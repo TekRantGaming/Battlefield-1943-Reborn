@@ -16,6 +16,11 @@ What the first release will hold, as of 6 November 2026.
 - Render resolution, shadow quality, sharpness, texture filtering and frame generation settings.
 - Shaders prepared once, so effects do not stutter the first time they appear.
 
+**Setup and servers**
+- First start setup: select your Xbox 360 package (or a folder), it installs once, then the game starts.
+- Server package with a setup window: server name, map rotation (the next map when a round ends, players kept),
+  the main backend, public address and router ports (UPnP); runs headless; listed for everyone with its map and players.
+
 **Settings**
 - Field of view, camera shake and its strength, hit blur.
 - Master, music and voices volume.

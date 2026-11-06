@@ -14,8 +14,8 @@ Two downloads come with each release, on the [Releases](../../releases) page:
 
 | Download | For | What it is |
 |---|---|---|
-| `BF1943-Reborn-<version>-windows.zip` | players | the game for Windows: start it, pick a server, play |
-| `BF1943-Reborn-Server-<version>-windows.zip` | server hosts | a dedicated server with its online backend, one server per map |
+| `BF1943-Reborn-<version>-windows.zip` | players | the game for Windows: the first start installs your copy once, then pick a server and play |
+| `BF1943-Reborn-Server-<version>-windows.zip` | server hosts | a dedicated server with a setup window: name, map rotation, ports; listed for everyone |
 
 ## What it does today
 
@@ -36,7 +36,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what changes between releases.
 
 ## Hosting a server
 
-See [docs/SERVER.md](docs/SERVER.md).
+See [docs/SERVER.md](docs/SERVER.md). The official servers: [docs/OFFICIAL-SERVERS.md](docs/OFFICIAL-SERVERS.md).
 
 ## Credits
 
