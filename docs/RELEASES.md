@@ -6,7 +6,7 @@ pages and the releases only.
 
 | File | Built by | Holds |
 |---|---|---|
-| `BF1943-Reborn-<version>-windows.zip` | `tools\make_packages.ps1 -Version <version>` | `bin` (the game and its libraries), `Play Battlefield 1943.bat`, the player guide, the licences |
+| `BF1943-Reborn-<version>-windows.zip` | `tools\make_packages.ps1 -Version <version>` | `bf1943.exe` at the top (started by itself: no batch file or script), its libraries, `data`, `fonts`, the player guide, the licences |
 | `BF1943-Reborn-Server-<version>-windows.zip` | the same run | `bin`, `server` (the backend and the hosts), `Start servers.bat`, `Stop servers.bat`, the server guide, the licences |
 
 ## Before a release goes up
