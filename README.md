@@ -259,8 +259,6 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 - **Voice and text chat** go through the server you play on: your voice only to the players near you, and only
   while you hold push to talk (or speak, with Open mic); the game opens your microphone only when you first use
   it. Servers keep a log of text chat for moderation; voice is passed on, never recorded.
-- The game takes network packets only from the server you play on (addresses it contacted itself): packets from
-  anyone else are dropped before the game reads them. Players are never connected to each other.
 - The game's own Telemetry setting changes nothing: its reports went to EA's servers, which are gone.
 - Settings, logs and crash reports stay on your PC, in the folder `user`.
 
