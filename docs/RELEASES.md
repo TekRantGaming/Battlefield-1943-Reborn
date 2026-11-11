@@ -1,13 +1,15 @@
 # How a release is made
 
-A release is a git tag (`v<major>.<minor>.<patch>`, for example `v0.1.0`) with two files attached on the Releases page.
+A release is a git tag (`v<version>`, for example `v0.1.33-preview`) with three files attached on the Releases page.
 The files are built from the development repository with its packaging scripts; this repository holds the public
-pages and the releases only.
+pages and the releases only. The game's updater reads the latest release: its tag, the file whose name ends
+`windows-x64.zip`, and `SHA256SUMS.txt`, so those names must stay as they are.
 
 | File | Built by | Holds |
 |---|---|---|
-| `BF1943-Reborn-<version>-windows.zip` | `tools\make_packages.ps1 -Version <version>` | `bf1943.exe` at the top (started by itself: no batch file or script), its libraries, `data`, `fonts`, the player guide, the licences |
+| `BF1943-Reborn-<version>-windows-x64.zip` | `tools\make_packages.ps1 -Version <version>` | `bf1943.exe` at the top (started by itself: no batch file or script), its libraries, `data`, `fonts`, the player guide, the licences |
 | `BF1943-Reborn-Server-<version>-windows.zip` | the same run | `bin`, `server` (the backend and the hosts), `Start servers.bat`, `Stop servers.bat`, the server guide, the licences |
+| `SHA256SUMS.txt` | the same run | the SHA256 of both zips and of the game's three binaries |
 
 ## Before a release goes up
 
