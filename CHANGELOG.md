@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.3 (11 November 2026): network packets only from your server
+
+An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. 0.2.0, 0.2.1 and 0.2.2 installs
+update to it by themselves at their next start, on Windows and Linux.
+
+**Security**
+- **The game listens only to the server you play on.** Battlefield 1943 Reborn has never connected players to each
+  other: your game talks only to the server you join, and no player is ever sent another player's IP address. But the
+  game's network port took packets from any address, so a PC that is directly on the internet (no router, or with
+  ports forwarded) could be sent packets by anyone. Now a packet reaches the game only from an address the game
+  contacted itself in the last 10 minutes (the server you play on); anything else is dropped before the game reads it.
+  Dedicated servers still take players as before. If it ever gets in your way, `bf_net_only_from_server = false` in
+  `bf1943.toml` turns it off.
+
+**Known issues**
+- Avoid flying with mouse and keyboard for now: take a boat to get to land, or use a controller to fly. This will be
+  fixed in a later update; mouse and keyboard work everywhere else.
+- With keyboard and mouse a tank aims the opposite way up and down to the soldier on foot, and one invert setting
+  covers both ([issue 3](../../issues/3)).
+- Voice chat has no echo cancelling: with Open mic, use headphones. Push to talk and the chat keys are keyboard keys:
+  with a controller only (Steam Deck, ROG Ally), use Open mic, or map a back button to B in Steam Input.
+- The first person weapon and hands still move 30 times a second at high frame rates.
+- Stats, awards and leaderboards reset when the official backend restarts.
+- Linux: the Vulkan renderer needs X11 or XWayland; the game's tutorial (Help) can drop back to the menu at once;
+  dedicated servers on Linux are not tested yet.
+
 ## 0.2.2 (11 November 2026): voice chat, text chat and a profanity filter
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. 0.2.0 and 0.2.1 installs update

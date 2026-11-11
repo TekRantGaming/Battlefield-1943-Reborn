@@ -14,7 +14,7 @@ brought back on servers that anyone can run.
 This is a fan project by TekRantGaming. It is not made, endorsed or supported by Electronic Arts or DICE. It contains
 no game files: you need your own copy of the Xbox 360 game (Xbox Live Arcade, title ID `5841097E`).
 
-**Latest build: [0.2.2](../../releases/latest)** (Windows and Linux) &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
+**Latest build: [0.2.3](../../releases/latest)** (Windows and Linux) &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
 
 - [Download and play](#download-and-play)
 - [Requirements](#requirements)
@@ -176,7 +176,7 @@ player logs in to and which lists every server.
 
 ## Known issues
 
-This is an alpha. The main ones in 0.2.2:
+This is an alpha. The main ones in 0.2.3:
 
 - **Avoid flying with mouse and keyboard for now.** Take a boat to get to land, or use a controller to fly
   (controllers fly as on the Xbox 360). This will be fixed in a later update; mouse and keyboard work everywhere else.
@@ -259,6 +259,8 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 - **Voice and text chat** go through the server you play on: your voice only to the players near you, and only
   while you hold push to talk (or speak, with Open mic); the game opens your microphone only when you first use
   it. Servers keep a log of text chat for moderation; voice is passed on, never recorded.
+- The game takes network packets only from the server you play on (addresses it contacted itself): packets from
+  anyone else are dropped before the game reads them. Players are never connected to each other.
 - The game's own Telemetry setting changes nothing: its reports went to EA's servers, which are gone.
 - Settings, logs and crash reports stay on your PC, in the folder `user`.
 
