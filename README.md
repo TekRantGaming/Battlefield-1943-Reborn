@@ -8,13 +8,13 @@
 
 # Battlefield 1943 Reborn
 
-Battlefield 1943, the 2009 Xbox 360 game by DICE, running natively on Windows, with its online multiplayer brought
-back on servers that anyone can run.
+Battlefield 1943, the 2009 Xbox 360 game by DICE, running natively on Windows and Linux, with its online multiplayer
+brought back on servers that anyone can run.
 
 This is a fan project by TekRantGaming. It is not made, endorsed or supported by Electronic Arts or DICE. It contains
 no game files: you need your own copy of the Xbox 360 game (Xbox Live Arcade, title ID `5841097E`).
 
-**Latest build: [0.1.33 preview](../../releases/latest)** &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
+**Latest build: [0.2.0](../../releases/latest)** (Windows and Linux) &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
 
 - [Download and play](#download-and-play)
 - [Requirements](#requirements)
@@ -30,17 +30,31 @@ no game files: you need your own copy of the Xbox 360 game (Xbox Live Arcade, ti
 
 ## Download and play
 
+**Windows**
 1. Download `BF1943-Reborn-<version>-windows-x64.zip` from the [Releases](../../releases/latest) page and unzip it
    somewhere you can write to (for example `C:\Games`, not Program Files).
 2. Start `bf1943.exe`.
-3. The first time, select your own Battlefield 1943 (Xbox 360) package: the single file in `5841097E\000D0000` from
+
+**Linux**
+1. Download `BF1943-Reborn-<version>-linux-x86_64.AppImage` from the [Releases](../../releases/latest) page into a
+   folder of its own (for example `~/Games/BF1943-Reborn`): its `game` and `user` folders go beside it.
+2. Make it runnable (`chmod +x` on the file, or Allow executing in its properties) and start it.
+
+**Then, on both**
+1. The first time, select your own Battlefield 1943 (Xbox 360) package: the single file in `5841097E\000D0000` from
    your console's storage, or a folder that holds it. It is installed into the folder `game`, once. The first start
    then prepares the game's shaders, so effects do not stutter the first time you see them.
-4. Choose your name and your playstyle (Classic or Modern, see [Features](#features)).
-5. Pick a server, or press **Play online** to join the busiest one.
+2. Choose your name, then press **Play**.
+3. **Quick Match** or the **Server Browser** first asks which movement you want, Classic or Modern (see
+   [Features](#features)), every time: then the busiest server that plays it, or one from its list.
 
-Your settings, logs and crash reports stay in the folder `user` next to the game. To update to a new build, copy its
-files over your current folder: your `game` and `user` folders stay.
+Your settings, logs and crash reports stay in the folder `user` next to the game.
+
+**Updates install themselves.** At every start the game looks at this page's latest release; a newer one is downloaded,
+checked against the release's `SHA256SUMS.txt`, installed and started. On Windows only the files that changed are
+replaced, and if any of them cannot be, every one is put back; on Linux the AppImage replaces itself. Your `game` and
+`user` folders are never touched. Builds before 0.2.0 cannot update themselves: download 0.2.0 once and unzip it over
+your folder (Windows), or put the AppImage in place of the old one (Linux).
 
 If Windows says *"rexruntime.dll is either not designed to run on Windows or it contains an error"* (Bad Image,
 0xc0e90002), it is not a broken download: the builds are not code signed yet, and Windows 11's Smart App Control has
@@ -48,8 +62,10 @@ not cleared this build's files.
 
 ## Requirements
 
-- Windows 10 or 11, 64 bit.
-- A graphics card with Vulkan (NVIDIA GTX 10 series, AMD RX 5000 series, Intel Arc or newer recommended).
+- Windows 10 or 11, 64 bit; or Linux on x86_64 with glibc 2.38 or newer, an X11 or XWayland session, and `curl` for
+  updates (SteamOS, Bazzite and current desktop distributions; tested on a ROG Ally with Bazzite).
+- A graphics card with Vulkan (NVIDIA GTX 10 series, AMD RX 5000 series, Intel Arc or newer recommended; on Linux,
+  Mesa's RADV or NVIDIA's driver).
 - Your own copy of Battlefield 1943 for Xbox 360: its package file from your console.
 - To host a server: Windows (10, 11 or Server) and [Python 3.12](https://www.python.org/downloads/).
 
@@ -58,20 +74,20 @@ not cleared this build's files.
 **The game**
 - All four maps: Wake Island, Guadalcanal, Iwo Jima and Coral Sea.
 - Up to 24 players a server, on foot, in jeeps, tanks, boats and planes, with the air raid, as in the original.
-- Two playstyles. **Classic** is the original game. **Modern** has quicker starts and stops, faster aiming with no
-  turn lag and quicker shots after a sprint or a jump, with aim assist kept. Each server plays one or the other, so
-  nobody has an edge: Play online picks servers that play your choice, and your game always plays what the server you
-  join plays.
+- Two movement styles. **Classic** is the original game. **Modern** has quicker starts and stops, faster aiming with
+  no turn lag and quicker shots after a sprint or a jump, with aim assist kept. Each server plays one or the other, so
+  nobody has an edge: Quick Match and the server browser ask which one you want every time and show only its servers,
+  and your game always plays what the server you join plays (there is no setting for it).
 - The game's own tutorial (Help), and our Stats and Awards, Achievements and Leaderboards pages.
 
 **Online**
-- A server browser with the official servers and everyone else's (Community), each with its map and players.
-- **Play online** joins the busiest server that plays your playstyle.
-- **Create Private Match** hosts a match on your own PC: friends join it with Direct connect in the server browser.
+- A server browser with the official servers and everyone else's (Community), each with its map and players, and
+  Direct connect for a server that is not listed.
+- **Quick Match** joins the busiest server with room that plays the movement you pick.
 - A server package for anyone to host their own dedicated servers, listed for everyone.
 
 **On PC**
-- A native Windows program with a Vulkan renderer, at your screen's resolution and refresh rate.
+- A native Windows and Linux program with a Vulkan renderer, at your screen's resolution and refresh rate.
 - Any frame rate: a limit from 30 to 240 or none, and VSync. The game still runs its world 30 times a second as on
   the console, but the camera turns on every frame, and soldiers, vehicles and vehicle cameras move smoothly between
   the game's updates.
@@ -83,7 +99,9 @@ not cleared this build's files.
 - Field of view, motion blur on or off, camera shake and its strength, brightness and gamma.
 - Keyboard and mouse beside controllers, with rebindable keys and the mouse aiming vehicle guns and turrets directly.
 - Volume for master, music, effects and voices, menu music and sounds.
-- Performance metrics in the corner (F2: off, FPS only or full), and crash and hang reports in `user\crashes`.
+- Performance metrics in the corner (off unless you turn them on; F2: off, FPS only or full), and crash and hang
+  reports in `user\crashes`.
+- Updates that install themselves (see [Download and play](#download-and-play)).
 
 ## Controls
 
@@ -109,9 +127,9 @@ Keyboard bindings.
 | Esc or Enter | pause menu | pause menu |
 | F2 | performance metrics | the same |
 
-Planes: W is the throttle, A and D the rudder, the mouse pitches and rolls, the left mouse button fires and the right
-drops bombs. On a controller planes fly as on the Xbox 360: left trigger throttle, right stick pitch and roll, left
-stick rudder, right bumper bombs, left bumper free look.
+Planes: flying with keyboard and mouse is not right yet (see [Known issues](#known-issues)): take a boat to get to
+land, or fly with a controller. On a controller planes fly as on the Xbox 360: left trigger throttle, right stick pitch
+and roll, left stick rudder, right bumper bombs, left bumper free look.
 
 Controllers: Xbox controllers play as on the console, with the game's own button layouts (Normal, Southpaw, Lefty)
 for soldiers, land vehicles and planes. Button prompts can show Xbox 360, Xbox Series, PlayStation 3, PlayStation 5
@@ -132,7 +150,7 @@ Everything is in our Settings menu, from the main menu and the pause menu.
   the Xbox 360), mouse sensitivity (with its own for aiming down sights and for vehicles), aim hold or toggle, mouse
   vertical, controller camera sensitivity, response, dead zone, inversion, vibration and its strength, button
   remapping, keyboard bindings, and the game's own control layouts, vertical look and vertical fly.
-- **Gameplay**: your name, your playstyle, performance metrics, and sharing (see [Privacy](#privacy)).
+- **Gameplay**: your name, performance metrics, and sharing (see [Privacy](#privacy)).
 
 ## Online play and servers
 
@@ -142,22 +160,21 @@ player logs in to and which lists every server.
 - **Official servers** are run by TekRantGaming. During the playtest the official list holds the Playtest Server;
   others come and go for test events.
 - **Community servers**: anyone can host dedicated servers with `BF1943-Reborn-Server-<version>-windows.zip`. Each
-  server has its own name, description, maps, playstyle and pause between rounds, and shows in everyone's server
-  browser under Community. See [docs/SERVER.md](docs/SERVER.md).
-- **Private matches**: Create Private Match hosts on your PC. Friends outside your home need UDP port 18300 open on
-  your router; the game asks the router for it (UPnP) unless you choose to open it yourself.
+  server has its own name, description, maps, movement (Classic or Modern) and pause between rounds, and shows in
+  everyone's server browser under Community. See [docs/SERVER.md](docs/SERVER.md).
 
 ## Known issues
 
-This is an alpha. The main ones in 0.1.33 preview:
+This is an alpha. The main ones in 0.2.0:
 
-- **Flying a plane with the mouse is very hard.** The mouse moves the plane's stick only while it moves, and S holds
-  free look in a plane. A new mouse flying mode is being worked on. Controllers fly as on the Xbox 360.
+- **Avoid flying with mouse and keyboard for now.** Take a boat to get to land, or use a controller to fly
+  (controllers fly as on the Xbox 360). This will be fixed in a later update; mouse and keyboard work everywhere else.
 - The first person weapon and hands still move 30 times a second at high frame rates (the view itself turns on every
   frame).
 - Stats, awards and leaderboards are kept only while the official backend runs: they reset when it restarts.
 - No HDR, and no ultrawide picture (the game is 16:9: letterbox or stretch).
-- Windows only for now.
+- Linux: the Vulkan renderer needs X11 or XWayland (a Wayland only session falls back to a slower one); the game's
+  tutorial (Help) can drop back to the menu at once; dedicated servers on Linux are not tested yet.
 - The builds are not code signed yet (see [Download and play](#download-and-play)).
 - HD textures can be imported (Settings > Graphics), but no texture pack has been published.
 
@@ -165,9 +182,10 @@ Report anything else on [Discord](https://discord.gg/8eakYSvBZS), with the files
 
 ## How it works
 
-- **Static recompilation.** The Xbox 360 program is translated ahead of time into native 64 bit Windows code with the
-  ReXGlue SDK (derived from the Xenia emulator), and runs on its runtime (`rexruntime.dll`), which stands in for the
-  console's system services. The game's own code runs natively; it is not emulated.
+- **Static recompilation.** The Xbox 360 program is translated ahead of time into native 64 bit code for Windows and
+  Linux with the ReXGlue SDK (derived from the Xenia emulator), and runs on its runtime (`rexruntime.dll`, on Linux
+  `librexruntime.so`), which stands in for the console's system services. The game's own code runs natively; it is
+  not emulated.
 - **NativeXRenderer.** The game's Xbox 360 graphics work is drawn with Vulkan by NativeXRenderer
   (`rexgpu-bfnative.dll`), with this project's additions: ambient occlusion, global illumination, grass, sharper
   shadows and motion between the game's updates.
@@ -176,6 +194,10 @@ Report anything else on [Discord](https://discord.gg/8eakYSvBZS), with the files
   players to it. A dedicated server is the game itself, run as a server with no window.
 - **Our menus.** The first start setup, main menu, server browser, pause menu and settings are this project's own,
   drawn over the game, which keeps its own HUD.
+- **Updates.** The game reads this repository's latest release through GitHub's API. The Windows download carries a
+  list of every file with its hash (`bf-files.txt`) and of files earlier builds had that it does not
+  (`bf-retired.txt`): an update installs exactly those, removes a retired file only while it is unchanged, and checks
+  the folder again at the first start of the new version.
 
 The development repository is private for now. This repository holds the releases, the changelog and the guides.
 

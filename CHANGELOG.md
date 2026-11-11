@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.2.0 (11 November 2026): Linux, and updates that install themselves
+
+An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset.
+
+**New**
+- **Linux.** Battlefield 1943 Reborn runs on Linux as an AppImage (`BF1943-Reborn-0.2.0-linux-x86_64.AppImage`). It
+  was played in a real match on the official Playtest server from a ROG Ally (Bazzite). Put it in a folder of its own:
+  its `game` and `user` folders go beside it.
+- **Updates install themselves**, on Windows and Linux. At every start the game looks at the latest release here; a
+  newer one is downloaded, checked against the release's `SHA256SUMS.txt`, installed and started. On Windows only the
+  files that changed are replaced, and if any cannot be, every one is put back; files an older build had and this one
+  does not are removed only while unchanged; the first start of a new version checks every file again. On Linux the
+  AppImage replaces itself. Your `game` and `user` folders are never touched. 0.1.33 and older cannot update
+  themselves: download this one once.
+- **Choose your movement.** Quick Match and the Server Browser now ask which movement you want, Classic or Modern,
+  every time, with what each one changes, and show only the servers that play it. There is no movement setting any
+  more: your game plays what the server you join plays, so nobody plays Modern on a Classic server. The choice works
+  with the mouse, the keyboard and a controller.
+- A notice on Home and the main menu: avoid flying with mouse and keyboard for now.
+
+**Changed**
+- Performance metrics are off unless you turn them on (Settings > Gameplay, or F2). Installs where an earlier build
+  turned them on get them off once.
+- Create Private Match is gone from the main menu for now.
+- After Play in the launcher the game signs in within about 12 seconds (it could take up to a minute).
+- Planes fly as in 0.1.33: the new keyboard and mouse flying modes that were tried are not in this build.
+
+**Known issues**
+- Avoid flying with mouse and keyboard for now: take a boat to get to land, or use a controller to fly. This will be
+  fixed in a later update; mouse and keyboard work everywhere else.
+- The first person weapon and hands still move 30 times a second at high frame rates.
+- Stats, awards and leaderboards reset when the official backend restarts.
+- Linux: the Vulkan renderer needs X11 or XWayland; the game's tutorial (Help) can drop back to the menu at once;
+  dedicated servers on Linux are not tested yet.
+- No HDR, no ultrawide picture (letterbox or stretch).
+- The builds are not code signed yet: Windows 11's Smart App Control can refuse `rexruntime.dll` (Bad Image,
+  0xc0e90002). It is not a broken download.
+
 ## 0.1.33 preview (11 November 2026): the first public release
 
 The first build on this page, and an **alpha playtest** build: expect bugs, crashes and changes, and stats that reset.
