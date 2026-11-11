@@ -4,11 +4,13 @@
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset.
 
-**11 November, the Linux AppImage replaced with two fixes:** its first start setup now opens a file browser to choose
-your game files (the two choices only highlighted before), and controllers work in the menus on every Linux device (a
-ROG Ally's built in controller did nothing there; with several pads connected, every one now drives the player). Its
-name no longer carries the version: `BF1943-Reborn-linux-x86_64.AppImage` in every release, so a Steam shortcut keeps
-working when a new download goes over the old file. The Windows downloads are unchanged.
+**11 November, the Linux AppImage replaced with three fixes:** its first start setup now opens a file browser to
+choose your game files (the two choices only highlighted before); controllers work in the menus on every Linux device
+(a ROG Ally's built in controller did nothing there; with several pads connected, every one now drives the player); and
+in a folder where another game keeps its own `game` folder (King Kong Recompiled's AppImage in Downloads, say) it asks
+for your game files and keeps them in `bf1943-game` (it took the other game's files for its own and skipped the setup
+before). Its name no longer carries the version: `BF1943-Reborn-linux-x86_64.AppImage` in every release, so a Steam
+shortcut keeps working when a new download goes over the old file. The Windows downloads are unchanged.
 
 **New**
 - **Linux.** Battlefield 1943 Reborn runs on Linux as an AppImage (`BF1943-Reborn-linux-x86_64.AppImage`). It
