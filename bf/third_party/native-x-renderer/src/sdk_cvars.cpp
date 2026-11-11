@@ -1,0 +1,29 @@
+// NativeXRenderer - the SDK graphics cvars the in-process SDK code reads (decision D15).
+//
+// NativeXRenderer compiles part of the SDK's graphics code (the shader translator, the register, draw and
+// texture utilities) into the executable. Those sources read cvars that the GPU plugin defines and
+// registers (compiled into rexgpu-xenos). Compiling their definitions again would register them twice,
+// and the registry ignores the second registration: the executable's copy would win, and the settings
+// (potcawe.toml, the command line, src/startup.cpp's defaults) would stop reaching the plugin, which still
+// runs the Xenos path. So:
+//   - cvars defined in sources NativeXRenderer does not compile (flags.cpp) get a forwarding accessor here;
+//   - sources NativeXRenderer compiles that define cvars (util/draw.cpp, pipeline/texture/cache.cpp) are
+//     compiled through wrappers (sdk_draw.cpp, sdk_texture_cache.cpp) that turn the definitions into
+//     forwarding accessors (sdk_cvars.h).
+// Both forward to the value registered by the plugin; nothing is registered from the executable.
+
+#include "sdk_cvars.h"
+
+namespace native_x_renderer::sdk {
+std::atomic<uint32_t> g_frame_generation{1};
+void NextFrame() { g_frame_generation.fetch_add(1, std::memory_order_relaxed); }
+}  // namespace native_x_renderer::sdk
+
+std::string& FLAGS_dump_shaders_storage_() {
+  thread_local native_x_renderer::sdk::Forwarded<std::string> forwarded;
+  return forwarded.Get("dump_shaders", std::string());
+}
+bool& FLAGS_gpu_allow_invalid_fetch_constants_storage_() {
+  thread_local native_x_renderer::sdk::Forwarded<bool> forwarded;
+  return forwarded.Get("gpu_allow_invalid_fetch_constants", false);
+}

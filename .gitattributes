@@ -1,0 +1,3 @@
+# Third party code kept in the tree: left out of GitHub's language statistics.
+sdk/** linguist-vendored
+bf/third_party/miniz/** linguist-vendored

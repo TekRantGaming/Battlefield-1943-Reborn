@@ -1,2 +1,39 @@
+# Players bring their own copy of the game. None of it goes in git, and nothing made from it either (README, Legal):
+# the game's package and files, the code the generator makes from default.xex, extracted pictures and sounds.
+/bf/assets
+/bf/generated/
+/input/
+/Game Files/
+*.xex
+*.fbrb
+*.zz
+/bf/**/*.bin
+/bf/**/*.res
+/bf/**/*.dds
+/bf/**/*.wav
+/bf/**/*.xma
+
+# Pictures in the game's folders: only our own (the button glyphs, the TRG Studios logo, the Linux icon).
+/bf/**/*.png
+/bf/**/*.jpg
+!/bf/glyphs/**/*.png
+!/bf/data/startup/trg_studios.png
+!/bf/data/linux/bf1943-reborn.png
+
+# Builds, test runs and tool output
+/bf/out/
+/sdk/src-bf/out/
+/runs/
+/build/
+/ghidra/
+/deps/
+*.pdb
+__pycache__/
+*.pyc
+
+# The official servers' key: never in git, never in a download
+*.key
+
+# System files
 Thumbs.db
 .DS_Store

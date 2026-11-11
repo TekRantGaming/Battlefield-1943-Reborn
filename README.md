@@ -24,6 +24,7 @@ no game files: you need your own copy of the Xbox 360 game (Xbox Live Arcade, ti
 - [Online play and servers](#online-play-and-servers)
 - [Known issues](#known-issues)
 - [How it works](#how-it-works)
+- [Source code](#source-code)
 - [Privacy](#privacy)
 - [Credits and licences](#credits-and-licences)
 - [Legal](#legal)
@@ -202,7 +203,41 @@ Report anything else on [Discord](https://discord.gg/8eakYSvBZS), with the files
   (`bf-retired.txt`): an update installs exactly those, removes a retired file only while it is unchanged, and checks
   the folder again at the first start of the new version.
 
-The development repository is private for now. This repository holds the releases, the changelog and the guides.
+## Source code
+
+This repository holds the source code, next to the releases, the changelog and the guides. It contains no game files
+and none of the game's code: the code generator translates the game's program on your PC, from your own copy.
+
+| Folder | What it holds |
+|---|---|
+| `bf` | The port itself: our menus and launcher, online services, the server mode, the renderer's game profile, and NativeXRenderer with our changes |
+| `sdk/src-bf` | Our copy of the ReXGlue SDK, with its third party libraries |
+| `server` | The backend and the dedicated server's host (Python) |
+| `tools` | Packaging, the server package's scripts, the Linux build, and the helpers used to study the game |
+| `docs` | The players' guides and the technical notes |
+
+<details>
+<summary><b>Building from source (for developers)</b></summary>
+
+You need Visual Studio 2022 Build Tools with clang, CMake and Ninja, Git, Python 3.12, and your own Battlefield 1943
+package.
+
+```bat
+git config --global core.longpaths true
+git clone --recursive https://github.com/TekRantGaming/Battlefield-1943-Reborn.git
+cd Battlefield-1943-Reborn
+sdk\src-bf\build_bf.bat
+python -I tools\stfs_extract.py "<your package file>" input\pkg
+mklink /J bf\assets input\pkg
+cd bf
+..\sdk\src-bf\out\install\win-amd64\bin\rexglue.exe codegen bf1943_manifest.toml
+build.bat bf-relwithdebinfo
+```
+
+The game is in `bf\out\build\bf-relwithdebinfo`. Linux builds run in WSL with the scripts in `tools/linux`. All the
+steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+</details>
 
 ## Privacy
 
@@ -215,6 +250,7 @@ The development repository is private for now. This repository holds the release
 
 ## Credits and licences
 
+- **Battlefield 1943 Reborn** by TekRantGaming and contributors (MIT, [LICENSE](LICENSE)): the port's own code.
 - **ReXGlue SDK** (BSD 3 Clause), derived from Xenia: the recompiler and runtime.
 - **NativeXRenderer** by Gustavo Garcia (MIT): the Vulkan renderer.
 - **GHMetalRecomp** (MIT): its NativeXRenderer profile, which Battlefield's started from.

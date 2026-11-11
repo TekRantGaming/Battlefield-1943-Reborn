@@ -1,0 +1,11 @@
+# Guest CRT setjmp and longjmp (save and restore f14..f31, r13..r31, v64..v127 in a jump buffer). Lua's error
+# handling depends on them: without these the first Lua error falls through to the panic handler and exit(1).
+setjmp_address = 0x829C34D0
+longjmp_address = 0x829C3090
+
+# Functions the analyzer did not find: each is reached by a tail branch from code outside .pdata and has no
+# .pdata entry of its own. Ends are the address after the last instruction.
+[functions]
+0x822DA560 = { end = 0x822DA5E0 }  # leaf, compares byte +0x48 with r4; tail branch from 0x822DEFF0
+0x8239E078 = { end = 0x8239E080 }  # thunk: lwz r3,0x6B0(r3); b; tail branch from 0x823EBBC0
+0x826CD658 = { end = 0x826CD664 }  # leaf: *(int*)r3 = -1; tail branch from 0x826D9864

@@ -1,0 +1,347 @@
+// NativeXRenderer - see textures.h.
+
+#include "textures.h"
+
+#include "guest_textures.h"
+#include "targets.h"
+
+#include <rex/cvar.h>
+#include <rex/graphics/pipeline/texture/util.h>
+
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+// The SDK's (rex/graphics): forces anisotropic filtering for eligible textures, -1 = the game's (D44).
+REXCVAR_DECLARE(int32_t, anisotropic_override);
+
+namespace native_x_renderer {
+
+using namespace Diligent;
+namespace xenos = rex::graphics::xenos;
+namespace texture_util = rex::graphics::texture_util;
+
+namespace {
+
+RefCntAutoPtr<ITexture> CreatePlaceholder(IRenderDevice* device, RESOURCE_DIMENSION type, const char* name,
+                                          uint32_t texel = 0xFFFFFFFFu) {
+  TextureDesc desc;
+  desc.Name = name;
+  desc.Type = type;
+  desc.Width = 1;
+  desc.Height = 1;
+  desc.ArraySize = type == RESOURCE_DIM_TEX_CUBE ? 6 : 1;  // Depth for the 3D texture
+  desc.Format = TEX_FORMAT_RGBA8_UNORM;
+  desc.Usage = USAGE_IMMUTABLE;
+  desc.BindFlags = BIND_SHADER_RESOURCE;
+  std::vector<TextureSubResData> data(desc.ArraySize, TextureSubResData{&texel, 4, 4});
+  TextureData initial{data.data(), uint32_t(data.size())};
+  RefCntAutoPtr<ITexture> texture;
+  device->CreateTexture(desc, &initial, &texture);
+  return texture;
+}
+
+TEXTURE_ADDRESS_MODE AddressMode(xenos::ClampMode mode) {
+  switch (mode) {
+    case xenos::ClampMode::kRepeat:
+      return TEXTURE_ADDRESS_WRAP;
+    case xenos::ClampMode::kClampToEdge:
+    case xenos::ClampMode::kClampToHalfway:
+      return TEXTURE_ADDRESS_CLAMP;
+    case xenos::ClampMode::kClampToBorder:
+      return TEXTURE_ADDRESS_BORDER;
+    default:
+      // Mirrored modes. The mirror-once modes need samplerMirrorClampToEdge, which DiligentCore does not
+      // enable: approximated with mirroring.
+      return TEXTURE_ADDRESS_MIRROR;
+  }
+}
+
+// Whether a fetch reads a depth resolve's memory as k_8_8_8_8: the depth and stencil words, as bytes (D64).
+bool ReadsPackedWords(const ResolvedTexture& texture, const xenos::xe_gpu_texture_fetch_t& fetch, bool cube) {
+  auto guest_format = xenos::TextureFormat(texture.guest_format);
+  return !cube && fetch.format == xenos::TextureFormat::k_8_8_8_8 &&
+         (guest_format == xenos::TextureFormat::k_24_8 || guest_format == xenos::TextureFormat::k_24_8_FLOAT);
+}
+
+// Whether a fetch may read a resolved texture: of a texture, in a format a resolve writes (D70).
+bool MayReadResolve(const xenos::xe_gpu_texture_fetch_t& fetch) {
+  return fetch.type == xenos::FetchConstantType::kTexture && ResolvableFormat(uint32_t(fetch.format));
+}
+
+}  // namespace
+
+bool Textures::Initialize(IRenderDevice* device, ResolvedTextures& resolved, GuestTextures& guest) {
+  device_ = device;
+  resolved_ = &resolved;
+  guest_ = &guest;
+  placeholder_2d_ = CreatePlaceholder(device, RESOURCE_DIM_TEX_2D_ARRAY, "NativeXRenderer placeholder 2D");
+  placeholder_3d_ = CreatePlaceholder(device, RESOURCE_DIM_TEX_3D, "NativeXRenderer placeholder 3D");
+  placeholder_cube_ = CreatePlaceholder(device, RESOURCE_DIM_TEX_CUBE, "NativeXRenderer placeholder cube");
+  placeholder_packed_ = CreatePlaceholder(device, RESOURCE_DIM_TEX_2D_ARRAY, "NativeXRenderer placeholder packed", 0);
+  if (!placeholder_2d_ || !placeholder_3d_ || !placeholder_cube_ || !placeholder_packed_) return false;
+  placeholder_views_[0] = placeholder_2d_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+  placeholder_views_[1] = placeholder_3d_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+  placeholder_views_[2] = placeholder_cube_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+  return true;
+}
+
+void Textures::Sync() {
+  resolved_->ApplyInvalidations();
+  uint64_t resolved = resolved_->generation(), guest = guest_->generation();
+  if (resolved != resolved_generation_ || guest != guest_generation_) {
+    resolved_generation_ = resolved;
+    guest_generation_ = guest;
+    ++generation_;
+  }
+}
+
+void Textures::Count(uint8_t kind) {
+  switch (kind) {
+    case 0:
+      ++stats_.resolved;
+      break;
+    case 1:
+      ++stats_.guest;
+      break;
+    case 2:
+      ++stats_.placeholders;
+      break;
+    default:
+      ++stats_.other_dimension;
+      break;
+  }
+}
+
+ITextureView* Textures::View(uint32_t fetch_constant, const xenos::xe_gpu_texture_fetch_t& fetch,
+                             xenos::FetchOpDimension dimension, bool is_signed) {
+  Sync();
+  uint32_t dimension_index = dimension == xenos::FetchOpDimension::k3DOrStacked ? 1
+                             : dimension == xenos::FetchOpDimension::kCube      ? 2
+                                                                                 : 0;
+  Kept<ViewFound>& kept = views_[(fetch_constant * 3 + dimension_index) * 2 + uint32_t(is_signed)];
+  if (!kept.Matches(fetch, generation_)) {
+    ViewFound found;
+    found.view =
+        FindView(fetch, fetch_constant, dimension, is_signed, found.kind, found.guest_read, found.packed_address);
+    kept.Keep(fetch, generation_, found);
+  } else if (kept.value.guest_read) {
+    resolved_->NoteGuestRead(fetch.base_address << 12);  // counted per fetch, as when it is looked up
+  }
+  if (kept.value.packed_address) packed_read_ = kept.value.packed_address;
+  Count(kept.value.kind);
+  return kept.value.view;
+}
+
+ITextureView* Textures::FindView(const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t fetch_constant,
+                                 xenos::FetchOpDimension dimension, bool is_signed, uint8_t& kind, bool& guest_read,
+                                 uint32_t& packed_address) {
+  guest_read = false;
+  packed_address = 0;
+  bool flat = dimension != xenos::FetchOpDimension::k3DOrStacked && dimension != xenos::FetchOpDimension::kCube;
+  bool cube = dimension == xenos::FetchOpDimension::kCube;
+  if ((flat || cube) && MayReadResolve(fetch)) {
+    if (ResolvedTexture* texture = resolved_->FindNewest(fetch.base_address << 12, cube)) {
+      if (ReadsPackedWords(*texture, fetch, cube)) {
+        // Depth resolves into it write the words from now on; until then zero words, no stencil (D64).
+        texture->read_packed = true;
+        resolved_->MarkUsed(texture);
+        if (texture->packed_written && texture->PackedArrayView()) {
+          kind = 0;
+          packed_address = texture->address;
+          return texture->PackedArrayView();
+        }
+        kind = 2;
+        return placeholder_packed_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+      }
+      if (ITextureView* view = cube ? texture->CubeView() : texture->ArrayView()) {
+        resolved_->MarkUsed(texture);
+        kind = 0;
+        return view;
+      }
+    } else {
+      resolved_->NoteGuestRead(fetch.base_address << 12);
+      guest_read = true;
+    }
+  }
+  bool other_dimension;
+  if (ITextureView* view = guest_->GetView(fetch_constant, dimension, is_signed, other_dimension)) {
+    kind = 1;
+    return view;
+  }
+  kind = other_dimension ? 3 : 2;
+  if (dimension == xenos::FetchOpDimension::k3DOrStacked) return placeholder_views_[1];
+  if (dimension == xenos::FetchOpDimension::kCube) return placeholder_views_[2];
+  return placeholder_views_[0];
+}
+
+bool Textures::IsResolved(uint32_t fetch_constant, const xenos::xe_gpu_texture_fetch_t& fetch) {
+  bool flat = fetch.dimension == xenos::DataDimension::k1D || fetch.dimension == xenos::DataDimension::k2DOrStacked;
+  if (!flat || !MayReadResolve(fetch)) return false;
+  Sync();
+  Kept<bool>& kept = resolved_kept_[fetch_constant];
+  if (!kept.Matches(fetch, generation_)) {
+    ResolvedTexture* texture = resolved_->FindNewest(fetch.base_address << 12, false);
+    kept.Keep(fetch, generation_, texture && texture->ArrayView());
+  }
+  return kept.value;
+}
+
+const ResolvedTexture* Textures::Resolved(const xenos::xe_gpu_texture_fetch_t& fetch) {
+  bool flat = fetch.dimension == xenos::DataDimension::k1D || fetch.dimension == xenos::DataDimension::k2DOrStacked;
+  if (!flat || !MayReadResolve(fetch)) return nullptr;
+  Sync();
+  ResolvedTexture* texture = resolved_->FindNewest(fetch.base_address << 12, false);
+  return texture && texture->ArrayView() ? texture : nullptr;
+}
+
+void Textures::HostSwizzle(uint32_t fetch_constant, const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t& swizzle,
+                           uint8_t& signs) {
+  Sync();
+  Kept<SwizzleFound>& kept = swizzles_[fetch_constant];
+  if (!kept.Matches(fetch, generation_)) {
+    SwizzleFound found;
+    FindSwizzle(fetch_constant, fetch, found.swizzle, found.signs);
+    kept.Keep(fetch, generation_, found);
+  }
+  swizzle = kept.value.swizzle;
+  signs = kept.value.signs;
+}
+
+void Textures::FindSwizzle(uint32_t fetch_constant, const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t& swizzle,
+                           uint8_t& signs) const {
+  bool flat = fetch.dimension == xenos::DataDimension::k1D || fetch.dimension == xenos::DataDimension::k2DOrStacked;
+  bool cube = fetch.dimension == xenos::DataDimension::kCube;
+  if ((flat || cube) && MayReadResolve(fetch)) {
+    if (ResolvedTexture* texture = resolved_->FindNewest(fetch.base_address << 12, cube)) {
+      bool packed = ReadsPackedWords(*texture, fetch, cube);
+      if (packed || (cube ? texture->CubeView() : texture->ArrayView())) {
+        uint32_t host_format_swizzle;
+        switch (packed ? TEX_FORMAT_RGBA8_UNORM : texture->format) {
+          case TEX_FORMAT_R8_UNORM:
+          case TEX_FORMAT_R16_UNORM:
+          case TEX_FORMAT_R16_FLOAT:
+          case TEX_FORMAT_R32_FLOAT:
+            host_format_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR;
+            break;
+          case TEX_FORMAT_RG8_UNORM:
+          case TEX_FORMAT_RG16_UNORM:
+          case TEX_FORMAT_RG16_FLOAT:
+          case TEX_FORMAT_RG32_FLOAT:
+            host_format_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG;
+            break;
+          default:
+            host_format_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA;
+            break;
+        }
+        swizzle = rex::graphics::TextureCache::GuestToHostSwizzle(fetch.swizzle, host_format_swizzle);
+        signs = texture_util::SwizzleSigns(fetch);
+        return;
+      }
+    }
+  }
+  swizzle = guest_->GetActiveTextureHostSwizzle(fetch_constant);
+  signs = guest_->GetActiveTextureSwizzledSigns(fetch_constant);
+}
+
+ISampler* Textures::Sampler(const xenos::xe_gpu_texture_fetch_t& fetch,
+                            const rex::graphics::SpirvShader::SamplerBinding& binding, float lod_bias) {
+  bool point = ReadsPacked(binding.fetch_constant, fetch);
+  std::array<uint32_t, 9> key;
+  std::memcpy(key.data(), &fetch, sizeof(fetch));
+  key[6] = uint32_t(binding.fetch_constant) | uint32_t(binding.mag_filter) << 5 | uint32_t(binding.min_filter) << 7 |
+           uint32_t(binding.mip_filter) << 9 | uint32_t(binding.aniso_filter) << 11 | uint32_t(point) << 14;
+  std::memcpy(&key[7], &lod_bias, sizeof(lod_bias));
+  key[8] = uint32_t(REXCVAR_GET(anisotropic_override));
+  SamplerKept& kept = samplers_kept_[(key[6] * UINT32_C(0x9E3779B1)) >> 25];
+  if (!kept.sampler || kept.key != key) {
+    kept.sampler = FindSampler(fetch, binding, lod_bias, point);
+    kept.key = key;
+  }
+  return kept.sampler;
+}
+
+// A depth resolve's words (D64) filtered between texels would mix the bytes of different depths. On the console a
+// game reads them at its texels' centers; at another scale those fall between the host's texels, and Guitar Hero 5's
+// depth restored from them (D113) had bands of wrong depth: the nearest texel is taken instead.
+bool Textures::ReadsPacked(uint32_t fetch_constant, const xenos::xe_gpu_texture_fetch_t& fetch) {
+  if (fetch.format != xenos::TextureFormat::k_8_8_8_8 || fetch.dimension != xenos::DataDimension::k2DOrStacked ||
+      !MayReadResolve(fetch)) {
+    return false;
+  }
+  Sync();
+  Kept<bool>& kept = packed_kept_[fetch_constant];
+  if (!kept.Matches(fetch, generation_)) {
+    ResolvedTexture* texture = resolved_->FindNewest(fetch.base_address << 12, false);
+    kept.Keep(fetch, generation_, texture && ReadsPackedWords(*texture, fetch, false));
+  }
+  return kept.value;
+}
+
+ISampler* Textures::FindSampler(const xenos::xe_gpu_texture_fetch_t& fetch,
+                                const rex::graphics::SpirvShader::SamplerBinding& binding, float lod_bias, bool point) {
+  // As the SDK's texture caches derive it (GetSamplerParameters), without the host format checks.
+  xenos::ClampMode clamp_x, clamp_y, clamp_z;
+  texture_util::GetClampModesForDimension(fetch, clamp_x, clamp_y, clamp_z);
+  auto pick = [](xenos::TextureFilter binding_filter, xenos::TextureFilter fetch_filter) {
+    return binding_filter == xenos::TextureFilter::kUseFetchConst ? fetch_filter : binding_filter;
+  };
+  xenos::TextureFilter mag = pick(binding.mag_filter, fetch.mag_filter);
+  xenos::TextureFilter min = pick(binding.min_filter, fetch.min_filter);
+  xenos::TextureFilter mip = pick(binding.mip_filter, fetch.mip_filter);
+  xenos::AnisoFilter aniso = binding.aniso_filter == xenos::AnisoFilter::kUseFetchConst ? fetch.aniso_filter
+                                                                                         : binding.aniso_filter;
+  if (point) {
+    mag = min = mip = xenos::TextureFilter::kPoint;
+    aniso = xenos::AnisoFilter::kDisabled;
+  }
+  uint32_t mip_min_level = 0, mip_max_level = 0;
+  texture_util::GetSubresourcesFromFetchConstant(fetch, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                                 &mip_min_level, &mip_max_level);
+  bool base_map = mip == xenos::TextureFilter::kBaseMap;
+  // anisotropic_override as the SDK's texture caches apply it (D44): to textures with mips, linear
+  // filtering and no base map.
+  int32_t forced = REXCVAR_GET(anisotropic_override);
+  if (forced > -1 && forced < 6 && mip_max_level > mip_min_level && !base_map &&
+      mag == xenos::TextureFilter::kLinear && min == xenos::TextureFilter::kLinear &&
+      (mip == xenos::TextureFilter::kPoint || mip == xenos::TextureFilter::kLinear)) {
+    aniso = xenos::AnisoFilter(forced);
+  }
+  aniso = std::min(aniso, xenos::AnisoFilter::kMax_16_1);
+  // At most what the device supports (16x on desktop GPUs). kMax_1_1 is 1x, each level doubles it.
+  uint32_t supported = std::max<uint32_t>(device_->GetAdapterInfo().Sampler.MaxAnisotropy, 1);
+  while (aniso > xenos::AnisoFilter::kMax_1_1 && (1u << (uint32_t(aniso) - 1)) > supported) {
+    aniso = xenos::AnisoFilter(uint32_t(aniso) - 1);
+  }
+  xenos::BorderColor border = fetch.border_color;
+
+  uint64_t key = uint64_t(clamp_x) | uint64_t(clamp_y) << 3 | uint64_t(clamp_z) << 6 | uint64_t(mag) << 9 |
+                 uint64_t(min) << 11 | uint64_t(mip) << 13 | uint64_t(aniso) << 15 | uint64_t(border) << 18 |
+                 uint64_t(mip_min_level) << 20 | uint64_t(uint16_t(int16_t(std::lround(lod_bias * 256.0f)))) << 24;
+  auto it = samplers_.find(key);
+  if (it != samplers_.end()) return it->second;
+
+  SamplerDesc desc;
+  desc.Name = "NativeXRenderer sampler";
+  if (aniso != xenos::AnisoFilter::kDisabled) {
+    desc.MinFilter = desc.MagFilter = desc.MipFilter = FILTER_TYPE_ANISOTROPIC;
+    desc.MaxAnisotropy = 1u << (uint32_t(aniso) - uint32_t(xenos::AnisoFilter::kMax_1_1));
+  } else {
+    desc.MagFilter = mag == xenos::TextureFilter::kLinear ? FILTER_TYPE_LINEAR : FILTER_TYPE_POINT;
+    desc.MinFilter = min == xenos::TextureFilter::kLinear ? FILTER_TYPE_LINEAR : FILTER_TYPE_POINT;
+    desc.MipFilter = mip == xenos::TextureFilter::kLinear ? FILTER_TYPE_LINEAR : FILTER_TYPE_POINT;
+  }
+  desc.AddressU = AddressMode(clamp_x);
+  desc.AddressV = AddressMode(clamp_y);
+  desc.AddressW = AddressMode(clamp_z);
+  float white = border == xenos::BorderColor::k_ABGR_White ? 1.0f : 0.0f;
+  desc.BorderColor[0] = desc.BorderColor[1] = desc.BorderColor[2] = desc.BorderColor[3] = white;
+  desc.MipLODBias = lod_bias;
+  desc.MinLOD = float(mip_min_level);
+  desc.MaxLOD = base_map ? desc.MinLOD + 0.25f : 1000.0f;
+  RefCntAutoPtr<ISampler>& sampler = samplers_[key];
+  device_->CreateSampler(desc, &sampler);
+  return sampler;
+}
+
+}  // namespace native_x_renderer

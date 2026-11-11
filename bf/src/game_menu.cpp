@@ -1,0 +1,4546 @@
+// Our main menu inside the running game, King Kong style (TekRantGaming, 4 Nov 2026; mockups in runs\mockups). Since 5 Nov
+// (TekRantGaming: "Launcher is the main menu > click join server > game loads into the server instantly skipping its main
+// menu and everything else") it is the main menu, over BF's own menu scene. Since 7 Nov (TekRantGaming: no bare menu over
+// the films, and BF's own loading screens) it opens only once BF's online menu is up: the game's films and title are
+// its own, the player presses Start, and the driver (auto_join.cpp) signs in under BF's own dialogs. A join covers BF's
+// menu while the driver picks the server there, then BF's own loading screen, Loading complete and spawn screen
+// (the class pick) are the player's. In a match the pause menu is drawn over the game. Pages:
+// main (Play online, Server browser, Settings, Quit), the server browser (the backend's live list, Join), settings
+// (frame rate, fullscreen; saved in <user>\bf1943-settings.txt) and the joining screen while the driver walks BF's
+// menus into the picked server. Its own input: player 1's pad (the game gets an empty pad meanwhile), the
+// keyboard (arrows, Enter, Esc) and the mouse.
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cctype>
+#include <condition_variable>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <random>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <imgui.h>
+#include <imgui_internal.h>
+#include <rex/cvar.h>
+#include <rex/logging.h>
+#include <rex/system/kernel_state.h>  // the achievements (AchievementsPage)
+#include <rex/ui/imgui_dialog.h>
+#include <rex/ui/window.h>
+
+#include <native_x_renderer/native_x_renderer.h>
+
+#include "display_modes.h"
+#include "game_install.h"
+#include "launcher_kit.h"
+#include "private_match.h"
+#include "server_list.h"
+#include "projects_art.h"
+#include "steam_shortcut.h"
+#include "update.h"
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <commdlg.h>
+#include <shellapi.h>
+#include <shobjidl.h>
+#else
+#include <dlfcn.h>
+#include <SDL3/SDL.h>  // the launcher's controller read on Linux (HostPad): SDL, the runtime's own input backend
+#endif
+
+REXCVAR_DEFINE_BOOL(bf_launcher, true, "BF1943", "Our menu in place of BF's main menu (false: the original menus)");
+REXCVAR_DEFINE_STRING(bf_button_prompts, "auto", "BF1943/Controls",
+                      "Our menus' button hints: auto, xbox360, xbox_series, ps3, ps5, steam_deck, keyboard (ps2 reads as ps3)");
+REXCVAR_DEFINE_STRING(bf_backend_registry, "", "BF1943",
+                      "The backend's server list (host:port); empty: bf_online_host's, port 18250");
+REXCVAR_DEFINE_STRING(bf_online_host, "127.0.0.1", "BF1943",
+                      "The main backend players log in to and get the server list from (an address or a name)");
+REXCVAR_DEFINE_STRING(bf_player_name, "", "BF1943",
+                      "The name other players see (empty: the one saved in bf1943-settings.txt, made at the first start)");
+// King Kong's Upscaler mode (TekRantGaming, 11 Nov 2026, v0.2.1: AMD FSR 1 and NVIDIA NIS "exactly" as King Kong has them): how
+// many pixels the game draws before the upscaler (native_x_renderer_scaling fsr or nis) scales them to the screen.
+REXCVAR_DEFINE_STRING(bf_upscaler_mode, "quality", "BF1943",
+                      "With AMD FSR 1 or NVIDIA NIS (native_x_renderer_scaling): native, quality, balanced or "
+                      "performance, the game drawn at the screen's size divided by 1, 1.5, 1.7 or 2 (never below 720p); "
+                      "read at the start")
+    .allowed({"native", "quality", "balanced", "performance"});
+REXCVAR_DECLARE(bool, bf_unlock_fps);  // frame_rate.cpp
+REXCVAR_DECLARE(bool, server);         // server_mode.cpp: a dedicated server has no menu
+REXCVAR_DECLARE(double, bf_max_fps);
+REXCVAR_DECLARE(bool, native_x_renderer);  // NativeXRenderer: its own shader storage is made before the first draw
+
+void SetFrameRate(double fps);  // frame_rate.cpp
+
+namespace bf1943 {
+int SystemFrameCap();      // frame_cap.cpp: a frame limit set outside the game (0: none known)
+void StartFrameCapRead();  // frame_cap.cpp
+
+// The real Steam and Discord marks on the launcher's cards (TekRantGaming, 11 Nov 2026; King Kong's, Simple Icons, CC0).
+namespace {
+#include "discord_icon.inc"
+#include "steam_icon.inc"
+}  // namespace
+
+// The upscaler modes (King Kong's launcher.cpp kUpscalerModes and settings.cpp RenderPresets): the screen's size over
+// the drawn size. King Kong rounds the drawn size to its renderer's 720p steps; NativeXRenderer draws any size (D157).
+struct UpscalerModeInfo {
+  const char* value;
+  const char* label;
+  double ratio;
+};
+constexpr UpscalerModeInfo kUpscalerModes[] = {
+    {"native", "Native", 1.0}, {"quality", "Quality", 1.5}, {"balanced", "Balanced", 1.7}, {"performance", "Performance", 2.0}};
+double UpscalerRatio(const std::string& mode) {
+  for (const auto& m : kUpscalerModes)
+    if (mode == m.value) return m.ratio;
+  return 1.5;  // the setting's default, Quality
+}
+// What NativeXRenderer draws for an output (renderer.cpp, D37 and D157): the game's 1280x720 at the largest scale that
+// fits the output, divided by the ratio, at least 1.
+std::pair<int, int> DrawnSizeFor(int out_w, int out_h, double ratio) {
+  const double fit = std::min(double(std::max(out_w, 1)) / 1280.0, double(std::max(out_h, 1)) / 720.0);
+  const double scale = std::max(1.0, fit / std::max(ratio, 1.0));
+  return {int(std::lround(1280.0 * scale)), int(std::lround(720.0 * scale))};
+}
+// The sharpness for the upscaler Off (the settings file's, else the command line's or the renderer's default), as the
+// start found it and the menu's Sharpness row changes it.
+std::string g_plain_sharpness = "-1";
+// The Upscaler (King Kong's, TekRantGaming 11 Nov 2026) into the renderer's settings, which it reads when it starts. The game
+// draws at the display's resolution (TekRantGaming, 11 Nov 2026: no Render resolution row; "I want that resolution to match the
+// render resolution", King Kong's Native): the largest 16:9 picture the screen or window holds, never above it. With
+// AMD FSR 1 or NVIDIA NIS, that divided by the Upscaler mode's ratio (never below 720p, NativeXRenderer D157), and the
+// upscaler sharpens as AMD and NVIDIA made it (RCAS at 0.2 stops, NIS at 0.5: King Kong offers no sharpness for them).
+// NIS where this GPU was found not to run it (`nis_support` "0", the settings' last answer, D158) is FSR 1. Called at
+// the start (ApplyStartupDisplaySettings) and when the menu's rows change before the game runs (Play takes them).
+void ApplyUpscaler(bool log, const std::string& nis_support) {
+  std::string scaling = rex::cvar::GetFlagByName("native_x_renderer_scaling");
+  if (!REXCVAR_GET(server)) rex::cvar::SetFlagByName("native_x_renderer_check_nis", "true");  // D158, for the menu
+  rex::cvar::SetFlagByName("native_x_renderer_resolution_scale", "0");  // the display's resolution
+  if (scaling == "nis" && nis_support == "0") {
+    rex::cvar::SetFlagByName("native_x_renderer_scaling", "fsr");
+    if (log) REXLOG_INFO("BF upscaler: NVIDIA NIS does not run on this GPU (its last start found): AMD FSR 1 instead");
+    scaling = "fsr";
+  }
+  if (scaling == "fsr" || scaling == "nis") {
+    const std::string mode = rex::cvar::GetFlagByName("bf_upscaler_mode");
+    const double ratio = UpscalerRatio(mode);
+    rex::cvar::SetFlagByName("native_x_renderer_upscale_ratio", fmt::format("{:.6f}", ratio));
+    rex::cvar::SetFlagByName("native_x_renderer_sharpness", "-1");
+    if (log)
+      REXLOG_INFO("BF upscaler: {} at {} (the display's size over {:.1f}, never below 720p), its own sharpening",
+                  scaling == "fsr" ? "AMD FSR 1" : "NVIDIA NIS", mode, ratio);
+    return;
+  }
+  if (scaling != "bilinear") rex::cvar::SetFlagByName("native_x_renderer_scaling", "bilinear");
+  rex::cvar::SetFlagByName("native_x_renderer_upscale_ratio", "0");
+  rex::cvar::SetFlagByName("native_x_renderer_sharpness", g_plain_sharpness);
+  if (log) REXLOG_INFO("BF upscaler: Off, the game drawn at the display's resolution");
+}
+#if defined(BF_DEV_TOOLS)
+const auto g_dev_began = std::chrono::steady_clock::now();  // the process start, for test scripts
+#endif
+
+// ---- which controller is in use, for the automatic button prompts (TekRantGaming, 8 Nov evening: like King Kong's launcher,
+// the pictures of the controller in the player's hands, the manual choice kept). A press the game saw that no Xbox
+// (XInput) controller made came from another kind: which kind, from the controllers Windows lists (Sony's maker ID
+// 054C: PlayStation; Valve's 28DE: Steam Deck). Read here, not from the runtime (its device names are private).
+namespace {
+std::atomic<int> g_pad_family{0};    // 0 Xbox, 1 PlayStation, 2 Steam Deck
+std::atomic<int> g_hid_family{0};    // the non Xbox kind connected, from the last scan
+std::atomic<bool> g_hid_scanning{false};
+std::atomic<double> g_hid_scanned_at{-100.0};
+
+double FamilyClock() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+#if defined(_WIN32)
+// The kinds of controller Windows lists now (setupapi, loaded when first needed): 1 a Sony one, 2 a Valve one.
+int ScanHidFamily() {
+  using GetDevs = void*(WINAPI*)(const GUID*, const wchar_t*, HWND, DWORD);
+  using EnumIf = BOOL(WINAPI*)(void*, void*, const GUID*, DWORD, void*);
+  using GetPath = BOOL(WINAPI*)(void*, void*, void*, DWORD, DWORD*, void*);
+  using Destroy = BOOL(WINAPI*)(void*);
+  static HMODULE m = LoadLibraryA("setupapi.dll");
+  if (!m) return 0;
+  static auto get = reinterpret_cast<GetDevs>(GetProcAddress(m, "SetupDiGetClassDevsW"));
+  static auto next = reinterpret_cast<EnumIf>(GetProcAddress(m, "SetupDiEnumDeviceInterfaces"));
+  static auto path = reinterpret_cast<GetPath>(GetProcAddress(m, "SetupDiGetDeviceInterfaceDetailW"));
+  static auto done = reinterpret_cast<Destroy>(GetProcAddress(m, "SetupDiDestroyDeviceInfoList"));
+  if (!get || !next || !path || !done) return 0;
+  static const GUID kHid = {0x4D1E55B2, 0xF16F, 0x11CF, {0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}};
+  void* set = get(&kHid, nullptr, nullptr, 0x2 | 0x10);  // DIGCF_PRESENT | DIGCF_DEVICEINTERFACE
+  if (!set || set == INVALID_HANDLE_VALUE) return 0;
+  int found = 0;
+  struct {
+    DWORD size;
+    GUID cls;
+    DWORD flags;
+    ULONG_PTR reserved;
+  } iface{};
+  for (DWORD i = 0; i < 256; ++i) {
+    iface.size = sizeof(iface);
+    if (!next(set, nullptr, &kHid, i, &iface)) break;
+    alignas(8) unsigned char buffer[1024];
+    *reinterpret_cast<DWORD*>(buffer) = sizeof(void*) == 8 ? 8 : 6;  // cbSize of SP_DEVICE_INTERFACE_DETAIL_DATA_W
+    if (!path(set, &iface, buffer, sizeof(buffer), nullptr, nullptr)) continue;
+    std::wstring p(reinterpret_cast<const wchar_t*>(buffer + 4));
+    for (auto& c : p) c = wchar_t(towlower(c));
+    if (p.find(L"vid_054c") != std::wstring::npos) found = 1;
+    else if (p.find(L"vid_28de") != std::wstring::npos && found == 0) found = 2;
+  }
+  done(set);
+  return found;
+}
+
+// Whether an Xbox (XInput) controller holds a button or trigger now.
+bool XInputPressed() {
+  using GetStateFn = DWORD(WINAPI*)(DWORD, void*);
+  static const GetStateFn get_state = [] {
+    HMODULE m = LoadLibraryA("xinput1_4.dll");
+    if (!m) m = LoadLibraryA("xinput9_1_0.dll");
+    return m ? reinterpret_cast<GetStateFn>(GetProcAddress(m, "XInputGetState")) : nullptr;
+  }();
+  if (!get_state) return false;
+  for (DWORD i = 0; i < 4; ++i) {
+    struct {
+      DWORD packet;
+      WORD buttons;
+      BYTE lt, rt;
+      SHORT lx, ly, rx, ry;
+    } st{};
+    if (get_state(i, &st) != 0) continue;
+    if (st.buttons || st.lt > 30 || st.rt > 30 || std::abs(st.lx) > 16000 || std::abs(st.ly) > 16000) return true;
+  }
+  return false;
+}
+#endif
+
+// A controller press was seen (by the game's read, or the launcher's own XInput read): which kind made it.
+void ClassifyPadPress(bool from_xinput) {
+#if defined(_WIN32)
+  const double now = FamilyClock();
+  if (now - g_hid_scanned_at.load() > 3.0 && !g_hid_scanning.exchange(true)) {
+    g_hid_scanned_at = now;
+    std::thread([] {
+      g_hid_family = ScanHidFamily();
+      g_hid_scanning = false;
+    }).detach();
+  }
+  const int family = from_xinput || XInputPressed() ? 0 : g_hid_family.load();
+  if (family != g_pad_family.exchange(family))
+    REXLOG_INFO("BF prompts: the controller in use is {}", family == 1 ? "a PlayStation one" : family == 2 ? "a Steam Deck" : "an Xbox one");
+#endif
+}
+}  // namespace
+
+// For the automatic prompts (launcher_kit.cpp, hud_glyphs.cpp): the set of the controller in use.
+std::string PadFamily() {
+  const int f = g_pad_family.load();
+  return f == 1 ? "ps5" : f == 2 ? "steam_deck" : "xbox_series";
+}
+
+
+std::filesystem::path ExecutableDir();  // shader_prep.cpp: the folder of bf1943.exe
+void PlayMenuMusic(const std::filesystem::path& wav, bool on);  // game_music.cpp
+void SetGameAudioMuted(bool muted);  // audio_settings.cpp: the game's own sound silent while our menus show
+void PlaySoundOnce(const std::filesystem::path& wav);
+}  // namespace bf1943
+#if defined(BF_DEV_TOOLS)
+REXCVAR_DEFINE_BOOL(bf_dev_auto_host, false, "BF1943",
+                    "Tests (BF_AUTO_JOIN=1): host our Create Private Match at the main menu");
+REXCVAR_DEFINE_STRING(bf_dev_auto_direct, "", "BF1943",
+                      "Tests (BF_AUTO_JOIN=1): join this address by Direct connect at the main menu");
+#endif
+REXCVAR_DEFINE_BOOL(bf_dev_no_auto_join, false, "BF1943",
+                    "Tests: no automatic Quick Match on our main menu (one client of two stays there)");
+namespace bf1943 {
+void StopSounds();
+void StartAutoJoin(const std::string& server);  // auto_join.cpp
+void StartTutorial();  // auto_join.cpp: the game's own tutorial
+void SetJoinedServerMode(bool modern);           // modern_mode.cpp
+void NotePlayedLevel(const std::string& title);  // pipeline_upload.cpp: the levels sent with the pipelines
+bool BfFontReady(const std::filesystem::path& game_dir, const std::filesystem::path& user_dir);  // bf_font.cpp
+float BfTextWidth(const std::string& text, float cap);
+void BfText(ImDrawList* d, ImVec2 top_left, float cap, ImU32 color, const std::string& text);
+void BfText(ImDrawList* d, ImVec2 top_left, float cap, ImU32 color, const std::string& text, ImU32 edge);
+void BfFontDebug(ImDrawList* d);
+// bf_list_shot.cpp: BF's own lists (0 its main menu's, 1 its pause's), copied from the window once.
+bool BfListShotTake(int list);
+bool BfListShotReady(int list);
+bool BfListShotLoad(int list);                      // a copy kept from an earlier start, if there is one for this size
+bool BfListShotShowing(int list, int row);          // BF's own list on screen now, `row` selected
+int BfListShotSelectedRow(int list);                // BF's own list on screen now: its selected row, or -1
+void BfListShotSetDir(const std::filesystem::path& dir);
+void BfListShotBar(int list, ImDrawList* d, ImVec2 a, ImVec2 b, bool selected);
+void BfListShotLetters(int list, ImDrawList* d, ImVec2 a, ImVec2 b, int bf_row, ImU32 color, ImU32 edge);
+bool BfListShotLabel(int list, ImDrawList* d, ImVec2 a, ImVec2 b, const std::string& text, ImU32 color, ImU32 edge);
+void BfPaper(ImDrawList* d, ImVec2 a, ImVec2 b, float strength);
+void RunPauseAction(int action);
+void PressBf(const std::vector<uint16_t>& presses);  // auto_join.cpp: BF's own buttons, one after another
+void PressBfTimed(const std::vector<std::pair<double, uint16_t>>& presses);  // each after its own wait (s)
+bool BfPressesDone();
+constexpr uint16_t kPadA = 0x1000, kPadB = 0x2000, kPadDown = 0x0002, kPadUp = 0x0001, kPadStart = 0x0010;
+int MenuDriverStage();
+bool InMatch();  // auto_join.cpp: the driver's in game stage
+bool LevelReady();
+void PressStartForPlayer();  // auto_join.cpp
+void MarkExitChosen();
+void LeaveMatch();  // auto_join.cpp: Exit Game, the game's own command (doExitLevel)
+void SuicideNow();  // the game's own suicide command
+void GameCommand(const std::string& name, const std::string& args);  // auto_join.cpp: a command as the game's menu sends it
+std::map<std::string, std::pair<int, double>> TakeScoreEvents();  // auto_join.cpp: the HUD's score events
+bool LevelLoaded();
+bool LoadingScreenShown();  // auto_join.cpp: the level's loading screen is up after a join's load began
+
+void NameChosen(const std::string& name);  // below: the name the player chose on the first start, in use at once
+bool PollNameCheck(bool abandon);           // below: the backend's answer to a chosen name, applied once it is in
+bool ShadersAfterUpdate();                  // below: the shaders are prepared again after an update
+const char* BfVersion();                    // pipeline_upload.cpp
+
+// Whether BF may sign in behind the launcher's pages (auto_join.cpp): a name was chosen and the backend answered.
+std::atomic<bool>& LauncherWalks() {
+  static std::atomic<bool> walks{false};
+  return walks;
+}
+
+namespace {
+
+namespace fs = std::filesystem;
+
+std::atomic<bool> g_escape_press{false};  // the keyboard's Esc with our menu closed (TakeEscapePress)
+// BF's own menu screen's last "couch" call (auto_join.cpp; steady clock ticks, 0: never): it comes about once a second
+// while BF's pause or a screen under it is up, never in play.
+std::atomic<int64_t> g_game_menu_signal_at{0};
+double SecondsSinceGameMenuSignal() {
+  const int64_t at = g_game_menu_signal_at.load(std::memory_order_relaxed);
+  if (!at) return 1e9;
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch() -
+                                       std::chrono::steady_clock::duration(at))
+      .count();
+}
+
+constexpr ImU32 kGold = IM_COL32(214, 170, 92, 255), kCream = IM_COL32(234, 226, 208, 255);
+constexpr ImU32 kText = IM_COL32(232, 232, 228, 255), kDim = IM_COL32(150, 152, 156, 255);
+constexpr ImU32 kDark = IM_COL32(20, 22, 26, 255), kLine = IM_COL32(46, 50, 56, 255);
+constexpr ImU32 kGreen = IM_COL32(120, 200, 120, 255);
+// BF's own menus (TekRantGaming's pick, 6 Nov 2026: "Original, extended"), measured from screenshots of the original main
+// menu and pause menu (runs origmenu1, origpause3): grey bars on the main menu, white ones in the pause, the selected
+// one olive green; dialogs are a black title bar over paper; button hints are black tags.
+constexpr ImU32 kBfPaper = IM_COL32(236, 235, 230, 255), kBfInk = IM_COL32(13, 13, 13, 255);
+constexpr ImU32 kBfGreen = IM_COL32(85, 112, 59, 255), kBfGreenInk = IM_COL32(181, 181, 180, 255);
+// BF's rows (runs origmenu3 and origpause2, sampled): the main menu's grey white paper and the pause's lighter one,
+// opaque (BF's own list is under ours); the lines between rows near black, two pixels at 1800 lines.
+constexpr ImU32 kBfMainBar = IM_COL32(216, 219, 220, 255), kBfPauseBar = IM_COL32(226, 232, 232, 255);
+constexpr ImU32 kBfLine = IM_COL32(22, 22, 22, 255);
+constexpr ImU32 kBfWhiteBar = IM_COL32(238, 238, 234, 255), kBfGreyBar = IM_COL32(140, 143, 147, 240);
+constexpr ImU32 kBfEdge = IM_COL32(112, 112, 110, 255), kBfBlack = IM_COL32(12, 12, 12, 255);
+constexpr ImU32 kBfFaint = IM_COL32(118, 116, 110, 255), kBfRed = IM_COL32(150, 36, 28, 255);
+
+struct Fonts {
+  ImFont* title = nullptr;   // Bahnschrift, the big BATTLEFIELD
+  ImFont* header = nullptr;  // Bahnschrift, spaced capitals
+  ImFont* item = nullptr;    // Segoe UI, menu rows
+  ImFont* body = nullptr;    // Segoe UI, help and hints
+  ImFont* bold = nullptr;    // Segoe UI Semibold
+  ImFont* bf = nullptr;      // Oswald Bold (bin\fonts): BF's own menu lettering's look, its lists and titles
+  ImFont* bf_med = nullptr;  // Oswald Medium: the settings' rows and help
+} g_fonts;
+
+// ---- settings: key = value lines
+
+struct Settings {
+  fs::path path;
+  std::map<std::string, std::string> values;
+  void Load() {
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+      const size_t eq = line.find('=');
+      if (line.empty() || line[0] == '#' || eq == std::string::npos) continue;
+      auto trim = [](std::string s) {
+        s.erase(0, s.find_first_not_of(" \t"));
+        s.erase(s.find_last_not_of(" \t\r") + 1);
+        return s;
+      };
+      values[trim(line.substr(0, eq))] = trim(line.substr(eq + 1));
+    }
+  }
+  void Save() const {
+    std::ofstream f(path, std::ios::trunc);
+    f << "# Battlefield 1943 PC settings (our menu)\n";
+    for (const auto& [k, v] : values) f << k << " = " << v << "\n";
+  }
+  std::string Get(const std::string& k, const std::string& def) const {
+    auto it = values.find(k);
+    return it == values.end() ? def : it->second;
+  }
+};
+
+// ---- the menu
+
+// kSetup to kAllSet: the first time setup's pages 1 to 9 (game_menu_launcher.inc); kHome on every later start; kMain
+// BF's own online menu with our list (Play); kPause in a match.
+enum class Page {
+  kIntro,  // the startup cards with the logo music (IntroPage), at every launch
+  kStats,  // our Stats & Awards (StatsPage), from the main menu
+  kAchievements,  // our Achievements (AchievementsPage), from the main menu
+  kLeaderboards,  // our Leaderboards (LeaderboardsPage), from the main menu and the pause
+  kFriends,  // our Join Match With Friends (FriendsPage), from the main menu
+  kScoreboard,  // our Scoreboard (ScoreboardPage), from the pause
+  kPrivateMatch,  // our Create Private Match (PrivateMatchPage), from the main menu
+  kHelp,          // our Help (HelpPage): the game's tutorial, its controls, the credits
+  kControls,      // the game's controller layouts (ControlsPage), from Help and the pause
+  kCredits,       // the credits (CreditsPage), from Help
+  kSetup, kName, kShaders, kMain, kServers, kSettings, kJoining, kPause, kLeaving,
+  kMovement,  // the movement choice before Quick Match and the server browser (MovementPage)
+  kSetupSettings, kPrompts, kPlaystyle, kAllSet, kHome, kProjects, kReport, kStarting, kUpdate
+};
+
+#if defined(_WIN32)
+// The first start's pickers: the player's package file, or a folder (a console drive's, or an unpacked game). Each
+// picker is owned by our window (`owner`, its HWND): in front of it, and the focus back to it when the picker closes
+// (GameMenu::Pick).
+fs::path BrowseForPackage(void* owner) {
+  wchar_t file[MAX_PATH] = L"";
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = static_cast<HWND>(owner);
+  ofn.lpstrFilter = L"Battlefield 1943 package (any file)\0*.*\0Unpacked game (default.xex)\0default.xex\0";
+  ofn.lpstrFile = file;
+  ofn.nMaxFile = MAX_PATH;
+  ofn.lpstrTitle = L"Select your Battlefield 1943 package (in 5841097E\\000D0000)";
+  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  return GetOpenFileNameW(&ofn) ? fs::path(file) : fs::path();
+}
+fs::path BrowseForFolder(void* owner) {
+  fs::path out;
+  IFileOpenDialog* dialog = nullptr;
+  if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+    dialog->SetTitle(L"Select the folder that holds your Battlefield 1943");
+    if (SUCCEEDED(dialog->Show(static_cast<HWND>(owner)))) {
+      IShellItem* item = nullptr;
+      if (SUCCEEDED(dialog->GetResult(&item))) {
+        PWSTR path = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) out = path, CoTaskMemFree(path);
+        item->Release();
+      }
+    }
+    dialog->Release();
+  }
+  return out;
+}
+// The HD texture pack's file (Settings > Graphics > Import HD texture pack).
+fs::path BrowseForHdPack(void* owner) {
+  wchar_t file[MAX_PATH] = L"";
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = static_cast<HWND>(owner);
+  ofn.lpstrFilter = L"Battlefield 1943 Reborn HD texture pack (*.bfhd)\0*.bfhd\0Any file\0*.*\0";
+  ofn.lpstrFile = file;
+  ofn.nMaxFile = MAX_PATH;
+  ofn.lpstrTitle = L"Select the HD texture pack";
+  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  return GetOpenFileNameW(&ofn) ? fs::path(file) : fs::path();
+}
+#else
+fs::path BrowseForPackage(void*) { return {}; }
+fs::path BrowseForFolder(void*) { return {}; }
+fs::path BrowseForHdPack(void*) { return {}; }
+#endif
+
+// Where an imported HD texture pack is kept (bf1943_app.h gives it to the renderer at the start).
+fs::path HdPackPath(const fs::path& user_dir) { return user_dir / "hd" / "bf1943-hd.bfhd"; }
+
+// The GPU plugin's shader storage progress (rex_gpu_shader_storage_progress, our SDK copy's rexgpu-xenos and
+// rexgpu-bfnative): the pipelines made from the storage at start, which the shader screen shows. Null with a
+// plugin that has no such export.
+struct ShaderProgress {
+  uint32_t queued = 0, done = 0, loading = 0, finished = 0;
+};
+using ShaderProgressFn = void (*)(uint32_t*, uint32_t*, uint32_t*, uint32_t*);
+ShaderProgressFn FindShaderProgress() {
+  for (const char* name : {"xenos", "bfnative"}) {
+#if defined(_WIN32)
+    if (HMODULE m = GetModuleHandleA((std::string("rexgpu-") + name + ".dll").c_str()))
+      if (auto f = reinterpret_cast<ShaderProgressFn>(GetProcAddress(m, "rex_gpu_shader_storage_progress"))) return f;
+#else
+    if (void* m = dlopen((std::string("librexgpu-") + name + ".so").c_str(), RTLD_NOW | RTLD_NOLOAD)) {
+      auto f = reinterpret_cast<ShaderProgressFn>(dlsym(m, "rex_gpu_shader_storage_progress"));
+      dlclose(m);
+      if (f) return f;
+    }
+#endif
+  }
+  return nullptr;
+}
+
+struct Input {
+  bool up = false, down = false, left = false, right = false, accept = false, back = false;
+  bool prev_tab = false, next_tab = false;  // LB and RB (Q and E): the settings' tabs
+  bool x = false, y = false, start = false, view = false;  // the launcher's pages (F, R, P and Tab on the keyboard)
+};
+
+class GameMenu final : public rex::ui::ImGuiDialog {
+ public:
+  GameMenu(rex::ui::ImGuiDrawer* drawer, fs::path settings_path, std::function<void(bool)> fullscreen,
+           std::function<void()> quit, std::function<rex::ui::Window*()> window, std::function<fs::path()> game_dir)
+      : ImGuiDialog(drawer), fullscreen_(std::move(fullscreen)), quit_(std::move(quit)), window_(std::move(window)),
+        game_dir_(std::move(game_dir)) {
+    settings_.path = std::move(settings_path);
+    settings_.Load();
+    BfListShotSetDir(settings_.path.parent_path() / "cache" / "extracted");
+    // A saved antialiasing mode no longer offered shows as FXAA, which applies (ApplyStartupDisplaySettings).
+    if (auto it = settings_.values.find("cvar.native_x_renderer_antialiasing");
+        it == settings_.values.end() || (it->second != "off" && it->second != "fxaa"))
+      settings_.values["cvar.native_x_renderer_antialiasing"] = "fxaa";
+    settings_.values.erase("cvar.native_x_renderer_frame_generation");
+    NoteStartValues();
+    StartFrameCapRead();
+    ApplyFrameRate();
+    open_ = true;  // the launcher is the main menu: shown from the first frame
+    // The SDK plugin's storage only runs on the Xenos path (under NativeXRenderer it never finishes); NativeXRenderer
+    // reports its own: the stored pipelines (shader_prep.cpp writes them from the player's game files on a first
+    // start) made at its first draw (D134).
+    shader_progress_ = REXCVAR_GET(native_x_renderer) ? &native_x_renderer::StorageProgress : FindShaderProgress();
+    page_ = Page::kShaders;  // until the storage's pipelines are made; then the setup or Home (AfterShaders)
+    // A setup closed half way counts as done once a name was chosen (TekRantGaming's rule for King Kong). Not saved here:
+    // the settings file is never written from the constructor (King Kong's pitfall 3).
+    if (settings_.Get("launcher_setup", "") == "started" && settings_.Get("player_name_chosen", "") == "1")
+      settings_.values["launcher_setup"] = "done";
+#if defined(BF_DEV_TOOLS)
+    if (!shader_progress_) {  // BF_MENU_PAGE / BF_MENU_TAB at once when there is no shader screen (screenshots)
+      if (const char* v = std::getenv("BF_MENU_PAGE"); v && std::string(v) == "settings") page_ = Page::kSettings;
+      if (const char* v = std::getenv("BF_MENU_TAB"); v && *v) tab_ = std::clamp(std::atoi(v), 0, int(kTabCount) - 1);
+    }
+#endif
+    // The fullscreen mode (Borderless or a Fullscreen resolution) before the window first goes fullscreen; the
+    // window mode itself was set before the window opened (ApplyStartupDisplaySettings).
+    if (window_ && window_())
+      ApplyFullscreenMode(window_(), std::atoi(settings_.Get("monitor", "0").c_str()),
+                          settings_.Get("fullscreen_mode", "desktop"));
+  }
+
+  // A file picker over our window (TekRantGaming, 10 Nov 2026: picking the game files in the setup, with 0.1.30's exclusive
+  // Fullscreen, left the game minimised behind the closed picker, looking crashed; the install itself had finished).
+  // An exclusive Fullscreen steps down to Borderless while the picker is open (Windows minimises an exclusive window
+  // that loses the focus) and back after; the picker is owned by our window, so the focus comes back to it.
+  template <typename Browse>
+  fs::path Pick(Browse browse) {
+    rex::ui::Window* window = window_ ? window_() : nullptr;
+    const std::string mode = settings_.Get("fullscreen_mode", "desktop");
+    const int monitor = std::atoi(settings_.Get("monitor", "0").c_str());
+    const bool exclusive = window && window->IsFullscreen() && ParseDisplayMode(mode).has_value();
+    if (exclusive) ApplyFullscreenMode(window, monitor, "desktop");
+    const fs::path picked = browse(window ? window->GetNativeWindowHandle() : nullptr);
+    if (exclusive) ApplyFullscreenMode(window, monitor, mode);
+    REXLOG_INFO("BF launcher: a file picker closed ({}{})", picked.empty() ? "nothing picked" : "picked",
+                exclusive ? "; Fullscreen stepped down to Borderless while it was open" : "");
+    return picked;
+  }
+
+  // The driver reached BF's online menu (or came back to it after a match). A join picked while the game was still
+  // starting goes on from here (OnDraw).
+  void Show() {
+    open_ = true;
+    // The game's own options as saved (it starts each run from its defaults): sent from our next draw, as this runs
+    // in the menu driver's step, under its lock, which GameCommand takes too.
+    if (!signed_in_once_) send_game_settings_ = true;
+    signed_in_once_ = true;
+    if (page_ == Page::kJoining && !failed_) return;
+    // Signed in under the launcher's pages (BF's menu is up behind them): they stay; Play goes on from here.
+    if (LauncherPage(page_) && page_ != Page::kStarting) {
+      main_cursor_ = 0;
+      return;
+    }
+    if (page_ == Page::kStarting) {
+      page_ = Page::kMain, row_ = 0, main_cursor_ = 0;
+      return;
+    }
+    // BF's menu reached while the shaders are still being made: the shader screen stays until they are done (its page
+    // then goes on to ours).
+    if (page_ == Page::kShaders) {
+      main_cursor_ = 0;
+      return;
+    }
+    page_ = Page::kMain, row_ = 0, from_pause_ = false, lost_ = false;
+    main_cursor_ = 0;  // BF's own list, (re)entered, is on its first row
+  }
+  void ShowLost() { open_ = true, page_ = Page::kLeaving, lost_ = true; }  // the server went away during the match
+  void ShowPause() {
+    open_ = true, page_ = Page::kPause, pause_row_ = 0, pause_focus_panel_ = false, handing_over_ = -1;
+    pause_confirm_ = -1;
+    pause_opened_at_ = ImGui::GetTime();
+  }
+  bool open() const { return open_; }
+  // For the graphics panel (f8_panel.cpp): the launcher's own pages are up; the settings file.
+  bool ShowingLauncher() const { return open_ && LauncherPage(page_); }
+  bool KeyboardLast() const { return device_ == Device::kKeyboard; }
+  std::string Setting(const std::string& key, const std::string& def) const { return settings_.Get(key, def); }
+  void SetSetting(const std::string& key, const std::string& value) {
+    settings_.values[key] = value;
+    settings_.Save();
+  }
+  fs::path UserDir() const { return settings_.path.parent_path(); }
+  bool passing() {
+    std::lock_guard<std::mutex> lock(pad_mutex_);
+    return passing_ >= 0;
+  }
+
+  // Player 1's pad, from the game's own pad reads: edges become our input.
+  void Pad(uint16_t buttons, int16_t lx, int16_t ly, bool from_game = false) {
+    std::lock_guard<std::mutex> lock(pad_mutex_);
+    if (from_game) game_pad_at_ = std::chrono::steady_clock::now();
+    uint16_t dirs = buttons;
+    if (ly > 16000) dirs |= 0x0001;
+    if (ly < -16000) dirs |= 0x0002;
+    if (lx < -16000) dirs |= 0x0004;
+    if (lx > 16000) dirs |= 0x0008;
+    const uint16_t pressed = dirs & ~last_pad_;
+    last_pad_ = dirs;
+    if (!open_) {
+      Passing(pressed);
+      return;
+    }
+    pad_.up |= (pressed & 0x0001) != 0;
+    pad_.down |= (pressed & 0x0002) != 0;
+    pad_.left |= (pressed & 0x0004) != 0;
+    pad_.right |= (pressed & 0x0008) != 0;
+    pad_.accept |= (pressed & 0x1000) != 0;     // A
+    pad_.start |= (pressed & 0x0010) != 0;      // Start (also A on BF's own pages, OnDraw)
+    pad_.view |= (pressed & 0x0020) != 0;       // Back (View)
+    pad_.back |= (pressed & 0x2000) != 0;       // B
+    pad_.x |= (pressed & 0x4000) != 0;          // X
+    pad_.y |= (pressed & 0x8000) != 0;          // Y
+    pad_.prev_tab |= (pressed & 0x0100) != 0;   // LB
+    pad_.next_tab |= (pressed & 0x0200) != 0;   // RB
+    if (pressed) pad_pressed_ = true, classify_press_ = from_game ? 1 : 2;
+  }
+
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    // The keyboard's Esc in a match with our menu closed opens the pause, as the controller's Start does (auto_join.cpp
+    // takes it at the next pad read; only with the soldier in the world, as Start).
+    if (!open_ && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) g_escape_press.store(true, std::memory_order_relaxed);
+    UpdateWalk(io);
+    if (hd_import_->turn_on.exchange(false)) SetCvar("native_x_renderer_hd_textures", "true");
+    // D150: the GPU's speed, timed once (the log keeps it) after the stored pipelines are made and 3 s of steady
+    // frames (none over 50 ms). Timed while they compiled (a first start, or the first after an update), an RTX 4070
+    // Ti took 13.3 ms instead of 5.8 (run smoke122); 2 s after them, with the game still loading, 8.7 (smoke122b): the
+    // GPU idles between uneven frames and its clock falls. Not before the game runs: the launcher shows before the
+    // renderer exists (the request was dropped, so the first start's auto detect, in the launcher, has no time yet and
+    // keeps the fast tier).
+    // Timed only while an auto detect waits for it (a short heavy load: a second or so on a GTX 1060), and in test
+    // builds for the log.
+#if defined(BF_DEV_TOOLS)
+    const bool want_time = true;
+#else
+    const bool want_time = settings_.Get("auto_detect_gpu", "") == "pending";
+#endif
+    if (!gpu_benchmark_started_ && want_time && !REXCVAR_GET(server)) {
+      if (page_ == Page::kShaders || pre_game_ || io.DeltaTime > 0.05f) gpu_benchmark_at_ = ImGui::GetTime() + 3.0;
+      else if (ImGui::GetTime() >= gpu_benchmark_at_) gpu_benchmark_started_ = true, native_x_renderer::GpuBenchmarkStart();
+    }
+    if (!REXCVAR_GET(server)) AutoDetectWhenTimed(), NoteNisSupport();
+#if defined(BF_DEV_TOOLS)
+    // BF_DEV_HD_IMPORT=<pack> (tests): Settings > Graphics > Import HD texture pack, as if chosen, once.
+    {
+      static bool done = false;
+      if (!done && std::getenv("BF_DEV_HD_IMPORT") && ImGui::GetFrameCount() > 30) done = true, ImportHdPack();
+    }
+    // BF_DEV_HD_FLIP=<seconds> (tests): HD textures off and on by turns (not saved), for screenshots of the same view.
+    if (const char* v = std::getenv("BF_DEV_HD_FLIP"); v && *v) {
+      static double next = 0;
+      static bool on = true;
+      const double now = ImGui::GetTime();
+      if (next == 0) next = now + std::atof(v);
+      if (now >= next) {
+        on = !on, next = now + std::atof(v);
+        rex::cvar::SetFlagByName("native_x_renderer_hd_textures", on ? "true" : "false");
+        REXLOG_INFO("BF dev HD flip: HD textures {}", on ? "on" : "off");
+      }
+    }
+    // BF_DEV_AUTODETECT=1 (tests): the auto detect once the GPU's time is known; =pre: at the launcher's first frame,
+    // before the game runs, as the first start's setup makes it (Start on its settings pages).
+    {
+      static bool done = false;
+      double ms = 0;
+      const char* v = std::getenv("BF_DEV_AUTODETECT");
+      if (!done && v && std::string(v) == "pre" && pre_game_) done = true, AutoDetect();
+      if (!done && v && std::string(v) != "pre" && native_x_renderer::GpuBenchmarkResult(&ms)) done = true, AutoDetect();
+    }
+#endif
+    if (!open_) PauseTest();
+    // A frame limit outside the game found since (the driver's read, or measured): the rate offered at most.
+    if (SystemFrameCap() != applied_cap_) ApplyFrameRate();
+    if (!open_) MenuSteps();  // tests: their bfb and bfa steps act while BF's own screen has the pad
+    if (!open_) ReopenPause();
+    // A new match: BF's pause list starts on its first row again.
+    if (const int stage = MenuDriverStage(); stage != last_stage_) {
+      if (stage == 5) bf_cursor_ = 0;
+      last_stage_ = stage;
+    }
+    if (page_ == Page::kJoining) {
+      const int stage = MenuDriverStage();
+      if (!pending_.empty() && stage == 2) StartAutoJoin(pending_), pending_.clear();  // the game is at its menu now
+      // The level is loading: BF's own loading screen, then its Loading complete and spawn screens are the player's
+      // (TekRantGaming, 7 Nov 2026: ours covered them and took the class pick away). Tests spawn by themselves (LevelReady).
+      // Ours gives way once that loading screen is up: for a second or two after the load begins the game's own menu
+      // is still on screen with its "Joining game" box (TekRantGaming, 10 Nov: the old menu showed; run launchaudio1), so our
+      // page stays over it until the load's first progress, 10 s at most.
+      if (stage == 5) {
+        if (joining_load_at_ < 0) joining_load_at_ = ImGui::GetTime();
+        if (LoadingScreenShown() || ImGui::GetTime() - joining_load_at_ > 10)
+          open_ = false, page_ = Page::kMain, joining_load_at_ = -1;
+      } else {
+        joining_load_at_ = -1;
+      }
+      if (stage == 6) failed_ = true;  // kFailed
+    }
+    // Until BF's online menu is up our menu stays closed: the game's own films, title and sign in show as they are,
+    // and the player presses Start (TekRantGaming, 7 Nov 2026: no bare menu over them). Its first start's setup and shader
+    // screens come first.
+    if (open_ && page_ == Page::kMain && MenuDriverStage() < 2) open_ = false;
+    // A click is Start there too (the keyboard's Return already is: the SDK's keybind_start), and the autosave
+    // notice's OK after it.
+    if (!open_ && MenuDriverStage() <= 1 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) PressStartForPlayer();
+    if (send_game_settings_.exchange(false)) SendGameSettings();
+    // The menu music from the player's game files (game_music.cpp) while our menus show outside a match: before the
+    // game runs, behind our Getting ready page while it starts and signs in, in our main menu and its pages, and while
+    // a join connects; the game's own sound is silent meanwhile (audio_settings.cpp), so its start's logo sound and
+    // title music and its hidden menu's music never play over ours (TekRantGaming, 10 Nov). From a level's load on (stage 5:
+    // the match, its pause) the game's sound is back and ours stops. BF_DEV_MENU_MUSIC=1 (tests): music on as well.
+    {
+      static const bool dev_music = [] {
+        const char* v = std::getenv("BF_DEV_MENU_MUSIC");
+        return v && *v == '1';
+      }();
+      const bool in_match = MenuDriverStage() == 5 && page_ != Page::kJoining;  // the joining page is ours to its end
+      const bool our_menus = page_ != Page::kIntro && !in_match && (pre_game_ || open_);
+      bf1943::SetGameAudioMuted(our_menus && !pre_game_);
+      const bool want = our_menus && (Cvar("bf_menu_music") != "false" || dev_music);
+      PlayMenuMusic(UserDir() / "cache" / "extracted" / "music" / "menu.wav", want);
+    }
+    if (!open_) return;
+    // BF_AUTO_JOIN=1 (test runs): Play online as soon as the server list has a server.
+    static const bool auto_join = [] {
+      const char* v = std::getenv("BF_AUTO_JOIN");
+      return v && *v == '1';
+    }();
+#if defined(BF_DEV_TOOLS)
+    if (auto_join && !auto_joined_ && page_ == Page::kMain && DevAutoPrivate()) auto_joined_ = true;
+#endif
+    if (auto_join && !auto_joined_ && page_ == Page::kMain && !list_.servers().empty() && !REXCVAR_GET(bf_dev_no_auto_join))
+      auto_joined_ = true, QuickJoin(MovementPreference(), true);
+    PrivateMatchTick();  // our Create Private Match: its server's state, the join, its end
+
+    PauseTest();
+    MenuSteps();
+    // Before the game runs (the first start's pages) nothing reads the pad for us: read it here. On the launcher's
+    // pages the game behind may not read it either (its intro films: the name page took no controller, TekRantGaming, 8 Nov),
+    // so with no read from the game for 0.3 s the launcher reads it itself.
+    bool game_reads;
+    {
+      std::lock_guard<std::mutex> lock(pad_mutex_);
+      game_reads = std::chrono::steady_clock::now() - game_pad_at_ < std::chrono::milliseconds(300);
+    }
+    const bool host_reads = pre_game_ || (LauncherPage(page_) && !game_reads);
+    if (host_reads != host_reads_ && LauncherPage(page_)) {
+      host_reads_ = host_reads;
+      REXLOG_INFO("BF launcher: the controller read by {}", host_reads ? "the launcher (the game is not reading it)" : "the game");
+    }
+    if (host_reads) HostPad();
+    Input pad, key;
+    bool pad_pressed = false;
+    {
+      std::lock_guard<std::mutex> lock(pad_mutex_);
+      pad = pad_, key = test_key_;
+      pad_ = {}, test_key_ = {};
+      pad_pressed = pad_pressed_;
+      pad_pressed_ = false;
+    }
+    // The keyboard: arrows, Enter and Esc everywhere; the launcher's letters (F, R, P, Tab, Q and E) where nothing is
+    // typed.
+    const bool typing = page_ == Page::kName || !capture_.empty();
+    key.up |= ImGui::IsKeyPressed(ImGuiKey_UpArrow);
+    key.down |= ImGui::IsKeyPressed(ImGuiKey_DownArrow);
+    key.left |= ImGui::IsKeyPressed(ImGuiKey_LeftArrow);
+    key.right |= ImGui::IsKeyPressed(ImGuiKey_RightArrow);
+    key.accept |= ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+    key.back |= ImGui::IsKeyPressed(ImGuiKey_Escape);
+    if (!typing) {
+      key.prev_tab |= ImGui::IsKeyPressed(ImGuiKey_Q);
+      key.next_tab |= ImGui::IsKeyPressed(ImGuiKey_E);
+      if (LauncherPage(page_)) {
+        key.x |= ImGui::IsKeyPressed(ImGuiKey_F, false);
+        key.y |= ImGui::IsKeyPressed(ImGuiKey_R, false);
+        key.start |= ImGui::IsKeyPressed(ImGuiKey_P, false);
+        key.view |= ImGui::IsKeyPressed(ImGuiKey_Tab, false);
+      }
+    }
+    // The kind of controller that pressed (the automatic prompts), on this thread: XInput reads of empty slots are slow.
+    if (const int c = classify_press_.exchange(0)) ClassifyPadPress(c == 2);
+    TrackDevice(io, pad_pressed, key);
+    Input in = MergeInput(pad, key);
+    // The pause button closes our pause from any of its pages and cards, as it opened it (TekRantGaming, 10 Nov 2026: a second
+    // Start showed the game's own pause). Never A there: on the Exit Game question it was YES. auto_join.cpp keeps the
+    // press from the game until it is let go.
+    if (in.start && InPause()) {
+      ClosePause("Start");
+      return;
+    }
+    if (!LauncherPage(page_)) in.accept |= in.start;  // BF's own pages: Start is A, as before
+
+    const float s = io.DisplaySize.y / 1080.0f;
+    io_scale_ = s;
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    // NoInputs: the window never takes ImGui's mouse capture. The runtime turns the controller off while ImGui wants
+    // the mouse (rex_app.cpp, SetActiveCallback), and this window covers the screen, so with the pointer over the
+    // game the pad was ignored (TekRantGaming, 5 Nov). Our rows read the mouse themselves (IsMouseHoveringRect, clicks).
+    ImGui::Begin("##bf_menu", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoInputs);
+    ImDrawList* d = ImGui::GetWindowDrawList();
+#if defined(BF_DEV_TOOLS)
+    if (LauncherPage(page_)) DevTextInputCheck();
+#endif
+    switch (page_) {
+      case Page::kIntro: IntroPage(d, io, in); break;
+      case Page::kStats: StatsPage(d, io, in); break;
+      case Page::kAchievements: AchievementsPage(d, io, in); break;
+      case Page::kLeaderboards: LeaderboardsPage(d, io, in); break;
+      case Page::kFriends: FriendsPage(d, io, in); break;
+      case Page::kScoreboard: ScoreboardPage(d, io, in); break;
+      case Page::kPrivateMatch: PrivateMatchPage(d, io, in); break;
+      case Page::kHelp: HelpPage(d, io, in); break;
+      case Page::kControls: ControlsPage(d, io, in); break;
+      case Page::kCredits: CreditsPage(d, io, in); break;
+      case Page::kSetup: FilesPage(d, io, in); break;
+      case Page::kName: AccountPage(d, io, in); break;
+      case Page::kShaders: ShadersPage(d, io, in); break;
+      case Page::kSetupSettings: SetupSettingsPage(d, io, in); break;
+      case Page::kPrompts: PromptsPage(d, io, in); break;
+      case Page::kPlaystyle: PlaystylePage(d, io, in); break;
+      case Page::kAllSet: AllSetPage(d, io, in); break;
+      case Page::kHome: HomePage(d, io, in); break;
+      case Page::kProjects: ProjectsPage(d, io, in); break;
+      case Page::kReport: ReportPage(d, io, in); break;
+      case Page::kStarting: StartingPage(d, io, in); break;
+      case Page::kUpdate: UpdatePage(d, io, in); break;
+      case Page::kMain: MainPage(d, s, io, in); break;
+      case Page::kServers: ServersPage(d, s, io, in); break;
+      case Page::kMovement: MovementPage(d, s, io, in); break;
+      case Page::kSettings:
+        if (from_home_) HomeSettingsPage(d, io, in);
+        else SettingsPage(d, s, io, in);
+        break;
+      case Page::kJoining: JoiningPage(d, s, io, in); break;
+      case Page::kPause: PausePage(d, s, io, in); break;
+      case Page::kLeaving: LeavingPage(d, s, io); break;
+    }
+    // The stamp on BF's own menus too: its main menu (and our pages over it) and the pause; never over a match.
+    if (kit::WatermarkOn() && open_ &&
+        (page_ == Page::kMain || page_ == Page::kServers || page_ == Page::kMovement || page_ == Page::kPause ||
+         page_ == Page::kStats ||
+         page_ == Page::kAchievements || page_ == Page::kLeaderboards || page_ == Page::kFriends ||
+         page_ == Page::kScoreboard || page_ == Page::kPrivateMatch || page_ == Page::kJoining || page_ == Page::kLeaving ||
+         page_ == Page::kHelp || page_ == Page::kControls || page_ == Page::kCredits ||
+         (page_ == Page::kSettings && !from_home_))) {
+      const Stage st = StageOf(io);
+      kit::Stamp(d, ImVec2(io.DisplaySize.x - st(36) - st(130), st(34) + st(32)), st.u, 5, 1.0f, true);
+    }
+    BfFontDebug(d);
+    ImGui::End();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+  }
+
+ private:
+  // ---- drawing helpers
+
+  static void Text(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const std::string& t) {
+    d->AddText(f, size, at, col, t.c_str());
+  }
+  static float Width(ImFont* f, float size, const std::string& t) {
+    return f->CalcTextSizeA(size, FLT_MAX, 0, t.c_str()).x;
+  }
+  // Spaced capitals, like King Kong's section titles.
+  static float Spaced(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const std::string& t, float gap) {
+    float x = at.x;
+    for (size_t i = 0; i < t.size();) {
+      size_t n = 1;  // one UTF-8 character
+      while (i + n < t.size() && (static_cast<unsigned char>(t[i + n]) & 0xC0) == 0x80) ++n;
+      const std::string ch = t.substr(i, n);
+      d->AddText(f, size, ImVec2(x, at.y), col, ch.c_str());
+      x += Width(f, size, ch) + gap;
+      i += n;
+    }
+    return x;
+  }
+
+  void Shade(ImDrawList* d, ImGuiIO& io, float left, float right) {
+    const ImVec2 sz = io.DisplaySize;
+    d->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(sz.x * 0.75f, sz.y), IM_COL32(8, 10, 14, int(255 * left)),
+                               IM_COL32(8, 10, 14, int(255 * right)), IM_COL32(8, 10, 14, int(255 * right)),
+                               IM_COL32(8, 10, 14, int(255 * left)));
+    d->AddRectFilled(ImVec2(sz.x * 0.75f, 0), sz, IM_COL32(8, 10, 14, int(255 * right)));
+  }
+
+  // Outside a match our pages have their own opaque background (BF's menu and title are never shown): dark, with a
+  // soft warm light from the top right.
+  void Backdrop(ImDrawList* d, ImGuiIO& io) {
+    const ImVec2 sz = io.DisplaySize;
+    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(8, 10, 14, 255));
+    d->AddRectFilledMultiColor(ImVec2(sz.x * 0.35f, 0), sz, IM_COL32(8, 10, 14, 0), IM_COL32(58, 46, 30, 150),
+                               IM_COL32(16, 18, 22, 60), IM_COL32(8, 10, 14, 0));
+  }
+  bool InMatch() const { return MenuDriverStage() == 5 && !(page_ == Page::kJoining); }
+  void Background(ImDrawList* d, ImGuiIO& io, float left, float right) {
+    if (InMatch()) Shade(d, io, left, right);
+    else Backdrop(d, io);
+  }
+
+  // A hint's button in the Button prompts style (Settings > Controls): Xbox letters, PlayStation names, or keys.
+  std::string Prompt(const std::string& k) const {
+    std::string style = rex::cvar::GetFlagByName("bf_button_prompts");
+    if (style == "auto" && device_ == Device::kKeyboard) style = "keyboard";  // the device used last
+    static const std::pair<const char*, const char*> kPlayStation[] = {
+        {"A", "Cross"}, {"B", "Circle"}, {"X", "Square"}, {"Y", "Triangle"}, {"LB", "L1"}, {"RB", "R1"}};
+    static const std::pair<const char*, const char*> kKeyboard[] = {
+        {"A", "Enter"}, {"B", "Esc"}, {"Y", "Y"}, {"LB", "Q"}, {"RB", "E"}};
+    std::string out, word;
+    auto flush = [&] {
+      if (word.empty()) return;
+      std::string t = word;
+      if (style == "ps5" || style == "ps3" || style == "ps2") {
+        for (const auto& [from, to] : kPlayStation) if (word == from) t = to;
+      } else if (style == "keyboard") {
+        for (const auto& [from, to] : kKeyboard) if (word == from) t = to;
+      }
+      out += t;
+      word.clear();
+    };
+    for (char c : k) {
+      if (c == ' ') flush(), out += c;
+      else word += c;
+    }
+    flush();
+    return out;
+  }
+
+  void Hints(ImDrawList* d, float s, ImGuiIO& io, const std::vector<std::pair<std::string, std::string>>& keys_in) {
+    std::vector<std::pair<std::string, std::string>> keys;
+    for (const auto& [k, t] : keys_in) keys.push_back({Prompt(k), t});
+    float total = 0;
+    for (const auto& [k, t] : keys) total += std::max(34.0f, Width(g_fonts.bold, 17 * s, k) / s + 18) * s + 12 * s +
+                                              Width(g_fonts.body, 22 * s, t) + 40 * s;
+    float x = io.DisplaySize.x - 80 * s - total + 40 * s, y = io.DisplaySize.y - 70 * s;
+    for (const auto& [k, t] : keys) {
+      const float w = std::max(34.0f * s, Width(g_fonts.bold, 17 * s, k) + 18 * s);
+      d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + 34 * s), IM_COL32(70, 72, 76, 255), 4 * s);
+      Text(d, g_fonts.bold, 17 * s, ImVec2(x + (w - Width(g_fonts.bold, 17 * s, k)) / 2, y + 7 * s), kText, k);
+      Text(d, g_fonts.body, 22 * s, ImVec2(x + w + 12 * s, y + 3 * s), kText, t);
+      x += w + 12 * s + Width(g_fonts.body, 22 * s, t) + 40 * s;
+    }
+  }
+
+  void Header(ImDrawList* d, float s, ImGuiIO& io, const std::vector<std::string>& crumbs) {
+    float x = 100 * s;
+    for (size_t i = 0; i < crumbs.size(); ++i) {
+      const bool last = i + 1 == crumbs.size();
+      const float end = Spaced(d, g_fonts.header, 34 * s, ImVec2(x, 52 * s), last ? kText : kDim, crumbs[i], 5 * s);
+      if (last) d->AddLine(ImVec2(x, 104 * s), ImVec2(end - 5 * s, 104 * s), kGold, 3 * s);
+      else Text(d, g_fonts.header, 34 * s, ImVec2(end + 18 * s, 52 * s), kDim, "/"), x = end + 60 * s;
+    }
+    d->AddLine(ImVec2(100 * s, 112 * s), ImVec2(io.DisplaySize.x - 100 * s, 112 * s), kLine);
+  }
+
+  // A menu row; true when it was clicked. The selected row is the cream bar.
+  bool Row(ImDrawList* d, float s, float x, float y, float w, const std::string& name, const std::string& sub,
+           bool selected, ImU32 color = kText) {
+    const float h = selected && !sub.empty() ? 86 * s : 64 * s;
+    const ImVec2 a(x, y), b(x + w, y + h);
+    const bool hover = ImGui::IsMouseHoveringRect(a, b);
+    if (selected) {
+      d->AddRectFilled(a, b, kCream);
+      Text(d, g_fonts.bold, 34 * s, ImVec2(x + 36 * s, y + 12 * s), kDark, name);
+      if (!sub.empty()) Text(d, g_fonts.body, 19 * s, ImVec2(x + 36 * s, y + 54 * s), IM_COL32(80, 76, 68, 255), sub);
+    } else {
+      Text(d, g_fonts.item, 32 * s, ImVec2(x + 36 * s, y + 14 * s), hover ? kCream : color, name);
+    }
+    return hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+  }
+
+  // ---- BF's own look
+
+  // A text's top for its capitals to sit in the middle of a band of height h (Oswald: ascent 1.193 em, capitals
+  // 0.81 em high).
+  static float CapTop(float top, float h, float size) { return top + (h - 0.81f * size) * 0.5f - 0.383f * size; }
+
+  // One of BF's list bars: grey (main menu) or white (pause), olive green when selected.
+  // BF's own lettering (bf_font.cpp), once the game is installed; Oswald before that.
+  bool BfLetters() {
+    if (bf_letters_ < 0) {
+      const fs::path dir = game_dir_ ? game_dir_() : fs::path();
+      if (dir.empty() || !install::Installed(dir)) return false;
+      bf_letters_ = BfFontReady(dir, settings_.path.parent_path()) ? 1 : 0;
+    }
+    return bf_letters_ == 1;
+  }
+
+  // One of BF's list rows: its paper (grey white on the main menu, lighter in the pause), the near black line under
+  // it, its capitals in BF's lettering 42 pixels high at 1800 lines (BF's size), 22 in from its left; olive green
+  // with grey letters when selected.
+  bool BfBar(ImDrawList* d, ImVec2 a, ImVec2 b, const std::string& t, bool sel, bool white, bool ours_disabled = false) {
+    const bool hover = ImGui::IsMouseHoveringRect(a, b);
+    const float px = io_scale_ * 1080.0f / 1800.0f;  // one pixel at 1800 lines
+    d->AddRectFilled(a, b, sel ? kBfGreen : white ? kBfPauseBar : kBfMainBar);
+    BfPaper(d, a, b, sel ? 0.1f : 0.16f);
+    d->AddRectFilled(ImVec2(a.x, b.y - 2 * px), ImVec2(b.x, b.y), kBfLine);
+    const float h = b.y - a.y;
+    const ImU32 ink = sel ? kBfGreenInk : ours_disabled ? kBfFaint : kBfInk;
+    if (BfLetters()) {
+      const float cap = 42 * px;
+      BfText(d, ImVec2(a.x + 22 * px, a.y + (h - cap) * 0.5f), cap, ink, t);
+    } else {
+      const float size = std::min(h * 0.62f, 34.0f * io_scale_);
+      Text(d, g_fonts.bf, size, ImVec2(a.x + 15 * io_scale_, CapTop(a.y, h, size)), ink, t);
+    }
+    return hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+  }
+
+  // A list's frame: BF's near black edge round its rows.
+  void BfListFrame(ImDrawList* d, ImVec2 a, ImVec2 b) {
+    const float px = io_scale_ * 1080.0f / 1800.0f;
+    d->AddRect(ImVec2(a.x - px, a.y - px), ImVec2(b.x + px, b.y + px), kBfLine, 0, 0, 2 * px);
+  }
+
+  // A button as BF draws it: a coloured disc with its letter (A green, B red, X blue, Y yellow); other keys (LB, a
+  // key name) as a small grey plate. Returns its width.
+  // The launcher's picture for one of BF's buttons when the prompts are not the Xbox 360's (0 when they are, or
+  // for a combined hint such as "LB RB").
+  float BfPicture(ImDrawList* d, ImVec2 centre_left, float h, const std::string& key_in, bool draw) {
+    const kit::Style ks = PromptStyle();
+    if (ks == kit::Style::kXbox360) return 0;
+    static const std::pair<const char*, kit::Button> kMap[] = {
+        {"A", kit::Button::kA},   {"B", kit::Button::kB},   {"X", kit::Button::kX},
+        {"Y", kit::Button::kY},   {"LB", kit::Button::kLB}, {"RB", kit::Button::kRB},
+        {"START", kit::Button::kStart}};
+    for (const auto& [name, b] : kMap)
+      if (key_in == name) return kit::Glyph(d, ks, b, KeyFor(b), centre_left, h * 1.15f, draw);
+    return 0;
+  }
+  float BfButton(ImDrawList* d, ImVec2 centre_left, float h, const std::string& key_in) {
+    if (const float w = BfPicture(d, centre_left, h, key_in, true)) return w;
+    const std::string k = Prompt(key_in);
+    const float r = h * 0.5f;
+    if (k.size() == 1 && std::string("ABXY").find(k) != std::string::npos) {
+      const ImU32 col = k == "A" ? IM_COL32(96, 162, 60, 255) : k == "B" ? IM_COL32(196, 46, 38, 255)
+                        : k == "X" ? IM_COL32(44, 104, 204, 255) : IM_COL32(222, 182, 34, 255);
+      const ImVec2 c(centre_left.x + r, centre_left.y);
+      d->AddCircleFilled(c, r, col);
+      d->AddCircle(c, r, IM_COL32(226, 226, 222, 255), 0, std::max(1.0f, r * 0.12f));
+      const float size = h * 0.9f;
+      Text(d, g_fonts.bf, size, ImVec2(c.x - Width(g_fonts.bf, size, k) * 0.5f, CapTop(c.y - r, h, size)),
+           IM_COL32(240, 240, 236, 255), k);
+      return h;
+    }
+    const float size = h * 0.62f, w = Width(g_fonts.bf, size, k) + h * 0.5f;
+    d->AddRectFilled(ImVec2(centre_left.x, centre_left.y - r), ImVec2(centre_left.x + w, centre_left.y + r),
+                     IM_COL32(96, 98, 102, 255), r * 0.3f);
+    Text(d, g_fonts.bf, size, ImVec2(centre_left.x + h * 0.25f, CapTop(centre_left.y - r, h, size)),
+         IM_COL32(240, 240, 236, 255), k);
+    return w;
+  }
+
+  // BF's button hint: a black tag, a little tilted, with the button and what it does (its "A SELECT").
+  float BfTag(ImDrawList* d, ImVec2 at, const std::string& key, const std::string& label, float min_w = 0) {
+    const float sy = io_scale_, h = 52 * sy, size = 29 * sy, bh = 31 * sy;
+    const std::string upper = Upper(label);
+    // Measured first, drawn after the tag.
+    const std::string k = Prompt(key);
+    float kw = BfPicture(d, ImVec2(0, 0), bh, key, false);
+    if (kw == 0)
+      kw = k.size() == 1 && std::string("ABXY").find(k) != std::string::npos ? bh : Width(g_fonts.bf, bh * 0.62f, k) + bh * 0.5f;
+    const float w = std::max(min_w, 12 * sy + kw + 9 * sy + Width(g_fonts.bf, size, upper) + 16 * sy), rise = w * 0.045f;
+    d->AddQuadFilled(ImVec2(at.x, at.y + rise), ImVec2(at.x + w, at.y), ImVec2(at.x + w, at.y + h),
+                     ImVec2(at.x, at.y + h + rise * 0.6f), kBfBlack);
+    const float mid = at.y + h * 0.5f + rise * 0.5f;
+    BfButton(d, ImVec2(at.x + 12 * sy, mid), bh, key);
+    Text(d, g_fonts.bf, size, ImVec2(at.x + 12 * sy + kw + 9 * sy, CapTop(mid - h * 0.5f, h, size)),
+         IM_COL32(238, 238, 234, 255), upper);
+    return w;
+  }
+
+  // The hints, stacked at the bottom left where BF puts its own.
+  // The last one sits exactly over BF's own A SELECT tag (x 7.2% to 15.8%, y 84% to 89% of the screen), so BF's
+  // never shows through; the others stack above it.
+  void BfTags(ImDrawList* d, ImGuiIO& io, const std::vector<std::pair<std::string, std::string>>& keys) {
+    const float step = 56 * io_scale_, min_w = io.DisplaySize.x * 0.168f;
+    float y = io.DisplaySize.y * 0.836f - (float(keys.size()) - 1) * step;
+    for (const auto& [k, t] : keys) BfTag(d, ImVec2(io.DisplaySize.x * 0.068f, y), k, t, min_w), y += step;
+  }
+
+  // BF's dialog (its Connection error box): a black title bar over paper.
+  static void BfDialog(ImDrawList* d, ImVec2 a, ImVec2 b, float bar) {
+    d->AddRectFilled(ImVec2(a.x + 5, a.y + 7), ImVec2(b.x + 5, b.y + 7), IM_COL32(0, 0, 0, 70));
+    d->AddRectFilled(a, ImVec2(b.x, a.y + bar), kBfBlack);
+    d->AddRectFilled(ImVec2(a.x, a.y + bar), b, kBfPaper);
+    d->AddRect(a, b, IM_COL32(30, 30, 30, 255), 0, 0, 1.5f);
+  }
+
+  static std::string Upper(std::string t) {
+    for (char& c : t) c = char(std::toupper(static_cast<unsigned char>(c)));
+    return t;
+  }
+
+  // Before BF's menu scene is up (its films and title): a plain backdrop in its colours, with the name.
+  void BfBootBackdrop(ImDrawList* d, ImGuiIO& io) {
+    const ImVec2 sz = io.DisplaySize;
+    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(44, 54, 64, 255));
+    const float sy = io_scale_, size = 150 * sy;
+    const std::string name = "BATTLEFIELD";
+    const float w = Width(g_fonts.bf, size, name), x = (sz.x - w) * 0.5f, y = sz.y * 0.16f;
+    for (int dx = -2; dx <= 2; ++dx)
+      for (int dy = -2; dy <= 2; ++dy) Text(d, g_fonts.bf, size, ImVec2(x + dx * sy, y + dy * sy), kBfBlack, name);
+    Text(d, g_fonts.bf, size, ImVec2(x, y), IM_COL32(160, 162, 164, 255), name);
+    const std::string year = "1943";
+    Text(d, g_fonts.bf, 64 * sy, ImVec2((sz.x - Width(g_fonts.bf, 64 * sy, year)) * 0.5f, y + 196 * sy), kBfBlack, year);
+  }
+
+  // ---- pages
+
+  // The first start (King Kong's setup idea): the player's game is installed once into the game folder, then the
+  // game starts. A package (CON or LIVE) is unpacked with its checksums checked; a folder with an unpacked game is
+  // used where it is (remembered as game_dir).
+ public:
+  void BeginSetup(fs::path game_dir, std::function<void(fs::path)> done) {
+    setup_dir_ = std::move(game_dir);
+    setup_done_ = std::move(done);
+    page_ = Page::kSetup, row_ = 0, open_ = true, pre_game_ = true;
+  }
+  // The launcher before the game (TekRantGaming, 8 Nov evening: "When the launcher is opened the game is not to be loaded in
+  // the background"): bf1943_app.h holds the runtime's start (OnFinalizePaths) and hands the start here; the setup or
+  // Home show with nothing of the game running (the menu music plays, the controller is read here), and Play starts
+  // the game: the shader page while its pipelines build, then the game's own startup cards, title and menus.
+  void BeginLauncher(std::function<void()> start) {
+    start_game_ = std::move(start);
+    pre_game_ = true, launcher_first_ = true, open_ = true;
+    REXLOG_INFO("BF launcher: before the game (it starts at Play)");
+    // Run the game, the startup videos, our main menu (TekRantGaming, 10 Nov 2026): the game's own startup cards and logo
+    // music, extracted from the player's files (shader_prep.cpp ExtractGameArt), played by us before anything else;
+    // the setting Startup cards off (bf_startup_cards = false) skips them.
+    if (fs::exists(UserDir() / "cache" / "extracted" / "startup" / "card5.png") &&
+        settings_.Get("bf_startup_cards", "true") != "false") {
+      page_ = Page::kIntro, intro_at_ = -1;
+      return;
+    }
+    AfterIntro();
+  }
+  // The intro's end (or none): the setup, or Home.
+  void AfterIntro() {
+    if (settings_.Get("launcher_setup", "") == "done" && settings_.Get("player_name_chosen", "") == "1") {
+      page_ = Page::kHome, home_row_ = 0;
+      return;
+    }
+    setup_active_ = true;
+    settings_.values["launcher_setup"] = "started";
+    settings_.Save();
+    BeginAccount(true);
+  }
+  // The startup cards (TekRantGaming, 10 Nov 2026): the game's rating notice, then the logo cards with the logo music, each
+  // logo arriving on a bar's first beat (the music is in 4/4 at about 125 beats a minute, a bar every 1.9 s): EA,
+  // DICE, Frostbite, Dolby, our TRG Studios card (shader_prep.cpp MakeTrgCard: TekRantGaming's logo on the player's own card
+  // paper), and the game's title on the music's big hit, the climax's first beat. The music is the game's own with its
+  // third bar played twice (MakeIntroMusic), so the title still lands on that hit after the extra card; a cache
+  // without those two files plays the game's five cards on its music as it is. The square cards (the notice and the
+  // title) are drawn 16:9 as the console showed them (TekRantGaming's cards: the game's squares stretched). Each card fades in
+  // to its beat and out just before the next; A, B, Start, Esc or a click skips them.
+  double intro_at_ = -1;
+  bool intro_music_ = false;
+  bool intro_trg_ = false;  // the cards with ours: chosen as the music starts (a first start after an update makes
+                            // the two files while the notice shows)
+  void IntroPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
+    const ImVec2 sz = io.DisplaySize;
+    const double now = ImGui::GetTime();
+    const fs::path dir = UserDir() / "cache" / "extracted" / "startup";
+    struct Card {
+      const char* file;
+      double beat;  // seconds into the music: fully shown
+      bool stretch;
+    };
+    // The drums' hits (the bars' first beats) in the music with the extra bar, and in the game's own.
+    static constexpr Card kWithTrg[] = {{"card1", 0.52, false}, {"card2", 2.44, false}, {"card3", 4.42, false},
+                                        {"card4", 6.25, false}, {"trg", 8.10, false},   {"card5", 9.91, true}};
+    static constexpr Card kGame[] = {{"card1", 0.52, false}, {"card2", 2.44, false}, {"card3", 4.42, false},
+                                     {"card4", 6.27, false}, {"card5", 8.08, true}};
+    // The notice first, without music; then the music, its first sound a quarter second before EA's hit.
+    constexpr double kNotice = 3.0, kIn = 0.25, kOut = 0.30, kNoticeFade = 0.4;
+    if (intro_at_ < 0) {
+      intro_at_ = now, intro_music_ = false;
+      REXLOG_INFO("BF intro: the startup cards");
+    }
+    const double t = now - intro_at_;
+    if (t >= kNotice && !intro_music_) {
+      std::error_code ec;
+      intro_music_ = true;
+      intro_trg_ = fs::exists(dir / "intro.wav", ec) && fs::exists(dir / "trg.png", ec);
+      PlaySoundOnce(dir / (intro_trg_ ? "intro.wav" : "logos.wav"));
+      REXLOG_INFO("BF intro: the music, {}", intro_trg_ ? "with the TRG Studios card" : "the game's own five cards");
+    }
+    const bool trg = intro_trg_;
+    const Card* cards = trg ? kWithTrg : kGame;
+    const int count = trg ? int(std::size(kWithTrg)) : int(std::size(kGame));
+    const double music_end = trg ? 14.15 : 12.33;  // the music's last sound (its tail has faded by then)
+    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(0, 0, 0, 255));
+    const bool skip = in.accept || in.back || in.start || ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    if (t > kNotice + music_end + 0.1 || (skip && t > 0.3)) {
+      REXLOG_INFO("BF intro: {} after {:.1f} s", skip ? "skipped" : "done", t);
+      StopSounds();
+      intro_at_ = -1;
+      AfterIntro();
+      return;
+    }
+    const char* file = nullptr;
+    bool stretch = false;
+    double shown = 0;
+    if (t < kNotice) {
+      file = "esrb", stretch = true;
+      shown = std::min({1.0, t / kNoticeFade, (kNotice - t) / kNoticeFade});
+      // The logo cards read while the notice shows, one a frame from 1 s on (nothing drawn: no area), so none is
+      // decoded on its own beat.
+      static constexpr const char* kWarm[] = {"card1", "card2", "card3", "card4", "trg", "card5"};
+      if (t > 1.0) {
+        const ImVec2 none(-8, -8);
+        kit::DrawImageFile(d, dir / (std::string(kWarm[ImGui::GetFrameCount() % 6]) + ".png"), none, none);
+      }
+    } else {
+      const double m = t - kNotice;
+      for (int i = 0; i < count; ++i) {
+        const double from = cards[i].beat - kIn, to = i + 1 < count ? cards[i + 1].beat - kIn : music_end;
+        if (m < from || m >= to) continue;
+        const double out = i + 1 < count ? kOut : 0.9;  // the title fades out with the music
+        file = cards[i].file, stretch = cards[i].stretch;
+        shown = std::min({1.0, (m - from) / kIn, (to - m) / out});
+        break;
+      }
+    }
+    if (!file) return;
+    // Each card filling the window's height at 16:9, centred: the 2:1 cards cropped at their sides, the squares
+    // stretched.
+    const float h = sz.y, w = h * 16.0f / 9.0f;
+    const ImVec2 a((sz.x - w) * 0.5f, 0), b((sz.x + w) * 0.5f, h);
+    kit::DrawImageFile(d, dir / (std::string(file) + ".png"), a, b, stretch);
+    if (shown < 1) d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(0, 0, 0, int(255 * std::clamp(1 - shown, 0.0, 1.0))));
+  }
+
+  // The player's name from Settings > Gameplay or Home's Edit (the setup's own account page is page 3).
+  void BeginName(std::function<void()> done) {
+    (void)done;
+    BeginAccount(false);
+  }
+
+ private:
+  void FinishSetup(const fs::path& game_dir) {
+    REXLOG_INFO("BF setup: the game is in {}", game_dir.string());
+    page_ = Page::kShaders, row_ = 0;  // the game starts; its shaders next (AfterShaders without a shader screen)
+    pre_game_ = false;
+    if (auto done = std::move(setup_done_)) done(game_dir);
+  }
+
+  bool pre_game_ = false;  // the first start's pages, before the game runs: our own pad reads (HostPad)
+  bool launcher_first_ = false;  // the launcher showed before the game (BeginLauncher); BF signs in only after Play
+  bool played_ = false;          // Play started the game: after its shaders the launcher closes
+  std::function<void()> start_game_;
+  uint16_t host_last_ = 0;
+  bool host_reads_ = false;
+  std::atomic<int> classify_press_{0};  // a press to classify: 1 from the game's read, 2 from XInput (HostPad)
+  std::chrono::steady_clock::time_point game_pad_at_{};  // the game's last pad read (pad_mutex_)
+
+  // The controller, read here while nothing else does (the first start's pages). XInput's buttons are the console's,
+  // so Pad() takes them as the game's reads.
+  void HostPad() {
+#if defined(_WIN32)
+    using GetStateFn = DWORD(WINAPI*)(DWORD, void*);
+    static const GetStateFn get_state = [] {
+      HMODULE m = LoadLibraryA("xinput1_4.dll");
+      if (!m) m = LoadLibraryA("xinput9_1_0.dll");
+      return m ? reinterpret_cast<GetStateFn>(GetProcAddress(m, "XInputGetState")) : nullptr;
+    }();
+    if (!get_state) return;
+    struct {
+      DWORD packet;
+      WORD buttons;
+      BYTE lt, rt;
+      SHORT lx, ly, rx, ry;
+    } state{};
+    // The first controller connected (the player's may not be the first slot).
+    // With none, the slots are tried again once a second (a read of an empty slot is slow).
+    static DWORD slot = 0;
+    static double none_at = -10;
+    if (slot == 4 && ImGui::GetTime() - none_at < 1.0) return;
+    if (slot == 4 || get_state(slot, &state) != 0) {
+      DWORD i = 0;
+      while (i < 4 && get_state(i, &state) != 0) ++i;
+      slot = i;
+      if (i == 4) {
+        none_at = ImGui::GetTime();
+        return;
+      }
+    }
+#if defined(BF_DEV_TOOLS)
+    // BF_DEV_HOST_PAD=<s>:<button>,... (tests): presses on the controller this reads, from the process start (a, b,
+    // x, y, start, back, up, down, left, right; 0.12 s each).
+    static const std::vector<std::pair<double, uint16_t>> script = [] {
+      std::vector<std::pair<double, uint16_t>> out;
+      const char* v = std::getenv("BF_DEV_HOST_PAD");
+      static const std::pair<const char*, uint16_t> kNames[] = {
+          {"start", 0x0010}, {"back", 0x0020}, {"up", 0x0001}, {"down", 0x0002}, {"left", 0x0004},
+          {"right", 0x0008}, {"a", 0x1000},    {"b", 0x2000},  {"x", 0x4000},    {"y", 0x8000}};
+      for (const char* c = v ? v : ""; *c;) {
+        const double at = std::atof(c);
+        while (*c && *c != ':') ++c;
+        if (*c) ++c;
+        uint16_t b = 0;
+        for (const auto& [name, bit] : kNames)
+          if (!std::strncmp(c, name, std::strlen(name))) {
+            b = bit;
+            break;
+          }
+        out.push_back({at, b});
+        while (*c && *c != ',') ++c;
+        if (*c) ++c;
+      }
+      return out;
+    }();
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_dev_began).count();
+    for (const auto& [at, b] : script)
+      if (t >= at && t < at + 0.12) state.buttons |= b;
+#endif
+    host_last_ = state.buttons;
+    Pad(state.buttons, state.lx, state.ly);
+#else
+    // Linux: SDL's gamepads (the runtime's own input backend, input_backend "sdl"; XInput is Windows only, so before
+    // this the launcher read no controller there: TekRantGaming, 11 Nov 2026, the ROG Ally's built in controller did nothing on
+    // the menus). Every gamepad connected, merged as the runtime merges the one player's (bf1943_app.h): a handheld
+    // shows several (the Ally's built in one through InputPlumber, Steam's virtual ones), and any of them may be the
+    // one in the player's hands. Buttons by position as XInput's (the bottom face button is A on every layout), the
+    // left stick pushed furthest, up positive. The runtime's driver opens the same pads; SDL counts the opens.
+    static const bool sdl_ok = [] {
+      const bool ok = SDL_InitSubSystem(SDL_INIT_GAMEPAD);
+      if (!ok) REXLOG_WARN("BF launcher: SDL's gamepads could not start: {}", SDL_GetError());
+      return ok;
+    }();
+    if (!sdl_ok) return;
+    static std::map<SDL_JoystickID, SDL_Gamepad*> pads;
+    static double scanned_at = -10;
+    SDL_UpdateGamepads();
+    if (ImGui::GetTime() - scanned_at >= 1.0) {  // the pads connected, looked over once a second
+      scanned_at = ImGui::GetTime();
+      int count = 0;
+      SDL_JoystickID* ids = SDL_GetGamepads(&count);
+      std::map<SDL_JoystickID, SDL_Gamepad*> now;
+      for (int i = 0; i < count; ++i) {
+        if (auto it = pads.find(ids[i]); it != pads.end()) now[ids[i]] = it->second, pads.erase(it);
+        else if (SDL_Gamepad* g = SDL_OpenGamepad(ids[i])) {
+          const char* name = SDL_GetGamepadName(g);
+          REXLOG_INFO("BF launcher: reads the controller \"{}\" (SDL)", name ? name : "?");
+          now[ids[i]] = g;
+        }
+      }
+      SDL_free(ids);
+      for (auto& [id, g] : pads) {  // gone
+        REXLOG_INFO("BF launcher: a controller was disconnected");
+        SDL_CloseGamepad(g);
+      }
+      pads = std::move(now);
+    }
+    if (pads.empty()) return;
+    static constexpr std::pair<SDL_GamepadButton, uint16_t> kButtons[] = {
+        {SDL_GAMEPAD_BUTTON_DPAD_UP, 0x0001},        {SDL_GAMEPAD_BUTTON_DPAD_DOWN, 0x0002},
+        {SDL_GAMEPAD_BUTTON_DPAD_LEFT, 0x0004},      {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, 0x0008},
+        {SDL_GAMEPAD_BUTTON_START, 0x0010},          {SDL_GAMEPAD_BUTTON_BACK, 0x0020},
+        {SDL_GAMEPAD_BUTTON_LEFT_STICK, 0x0040},     {SDL_GAMEPAD_BUTTON_RIGHT_STICK, 0x0080},
+        {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, 0x0100},  {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, 0x0200},
+        {SDL_GAMEPAD_BUTTON_SOUTH, 0x1000},          {SDL_GAMEPAD_BUTTON_EAST, 0x2000},
+        {SDL_GAMEPAD_BUTTON_WEST, 0x4000},           {SDL_GAMEPAD_BUTTON_NORTH, 0x8000}};
+    uint16_t buttons = 0;
+    int16_t lx = 0, ly = 0;
+    for (const auto& [id, pad] : pads) {
+      for (const auto& [button, bit] : kButtons)
+        if (SDL_GetGamepadButton(pad, button)) buttons |= bit;
+      const int16_t x = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
+      const int16_t y = int16_t(std::clamp(-int(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY)), -32768, 32767));
+      if (std::abs(x) > std::abs(lx)) lx = x;
+      if (std::abs(y) > std::abs(ly)) ly = y;
+    }
+    host_last_ = buttons;
+    Pad(buttons, lx, ly);
+#endif
+  }
+  fs::path setup_dir_;
+  std::function<void(fs::path)> setup_done_;
+  std::shared_ptr<install::Progress> setup_progress_;  // shared with the install's thread (detached: quitting mid way)
+  // An HD texture pack being imported (its copy's thread, detached): percent copied, -1 idle; the last result.
+  struct HdImport {
+    std::atomic<int> percent{-1};
+    std::atomic<bool> turn_on{false};  // imported: HD textures on (by the menu's own thread)
+    std::mutex mutex;
+    std::string result;
+  };
+  std::shared_ptr<HdImport> hd_import_ = std::make_shared<HdImport>();
+  std::string setup_error_;
+
+  // What a row does. BF's own rows are pressed for the player (its selection moved there, then A); what happens next
+  // is BF's, measured in runs origpause3 to pause1g and menu2a: a screen of its own (back with B, and A going one
+  // screen deeper), the scoreboard (its B goes back to the match), a question (B back, A ends the pause), nothing on
+  // PC (Help & Options and Achievements in the pause: Xbox screens), or leaving the match. Join match with friends
+  // opens BF's Squad match and Create private match its Private match: their B asks "This will cancel your squad
+  // (private) match" and only A (OK) goes back (runs menu3b, menu4c).
+  enum class Does { kOurs, kScreen, kScreenThenGame, kScreenThenOk, kQuestion, kNothing, kLeave, kHelp };
+  struct ListItem {
+    const char* name;
+    int bf_row;  // BF's own row (from its first), -1: ours
+    Does does;
+  };
+  // The main menu (TekRantGaming's pick, 6 Nov 2026: BF's own list, ours added inside it, a little tighter so it keeps BF's
+  // height): BF's eight rows in its order, with Server browser under Quick match and PC settings under Help &
+  // options. Quick match is ours (the busiest server with room, as BF's would).
+  static constexpr ListItem kMainItems[] = {
+      {"QUICK MATCH", 0, Does::kOurs},          {"SERVER BROWSER", -1, Does::kOurs},
+      {"JOIN MATCH WITH FRIENDS", 1, Does::kScreenThenOk},
+      {"STATS & AWARDS", 3, Does::kScreen},
+      {"PC SETTINGS", -1, Does::kOurs},         {"ACHIEVEMENTS", 5, Does::kNothing},
+      {"LEADERBOARDS", 6, Does::kScreen},       {"HELP", -1, Does::kOurs},
+      {"RETURN TO GAME LIBRARY", 7, Does::kScreen}};
+  // A main menu row by its name (the pages that go back to it).
+  static int MainRowOf(const char* name) {
+    for (int i = 0; i < int(std::size(kMainItems)); ++i)
+      if (std::string(kMainItems[i].name) == name) return i;
+    return 0;
+  }
+  // The pause (TekRantGaming's pick: BF's own list as it is, PC settings added under its last row).
+  static constexpr ListItem kPauseItems[] = {
+      {"MY SQUAD", 0, Does::kScreen},       {"SCOREBOARD", 1, Does::kScreenThenGame},
+      {"HELP & OPTIONS", 2, Does::kHelp},    {"LEADERBOARDS", 3, Does::kScreen},
+      {"ACHIEVEMENTS", 4, Does::kNothing},  {"EXIT GAME", 5, Does::kLeave},
+      {"SUICIDE", 6, Does::kQuestion},      {"PC SETTINGS", -1, Does::kOurs}};
+  static constexpr int kPauseSettings = 7;
+
+  // BF's row `it.bf_row`: its selection moved there from where it is (BF keeps it), then A. Returns the presses.
+  std::vector<std::pair<double, uint16_t>> BfRowPresses(int& cursor, int row) {
+    std::vector<std::pair<double, uint16_t>> presses;
+    // 0.5 s apart: at 0.3 BF's pause list dropped one of five Downs and Exit Game landed on Achievements (run exit6).
+    for (int r = cursor; r != row; r += row > r ? 1 : -1)
+      presses.push_back({presses.empty() ? 0.15 : 0.5, row > r ? kPadDown : kPadUp});
+    presses.push_back({presses.empty() ? 0.15 : 0.5, kPadA});
+    cursor = row;
+    return presses;
+  }
+
+  // Our main menu (TekRantGaming, 10 Nov 2026: ours in place of the game's, docs/MENUS-PLAN.md): the game's own menu is never
+  // shown; the maps from the air (their pictures from the player's files, one after another) under the same column as
+  // the pause. Quick Match, the server browser and Settings are ours (the join by the game's own startQuickMatch);
+  // the game's other options still open the game's own screens for now (their presses, until our pages for them are
+  // built: the plan's section 3).
+  double main_map_at_ = -1;
+  int main_map_ = 0;
+
+  // fixed (0 to 3, the order of kMaps): that map only (the map being joined, or the one a private match plays), faded
+  // in when it changes; -1: the four in turn.
+  void MainBackdrop(ImDrawList* d, ImVec2 sz, int fixed = -1) {
+    static constexpr const char* kMaps[] = {"wake", "guadalcanal", "iwo", "coral"};
+    const double now = ImGui::GetTime();
+    if (main_map_at_ < 0) main_map_at_ = now;
+    if (fixed >= 0 && fixed < 4 && fixed != main_map_) main_map_ = fixed, main_map_at_ = now;
+    else if (fixed < 0 && now - main_map_at_ > 16) main_map_ = (main_map_ + 1) % 4, main_map_at_ = now;
+    const float t = float(now - main_map_at_);
+    // A slow drift over the picture, a little larger than the window (with one map held, back and forth).
+    const float td = fixed < 0 ? t : (std::fmod(t, 32.0f) < 16.0f ? std::fmod(t, 32.0f) : 32.0f - std::fmod(t, 32.0f));
+    const float z = 1.08f + 0.004f * td, ox = -sz.x * (z - 1) * (0.2f + 0.02f * td), oy = -sz.y * (z - 1) * 0.5f;
+    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 255));
+    kit::DrawImageFile(d, UserDir() / "cache" / "extracted" / "maps" / (std::string(kMaps[main_map_]) + ".png"),
+                       ImVec2(ox, oy), ImVec2(ox + sz.x * z, oy + sz.y * z));
+    d->AddRectFilledMultiColor(ImVec2(0, 0), sz, IM_COL32(6, 7, 5, 200), IM_COL32(6, 7, 5, 70),
+                               IM_COL32(6, 7, 5, 110), IM_COL32(6, 7, 5, 230));
+    const float fade = t < 0.8f ? 1.0f - t / 0.8f : 0.0f;  // each new map comes in from black
+    if (fade > 0) d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(6, 7, 5, int(255 * fade)));
+  }
+
+  // The flying notice (TekRantGaming, 11 Nov 2026): flying a plane on mouse and keyboard is not right yet, so Home and the main
+  // menu say so until a later update fixes it. A box `w` wide whose top right corner is `tr`; `u` is the menus' unit
+  // (one pixel of a 1080 high window).
+  static void FlyingNotice(ImDrawList* d, ImVec2 tr, float w, float u) {
+    const kit::Fonts& f = kit::GetFonts();
+    const std::string label = "PLAYTEST NOTICE";
+    const std::string heading = "AVOID FLYING WITH MOUSE AND KEYBOARD FOR NOW";
+    const std::string body = "Take a boat to get to land, or use a controller to fly. This will be fixed in a later "
+                             "update. Mouse and keyboard work everywhere else.";
+    const float pad = 24 * u, x = tr.x - w + 6 * u + pad, tw = w - 6 * u - 2 * pad;
+    // The heading on one line: smaller when the box is narrow.
+    const float k = std::min(1.0f, tw / std::max(1.0f, kit::SpacedWidth(f.ui_bold, 27 * u, heading, 2 * u)));
+    const float hs = 27 * u * k, bs = 20 * u;
+    const float h = pad + 15 * u + 14 * u + hs * 1.2f + 10 * u + kit::WrappedHeight(f.typed, bs, body, tw) + pad;
+    const ImVec2 a(tr.x - w, tr.y), b(tr.x, tr.y + h);
+    d->AddRectFilled(a, b, IM_COL32(15, 17, 13, 226));
+    d->AddRectFilled(a, ImVec2(a.x + 6 * u, b.y), kit::kStamp);
+    float y = a.y + pad;
+    kit::Spaced(d, f.typed, 15 * u, ImVec2(x, y), kit::kStamp, label, 3 * u);
+    y += 15 * u + 14 * u;
+    kit::Spaced(d, f.ui_bold, hs, ImVec2(x, y), kit::kCream, heading, 2 * u * k);
+    y += hs * 1.2f + 10 * u;
+    kit::Wrapped(d, f.typed, bs, ImVec2(x, y), kit::kKhakiText, body, tw);
+  }
+
+  void MainPage(ImDrawList* d, float s, ImGuiIO& io, const Input& in_raw) {
+    (void)s;
+    const ImVec2 sz = io.DisplaySize;
+    const kit::Fonts& f = kit::GetFonts();
+    const float u = sz.y / 1080.0f;
+    const bool at_menu = MenuDriverStage() == 2;
+    Input in = in_raw;
+    if (handing_over_ >= 0) {  // the game's presses for one of its rows still running
+      in = {};
+      if (BfPressesDone()) {
+        std::lock_guard<std::mutex> lock(pad_mutex_);
+        passing_ = handing_over_, passing_main_ = true, passing_depth_ = 0, passing_asked_ = false;
+        handing_over_ = -1;
+        open_ = false;
+        return;
+      }
+    }
+    MainBackdrop(d, sz);
+    const int count = int(std::size(kMainItems));
+    if (in.up) row_ = (row_ + count - 1) % count;
+    if (in.down) row_ = (row_ + 1) % count;
+    if (in.back && handing_over_ < 0 && !SkipLauncher()) {  // Home, the launcher (docs/LAUNCHER-PLAN.md, 2.3)
+      page_ = Page::kHome;
+      return;
+    }
+    const float cx0 = sz.x * 0.05f, cx1 = cx0 + 600 * u;
+    d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(15, 17, 13, 226));
+    d->AddRectFilled(ImVec2(cx1, 0), ImVec2(cx1 + 2 * u, sz.y), IM_COL32(201, 183, 122, 110));
+    kit::Brand(d, ImVec2(cx0, 58 * u), u * 0.9f);
+    const float hy = 150 * u;
+    kit::Spaced(d, f.typed, 20 * u, ImVec2(cx0, hy), kit::kKhakiDim, "PACIFIC THEATRE, 1943", 4 * u);
+    Text(d, f.stencil, 88 * u, ImVec2(cx0 - 4 * u, hy + 24 * u), kit::kCream, "MULTIPLAYER");
+    d->AddRectFilled(ImVec2(cx0, hy + 126 * u), ImVec2(cx0 + 64 * u, hy + 132 * u), kit::kStamp);
+    const float ry = hy + 168 * u, rh = 62 * u;
+    int clicked = -1;
+    for (int i = 0; i < count; ++i) {
+      const ListItem& it = kMainItems[i];
+      const ImVec2 a(cx0 - 28 * u, ry + rh * i), b(cx1, ry + rh * (i + 1));
+      const bool sel = i == row_;
+      const bool waits = it.bf_row >= 0 && it.does != Does::kOurs && !at_menu;  // the game's, once it is signed in
+      const bool hover = ImGui::IsMouseHoveringRect(a, b);
+      if (hover && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) row_ = i;
+      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
+      if (sel) {
+        d->AddRectFilled(a, b, IM_COL32(201, 183, 122, 26));
+        d->AddRectFilled(a, ImVec2(a.x + 8 * u, b.y), kit::kStamp);
+      }
+      d->AddRectFilled(ImVec2(cx0, b.y - 1 * u), ImVec2(cx1 - 40 * u, b.y), IM_COL32(201, 183, 122, 30));
+      kit::Spaced(d, f.typed, 15 * u, ImVec2(cx0, a.y + 23 * u), sel ? kit::kStamp : kit::kKhakiDim,
+                  fmt::format("{:02d}", i + 1), 2 * u);
+      const std::string name = std::string(it.name) == "PC SETTINGS" ? "SETTINGS"
+                               : std::string(it.name) == "RETURN TO GAME LIBRARY" ? "QUIT GAME" : it.name;
+      kit::Spaced(d, f.ui_bold, 33 * u, ImVec2(cx0 + 52 * u, a.y + 13 * u),
+                  waits ? kit::kKhakiDim : sel ? kit::kCream : kit::kKhakiText, name, 3 * u);
+    }
+    // The selected row's card, at the right, and the backend's numbers.
+    static const std::map<std::string, const char*> kAbout = {
+        {"QUICK MATCH", "Pick classic or modern movement, then straight into the busiest server with room that "
+                        "plays it."},
+        {"SERVER BROWSER", "Pick classic or modern movement, then every official and community server that plays "
+                           "it: maps, players and ping."},
+        {"JOIN MATCH WITH FRIENDS", "The game's own friends list and invitations."},
+        {"CREATE PRIVATE MATCH", "Host a match on this PC for you and your friends: pick the map and playstyle, then "
+                                 "play. Friends join it by Direct connect."},
+        {"STATS & AWARDS", "Your service record: rank, awards and best rounds."},
+        {"HELP & OPTIONS", "The game's controls, its own settings and how to play."},
+        {"PC SETTINGS", "Display, graphics, audio, controls (the game's own options with them) and gameplay."},
+        {"ACHIEVEMENTS", "The game's achievements."},
+        {"LEADERBOARDS", "Where you stand among every player."},
+        {"HELP", "The game's tutorial on Wake Island, its controls on foot, in vehicles and in planes, and the credits."},
+        {"RETURN TO GAME LIBRARY", "Close Battlefield 1943."}};
+    {
+      const ListItem& it = kMainItems[row_];
+      const float w = 620 * u;
+      const ImVec2 ca(sz.x * 0.95f - w, sz.y * 0.62f), cb(sz.x * 0.95f, sz.y * 0.62f + 170 * u);
+      d->AddRectFilled(ca, cb, IM_COL32(15, 17, 13, 210));
+      d->AddRectFilled(ca, ImVec2(ca.x + 6 * u, cb.y), kit::kStamp);
+      const std::string name = std::string(it.name) == "PC SETTINGS" ? "SETTINGS"
+                               : std::string(it.name) == "RETURN TO GAME LIBRARY" ? "QUIT GAME" : it.name;
+      kit::Spaced(d, f.ui_bold, 30 * u, ImVec2(ca.x + 30 * u, ca.y + 22 * u), kit::kCream, name, 3 * u);
+      const auto about = kAbout.find(it.name);
+      kit::Wrapped(d, f.typed, 20 * u, ImVec2(ca.x + 30 * u, ca.y + 74 * u), kit::kKhakiText,
+                   about == kAbout.end() ? "" : about->second, w - 60 * u);
+    }
+    FlyingNotice(d, ImVec2(sz.x * 0.95f, 200 * u), 620 * u, u);  // under the stamp, above the card
+    const auto servers = list_.servers();
+    int players = 0;
+    for (const auto& sv : servers) players += sv.players;
+    const std::string online = !list_.reachable() ? "SERVERS NOT REACHABLE"
+                               : fmt::format("{} {}  /  {} {}", servers.size(), servers.size() == 1 ? "SERVER" : "SERVERS",
+                                             players, players == 1 ? "PLAYER" : "PLAYERS");
+    const float ow = kit::SpacedWidth(f.typed, 18 * u, online, 3 * u);
+    d->AddCircleFilled(ImVec2(sz.x * 0.95f - ow - 22 * u, sz.y - 64 * u), 6 * u,
+                       list_.reachable() ? kit::kGreenBright : kit::kStamp);
+    kit::Spaced(d, f.typed, 18 * u, ImVec2(sz.x * 0.95f - ow, sz.y - 74 * u), kit::kKhakiText, online, 3 * u);
+    // The prompts.
+    const float py = sz.y - 64 * u;
+    float x = cx0;
+    x += kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(x, py), 34 * u) + 10 * u;
+    x += kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(x, py - 14 * u), kit::kKhakiText, "SELECT", 3 * u) + 34 * u;
+    if (!SkipLauncher()) {
+      x += kit::Glyph(d, PromptStyle(), kit::Button::kB, "Esc", ImVec2(x, py), 34 * u) + 10 * u;
+      kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(x, py - 14 * u), kit::kKhakiText, "HOME", 3 * u);
+    }
+    if (in.accept) clicked = row_;
+    if (clicked < 0) return;
+    row_ = clicked;
+    const ListItem& it = kMainItems[clicked];
+    const std::string name = it.name;
+    REXLOG_INFO("BF main menu: {}", name);
+    if (name == "QUICK MATCH") return ChooseMovement(true, false);
+    if (name == "SERVER BROWSER") return ChooseMovement(false, false);
+    if (name == "PC SETTINGS") {
+      page_ = Page::kSettings, row_ = 0, from_pause_ = false, from_home_ = false;
+      return;
+    }
+    if (name == "STATS & AWARDS") {  // ours (StatsPage), in place of the game's screen
+      page_ = Page::kStats;
+      return;
+    }
+    if (name == "HELP") {  // ours (HelpPage): the rest of the game's Help & Options
+      page_ = Page::kHelp, help_row_ = 0;
+      return;
+    }
+    if (name == "CREATE PRIVATE MATCH") {  // ours (PrivateMatchPage): our own server on this PC, then joined
+      page_ = Page::kPrivateMatch, pm_row_ = 0, pm_error_.clear();
+      LoadPrivateMatchChoices();
+      return;
+    }
+    if (name == "JOIN MATCH WITH FRIENDS") {  // ours (FriendsPage): the players online and their servers
+      page_ = Page::kFriends, fr_row_ = 0, fr_asked_at_ = -100;
+      return;
+    }
+    if (name == "LEADERBOARDS") {  // ours (LeaderboardsPage): every player's totals from our backend
+      page_ = Page::kLeaderboards, lb_from_pause_ = false, lb_asked_at_ = -100;
+      return;
+    }
+    if (name == "ACHIEVEMENTS") {  // ours (AchievementsPage): the game's list and this player's unlocks
+      page_ = Page::kAchievements, ach_scroll_ = 0, ach_from_pause_ = false;
+      return;
+    }
+    if (name == "RETURN TO GAME LIBRARY") {  // quits as the window's close button does
+      if (quit_) quit_();
+      return;
+    }
+    if (!at_menu) return;  // the game's own rows once it is signed in
+    PressBfTimed(BfRowPresses(main_cursor_, it.bf_row));
+    if (it.does != Does::kNothing) handing_over_ = clicked;
+  }
+
+  void ImportHdPack() {
+    if (hd_import_->percent.load() >= 0) return;
+    fs::path from;
+#if defined(BF_DEV_TOOLS)
+    if (const char* v = std::getenv("BF_DEV_HD_IMPORT"); v && *v) from = v;  // tests: no picker
+#endif
+    if (from.empty()) from = Pick(BrowseForHdPack);
+    if (from.empty()) return;
+    const fs::path to = HdPackPath(UserDir());
+    std::shared_ptr<HdImport> state = hd_import_;
+    {
+      std::lock_guard lock(state->mutex);
+      state->result.clear();
+    }
+    state->percent.store(0);
+    std::thread([this, state, from, to] {
+      std::string result = "Imported";
+      std::error_code ec;
+      std::ifstream in(from, std::ios::binary);
+      char magic[4] = {};
+      if (!in || !in.read(magic, 4) || std::memcmp(magic, "BFHD", 4) != 0) {
+        result = "Not an HD texture pack";
+      } else {
+        fs::create_directories(to.parent_path(), ec);
+        const fs::path tmp = to.string() + ".part";
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        const uint64_t total = std::max<uint64_t>(1, fs::file_size(from, ec));
+        in.seekg(0);
+        std::vector<char> buffer(8 << 20);
+        uint64_t done = 0;
+        while (in && out) {
+          in.read(buffer.data(), std::streamsize(buffer.size()));
+          const std::streamsize n = in.gcount();
+          if (n <= 0) break;
+          out.write(buffer.data(), n);
+          done += uint64_t(n);
+          state->percent.store(int(std::min<uint64_t>(99, done * 100 / total)));
+        }
+        out.close();
+        if (done != total || !out) {
+          result = "Could not copy it";
+          fs::remove(tmp, ec);
+        } else {
+          fs::rename(tmp, to, ec);
+          if (ec) result = "Could not copy it";
+        }
+      }
+      if (result == "Imported") {
+        REXLOG_INFO("BF settings: HD texture pack imported from {} ({} MB)", from.string(),
+                    fs::file_size(to, ec) >> 20);
+        state->turn_on.store(true);
+      } else {
+        REXLOG_WARN("BF settings: HD texture pack from {}: {}", from.string(), result);
+      }
+      {
+        std::lock_guard lock(state->mutex);
+        state->result = result == "Imported" ? "Imported: on at the next start" : result;
+      }
+      state->percent.store(-1);
+    }).detach();
+  }
+
+  // The busiest server with room that plays `want` (the movement chosen on the movement page; TekRantGaming, 7 Nov 2026:
+  // Modern and Classic servers apart, so nobody has an edge). `any`: else the busiest of any (the tests' automatic
+  // join). False when there is none.
+  bool QuickJoin(const std::string& want, bool any) {
+    const auto servers = list_.servers();
+    const ServerInfo* best = nullptr;
+    for (int pass = 0; pass < (any ? 2 : 1) && !best; ++pass)
+      for (const auto& sv : servers)
+        if (sv.players < sv.max_players && (pass == 1 || ModeOf(sv) == want) && (!best || sv.players > best->players))
+          best = &sv;
+    if (best) Join(*best);
+    return best != nullptr;
+  }
+  std::string MovementPreference() {
+    return settings_.Get("cvar.bf_movement_pref", rex::cvar::GetFlagByName("bf_movement_pref")) == "modern" ? "modern"
+                                                                                                            : "classic";
+  }
+
+  void Join(const ServerInfo& sv) {
+    if (!list_.Reserve(sv.gid)) return;
+    // The game plays what the server plays (modern_mode.cpp): its movement and aiming match the server's.
+    SetJoinedServerMode(sv.mode == "modern");
+    joining_ = sv.name;
+    joining_map_ = sv.map;
+    joined_gid_ = sv.gid;  // the pause's Scoreboard and the match score sent to the backend
+    joined_from_start_ = MenuDriverStage() < 2;  // its joining page shows the game's start first
+    tutorial_ = false;
+    NotePlayedLevel(sv.map.empty() ? "Wake Island" : sv.map);
+    failed_ = false;
+    page_ = Page::kJoining;
+    main_cursor_ = 0;  // the join reloads BF's menu (StartAutoJoin)
+    if (MenuDriverStage() == 2) StartAutoJoin(sv.name);
+    else pending_ = sv.name;  // still starting: OnDraw joins once BF's online menu is up
+    // Picked on Home before the game runs (TekRantGaming, 10 Nov 2026, as King Kong's chapter select): the game starts now,
+    // its films, title and sign in hidden behind this Joining page, and the join follows the sign in.
+    if (pre_game_ && start_game_) {
+      REXLOG_INFO("BF launcher: a server picked on Home: the game starts, the join follows its sign in");
+      pre_game_ = false, played_ = true, started_from_launcher_ = true;
+      NoteStartValues();  // the renderer takes its settings now
+      auto start = std::move(start_game_);
+      start();
+    }
+  }
+
+  // The server browser, version 3 of TekRantGaming's 8 Nov mockups (SERVERS-PLAN.md section 5): over the game's own menu
+  // scene, PLAY ONLINE, three tabs (Official, Community, Direct connect), one table (name, map, movement, players,
+  // ping) whose selected row opens with the map's picture, the description, the next map and Join. No address shown.
+  static constexpr ImU32 kTableInk = IM_COL32(30, 32, 27, 255), kTableFaint = IM_COL32(106, 106, 94, 255);
+  static constexpr ImU32 kTablePaper = IM_COL32(233, 230, 220, 255), kTableGreen = IM_COL32(111, 143, 58, 255);
+  static constexpr ImU32 kTableLine = IM_COL32(201, 196, 178, 255), kCreamText = IM_COL32(233, 230, 220, 255);
+  int browser_tab_ = 0;  // 0 official, 1 community, 2 direct connect
+  bool sort_by_ping_ = false;
+
+  // ---- The movement choice (TekRantGaming, 11 Nov 2026: "when a user clicks quick play or server browser it must now come up
+  // with a screen asking if the user wants classic movement or modern movement with clear info on what the diffrance
+  // is and when they select one only servers of that catagory show this popup should show everytime"). Before Quick
+  // Match and the server browser, from Home and the main menu, every time. The game plays what the joined server plays
+  // (SetJoinedServerMode): no setting a player could change, so nobody plays modern on a classic server.
+  int movement_row_ = 0;             // the card under the cursor: 0 classic, 1 modern (the last one chosen)
+  bool movement_quick_ = false;      // after the choice: Quick Match (else the server browser)
+  bool movement_from_home_ = false;  // opened from Home (before the game): Back goes there
+  std::string browser_mode_ = "classic";  // the movement whose servers the browser shows
+  std::string movement_error_;
+  static std::string ModeOf(const ServerInfo& sv) { return sv.mode == "modern" ? "modern" : "classic"; }
+  void ChooseMovement(bool quick, bool from_home) {
+    page_ = Page::kMovement, movement_quick_ = quick, movement_from_home_ = from_home;
+    movement_row_ = browser_mode_ == "modern" ? 1 : 0;
+    movement_error_.clear();
+    REXLOG_INFO("BF movement choice: before {}", quick ? "Quick Match" : "the server browser");
+  }
+  void MovementPage(ImDrawList* d, float s, ImGuiIO& io, const Input& in) {
+    const ImVec2 sz = io.DisplaySize;
+    const kit::Fonts& kf = kit::GetFonts();
+    MainBackdrop(d, sz);
+    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 196));
+    const float x0 = sz.x * 0.05f, x1 = sz.x * 0.95f, w = x1 - x0;
+    kit::Spaced(d, kf.typed, 18 * s, ImVec2(x0, 50 * s), kit::kKhakiDim,
+                movement_quick_ ? "QUICK MATCH" : "SERVER BROWSER", 4 * s);
+    Text(d, kf.stencil, 70 * s, ImVec2(x0 - 3 * s, 72 * s), kit::kCream, "CHOOSE YOUR MOVEMENT");
+    d->AddRectFilled(ImVec2(x0, 158 * s), ImVec2(x0 + 60 * s, 164 * s), kit::kStamp);
+    d->AddText(g_fonts.bf_med, 27 * s, ImVec2(x0, 188 * s), kCreamText,
+               "Every server plays one of two ways. Pick one: only its servers show, and you play that way there. "
+               "You pick again every time, so you can switch whenever you like.",
+               nullptr, w);
+    // The two cards, with what each plays and how many servers and players it has now.
+    struct Style {
+      const char* key;
+      const char* title;
+      ImU32 color;
+      const char* line;
+      std::vector<const char*> points;
+    };
+    static const Style kStyles[] = {
+        {"classic", "CLASSIC", kit::kBrown, "THE GAME AS IT PLAYED ON THE XBOX 360 IN 2009",
+         {"The original aim acceleration and turn speed", "The original movement: its starts, stops and timings",
+          "The original wait before firing after a sprint", "Aim assist as in the original game"}},
+        {"modern", "MODERN", kit::kGreenDark, "MOVEMENT AND AIMING LIKE TODAY'S SHOOTERS",
+         {"Aim responds at once: a clean curve, no acceleration lag", "Faster aiming down sights",
+          "Quicker starts and stops", "Fire sooner after a sprint or a jump", "Aim assist stays"}}};
+    const auto servers = list_.servers();
+    if (in.left || in.up) movement_row_ = 0;
+    if (in.right || in.down) movement_row_ = 1;
+    int clicked = -1;
+    const float top = 290 * s, ch = 560 * s, gap = 40 * s, cw = (w - gap) * 0.5f;
+    for (int i = 0; i < 2; ++i) {
+      const Style& st = kStyles[i];
+      const ImVec2 a(x0 + float(i) * (cw + gap), top), b(a.x + cw, top + ch);
+      const bool sel = movement_row_ == i;
+      if (ImGui::IsMouseHoveringRect(a, b)) {
+        if (io.MouseDelta.x != 0 || io.MouseDelta.y != 0) movement_row_ = i;
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
+      }
+      d->AddRectFilled(a, b, kTablePaper);
+      d->AddRectFilled(a, ImVec2(b.x, a.y + 14 * s), sel ? kTableGreen : st.color);
+      if (sel) d->AddRect(a, b, kTableGreen, 0, 0, 6 * s);
+      float y = a.y + 40 * s;
+      const float px = a.x + 40 * s, pw = cw - 80 * s;
+      Text(d, g_fonts.bf, 64 * s, ImVec2(px, y), st.color, st.title);
+      y += 84 * s;
+      Text(d, g_fonts.bf_med, 24 * s, ImVec2(px, y), kTableFaint, st.line);
+      y += 52 * s;
+      for (const char* pt : st.points) {
+        d->AddRectFilled(ImVec2(px, y + 10 * s), ImVec2(px + 10 * s, y + 20 * s), kTableInk);
+        d->AddText(g_fonts.bf_med, 27 * s, ImVec2(px + 26 * s, y), kTableInk, pt, nullptr, pw - 26 * s);
+        y += 44 * s;
+      }
+      int count = 0, players = 0;
+      for (const auto& sv : servers)
+        if (ModeOf(sv) == st.key) ++count, players += sv.players;
+      const std::string now = !list_.reachable() ? "THE SERVER LIST IS NOT REACHABLE RIGHT NOW"
+                                                 : fmt::format("{} {}  /  {} {}", count, count == 1 ? "SERVER" : "SERVERS",
+                                                               players, players == 1 ? "PLAYER" : "PLAYERS");
+      Text(d, g_fonts.bf_med, 24 * s, ImVec2(px, b.y - 136 * s), sel ? kTableGreen : kTableFaint, now);
+      // Its button (TekRantGaming, 11 Nov 2026: "add buttons to it to make it clear you can select them"): the chosen card's is
+      // green with the A (Enter) glyph. The mouse picks a card by pointing at it and clicking it or its button; the
+      // keyboard's arrows, the stick and the pad's arrows move between the two; A or Enter picks.
+      {
+        const std::string label =
+            std::string(movement_quick_ ? "PLAY " : "SHOW ") + st.title + (movement_quick_ ? "" : " SERVERS");
+        const ImVec2 b0(px, b.y - 96 * s), b1(b.x - 40 * s, b.y - 30 * s);
+        d->AddRectFilled(b0, b1, sel ? kTableGreen : IM_COL32(30, 32, 27, 255));
+        const float size = 30 * s;
+        float tx = b0.x + 24 * s;
+        if (sel) tx = b0.x + 20 * s + BfButton(d, ImVec2(b0.x + 20 * s, (b0.y + b1.y) * 0.5f), 38 * s, "A") + 16 * s;
+        Text(d, g_fonts.bf, size, ImVec2(tx, CapTop(b0.y, b1.y - b0.y, size)), IM_COL32(255, 255, 255, 255), label);
+      }
+    }
+    // Both: the same graphics; only the soldier's movement and aim differ, and a server plays one for everyone.
+    {
+      const ImVec2 a(x0, top + ch + 24 * s), b(x1, top + ch + 92 * s);
+      d->AddRectFilled(a, b, IM_COL32(20, 20, 18, 214));
+      d->AddRectFilled(a, ImVec2(a.x + 6 * s, b.y), kit::kGreenBright);
+      d->AddText(g_fonts.bf_med, 24 * s, ImVec2(a.x + 28 * s, a.y + 10 * s), kCreamText,
+                 "Both play with all of Reborn's graphics. Only how your soldier moves and aims is different, and "
+                 "everyone on a server plays the same way, so nobody has an edge.",
+                 nullptr, w - 56 * s);
+    }
+    if (!movement_error_.empty())
+      Text(d, g_fonts.bf_med, 26 * s, ImVec2(x0, top + ch + 108 * s), kBfRed, Upper(movement_error_));
+    // The prompts: two arrows (left and right choose), A picks, B goes back; A and B are buttons for the mouse too.
+    bool back = in.back;
+    {
+      const float py = sz.y - 62 * s, bh = 34 * s, size = 25 * s, tw = 64 * s;
+      d->AddRectFilled(ImVec2(x0, py - bh * 0.5f), ImVec2(x0 + tw, py + bh * 0.5f), IM_COL32(96, 98, 102, 255), bh * 0.15f);
+      const float r = 9 * s, l = x0 + 12 * s, rr = x0 + tw - 12 * s;
+      const ImU32 arrow = IM_COL32(240, 240, 236, 255);
+      d->AddTriangleFilled(ImVec2(l, py), ImVec2(l + r * 1.4f, py - r), ImVec2(l + r * 1.4f, py + r), arrow);
+      d->AddTriangleFilled(ImVec2(rr, py), ImVec2(rr - r * 1.4f, py + r), ImVec2(rr - r * 1.4f, py - r), arrow);
+      Text(d, g_fonts.bf, size, ImVec2(x0 + tw + 10 * s, CapTop(py - bh * 0.5f, bh, size)), kCreamText, "CHOOSE");
+      float hx = x0 + tw + 10 * s + Width(g_fonts.bf, size, "CHOOSE") + 34 * s;
+      auto hint = [&](const char* key, const std::string& label) {
+        const float kw = BfButton(d, ImVec2(hx, py), bh, key);
+        const std::string t = Upper(label);
+        Text(d, g_fonts.bf, size, ImVec2(hx + kw + 10 * s, CapTop(py - bh * 0.5f, bh, size)), kCreamText, t);
+        const ImVec2 h0(hx - 8 * s, py - bh * 0.5f - 8 * s), h1(hx + kw + 18 * s + Width(g_fonts.bf, size, t), py + bh * 0.5f + 8 * s);
+        const bool over = ImGui::IsMouseHoveringRect(h0, h1);
+        if (over) d->AddRect(h0, h1, IM_COL32(233, 230, 220, 140), 4 * s, 0, 2 * s);
+        hx = h1.x + 26 * s;
+        return over && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+      };
+      const std::string pick = std::string(movement_quick_ ? "Play " : "Show ") + kStyles[movement_row_].title +
+                               (movement_quick_ ? "" : " servers");
+      if (hint("A", pick)) clicked = movement_row_;
+      if (hint("B", "Back")) back = true;
+    }
+    if (in.accept) clicked = movement_row_;
+    if (clicked >= 0) {
+      movement_row_ = clicked;
+      browser_mode_ = kStyles[clicked].key;
+      REXLOG_INFO("BF movement choice: {} for {}", browser_mode_, movement_quick_ ? "Quick Match" : "the server browser");
+      if (movement_quick_) {
+        if (!QuickJoin(browser_mode_, false)) {
+          movement_error_ = fmt::format("No {} server has room right now. Pick the other movement, or try again soon.",
+                                        browser_mode_);
+          REXLOG_INFO("BF movement choice: no {} server with room", browser_mode_);
+        }
+      } else {
+        page_ = Page::kServers, row_ = 0, servers_from_home_ = movement_from_home_;
+      }
+      return;
+    }
+    if (back) {
+      if (movement_from_home_) page_ = Page::kHome;
+      else page_ = Page::kMain, row_ = MainRowOf(movement_quick_ ? "QUICK MATCH" : "SERVER BROWSER");
+    }
+  }
+
+  // The prompts in a row along the bottom (mockup 3), BF's discs or the chosen style's pictures.
+  void BrowserHints(ImDrawList* d, float s, float x, float y, const std::vector<std::pair<std::string, std::string>>& keys) {
+    const float bh = 34 * s, size = 25 * s;
+    for (const auto& [k, t] : keys) {
+      const float kw = BfButton(d, ImVec2(x, y), bh, k);
+      Text(d, g_fonts.bf, size, ImVec2(x + kw + 10 * s, CapTop(y - bh * 0.5f, bh, size)), kCreamText, Upper(t));
+      x += kw + 10 * s + Width(g_fonts.bf, size, Upper(t)) + 34 * s;
+    }
+  }
+
+  // A map's picture: the one extracted from the player's files (SERVERS-PLAN.md section 2) once that is built; until
+  // then a hatched plate with the map's name.
+  void MapPicture(ImDrawList* d, float s, ImVec2 a, ImVec2 b, const std::string& map) {
+    // The map's loading screen picture, made from the player's game files at the start (shader_prep.cpp
+    // ExtractGameArt) into the user's cache.
+    std::string key = map.empty() ? "Wake Island" : map;
+    for (char& c : key) c = char(std::tolower(static_cast<unsigned char>(c)));
+    const char* file = key.find("iwo") != std::string::npos ? "iwo" : key.find("guadal") != std::string::npos ? "guadalcanal"
+                       : key.find("coral") != std::string::npos ? "coral" : "wake";
+    if (kit::DrawImageFile(d, UserDir() / "cache" / "extracted" / "maps" / (std::string(file) + ".png"), a, b)) {
+      d->AddRect(a, b, IM_COL32(30, 32, 27, 255), 0, 0, 2 * s);
+      return;
+    }
+    d->AddRectFilled(a, b, IM_COL32(157, 167, 160, 255));
+    d->PushClipRect(a, b, true);
+    for (float x = a.x - (b.y - a.y); x < b.x; x += 20 * s)
+      d->AddLine(ImVec2(x, b.y), ImVec2(x + (b.y - a.y), a.y), IM_COL32(179, 188, 180, 255), 10 * s);
+    d->PopClipRect();
+    const std::string t = Upper(map.empty() ? "Wake Island" : map);
+    const float size = 26 * s, tw = Width(g_fonts.bf, size, t);
+    const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+    d->AddRectFilled(ImVec2(c.x - tw * 0.5f - 12 * s, c.y - 22 * s), ImVec2(c.x + tw * 0.5f + 12 * s, c.y + 22 * s),
+                     IM_COL32(30, 32, 27, 200));
+    Text(d, g_fonts.bf, size, ImVec2(c.x - tw * 0.5f, CapTop(c.y - 22 * s, 44 * s, size)), kCreamText, t);
+  }
+
+  void ServersPage(ImDrawList* d, float s, ImGuiIO& io, const Input& in) {
+    const ImVec2 sz = io.DisplaySize;
+    // The new look (docs/MENUS-PLAN.md section 6): the maps from the air behind, darkened under the table.
+    MainBackdrop(d, sz);
+    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 196));
+    list_.WantPings();
+    const float x0 = sz.x * 0.05f, x1 = sz.x * 0.95f, w = x1 - x0;
+    {
+      const kit::Fonts& kf = kit::GetFonts();
+      kit::Spaced(kf.typed ? d : d, kf.typed, 18 * s, ImVec2(x0, 50 * s), kit::kKhakiDim, "PACIFIC THEATRE, 1943", 4 * s);
+      Text(d, kf.stencil, 70 * s, ImVec2(x0 - 3 * s, 72 * s), kit::kCream, "SERVER BROWSER");
+      // The movement chosen before it (MovementPage): only its servers are listed.
+      const std::string mode = browser_mode_ == "modern" ? "MODERN MOVEMENT SERVERS" : "CLASSIC MOVEMENT SERVERS";
+      kit::Spaced(d, kf.typed, 22 * s, ImVec2(x0 + 84 * s, 150 * s),  // beside the red rule, clear of the stamp
+                  browser_mode_ == "modern" ? kit::kGreenBright : kit::kGold, mode, 4 * s);
+      d->AddRectFilled(ImVec2(x0, 158 * s), ImVec2(x0 + 60 * s, 164 * s), kit::kStamp);
+    }
+    const auto all = list_.servers();
+    int counts[2] = {0, 0};
+    for (const auto& sv : all)
+      if (ModeOf(sv) == browser_mode_) ++counts[sv.official ? 0 : 1];
+    // The tabs: LB and RB, or a click.
+    if (in.prev_tab) browser_tab_ = (browser_tab_ + 2) % 3, row_ = 0;
+    if (in.next_tab) browser_tab_ = (browser_tab_ + 1) % 3, row_ = 0;
+    {
+      static const char* kTabs[] = {"OFFICIAL SERVERS", "COMMUNITY SERVERS", "DIRECT CONNECT"};
+      float tx = x0;
+      const float ty = 186 * s, th = 52 * s, size = 27 * s;
+      for (int t = 0; t < 3; ++t) {
+        const std::string label = t < 2 ? std::string(kTabs[t]) + "  " + std::to_string(counts[t]) : kTabs[t];
+        const float tw = Width(g_fonts.bf, size, label) + 64 * s;
+        const ImVec2 a(tx, ty), b(tx + tw, ty + th);
+        const bool cur = t == browser_tab_;
+        d->AddRectFilled(a, b, cur ? IM_COL32(233, 230, 220, 255) : IM_COL32(233, 230, 220, 46));
+        Text(d, cur ? g_fonts.bf : g_fonts.bf_med, size, ImVec2(tx + 32 * s, CapTop(ty, th, size)), cur ? kTableInk : kCreamText,
+             label);
+        if (ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) browser_tab_ = t, row_ = 0;
+        tx = b.x + 6 * s;
+      }
+      // The players signed in, at the right of the tabs.
+      const std::string online = !list_.reachable() ? "SERVERS NOT REACHABLE"
+                                                    : std::to_string(list_.players_online()) +
+                                                          (list_.players_online() == 1 ? " PLAYER ONLINE" : " PLAYERS ONLINE");
+      Text(d, g_fonts.bf_med, 22 * s, ImVec2(x1 - Width(g_fonts.bf_med, 22 * s, online), CapTop(ty, th, 22 * s)),
+           IM_COL32(201, 196, 178, 255), online);
+    }
+    if (browser_tab_ == 2) {
+      DirectConnectPage(d, s, io, in, x0, x1, 262 * s);
+      return;
+    }
+    // This tab's servers, the busiest first (or the nearest: Y).
+    std::vector<ServerInfo> servers;
+    for (const auto& sv : all)
+      if (sv.official == (browser_tab_ == 0) && ModeOf(sv) == browser_mode_) servers.push_back(sv);
+    std::stable_sort(servers.begin(), servers.end(), [this](const ServerInfo& p, const ServerInfo& q) {
+      if (sort_by_ping_) {
+        const int a = p.ping_ms < 0 ? 1 << 20 : p.ping_ms, b = q.ping_ms < 0 ? 1 << 20 : q.ping_ms;
+        if (a != b) return a < b;
+      }
+      return p.players > q.players;
+    });
+    const int n = int(servers.size());
+    if (n) {
+      if (in.up) row_ = (row_ + n - 1) % n;
+      if (in.down) row_ = (row_ + 1) % n;
+    }
+    row_ = std::clamp(row_, 0, std::max(0, n - 1));
+    // The table.
+    const float top = 262 * s, head = 46 * s, rh = 62 * s, open = 214 * s, pad = 24 * s;
+    const float bottom = sz.y - 120 * s;
+    const float cx[] = {0.0f, 0.44f, 0.60f, 0.72f, 0.84f};  // fractions of the row's width
+    static const char* kHeads[] = {"SERVER NAME", "MAP", "MOVEMENT", "PLAYERS", "PING"};
+    const float rows_h = n ? float(n) * rh + open : 90 * s;
+    const float table_b = std::max(std::min(bottom, top + head + rows_h + 4 * s), top + head + 5 * rh + open);
+    d->AddRectFilled(ImVec2(x0, top), ImVec2(x1, table_b), kTablePaper);
+    for (int c = 0; c < 5; ++c)
+      Text(d, g_fonts.bf_med, 21 * s, ImVec2(x0 + pad + cx[c] * (w - 2 * pad), CapTop(top, head, 21 * s)), kTableFaint, kHeads[c]);
+    d->AddRectFilled(ImVec2(x0, top + head - 3 * s), ImVec2(x1, top + head), kTableInk);
+    // Scrolled so the selected row and its opened part show.
+    const float area = table_b - (top + head);
+    float scroll = 0;
+    if (n) scroll = std::max(0.0f, float(row_) * rh + rh + open - area);
+    d->PushClipRect(ImVec2(x0, top + head), ImVec2(x1, table_b), true);
+    int clicked = -1;
+    float y = top + head - scroll;
+    for (int i = 0; i < n; ++i) {
+      const ServerInfo& sv = servers[size_t(i)];
+      const bool sel = i == row_;
+      const float h = sel ? rh + open : rh;
+      const ImVec2 r0(x0, y), r1(x1, y + h);
+      if (y + h > top + head && y < table_b && ImGui::IsMouseHoveringRect(r0, r1)) {
+        if (io.MouseDelta.y != 0) row_ = i;
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
+      }
+      const bool full = sv.max_players > 0 && sv.players >= sv.max_players;
+      const ImU32 ink = sel ? IM_COL32(255, 255, 255, 255) : full ? IM_COL32(138, 137, 124, 255) : kTableInk;
+      if (sel) d->AddRectFilled(r0, r1, kTableGreen);
+      const std::string ping = sv.ping_ms < 0 ? "?" : std::to_string(sv.ping_ms) + " MS";
+      const std::string cells[] = {Upper(sv.name), Upper(sv.map.empty() ? "Wake Island" : sv.map),
+                                   sv.mode == "modern" ? "MODERN" : "CLASSIC",
+                                   std::to_string(sv.players) + " / " + std::to_string(sv.max_players) + (full ? "  FULL" : ""),
+                                   ping};
+      for (int c = 0; c < 5; ++c) {
+        float tx = x0 + pad + cx[c] * (w - 2 * pad);
+        if (c == 4 && sv.ping_ms >= 0) {  // four bars: green under 60 ms, yellow under 120, red above
+          const int bars = sv.ping_ms < 60 ? 4 : sv.ping_ms < 120 ? 3 : sv.ping_ms < 200 ? 2 : 1;
+          const ImU32 bc = sel ? IM_COL32(255, 255, 255, 255) : sv.ping_ms < 60 ? IM_COL32(80, 140, 50, 255)
+                                                               : sv.ping_ms < 120 ? IM_COL32(190, 150, 30, 255) : kBfRed;
+          for (int k = 0; k < 4; ++k) {
+            const float bx = tx + float(k) * 8 * s, bh = (8.0f + 5.0f * float(k)) * s, base = y + rh * 0.5f + 12 * s;
+            d->AddRectFilled(ImVec2(bx, base - bh), ImVec2(bx + 5 * s, base), k < bars ? bc : IM_COL32(150, 150, 140, 120));
+          }
+          tx += 42 * s;
+        }
+        Text(d, c == 0 ? g_fonts.bf : g_fonts.bf_med, 29 * s, ImVec2(tx, CapTop(y, rh, 29 * s)), ink, cells[c]);
+      }
+      if (sel) {
+        // The opened row: the map's picture, the description and the next map, who runs it, Join.
+        const float oy = y + rh;
+        MapPicture(d, s, ImVec2(x0 + pad, oy), ImVec2(x0 + pad + 340 * s, oy + 190 * s), sv.map);
+        const float dx = x0 + pad + 370 * s, dw = w * 0.5f - 300 * s;
+        const std::string desc = sv.description.empty() ? "No description." : sv.description;
+        d->AddText(g_fonts.bf_med, 25 * s, ImVec2(dx, oy + 4 * s), IM_COL32(255, 255, 255, 255), desc.c_str(), nullptr,
+                   std::max(200.0f * s, dw));
+        if (!sv.next_map.empty())
+          Text(d, g_fonts.bf_med, 23 * s, ImVec2(dx, oy + 150 * s), IM_COL32(230, 240, 220, 255), "NEXT: " + Upper(sv.next_map));
+        const float rx = x0 + w * 0.70f;
+        Text(d, g_fonts.bf_med, 22 * s, ImVec2(rx, oy + 10 * s), IM_COL32(230, 240, 220, 255),
+             sv.official ? "RUN BY TRG STUDIOS  \xC2\xB7  OFFICIAL" : "COMMUNITY SERVER");
+        Text(d, g_fonts.bf_med, 22 * s, ImVec2(rx, oy + 44 * s), IM_COL32(230, 240, 220, 255),
+             sv.mode == "modern" ? "MODERN MOVEMENT AND AIMING" : "CLASSIC MOVEMENT AND AIMING");
+        const ImVec2 j0(rx, oy + 116 * s), j1(x1 - pad, oy + 172 * s);
+        d->AddRect(j0, j1, IM_COL32(255, 255, 255, 255), 0, 0, 3 * s);
+        const float jk = BfButton(d, ImVec2(j0.x + 18 * s, (j0.y + j1.y) * 0.5f), 34 * s, "A");
+        Text(d, g_fonts.bf, 28 * s, ImVec2(j0.x + 30 * s + jk, CapTop(j0.y, j1.y - j0.y, 28 * s)), IM_COL32(255, 255, 255, 255),
+             full ? "FULL" : "JOIN");
+        if (ImGui::IsMouseHoveringRect(j0, j1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
+      }
+      d->AddLine(ImVec2(x0, y + h), ImVec2(x1, y + h), kTableLine, 1.0f);
+      y += h;
+    }
+    d->PopClipRect();
+    if (!n)
+      Text(d, g_fonts.bf_med, 27 * s, ImVec2(x0 + pad, top + head + 28 * s), kTableInk,
+           !list_.reachable() ? "THE SERVER LIST IS NOT REACHABLE RIGHT NOW. RETRYING."
+           : fmt::format("NO {} {} SERVERS RIGHT NOW. THE LIST REFRESHES EVERY 5 SECONDS. B: THE OTHER MOVEMENT.",
+                         browser_mode_ == "modern" ? "MODERN" : "CLASSIC", browser_tab_ == 0 ? "OFFICIAL" : "COMMUNITY"));
+    BrowserHints(d, s, x0, sz.y - 62 * s,
+                 {{"A", "Join"}, {"X", "Refresh"}, {"Y", sort_by_ping_ ? "Sort by players" : "Sort by ping"},
+                  {"LB", "Tabs"}, {"B", "Movement"}});
+    if (in.x) list_.RefreshNow();
+    if (in.y) sort_by_ping_ = !sort_by_ping_, row_ = 0;
+    if (n && in.accept) clicked = row_;
+    if (clicked >= 0 && clicked < n) {
+      const ServerInfo& sv = servers[size_t(clicked)];
+      if (sv.max_players <= 0 || sv.players < sv.max_players) Join(sv);
+    }
+    if (in.back) {  // back to the movement choice (to switch), and from there where the browser was opened from
+      page_ = Page::kMovement, movement_quick_ = false, movement_from_home_ = servers_from_home_;
+      servers_from_home_ = false, movement_error_.clear();
+    }
+  }
+
+  // ---- Direct connect: an address typed (keyboard, or the on screen keys with a controller), found through the main
+  // backend (registered servers, listed or not), then the normal join.
+  std::string direct_text_, direct_error_;
+  bool direct_keys_ = false, direct_letters_ = false;
+  int direct_key_ = 0;
+  std::shared_ptr<std::atomic<int>> direct_job_;  // 0 looking, 1 found, 2 not found
+  std::shared_ptr<ServerInfo> direct_found_;
+  void DirectConnect() {
+    std::string text = direct_text_;
+    int port = 18300;
+    if (const size_t colon = text.rfind(':'); colon != std::string::npos) {
+      port = std::atoi(text.c_str() + colon + 1);
+      text = text.substr(0, colon);
+    }
+    if (text.empty() || port <= 0 || port > 65535) {
+      direct_error_ = "Type an address, like 203.0.113.24:18300, or a name.";
+      return;
+    }
+    direct_error_.clear();
+    auto job = std::make_shared<std::atomic<int>>(0);
+    auto found = std::make_shared<ServerInfo>();
+    direct_job_ = job, direct_found_ = found;
+    REXLOG_INFO("BF browser: Direct connect to {}:{}", text, port);
+    std::thread([this, job, found, text, port] { job->store(list_.Find(text, port, *found) ? 1 : 2); }).detach();
+  }
+  void DirectConnectPage(ImDrawList* d, float s, ImGuiIO& io, const Input& in, float x0, float x1, float top) {
+    // The keyboard types straight in (as on the launcher's name page, the window is asked for text input).
+    {
+      ImGuiContext& g = *ImGui::GetCurrentContext();
+      g.PlatformImeData.WantTextInput = true;
+      g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
+    }
+    auto allowed = [](unsigned c) { return std::isalnum(int(c)) || c == '.' || c == ':' || c == '-'; };
+    for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
+      const ImWchar c = io.InputQueueCharacters[i];
+      if (c < 128 && allowed(c) && direct_text_.size() < 64) direct_text_ += char(c), direct_keys_ = false;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !direct_text_.empty()) direct_text_.pop_back();
+    if (ImGui::IsKeyPressed(ImGuiKey_V) && io.KeyCtrl)
+      if (const char* clip = ImGui::GetClipboardText())
+        for (const char* c = clip; *c && direct_text_.size() < 64; ++c)
+          if (allowed(static_cast<unsigned char>(*c))) direct_text_ += *c;
+    // The finished lookup.
+    if (direct_job_ && direct_job_->load() != 0) {
+      if (direct_job_->load() == 1) {
+        const ServerInfo sv = *direct_found_;
+        std::string recent = sv.name + "|" + direct_text_;
+        for (const std::string& r : RecentServers())
+          if (r.substr(r.find('|') + 1) != direct_text_) recent += ";" + r;
+        settings_.values["recent_servers"] = recent.substr(0, 400);
+        settings_.Save();
+        direct_job_.reset();
+        Join(sv);
+        return;
+      }
+      direct_error_ = "No server answers at that address through the main backend. Check the address and its port.";
+      direct_job_.reset();
+    }
+    const float w = x1 - x0, pw = w * 0.52f;
+    const ImVec2 a(x0, top), b(x0 + pw, top + 520 * s);
+    d->AddRectFilled(a, b, kTablePaper);
+    float y = top + 26 * s;
+    const float px = x0 + 30 * s;
+    Text(d, g_fonts.bf_med, 21 * s, ImVec2(px, y), kTableFaint, "JOIN A SERVER BY ITS ADDRESS");
+    y += 34 * s;
+    Text(d, g_fonts.bf, 48 * s, ImVec2(px, y), kTableInk, "DIRECT CONNECT");
+    y += 66 * s;
+    d->AddText(g_fonts.bf_med, 24 * s, ImVec2(px, y), IM_COL32(60, 59, 50, 255),
+               "For a server that is not listed, such as a friend's private one. Ask its host for the address.", nullptr,
+               pw - 60 * s);
+    y += 74 * s;
+    const ImVec2 f0(px, y), f1(x0 + pw - 30 * s, y + 64 * s);
+    d->AddRectFilled(f0, f1, IM_COL32(244, 239, 223, 255));
+    d->AddRect(f0, f1, kTableGreen, 0, 0, 4 * s);
+    const std::string shown = direct_text_.empty() && !direct_keys_ ? "" : direct_text_;
+    Text(d, g_fonts.bf_med, 34 * s, ImVec2(f0.x + 16 * s, CapTop(f0.y, 64 * s, 34 * s)), kTableInk, shown);
+    if (std::fmod(ImGui::GetTime(), 1.0) < 0.6) {
+      const float cx = f0.x + 18 * s + Width(g_fonts.bf_med, 34 * s, shown);
+      d->AddRectFilled(ImVec2(cx, f0.y + 14 * s), ImVec2(cx + 3 * s, f1.y - 14 * s), kTableInk);
+    }
+    y += 76 * s;
+    Text(d, g_fonts.bf_med, 20 * s, ImVec2(px, y), direct_error_.empty() ? kTableFaint : kBfRed,
+         direct_job_ ? "LOOKING FOR THE SERVER..." : direct_error_.empty() ? "AN ADDRESS AND PORT, OR A NAME. THE PORT IS 18300 IF YOU LEAVE IT OUT."
+                                                                          : Upper(direct_error_));
+    y += 44 * s;
+    // Recent servers: a click (or Y with a controller) fills the address.
+    const auto recent = RecentServers();
+    if (!recent.empty()) {
+      Text(d, g_fonts.bf_med, 20 * s, ImVec2(px, y), kTableFaint, "RECENT");
+      y += 30 * s;
+      for (size_t i = 0; i < recent.size() && i < 3; ++i) {
+        const std::string& r = recent[i];
+        const ImVec2 r0(px, y), r1(x0 + pw - 30 * s, y + 38 * s);
+        Text(d, g_fonts.bf_med, 25 * s, ImVec2(px, CapTop(y, 38 * s, 25 * s)), kTableInk, Upper(r.substr(0, r.find('|'))));
+        if (ImGui::IsMouseHoveringRect(r0, r1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+          direct_text_ = r.substr(r.find('|') + 1);
+        y += 40 * s;
+      }
+      if (in.y) direct_text_ = recent[0].substr(recent[0].find('|') + 1);
+    }
+    // The on screen keys: numbers, the dot and the colon; ABC for the letters of a name.
+    static const char* kDigits[] = {"1", "2", "3", "DEL", "4", "5", "6", ".", "7", "8", "9", ":", "ABC", "0", "-", "CONNECT"};
+    static const char* kLetters[] = {"Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "A", "S", "D", "F", "G", "H",
+                                     "J", "K", "L", ".", "Z", "X", "C", "V", "B", "N", "M", "123", "DEL", "CONNECT"};
+    const int cols = direct_letters_ ? 10 : 4, count = direct_letters_ ? 30 : 16;
+    const char* const* keys = direct_letters_ ? kLetters : kDigits;
+    const float kx = x0 + pw + 40 * s, kw = x1 - kx, gap = 10 * s;
+    const float cw = (kw - gap * float(cols - 1)) / float(cols), ch = direct_letters_ ? 70 * s : 86 * s;
+    Text(d, g_fonts.bf_med, 21 * s, ImVec2(kx, top - 2 * s), IM_COL32(201, 196, 178, 255), "ON SCREEN KEYS (A OPENS THEM ON A CONTROLLER)");
+    direct_key_ = std::clamp(direct_key_, 0, count - 1);
+    int pressed = -1;
+    for (int k = 0; k < count; ++k) {
+      const ImVec2 k0(kx + float(k % cols) * (cw + gap), top + 34 * s + float(k / cols) * (ch + gap));
+      const ImVec2 k1(k0.x + cw, k0.y + ch);
+      const bool sel = direct_keys_ && k == direct_key_;
+      d->AddRectFilled(k0, k1, sel ? kTableGreen : IM_COL32(233, 230, 220, 255));
+      const float size = std::string(keys[k]).size() > 1 ? 22 * s : 30 * s;
+      Text(d, g_fonts.bf, size, ImVec2((k0.x + k1.x - Width(g_fonts.bf, size, keys[k])) * 0.5f, CapTop(k0.y, ch, size)),
+           sel ? IM_COL32(255, 255, 255, 255) : kTableInk, keys[k]);
+      if (ImGui::IsMouseHoveringRect(k0, k1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) pressed = k, direct_key_ = k;
+    }
+    if (direct_keys_) {
+      if (in.left) direct_key_ = (direct_key_ / cols) * cols + (direct_key_ % cols + cols - 1) % cols;
+      if (in.right) direct_key_ = (direct_key_ / cols) * cols + (direct_key_ % cols + 1) % cols;
+      if (in.up) direct_key_ = (direct_key_ + count - cols) % count;
+      if (in.down) direct_key_ = (direct_key_ + cols) % count;
+      if (in.accept) pressed = direct_key_;
+      if (in.x && !direct_text_.empty()) direct_text_.pop_back();
+    } else if (in.accept && !ImGui::IsKeyPressed(ImGuiKey_Enter) && !ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
+      direct_keys_ = true;
+    }
+    if (pressed >= 0) {
+      const std::string k = keys[pressed];
+      if (k == "DEL") {
+        if (!direct_text_.empty()) direct_text_.pop_back();
+      } else if (k == "ABC" || k == "123") {
+        direct_letters_ = !direct_letters_, direct_key_ = 0;
+      } else if (k == "CONNECT") {
+        if (!direct_job_) DirectConnect();
+      } else if (direct_text_.size() < 64) {
+        direct_text_ += direct_letters_ ? char(std::tolower(static_cast<unsigned char>(k[0]))) : k[0];
+      }
+    }
+    if ((in.start || ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) && !direct_job_)
+      DirectConnect();
+    BrowserHints(d, s, x0, io.DisplaySize.y - 62 * s,
+                 direct_keys_ ? std::vector<std::pair<std::string, std::string>>{{"A", "Type"}, {"X", "Delete"}, {"START", "Connect"}, {"B", "Done typing"}}
+                              : std::vector<std::pair<std::string, std::string>>{{"A", "Type"}, {"START", "Connect"}, {"LB", "Tabs"}, {"B", "Back"}});
+    if (in.back) {
+      if (direct_keys_) direct_keys_ = false;
+      else page_ = Page::kMain, row_ = 1;
+    }
+  }
+  std::vector<std::string> RecentServers() {
+    std::vector<std::string> out;
+    const std::string all = settings_.Get("recent_servers", "");
+    for (size_t at = 0; at < all.size();) {
+      const size_t end = std::min(all.find(';', at), all.size());
+      if (const std::string r = all.substr(at, end - at); r.find('|') != std::string::npos) out.push_back(r);
+      at = end + 1;
+    }
+    return out;
+  }
+
+  // Without a saved choice the frame rate follows bf_unlock_fps and bf_max_fps (so a command line sets it for tests).
+  static std::string DefaultFrameRate() {
+    if (!REXCVAR_GET(bf_unlock_fps)) return "30";
+    const double max_fps = REXCVAR_GET(bf_max_fps);
+    return max_fps <= 0 ? "unlimited" : std::to_string(int(max_fps));
+  }
+
+  // The frame rates offered (TekRantGaming, 9 Nov 2026): the game updates its world 30 times a second, so rates that divide
+  // into 30 keep motion even; up to the screen's refresh rate and a frame limit set outside the game
+  // (frame_cap.cpp: NVIDIA's Max Frame Rate, or one measured). Unlimited only without such a limit.
+  int ScreenRefresh() {
+    rex::ui::Window* window = window_ ? window_() : nullptr;
+    if (settings_.Get("fullscreen", "off") == "on")
+      if (auto mode = ParseDisplayMode(settings_.Get("fullscreen_mode", "desktop")); mode && mode->refresh > 0)
+        return int(std::lround(mode->refresh));
+    const DisplayMode desktop = DesktopDisplayMode(std::atoi(settings_.Get("monitor", "0").c_str()), window);
+    return desktop.refresh > 0 ? int(std::lround(desktop.refresh)) : 0;
+  }
+  std::vector<std::string> OfferedRates() {
+    const int refresh = ScreenRefresh(), cap = SystemFrameCap();
+    int most = refresh > 0 ? refresh + 1 : 1000;  // 59.94 Hz offers 60
+    if (cap > 0) most = std::min(most, cap);
+    std::vector<std::string> rates;
+    for (int r = 30; r <= 240; r += 30)
+      if (r <= 60 || r <= most) rates.push_back(std::to_string(r));
+    if (cap <= 0) rates.push_back("unlimited");
+    return rates;
+  }
+  // The saved choice as it applies now: the highest offered rate at or below it (110 or 144 saved: 90 or 120).
+  std::string EffectiveFrameRate() {
+    const std::string saved = settings_.Get("frame_rate", DefaultFrameRate());
+    const std::vector<std::string> rates = OfferedRates();
+    if (std::find(rates.begin(), rates.end(), saved) != rates.end()) return saved;
+    const int want = saved == "unlimited" ? 100000 : std::atoi(saved.c_str());
+    std::string best = "30";
+    for (const std::string& r : rates)
+      if (r != "unlimited" && std::atoi(r.c_str()) <= want) best = r;
+    return best;
+  }
+  void ApplyFrameRate() {
+    const std::string fps = EffectiveFrameRate();
+    applied_cap_ = SystemFrameCap();
+    SetFrameRate(fps == "unlimited" ? 0.0 : std::atof(fps.c_str()));
+    if (fps != applied_rate_) {
+      REXLOG_INFO("BF frame rate: {} (chosen {}; screen {} Hz; a limit outside the game: {})", fps,
+                  settings_.Get("frame_rate", DefaultFrameRate()), ScreenRefresh(),
+                  applied_cap_ ? std::to_string(applied_cap_) : std::string("none"));
+      applied_rate_ = fps;
+    }
+  }
+
+  // ---- settings: King Kong's pages (kk/src/launcher.cpp, settings_layout.h): Display, Graphics, Audio, Controls,
+  // Gameplay, in King Kong's order, rows and wording. Every value is saved in bf1943-settings.txt: our own keys,
+  // and runtime settings as "cvar.<name>" (set again at every start, ApplyStartupDisplaySettings). Rows that need
+  // more of the game found first are shown, greyed, with a note.
+  enum Tab { kTabDisplay, kTabGraphics, kTabAudio, kTabControls, kTabGameplay, kTabCount };
+  static constexpr const char* kTabNames[kTabCount] = {"DISPLAY", "GRAPHICS", "AUDIO", "CONTROLS", "GAMEPLAY"};
+  static constexpr const char* kNotYet = "Coming in a later version: this needs more of the game's own code found first.";
+
+  struct SettingRow {
+    std::string section, name, help;
+    std::vector<std::string> options;
+    int index = 0;
+    std::function<void(int)> choose;  // null: a row that only informs (or a slider)
+    std::string value;                // shown for a row without options
+    bool slider = false;
+    float lo = 0, hi = 1, step = 1, val = 0;
+    std::function<void(float)> set;
+    std::function<std::string(float)> format;
+    std::function<void()> activate;  // a row that opens a page or does something
+    bool disabled = false;
+    std::string note;  // why it is greyed
+    std::string start_key;  // a setting taken only at the start ("cvar.<name>" or a settings key): NEXT START if changed
+  };
+
+  // Settings the renderer or the window take only at the start (their rows say "Applies at the next start"). Their
+  // values as this run started: a changed one shows NEXT START on its row, and the setup restarts the game at its end
+  // (TekRantGaming, 8 Nov: the setup's DLAA and Ultra shadows only arrived at the second start, which then ran much slower
+  // than the first match).
+  static constexpr const char* kStartCvars[] = {"native_x_renderer_antialiasing", "native_x_renderer_frame_generation",
+                                                "native_x_renderer_shadow_scale", "native_x_renderer_sharpness",
+                                                "native_x_renderer_scaling", "bf_upscaler_mode"};
+  static constexpr const char* kStartKeys[] = {"vsync", "monitor", "window_width", "window_height"};
+  std::map<std::string, std::string> started_with_;
+  std::string StartValue(const std::string& key) {
+    return key.rfind("cvar.", 0) == 0 ? Cvar(key.substr(5)) : settings_.Get(key, "");
+  }
+  void NoteStartValues() {
+    for (const char* c : kStartCvars) started_with_[std::string("cvar.") + c] = Cvar(c);
+    for (const char* k : kStartKeys) started_with_[k] = settings_.Get(k, "");
+  }
+  bool StartChanged(const std::string& key) {
+    // Before the game runs the renderer's settings are not taken yet: they apply at Play.
+    if (pre_game_ && key.rfind("cvar.", 0) == 0) return false;
+    const auto it = started_with_.find(key);
+    if (it == started_with_.end()) return false;
+    const std::string now = StartValue(key);
+    if (now == it->second) return false;
+    // "2" and "2.000000" are the same setting.
+    char* e1 = nullptr;
+    char* e2 = nullptr;
+    const double a = std::strtod(now.c_str(), &e1), b = std::strtod(it->second.c_str(), &e2);
+    if (!now.empty() && !it->second.empty() && !*e1 && !*e2) return a != b;
+    return true;
+  }
+  bool RestartPending() {
+    for (const auto& [key, value] : started_with_)
+      if (StartChanged(key)) return true;
+    return false;
+  }
+  bool Pending(const SettingRow& r) { return !r.start_key.empty() && StartChanged(r.start_key); }
+  // Starts the game again for the settings taken at the start (the setup's end, Settings from Home).
+  void RestartForSettings(const char* why) {
+    std::string changed;
+    for (const auto& [key, value] : started_with_)
+      if (StartChanged(key)) changed += (changed.empty() ? "" : ", ") + key;
+    REXLOG_INFO("BF launcher: restarting for the settings taken at the start ({}; {})", changed, why);
+    settings_.Save();
+    if (update::RestartSelf() && quit_) quit_();
+  }
+
+  // A runtime setting as the menu sees it: the saved value, else the runtime's own.
+  std::string Cvar(const std::string& name) {
+    const std::string saved = settings_.Get("cvar." + name, "");
+    return saved.empty() ? rex::cvar::GetFlagByName(name) : saved;
+  }
+  void SetCvar(const std::string& name, const std::string& value) {
+    settings_.values["cvar." + name] = value;
+    settings_.Save();
+    rex::cvar::SetFlagByName(name, value);
+    // The Upscaler's rows and the Sharpness it stands in for: the renderer's settings follow before the game runs (Play
+    // takes them; once it runs, they wait for the next start, as the rows say).
+    if (name == "native_x_renderer_sharpness") g_plain_sharpness = value;
+    if (name == "native_x_renderer_scaling" || name == "bf_upscaler_mode" || name == "native_x_renderer_sharpness")
+      ApplyUpscaler(false, settings_.Get("nis_support", ""));
+  }
+  static bool Truthy(const std::string& v) { return v == "true" || v == "1" || v == "on"; }
+
+  SettingRow Choice(const std::string& section, const std::string& name, const std::string& help,
+                    const std::string& cvar, const std::vector<std::pair<std::string, std::string>>& options) {
+    SettingRow r{section, name, help};
+    const std::string cur = Cvar(cvar);
+    std::vector<std::string> values;
+    for (size_t i = 0; i < options.size(); ++i) {
+      r.options.push_back(options[i].first);
+      values.push_back(options[i].second);
+      if (options[i].second == cur) r.index = int(i);
+    }
+    r.choose = [this, cvar, values](int i) { SetCvar(cvar, values[size_t(i)]); };
+    for (const char* c : kStartCvars)
+      if (cvar == c) r.start_key = "cvar." + cvar;
+    return r;
+  }
+  SettingRow Toggle(const std::string& section, const std::string& name, const std::string& help,
+                    const std::string& cvar, const std::string& off = "Off", const std::string& on = "On") {
+    SettingRow r = Choice(section, name, help, cvar, {{off, "false"}, {on, "true"}});
+    r.index = Truthy(Cvar(cvar)) ? 1 : 0;
+    return r;
+  }
+  SettingRow Slider(const std::string& section, const std::string& name, const std::string& help,
+                    const std::string& cvar, float lo, float hi, float step, std::function<std::string(float)> format,
+                    float fallback = 0) {
+    SettingRow r{section, name, help};
+    r.slider = true, r.lo = lo, r.hi = hi, r.step = step;
+    const std::string cur = Cvar(cvar);  // empty for a setting not in this version yet: its default
+    float v = cur.empty() ? fallback : float(std::atof(cur.c_str()));
+    // Below the range: the setting's "the game's own" (bf_fov 0 is the game's 85.6, shown as 60 before).
+    if (v < lo && fallback >= lo) v = fallback;
+    r.val = std::clamp(v, lo, hi);
+    r.format = std::move(format);
+    r.set = [this, cvar](float v) {
+      char b[32];
+      std::snprintf(b, sizeof(b), "%g", v);
+      SetCvar(cvar, b);
+    };
+    return r;
+  }
+  static SettingRow NotYet(SettingRow r) {
+    r.disabled = true, r.note = kNotYet;
+    return r;
+  }
+  static std::string Percent(float v) { return std::to_string(int(std::lround(v))) + "%"; }
+
+  // ---- the game's own options: every row of its Controls and Sound / Image pages (common_screens.apt), sent as its
+  // pages send them, FSCommand setSetting "<category>,<key>,<value>" and then applySettings "<category>"
+  // (control_to_settings), so a change takes effect at once, in a match too (TekRantGaming, 10 Nov: inverted flight and the
+  // rest of the original pause menu's pages were missing). The values are its widgets' own: a toggle "0" or "1"
+  // (its flight toggle the other way round: inverted is "0"), a list its index, a slider a fraction. Saved here as
+  // "game.<category>.<key>" and sent again after each start's sign in (SendGameSettings): the game starts every run
+  // from its defaults (settings/gamesettings.dbx in startup-00.fbrb), which are each row's fallback.
+  std::string GameValue(const std::string& category, const std::string& key, const std::string& fallback) const {
+    return settings_.Get("game." + category + "." + key, fallback);
+  }
+  void SetGameValue(const std::string& category, const std::vector<std::string>& keys, const std::string& value) {
+    for (const auto& k : keys) settings_.values["game." + category + "." + k] = value;
+    settings_.Save();
+    if (!signed_in_once_) return;  // sent after the sign in (Show)
+    for (const auto& k : keys) GameCommand("setSetting", category + "," + k + "," + value);
+    GameCommand("applySettings", category);
+  }
+  // At the first sign in of a run: every saved one to the game, a category at a time as its pages do.
+  void SendGameSettings() {
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>> by_category;
+    for (const auto& [key, value] : settings_.values) {
+      if (key.rfind("game.", 0) != 0) continue;
+      const size_t dot = key.find('.', 5);
+      if (dot == std::string::npos || value.empty()) continue;
+      by_category[key.substr(5, dot - 5)].push_back({key.substr(dot + 1), value});
+    }
+    for (const auto& [category, values] : by_category) {
+      for (const auto& [key, value] : values) GameCommand("setSetting", category + "," + key + "," + value);
+      GameCommand("applySettings", category);
+      REXLOG_INFO("BF launcher: sent the game's {} options ({} saved)", category, values.size());
+    }
+  }
+  SettingRow GameChoice(const std::string& section, const std::string& name, const std::string& help,
+                        const std::string& category, const std::vector<std::string>& keys, const std::string& fallback,
+                        const std::vector<std::pair<std::string, std::string>>& options) {
+    SettingRow r{section, name, help};
+    const std::string cur = GameValue(category, keys.front(), fallback);
+    std::vector<std::string> values;
+    for (size_t i = 0; i < options.size(); ++i) {
+      r.options.push_back(options[i].first);
+      values.push_back(options[i].second);
+      if (options[i].second == cur) r.index = int(i);
+    }
+    r.choose = [this, category, keys, values](int i) { SetGameValue(category, keys, values[size_t(i)]); };
+    return r;
+  }
+  // A slider of the game's (0 to 1), shown in percent.
+  SettingRow GameSlider(const std::string& section, const std::string& name, const std::string& help,
+                        const std::string& category, const std::string& key, float fallback) {
+    SettingRow r{section, name, help};
+    r.slider = true, r.lo = 0, r.hi = 100, r.step = 5;
+    const std::string cur = GameValue(category, key, "");
+    r.val = std::clamp(cur.empty() ? fallback * 100 : float(std::atof(cur.c_str())) * 100, 0.0f, 100.0f);
+    r.format = Percent;
+    r.set = [this, category, key](float v) {
+      char b[32];
+      std::snprintf(b, sizeof(b), "%g", std::clamp(v, 0.0f, 100.0f) / 100.0f);
+      SetGameValue(category, {key}, b);
+    };
+    return r;
+  }
+
+  std::vector<SettingRow> RowsOf(int tab) {
+    switch (tab) {
+      case kTabDisplay: return DisplayRows();
+      case kTabGraphics: return GraphicsRows();
+      case kTabAudio: return AudioRows();
+      case kTabControls: return sub_ == kSubRemap ? RemapRows() : sub_ == kSubKeys ? KeyRows() : ControlsRows();
+      default: return GameplayRows();
+    }
+  }
+
+  std::vector<SettingRow> DisplayRows() {
+    std::vector<SettingRow> rows;
+    rex::ui::Window* window = window_ ? window_() : nullptr;
+    const int monitor = std::atoi(settings_.Get("monitor", "0").c_str());
+    if (modes_monitor_ != monitor || !modes_listed_) {
+      modes_ = ListDisplayModes(monitor, window);
+      displays_ = ListDisplays();
+      modes_monitor_ = monitor, modes_listed_ = true;
+    }
+    const bool fullscreen = settings_.Get("fullscreen", "off") == "on";
+    const std::string mode_value = settings_.Get("fullscreen_mode", "desktop");
+    const bool exclusive = fullscreen && ParseDisplayMode(mode_value).has_value();
+    const DisplayMode desktop = DesktopDisplayMode(monitor, window);
+    auto size = [](int w, int h) { return std::to_string(w) + " \xC3\x97 " + std::to_string(h); };
+
+    SettingRow mode{"Screen", "Window mode", "How the game fills your screen: in a window, borderless or fullscreen.",
+                    {"Windowed", "Borderless", "Fullscreen"}, !fullscreen ? 0 : exclusive ? 2 : 1};
+    mode.choose = [this, monitor, desktop](int i) {
+      settings_.values["fullscreen"] = i ? "on" : "off";
+      if (i == 1) settings_.values["fullscreen_mode"] = "desktop";
+      if (i == 2 && !ParseDisplayMode(settings_.Get("fullscreen_mode", "desktop"))) {
+        const float rate = HighestRefreshAt(modes_, desktop.width, desktop.height);
+        settings_.values["fullscreen_mode"] = DisplayMode{desktop.width, desktop.height, rate}.Value();
+      }
+      settings_.Save();
+      if (window_) ApplyFullscreenMode(window_(), monitor, settings_.Get("fullscreen_mode", "desktop"));
+      if (fullscreen_) fullscreen_(i != 0);
+    };
+    rows.push_back(mode);
+
+    SettingRow mon{"Screen", "Monitor", "Which display the game opens on. Applies at the next start.", {"Default"}, 0};
+    for (size_t i = 0; i < displays_.size(); ++i)
+      mon.options.push_back("Display " + std::to_string(i + 1) + (displays_[i].primary ? " (main)" : "") +
+                            "  \xC2\xB7  " + size(displays_[i].width, displays_[i].height));
+    mon.index = std::clamp(monitor, 0, int(mon.options.size()) - 1);
+    mon.start_key = "monitor";
+    mon.choose = [this](int i) {
+      settings_.values["monitor"] = std::to_string(i);
+      settings_.Save();
+    };
+    rows.push_back(mon);
+
+    if (!fullscreen) {
+      static const std::pair<int, int> kSizes[] = {{0, 0},       {1280, 720},  {1600, 900},
+                                                   {1920, 1080}, {2560, 1440}, {3200, 1800}};
+      SettingRow win{"Screen", "Window size", "The size of the game's window. Applies at the next start.", {}, 0};
+      win.start_key = "window_width";
+      std::vector<std::pair<int, int>> sizes;
+      const int w = std::atoi(settings_.Get("window_width", "0").c_str());
+      const int h = std::atoi(settings_.Get("window_height", "0").c_str());
+      for (auto [sw, sh] : kSizes) {
+        if (desktop.width && (sw >= desktop.width || sh >= desktop.height)) continue;  // must fit with its frame
+        if (sw == w && sh == h) win.index = int(sizes.size());
+        win.options.push_back(sw ? size(sw, sh) : "Default");
+        sizes.emplace_back(sw, sh);
+      }
+      win.choose = [this, sizes](int i) {
+        settings_.values["window_width"] = std::to_string(sizes[size_t(i)].first);
+        settings_.values["window_height"] = std::to_string(sizes[size_t(i)].second);
+        settings_.Save();
+      };
+      rows.push_back(win);
+    } else if (exclusive) {
+      const auto cur = ParseDisplayMode(mode_value);
+      SettingRow res{"Screen", "Resolution", "The size your screen switches to while the game runs.", {}, -1};
+      std::vector<std::pair<int, int>> sizes;
+      for (const DisplayMode& m : modes_) {
+        if (!sizes.empty() && sizes.back() == std::pair<int, int>{m.width, m.height}) continue;
+        if (cur && m.width == cur->width && m.height == cur->height) res.index = int(sizes.size());
+        sizes.emplace_back(m.width, m.height);
+        res.options.push_back(size(m.width, m.height));
+      }
+      if (res.index < 0 && cur) {  // a size this display doesn't have
+        res.index = int(sizes.size());
+        sizes.emplace_back(cur->width, cur->height);
+        res.options.push_back(size(cur->width, cur->height) + " (not on this display)");
+      }
+      res.index = std::max(res.index, 0);
+      res.choose = [this, sizes, monitor](int i) {
+        const auto [w, h] = sizes[size_t(i)];
+        settings_.values["fullscreen_mode"] = DisplayMode{w, h, HighestRefreshAt(modes_, w, h)}.Value();
+        settings_.Save();
+        if (window_) ApplyFullscreenMode(window_(), monitor, settings_.Get("fullscreen_mode", "desktop"));
+      };
+      rows.push_back(res);
+    } else {
+      SettingRow res{"Screen", "Resolution", "Borderless shows the game at your desktop's size.", {}, 0};
+      res.value = size(desktop.width, desktop.height);
+      rows.push_back(res);
+    }
+
+    {
+      const auto cur = ParseDisplayMode(mode_value);
+      const DisplayMode shown = exclusive && cur ? DisplayMode{cur->width, cur->height,
+                                                               HighestRefreshAt(modes_, cur->width, cur->height)}
+                                                 : desktop;
+      SettingRow rate{"Screen", "Refresh rate", "", {}, 0};
+      rate.value = shown.refresh > 0 ? shown.RateLabel() : "";
+      if (exclusive) {
+        rate.help = "Fullscreen switches your screen to its highest refresh rate.";
+      } else {
+        const float highest = HighestRefreshAt(modes_, desktop.width, desktop.height);
+        rate.help = DesktopBelowHighest(desktop, highest)
+                        ? "Windows runs your screen at " + desktop.RateLabel() + ", but it can run at " +
+                              DisplayMode{0, 0, highest}.RateLabel() + ". Your screen shows at most " +
+                              std::to_string(int(std::lround(desktop.refresh))) + " pictures a second until then."
+                        : "The game uses the refresh rate Windows has set for your screen.";
+      }
+      rows.push_back(rate);
+    }
+
+    SettingRow aspect{"Screen", "Aspect ratio", "What the game's 16:9 picture does on a screen of another shape.",
+                      {"Letterbox 16:9", "Stretch"}, settings_.Get("letterbox", "on") == "on" ? 0 : 1};
+    aspect.choose = [this](int i) {
+      settings_.values["letterbox"] = i ? "off" : "on";
+      settings_.Save();
+      rex::cvar::SetFlagByName("present_letterbox", i ? "false" : "true");
+    };
+    rows.push_back(aspect);
+
+    // Picture: brightness and gamma of the game's picture, in the GPU plugin's gamma ramp (King Kong's curve), at
+    // once; our menus and the overlays stay as they are.
+    rows.push_back(Slider("Picture", "Brightness",
+                          "Raises or lowers the darkest parts of the game's picture. Higher shows more in dark places, "
+                          "lower gives deeper blacks. White stays the same. The menus do not change. 0 is the game's "
+                          "own picture.",
+                          "bf_brightness", -50, 50, 1, [](float v) {
+                            const int n = int(std::lround(v));
+                            return n > 0 ? "+" + std::to_string(n) : std::to_string(n);
+                          }));
+    rows.push_back(Slider("Picture", "Gamma",
+                          "Brightens or darkens the middle tones of the game's picture while black and white stay "
+                          "the same. Above 1.00 is brighter, below is darker. 1.00 is the game's own picture.",
+                          "bf_gamma", 0.5f, 1.5f, 0.05f, [](float v) {
+                            char b[16];
+                            std::snprintf(b, sizeof(b), "%.2f", std::round(v * 20.0f) / 20.0f);
+                            return std::string(b);
+                          }));
+    rows.push_back(GameSlider("Picture", "Game brightness",
+                              "The game's own brightness from its Image settings, 50% as it starts. Brightness and "
+                              "Gamma above change the picture on top of it.",
+                              "GstRender", "Brightness", 0.5f));
+
+    SettingRow vsync{"Frame rate", "VSync", "Makes each frame wait for your screen's next refresh. Applies at the next start.",
+                     {"Off", "On"}, settings_.Get("vsync", "off") == "on" ? 1 : 0};
+    vsync.start_key = "vsync";
+    vsync.choose = [this](int i) {
+      settings_.values["vsync"] = i ? "on" : "off";
+      settings_.Save();
+    };
+    rows.push_back(vsync);
+
+    const std::vector<std::string> rates = OfferedRates();
+    std::vector<std::string> rate_names;
+    for (const std::string& r : rates)
+      rate_names.push_back(r == "30" ? "30 (Xbox 360)" : r == "unlimited" ? "Unlimited" : r);
+    const std::string fps = EffectiveFrameRate();
+    std::string help =
+        "The most frames the game draws a second. The game updates its world 30 times a second, so these rates keep "
+        "motion even. The Xbox 360 ran it at 30. Applies at once.";
+    if (const int cap = SystemFrameCap(); cap > 0)
+      help += " A frame limit of " + std::to_string(cap) + " is set outside the game (your graphics driver or a "
+              "tool), so the most offered is " + rates.back() + ".";
+    SettingRow frame{"Frame rate", "Frame rate", help, rate_names,
+                     int(std::find(rates.begin(), rates.end(), fps) - rates.begin())};
+    if (frame.index >= int(rates.size())) frame.index = std::min(1, int(rates.size()) - 1);
+    frame.choose = [this, rates](int i) {
+      settings_.values["frame_rate"] = rates[size_t(i)];
+      settings_.Save();
+      ApplyFrameRate();
+    };
+    rows.push_back(frame);
+
+    // Camera: King Kong's rows; BF's camera and effects first need finding in the game's code.
+    // Field of view (fov.cpp): horizontal at 16:9; the game's own is 86. Aiming down sights still narrows it.
+    rows.push_back(Slider("Camera", "Field of view",
+                          "How wide the camera sees, across the screen at 16:9. The game's own is 86\xC2\xB0. "
+                          "Aiming down sights still zooms in. Applies at once.",
+                          "bf_fov", 60, 120, 1,
+                          [](float v) { return std::to_string(int(std::lround(v))) + "\xC2\xB0"; }, 86));
+    rows.push_back(Toggle("Camera", "Motion blur",
+                          "The game's screen blur: from nearby explosions, bullets and low health, and its camera "
+                          "blur. Off turns all of it off. Applies at once.",
+                          "bf_motion_blur"));
+    rows.push_back(Toggle("Camera", "Camera shake", "The camera shaking from explosions and gunfire. Applies at once.",
+                                 "bf_camera_shake"));
+    rows.push_back(Slider("Camera", "Camera shake strength",
+                                 "How hard the camera shakes. 100% is the Xbox 360's; lower it if the shaking bothers "
+                                 "you.",
+                                 "bf_camera_shake_strength", 10, 200, 5, Percent, 100));
+    return rows;
+  }
+
+  std::vector<SettingRow> GraphicsRows() {
+    std::vector<SettingRow> rows;
+    // No Graphics API row: Vulkan, our renderer, is the only one (DECISIONS.md, 5 Nov 2026 evening). The rows set
+    // NativeXRenderer's own settings: the presenter's swap_post_effect and present_effect, which these rows set before,
+    // are not used when NativeXRenderer draws (they changed nothing).
+    // Antialiasing (TekRantGaming, 9 Nov 2026, after testing them all: "FXAA works the best, so we're only going to offer
+    // that, and it should be on by default"): Off or FXAA. DLAA, DLSS, FSR 3.1 and SMAA are no longer offered (a saved
+    // one becomes FXAA: ApplyStartupDisplaySettings); frame generation went with them (it needs DLSS or FSR 3.1).
+    rows.push_back(Choice("Image", "Antialiasing",
+                          "Smooths jagged edges. FXAA is light and works on the whole picture. Applies at the next "
+                          "start.",
+                          "native_x_renderer_antialiasing", {{"Off", "off"}, {"FXAA", "fxaa"}}));
+    // Upscaling: King Kong's Upscaler and Upscaler mode rows and their words (TekRantGaming, 11 Nov 2026, v0.2.1: AMD FSR 1 and
+    // NVIDIA NIS, "copy exactly that"). NativeXRenderer scales the drawn picture up to the screen with them (D115, on
+    // Vulkan, so NIS can run on Linux too: King Kong's NIS is in its Direct3D 12 presenter, Windows only). Off draws the
+    // display's resolution, with the Sharpness row; with an upscaler the Upscaler mode says how much of it is drawn and
+    // the upscaler sharpens as AMD and NVIDIA made it (ApplyUpscaler).
+    // NVIDIA NIS only where this GPU runs it (TekRantGaming, 11 Nov 2026: "ensure that NVIDIA NIS isn't shown to unsupported
+    // devices"): the renderer's answer at the last start (D158, nis_support, NoteNisSupport), so not before the first;
+    // a NIS chosen before on a GPU that does not run it shows and runs as FSR 1 (ApplyUpscaler). King Kong's sentences
+    // for both lists. No Render resolution row (TekRantGaming, 11 Nov 2026): Off draws the display's resolution.
+    std::string scaling = Cvar("native_x_renderer_scaling");
+    const bool nis_offered = settings_.Get("nis_support", "") == "1";
+    if (scaling == "nis" && !nis_offered) scaling = "fsr";
+    const bool upscaler = scaling == "fsr" || scaling == "nis";
+    {
+      std::vector<std::pair<std::string, std::string>> choices = {{"Off", "bilinear"}, {"AMD FSR 1", "fsr"}};
+      if (nis_offered) choices.push_back({"NVIDIA NIS", "nis"});
+      SettingRow r = Choice("Image", "Upscaler",
+                            std::string("Scales the picture up to your screen and sharpens it, for a clearer image when "
+                                        "the game draws fewer pixels than your screen has. ") +
+                                (nis_offered ? "AMD FSR 1 and NVIDIA Image Scaling (NIS) work on any graphics card. "
+                                             : "AMD FSR 1 works on any graphics card. ") +
+                                "Off draws the game at your display's resolution. Applies at the next start.",
+                            "native_x_renderer_scaling", choices);
+      if (Cvar("native_x_renderer_scaling") == "nis" && !nis_offered) r.index = 1;  // runs as FSR 1 here
+      rows.push_back(r);
+    }
+    if (upscaler) {
+      // King Kong's facts under the row: what the game draws for this screen, and the modes that draw the same here.
+      const ImGuiIO& io = ImGui::GetIO();
+      const int out_w = int(std::lround(io.DisplaySize.x * io.DisplayFramebufferScale.x));
+      const int out_h = int(std::lround(io.DisplaySize.y * io.DisplayFramebufferScale.y));
+      const std::string mode = Cvar("bf_upscaler_mode");
+      std::string help = "How many pixels the game draws before the upscaler scales them to your screen. Applies at the "
+                         "next start.";
+      std::vector<std::pair<std::string, std::string>> options;
+      for (const auto& m : kUpscalerModes) options.push_back({m.label, m.value});
+      for (const auto& m : kUpscalerModes) {
+        if (mode != m.value) continue;
+        const auto drawn = DrawnSizeFor(out_w, out_h, m.ratio);
+        auto size = [](std::pair<int, int> s) { return std::to_string(s.first) + "x" + std::to_string(s.second); };
+        help += " Draws " + size(drawn) + " for your " + size({out_w, out_h}) +
+                (settings_.Get("fullscreen", "") == "on" ? " screen." : " window.");
+        std::string same;
+        for (const auto& o : kUpscalerModes)
+          if (o.value != m.value && DrawnSizeFor(out_w, out_h, o.ratio) == drawn)
+            same += std::string(same.empty() ? "" : " and ") + o.label;
+        if (!same.empty()) help += " Same as " + same + " here.";
+      }
+      rows.push_back(Choice("Image", "Upscaler mode", help, "bf_upscaler_mode", options));
+    }
+    rows.push_back(Choice("Image", "Shadow quality",
+                          "The shadow maps' detail. Original draws them at the render resolution. Applies at the next "
+                          "start.",
+                          "native_x_renderer_shadow_scale",
+                          {{"Original", "0.000000"}, {"High (2x)", "2.000000"}, {"Ultra (4x)", "4.000000"}}));
+    // Sharpness: CAS when presenting (native_x_renderer_sharpness, 0 to 1), at the next start; with FSR 1 or NIS their
+    // own sharpening instead (King Kong offers no sharpness for them).
+    {
+      SettingRow sharp = Choice("Image", "Sharpness", "Makes fine detail crisper. Applies at the next start.",
+                                "native_x_renderer_sharpness",
+                                {{"Off", "0.000000"}, {"Low", "0.250000"}, {"Medium", "0.500000"}, {"High", "0.800000"}});
+      if (upscaler) sharp.disabled = true, sharp.note = "The upscaler sharpens the picture itself.";
+      rows.push_back(sharp);
+    }
+    rows.push_back(Choice("Image", "Texture filtering", "Keeps the ground and distant textures sharp at steep angles.",
+                          "anisotropic_override",
+                          {{"Game", "-1"}, {"Off", "0"}, {"2\xC3\x97", "2"}, {"4\xC3\x97", "3"}, {"8\xC3\x97", "4"},
+                           {"16\xC3\x97", "5"}}));
+    // Ambient occlusion: King Kong's three rows (GTAO, NativeXRenderer D132), all applied at once.
+    rows.push_back(Choice("Lighting", "Ambient occlusion",
+                          "Soft shadows where objects meet the ground and each other, under vehicles and in corners. "
+                          "Applies at once.",
+                          "native_ao_mode", {{"Off", "0"}, {"On", "1"}}));
+    rows.push_back(Choice("Lighting", "AO strength", "How dark the ambient occlusion is. Applies at once.",
+                          "native_ao_strength", {{"Light", "1"}, {"Medium", "2"}, {"Strong", "3"}}));
+    rows.push_back(Choice("Lighting", "AO quality",
+                          "How many samples the ambient occlusion takes. Higher is smoother and costs more. Applies at "
+                          "once.",
+                          "native_ao_samples", {{"Low", "1"}, {"Medium", "2"}, {"High", "3"}}));
+    // Global illumination: King Kong's SSGI (NativeXRenderer D133), one bounce of light from the lit scene, live.
+    rows.push_back(Choice("Lighting", "Global illumination",
+                          "Sunlight bouncing off the ground and walls onto what is next to them. Applies at once.",
+                          "native_gi_mode", {{"Off", "0"}, {"On", "1"}}));
+    rows.push_back(Choice("Lighting", "GI quality", "How many directions the bounce light is gathered from. Applies at once.",
+                          "native_gi_quality", {{"Low", "1"}, {"Medium", "2"}, {"High", "3"}}));
+    rows.push_back(Choice("Lighting", "GI distance", "How far away the bounce light is drawn. Applies at once.",
+                          "native_gi_distance", {{"Near", "1"}, {"Medium", "2"}, {"Far", "3"}, {"Full", "4"}}));
+    // Grass and shrubs (NativeXRenderer grass.cpp) are always on (TekRantGaming, 10 Nov 2026): no row turns them off, only
+    // their distance below is the player's (the F8 panel still switches them, for testing).
+    // HD textures (TekRantGaming, 9 Nov 2026: an HD texture pack, imported in the launcher, toggled here; NativeXRenderer D149).
+    {
+      const fs::path pack = HdPackPath(UserDir());
+      std::error_code ec;
+      const bool have = fs::exists(pack, ec);
+      SettingRow hd = Toggle("Textures", "HD textures",
+                             "The game's textures at twice their size, from an HD texture pack you have imported. "
+                             "Uses more graphics memory. Applies at the next start.",
+                             "native_x_renderer_hd_textures");
+      hd.start_key = "cvar.native_x_renderer_hd_textures";
+      if (!have) hd.disabled = true, hd.note = "Import an HD texture pack first";
+      rows.push_back(hd);
+      SettingRow import{"Textures", "Import HD texture pack",
+                        "Choose an HD texture pack file (.bfhd) to copy into the game. It replaces one imported "
+                        "before."};
+      const int percent = hd_import_->percent.load();
+      std::string result;
+      {
+        std::lock_guard lock(hd_import_->mutex);
+        result = hd_import_->result;
+      }
+      import.value = percent >= 0 ? "Copying " + std::to_string(percent) + "%"
+                     : !result.empty() ? result
+                     : have ? std::to_string(fs::file_size(pack, ec) >> 20) + " MB imported" : "None";
+      import.activate = [this] { ImportHdPack(); };
+      rows.push_back(import);
+    }
+    // How far the grass reaches (TekRantGaming, 9 Nov: "Right now it's too small"; later the same day: more grass appeared as
+    // he walked towards it, so on the maps every plant within the distance is drawn at its full density, NXR D152;
+    // Full map is the default). On a level without a grass map the far rings still have larger, sparser tufts.
+    rows.push_back(Choice("Grass", "Grass distance",
+                          "How far from you the grass and shrubs are drawn. Every plant within it is drawn, as dense far "
+                          "away as near; the smallest far ones fade out. Applies at once.",
+                          "native_grass_radius",
+                          {{"Low", "45.000000"}, {"Medium", "90.000000"}, {"High", "180.000000"},
+                           {"Extreme", "360.000000"}, {"Full map", "1440.000000"}}));
+    return rows;
+  }
+
+  std::vector<SettingRow> AudioRows() {
+    std::vector<SettingRow> rows;
+    rows.push_back(Slider("Game audio", "Master volume", "How loud all game audio is. Applies during play.",
+                          "bf_master_volume", 0, 100, 1, Percent));
+    rows.push_back(Slider("Game audio", "Music volume", "How loud the game's music is, in menus, loading and matches. Applies at once.", "bf_music_volume", 0,
+                                 100, 1, Percent, 100));
+    rows.push_back(NotYet(Slider("Game audio", "Effects volume", "How loud the game's sound effects are.",
+                                 "bf_effects_volume", 0, 100, 1, Percent, 100)));
+    rows.push_back(Slider("Game audio", "Voices volume", "How loud the soldiers' voices and radio calls are. Applies at once.",
+                                 "bf_voices_volume", 0, 100, 1, Percent, 100));
+    rows.push_back(Toggle("Menu", "Menu music",
+                          "The game's main menu music in the launcher, made from your game files. Applies at once.",
+                          "bf_menu_music"));
+    rows.push_back(NotYet(Slider("Menu", "Menu music volume", "How loud the menu's music is.", "bf_menu_music_volume", 0,
+                                 100, 5, Percent, 100)));
+    rows.push_back(NotYet(Toggle("Menu", "Menu sounds", "The game's own menu sounds as you move around our menu.",
+                                 "bf_menu_sounds")));
+    rows.push_back(NotYet(Slider("Menu", "Menu sound volume", "How loud the menu sounds are.", "bf_menu_sounds_volume",
+                                 0, 100, 5, Percent, 100)));
+    // The rest of the game's own Sound page (its master, music and dialogue volumes are the rows above).
+    rows.push_back(GameChoice("Game sound", "Sound system",
+                              "What you listen on, as the game's own setting: it mixes its sound for that.",
+                              "GstAudio", {"SoundSystemSize"}, "1",
+                              {{"TV", "0"}, {"Hi-fi", "1"}, {"Home cinema", "2"}}));
+    rows.push_back(GameChoice("Game sound", "Voiceover language",
+                              "The soldiers' voices: Localized in your game's language, Original as they were "
+                              "recorded.",
+                              "GstAudio", {"VOLanguage"}, "0", {{"Localized", "0"}, {"Original", "1"}}));
+    SettingRow reset{"Reset", "Reset page", "Put these settings back to their defaults."};
+    reset.activate = [this] {
+      SetCvar("bf_master_volume", "100");
+      SetGameValue("GstAudio", {"SoundSystemSize"}, "1");
+      SetGameValue("GstAudio", {"VOLanguage"}, "0");
+    };
+    rows.push_back(reset);
+    return rows;
+  }
+
+  std::vector<SettingRow> ControlsRows() {
+    std::vector<SettingRow> rows;
+    rows.push_back(Toggle("Input", "Keyboard & mouse",
+                          "Controllers always work. With this on, a keyboard and mouse work too, at the same time: the "
+                          "mouse turns the camera and stays in the game window while you play (our menu frees it). The "
+                          "keys are under Keyboard bindings.",
+                          "mnk_mode", "Off", "On"));
+    rows.push_back(Choice("Input", "Button prompts",
+                          "Which buttons our menus show in their hints. Automatic follows what you used last: the Xbox "
+                          "360's buttons for a controller, the keys for the keyboard and mouse.",
+                          "bf_button_prompts",
+                          {{"Automatic", "auto"}, {"Xbox 360", "xbox360"}, {"Xbox Series", "xbox_series"},
+                           {"PlayStation 3", "ps3"}, {"PlayStation 5", "ps5"}, {"Steam Deck", "steam_deck"},
+                           {"Keyboard and mouse", "keyboard"}}));
+    rows.push_back(Toggle("Input", "Camera turning",
+                          "Every frame turns the camera on each frame you see, with the stick and the mouse, so turning "
+                          "is as smooth as your frame rate. Original turns it 30 times a second, as on the Xbox 360.",
+                          "bf_look", "Original", "Every frame"));
+    rows.push_back(Slider("Controller", "Camera sensitivity",
+                          "How fast the right stick turns the camera and moves your aim.", "bf_camera_sensitivity", 25,
+                          300, 5, Percent));
+    rows.push_back(Toggle("Controller", "Camera response",
+                          "Modern turns the camera the same way in every direction, so circles and diagonals feel even. "
+                          "Original passes the stick to the game as the Xbox 360 did.",
+                          "bf_camera_modern", "Original", "Modern"));
+    rows.push_back(Slider("Controller", "Stick deadzone",
+                          "Ignores small stick movements. Raise it if the camera or cursor drifts.", "bf_deadzone", 0,
+                          40, 1, Percent));
+    rows.push_back(Toggle("Controller", "Camera horizontal",
+                          "Which way the camera turns when you push the right stick left or right.", "bf_invert_rs_x",
+                          "Normal", "Inverted"));
+    rows.push_back(Toggle("Controller", "Camera vertical",
+                          "Which way the right stick moves the camera up and down, in every seat. The game's own "
+                          "Vertical look and Vertical fly are under Game controls below.",
+                          "bf_invert_rs_y", "Normal", "Inverted"));
+    {
+      SettingRow ls{"Controller", "Left stick", "Invert the left stick's axes.", {"Normal", "Invert X", "Invert Y", "Both"}};
+      const bool x = Truthy(Cvar("bf_invert_ls_x")), y = Truthy(Cvar("bf_invert_ls_y"));
+      ls.index = x && y ? 3 : x ? 1 : y ? 2 : 0;
+      ls.choose = [this](int i) {
+        SetCvar("bf_invert_ls_x", i == 1 || i == 3 ? "true" : "false");
+        SetCvar("bf_invert_ls_y", i == 2 || i == 3 ? "true" : "false");
+      };
+      rows.push_back(ls);
+    }
+    rows.push_back(Toggle("Controller", "Aim",
+                          "Hold: keep the left trigger held to aim, as on the console. Toggle: press it once to aim and "
+                          "again to stop. Opening the menu stops aiming.",
+                          "bf_toggle_aim", "Hold", "Toggle"));
+    rows.push_back(Toggle("Controller", "Vibration", "Controller rumble.", "bf_vibration"));
+    {
+      SettingRow strength = Slider("Controller", "Vibration strength",
+                                   "How strong the rumble is. Above 100% it is stronger than on the Xbox 360, up to the "
+                                   "controller's full strength.",
+                                   "bf_vibration_strength", 10, 200, 5, Percent);
+      if (!Truthy(Cvar("bf_vibration"))) strength.disabled = true, strength.note = "Switch Vibration on to set its strength.";
+      rows.push_back(strength);
+    }
+    const bool mnk = Truthy(Cvar("mnk_mode"));
+    const std::string mnk_note = "Used when Keyboard & mouse is on.";
+    {
+      SettingRow r = Slider("Keyboard & mouse", "Mouse sensitivity",
+                            "How far the camera turns as you move the mouse. It turns the same however fast you move "
+                            "it, as in other first person games.", "bf_mouse_sensitivity", 0.1f, 5.0f, 0.05f,
+                            [](float v) {
+                              char b[32];
+                              std::snprintf(b, sizeof(b), "%.2f\xC3\x97", v);
+                              return std::string(b);
+                            });
+      if (!mnk) r.disabled = true, r.note = mnk_note;
+      rows.push_back(r);
+      SettingRow zoom = Slider("Keyboard & mouse", "Aiming sensitivity",
+                               "How fast the mouse turns while you aim down sights or through a scope. At 100% a mouse "
+                               "movement moves the view the same distance on screen as without zoom, for every sight "
+                               "and scope.",
+                               "bf_mouse_zoom_sensitivity", 25, 200, 5, Percent);
+      if (!mnk) zoom.disabled = true, zoom.note = mnk_note;
+      rows.push_back(zoom);
+      SettingRow veh = Slider("Keyboard & mouse", "Vehicle sensitivity",
+                              "How fast the mouse turns vehicles, their guns and planes. The mouse's own: the "
+                              "controller's camera sensitivity does not change it.",
+                              "bf_mouse_vehicle_sensitivity", 0.1f, 5.0f, 0.05f, [](float v) {
+                                char b[32];
+                                std::snprintf(b, sizeof(b), "%.2f×", v);
+                                return std::string(b);
+                              });
+      if (!mnk) veh.disabled = true, veh.note = mnk_note;
+      rows.push_back(veh);
+      SettingRow aim = Toggle("Keyboard & mouse", "Aim",
+                              "Hold: keep the right mouse button held to aim. Toggle: click once to aim and again to "
+                              "stop. The controller has its own choice.",
+                              "bf_mouse_toggle_aim", "Hold", "Toggle");
+      if (!mnk) aim.disabled = true, aim.note = mnk_note;
+      rows.push_back(aim);
+      SettingRow cam = Toggle("Keyboard & mouse", "Mouse camera",
+                              "Turn the camera with the mouse. Off, it turns with the keys bound to the right stick.",
+                              "mnk_mouse");
+      if (!mnk) cam.disabled = true, cam.note = mnk_note;
+      rows.push_back(cam);
+      SettingRow inv = Toggle("Keyboard & mouse", "Mouse vertical", "Which way moving the mouse up and down moves the camera.",
+                              "bf_mouse_invert_y", "Normal", "Inverted");
+      if (!mnk || !Truthy(Cvar("mnk_mouse"))) inv.disabled = true, inv.note = mnk_note;
+      rows.push_back(inv);
+    }
+    // The game's own Controls page, row for row, with its names and choices.
+    rows.push_back(GameChoice("Game controls", "Soldier controls",
+                              "The game's own button layouts for playing on foot, from its Controls page.",
+                              "GstInput", {"Scheme1InputType"}, "0",
+                              {{"Normal", "0"}, {"Southpaw", "1"}, {"Lefty", "2"}, {"Lefty southpaw", "3"}}));
+    rows.push_back(GameChoice("Game controls", "Land and boat controls",
+                              "The game's own button layouts for driving tanks, jeeps and boats.", "GstInput",
+                              {"Scheme2InputType"}, "0",
+                              {{"Normal", "0"}, {"Stickdrive", "1"}, {"Southpaw", "2"}, {"Southpaw stickdrive", "3"}}));
+    rows.push_back(GameChoice("Game controls", "Plane controls", "The game's own button layouts for flying planes.",
+                              "GstInput", {"Scheme3InputType"}, "0",
+                              {{"Normal", "0"}, {"Southpaw", "1"}, {"Lefty", "2"}, {"Lefty southpaw", "3"}}));
+    rows.push_back(GameChoice("Game controls", "Vertical look",
+                              "Inverts up and down when you look around on foot, in land vehicles and in boats, as the "
+                              "game's own setting does.",
+                              "GstInput", {"Scheme1FlipY", "Scheme2FlipY", "Scheme4FlipY"}, "0",
+                              {{"Standard", "0"}, {"Inverted", "1"}}));
+    rows.push_back(GameChoice("Game controls", "Vertical fly",
+                              "Which way a plane pitches, as the game's own setting does. Standard (the game's own): "
+                              "pushing the stick up climbs. Inverted: pushing it up dives, as in a real plane.",
+                              "GstInput",
+                              {"Scheme3FlipY"}, "1", {{"Standard", "1"}, {"Inverted", "0"}}));
+    rows.push_back(GameSlider("Game controls", "Game sensitivity",
+                              "The game's own controller sensitivity, 50% as it starts. Camera sensitivity above works "
+                              "on top of it.",
+                              "GstInput", "Scheme1Sensitivity", 0.5f));
+    rows.push_back(GameChoice("Game controls", "Game vibration",
+                              "The game's own vibration strength. Vibration and Vibration strength above work on top "
+                              "of it.",
+                              "GstInput", {"Vibration"}, "2",
+                              {{"Off", "0"}, {"Weak", "1"}, {"Fairly strong", "2"}, {"Strong", "3"}}));
+    SettingRow remap{"Mapping", "Button remapping", "Choose what each controller button does in the game."};
+    remap.value = ">";
+    remap.activate = [this] { sub_ = kSubRemap, row_ = 0; };
+    rows.push_back(remap);
+    SettingRow keys{"Mapping", "Keyboard bindings",
+                    "The keys and mouse buttons for each of the game's actions, when Keyboard & mouse is on."};
+    keys.value = ">";
+    keys.activate = [this] { sub_ = kSubKeys, row_ = 0; };
+    rows.push_back(keys);
+    SettingRow metrics_key{"Keys while playing", "Performance metrics", "F2 switches the performance metrics while you play."};
+    metrics_key.value = "F2";
+    rows.push_back(metrics_key);
+    return rows;
+  }
+
+  // Controls > Button remapping: what each controller button presses in the game.
+  std::vector<SettingRow> RemapRows() {
+    static const std::pair<const char*, const char*> kButtonsShown[] = {
+        {"a", "A"},           {"b", "B"},           {"x", "X"},           {"y", "Y"},
+        {"lb", "Left bumper"}, {"rb", "Right bumper"}, {"lt", "Left trigger"}, {"rt", "Right trigger"},
+        {"ls", "Left stick press"}, {"rs", "Right stick press"}, {"back", "Back"}, {"start", "Start"},
+        {"up", "D-pad up"},   {"down", "D-pad down"}, {"left", "D-pad left"}, {"right", "D-pad right"}};
+    std::vector<std::pair<std::string, std::string>> targets;
+    for (const auto& [id, label] : kButtonsShown) targets.push_back({label, id});
+    targets.push_back({"Nothing", "none"});
+    std::vector<SettingRow> rows;
+    for (const auto& [id, label] : kButtonsShown)
+      rows.push_back(Choice("Button remapping", label, std::string("What ") + label + " does in the game.",
+                            std::string("bf_remap_") + id, targets));
+    SettingRow reset{"Reset", "Reset remapping", "Every button back to its own action."};
+    reset.activate = [this] {
+      for (const auto& [id, label] : kButtonsShown) SetCvar(std::string("bf_remap_") + id, id);
+    };
+    rows.push_back(reset);
+    return rows;
+  }
+
+  // Controls > Keyboard bindings: the SDK's keybind_* settings, each the controller button BF reads, named by what BF
+  // does with it (BF's own Help & Options > Controls for the soldier, vehicles and planes, runs help3 and helpveh1; in a
+  // vehicle the walk keys are the throttle and the brake and the zoom key the second weapon, input_settings.cpp).
+  // Select a row, then press the key or mouse button for it.
+  std::vector<SettingRow> KeyRows() {
+    static const std::pair<const char*, const char*> kBinds[] = {
+        {"keybind_lstick_up", "Move forward / throttle"},
+        {"keybind_lstick_down", "Move back / brake"},
+        {"keybind_lstick_left", "Move left / turn left"},
+        {"keybind_lstick_right", "Move right / turn right"},
+        {"keybind_right_trigger", "Fire"},
+        {"keybind_left_trigger", "Zoom / second weapon"},
+        {"keybind_a", "Jump / change seat"},
+        {"keybind_b", "Enter, use, pick up / exit"},
+        {"keybind_x", "Reload"},
+        {"keybind_y", "Draw knife"},
+        {"keybind_left_shoulder", "Grenade, explosives"},
+        {"keybind_right_shoulder", "Toggle weapon / second weapon"},
+        {"keybind_lstick_press", "Sprint"},
+        {"keybind_rstick_press", "Crouch"},
+        {"keybind_back", "Command (tap), score (hold)"},
+        {"keybind_start", "Game menu"},
+        {"keybind_dpad_up", "Vehicle camera (D-pad up)"},
+        {"keybind_dpad_down", "D-pad down"},
+        {"keybind_dpad_left", "D-pad left"},
+        {"keybind_dpad_right", "D-pad right"},
+        {"keybind_rstick_up", "Look up (mouse camera off)"},
+        {"keybind_rstick_down", "Look down (mouse camera off)"},
+        {"keybind_rstick_left", "Look left (mouse camera off)"},
+        {"keybind_rstick_right", "Look right (mouse camera off)"}};
+    std::vector<SettingRow> rows;
+    for (const auto& [cvar, label] : kBinds) {
+      SettingRow r{"Keyboard bindings", label,
+                   "Select, then press the key or mouse button for it. Esc keeps what it has. The mouse wheel toggles "
+                   "the weapon on foot."};
+      r.value = capture_ == cvar ? "Press a key" : Cvar(cvar);
+      const std::string name = cvar;
+      r.activate = [this, name] { capture_ = name; };
+      rows.push_back(r);
+    }
+    SettingRow reset{"Reset", "Reset bindings", "Every key back to its default."};
+    reset.activate = [this] {
+      for (const auto& [cvar, label] : kBinds)
+        if (const auto* info = rex::cvar::GetFlagInfo(cvar)) SetCvar(cvar, info->default_value);
+    };
+    rows.push_back(reset);
+    return rows;
+  }
+
+  std::vector<SettingRow> GameplayRows() {
+    std::vector<SettingRow> rows;
+    SettingRow name{"Player", "Name", name_saved_.empty() ? "The name other players see in the game."
+                                                          : "Saved: other players see it from your next start."};
+    name.value = settings_.Get("player_name", "");
+    name.activate = [this] { BeginName(nullptr); };
+    rows.push_back(name);
+    rows.push_back(Choice("Overlay", "Performance metrics",
+                          "Readings in the top left corner while you play. F2 switches between them.",
+                          "bf_performance_metrics", {{"Off", "off"}, {"FPS only", "fps"}, {"Full", "full"}}));
+    rows.push_back(Toggle("Sharing", "Share graphics data",
+                          "Sends the graphics pipelines your game builds (render settings and shader numbers: no game "
+                          "files, no name, nothing about you) to our server, so the next update has them ready and "
+                          "everyone gets less stutter on new maps and effects. At most every 15 minutes, only when "
+                          "something new was built.",
+                          "bf_share_pipelines"));
+    rows.push_back(GameChoice("Sharing", "Telemetry",
+                              "The game's own play reports, from its Sound / Image page. They went to EA's servers, "
+                              "which are gone, so this changes nothing you can see.",
+                              "GstGameplay", {"Telemetry"}, "1", {{"Off", "0"}, {"On", "1"}}));
+    return rows;
+  }
+
+  // A key or mouse button for the Keyboard bindings, in the SDK's names (keybind_* values, sdk ui/keybinds.cpp), from
+  // ImGui's presses. Esc cancels (SettingsPanel); F2 is the metrics key.
+  static std::string CapturedKey() {
+    for (int k = ImGuiKey_A; k <= ImGuiKey_Z; ++k)
+      if (ImGui::IsKeyPressed(ImGuiKey(k))) return std::string(1, char('A' + (k - ImGuiKey_A)));
+    for (int k = ImGuiKey_0; k <= ImGuiKey_9; ++k)
+      if (ImGui::IsKeyPressed(ImGuiKey(k))) return std::string(1, char('0' + (k - ImGuiKey_0)));
+    for (int k = ImGuiKey_Keypad0; k <= ImGuiKey_Keypad9; ++k)
+      if (ImGui::IsKeyPressed(ImGuiKey(k))) return "Numpad" + std::string(1, char('0' + (k - ImGuiKey_Keypad0)));
+    static const std::pair<ImGuiKey, const char*> kNamed[] = {
+        {ImGuiKey_Space, "Space"},        {ImGuiKey_Enter, "Return"},       {ImGuiKey_Backspace, "Backspace"},
+        {ImGuiKey_Tab, "Tab"},            {ImGuiKey_UpArrow, "Up"},         {ImGuiKey_DownArrow, "Down"},
+        {ImGuiKey_LeftArrow, "Left"},     {ImGuiKey_RightArrow, "Right"},   {ImGuiKey_Semicolon, "Semicolon"},
+        {ImGuiKey_Apostrophe, "Quote"},   {ImGuiKey_LeftShift, "Shift"},    {ImGuiKey_RightShift, "Shift"},
+        {ImGuiKey_LeftCtrl, "Control"},   {ImGuiKey_RightCtrl, "Control"},  {ImGuiKey_LeftAlt, "Alt"},
+        {ImGuiKey_RightAlt, "Alt"},       {ImGuiKey_CapsLock, "CapsLock"},  {ImGuiKey_GraveAccent, "Backtick"},
+        {ImGuiKey_Minus, "Minus"},        {ImGuiKey_Equal, "Plus"},         {ImGuiKey_Comma, "Comma"},
+        {ImGuiKey_Period, "Period"},      {ImGuiKey_Slash, "Slash"},        {ImGuiKey_Backslash, "Backslash"},
+        {ImGuiKey_LeftBracket, "LBracket"}, {ImGuiKey_RightBracket, "RBracket"}, {ImGuiKey_Delete, "Delete"},
+        {ImGuiKey_Insert, "Insert"},      {ImGuiKey_Home, "Home"},          {ImGuiKey_End, "End"},
+        {ImGuiKey_PageUp, "PageUp"},      {ImGuiKey_PageDown, "PageDown"},  {ImGuiKey_KeypadEnter, "NumpadEnter"},
+        {ImGuiKey_KeypadAdd, "NumpadPlus"}, {ImGuiKey_KeypadSubtract, "NumpadMinus"},
+        {ImGuiKey_KeypadMultiply, "NumpadStar"}, {ImGuiKey_KeypadDivide, "NumpadSlash"},
+        {ImGuiKey_F1, "F1"},  {ImGuiKey_F3, "F3"},  {ImGuiKey_F4, "F4"},  {ImGuiKey_F5, "F5"},  {ImGuiKey_F6, "F6"},
+        {ImGuiKey_F7, "F7"},  {ImGuiKey_F8, "F8"},  {ImGuiKey_F9, "F9"},  {ImGuiKey_F10, "F10"}, {ImGuiKey_F11, "F11"},
+        {ImGuiKey_F12, "F12"}};
+    for (const auto& [k, name] : kNamed)
+      if (ImGui::IsKeyPressed(k)) return name;
+    // Mouse buttons, from the second frame of the capture (the click that started it is not taken).
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return "LMB";
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) return "RMB";
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) return "MMB";
+    return {};
+  }
+
+  // The settings from the main menu: BF's dialog over its scene.
+  void SettingsPage(ImDrawList* d, float s, ImGuiIO& io, const Input& in) {
+    const ImVec2 sz = io.DisplaySize;
+    if (from_pause_) {  // the pause shows the panel in its own place
+      page_ = Page::kPause, pause_focus_panel_ = true;
+      return;
+    }
+    // The new look (docs/MENUS-PLAN.md section 6): the maps from the air, darkened, never the game's own menu.
+    MainBackdrop(d, sz);
+    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 186));
+    {
+      const kit::Fonts& kf = kit::GetFonts();
+      kit::Spaced(d, kf.typed, 16 * s, ImVec2(sz.x * 0.14f, sz.y * 0.035f), kit::kKhakiDim, "PACIFIC THEATRE, 1943", 4 * s);
+      Text(d, kf.stencil, 54 * s, ImVec2(sz.x * 0.14f - 3 * s, sz.y * 0.052f), kit::kCream, "SETTINGS");
+    }
+    if (SettingsPanel(d, ImVec2(sz.x * 0.14f, sz.y * 0.13f), ImVec2(sz.x * 0.86f, sz.y * 0.80f), in, true))
+      page_ = Page::kMain, row_ = 5;  // back on the main menu's Settings row
+    BfTags(d, io, {{"LB RB", "Section"}, {"B", "Back"}});
+    if (RestartPending()) {  // the rows marked NEXT START (SERVERS-PLAN.md section 3)
+      const std::string t = "SETTINGS MARKED NEXT START TAKE EFFECT WHEN THE GAME STARTS AGAIN";
+      Text(d, g_fonts.bf_med, 22 * s, ImVec2(sz.x * 0.86f - Width(g_fonts.bf_med, 22 * s, t), sz.y * 0.815f),
+           IM_COL32(236, 235, 230, 255), t);
+    }
+  }
+
+  // The settings in BF's dialog: the tabs in the black title bar (LB and RB), the rows on the paper, the selected one
+  // green, and the selected row's help at the foot. With focused false it is drawn without a selection (the pause's
+  // preview while its list has the focus). True when B leaves it.
+  bool SettingsPanel(ImDrawList* d, ImVec2 a, ImVec2 b, const Input& in_raw, bool focused) {
+    const float s = io_scale_;
+    Input in = focused ? in_raw : Input{};
+    const float bar = 52 * s;
+    BfDialog(d, a, b, bar);
+    // Keyboard bindings: the next key goes to the row being bound.
+    if (focused && !capture_.empty()) {
+      if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        capture_.clear();
+      } else if (const std::string key = CapturedKey(); !key.empty()) {
+        SetCvar(capture_, key);
+        capture_.clear();
+      }
+      in = {};
+    }
+    if (sub_ == kSubNone) {
+      if (in.prev_tab) tab_ = (tab_ + kTabCount - 1) % kTabCount, row_ = 0, scroll_ = 0;
+      if (in.next_tab) tab_ = (tab_ + 1) % kTabCount, row_ = 0, scroll_ = 0;
+      // The tabs, spread over the bar; a click switches.
+      const float tab_size = std::min(28 * s, (b.x - a.x) / 26.0f);
+      float total = 0;
+      for (int t = 0; t < kTabCount; ++t) total += Width(g_fonts.bf, tab_size, kTabNames[t]);
+      const float gap = std::max(18 * s, ((b.x - a.x) - 40 * s - total) / float(kTabCount));
+      float tx = a.x + 20 * s + gap * 0.5f;
+      for (int t = 0; t < kTabCount; ++t) {
+        const bool cur = t == tab_;
+        const float tw = Width(g_fonts.bf, tab_size, kTabNames[t]);
+        Text(d, g_fonts.bf, tab_size, ImVec2(tx, CapTop(a.y, bar, tab_size)),
+             cur ? IM_COL32(242, 242, 238, 255) : IM_COL32(118, 118, 116, 255), kTabNames[t]);
+        if (cur) d->AddRectFilled(ImVec2(tx, a.y + bar - 7 * s), ImVec2(tx + tw, a.y + bar - 3 * s), kBfGreen);
+        if (ImGui::IsMouseHoveringRect(ImVec2(tx, a.y), ImVec2(tx + tw, a.y + bar)) &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+          tab_ = t, row_ = 0, scroll_ = 0, sub_ = kSubNone;
+        tx += tw + gap;
+      }
+    } else {
+      const std::string t = sub_ == kSubRemap ? "CONTROLS  /  BUTTON REMAPPING" : "CONTROLS  /  KEYBOARD BINDINGS";
+      Text(d, g_fonts.bf, 28 * s, ImVec2((a.x + b.x - Width(g_fonts.bf, 28 * s, t)) * 0.5f, CapTop(a.y, bar, 28 * s)),
+           IM_COL32(242, 242, 238, 255), t);
+    }
+    const std::vector<SettingRow> rows = RowsOf(tab_);
+    const int count = int(rows.size());
+    if (in.up) row_ = (row_ + count - 1) % count;
+    if (in.down) row_ = (row_ + 1) % count;
+    row_ = std::clamp(row_, 0, count - 1);
+    // The help at the foot of the paper; the rows scroll above it so the selected one stays in view.
+    const float pad = 18 * s, help_h = std::min(150 * s, (b.y - a.y) * 0.26f);
+    const float top = a.y + bar + 10 * s, bottom = b.y - help_h, rh = 38 * s, sh = 30 * s;
+    std::vector<float> ys(static_cast<size_t>(count));
+    {
+      float y = 0;
+      std::string section;
+      for (int i = 0; i < count; ++i) {
+        if (rows[i].section != section) section = rows[i].section, y += sh;
+        ys[size_t(i)] = y;
+        y += rh;
+      }
+    }
+    if (ys[size_t(row_)] - scroll_ < sh) scroll_ = std::max(0.0f, ys[size_t(row_)] - sh);
+    if (ys[size_t(row_)] + rh - scroll_ > bottom - top) scroll_ = ys[size_t(row_)] + rh - (bottom - top);
+    d->PushClipRect(ImVec2(a.x, top), ImVec2(b.x, bottom), true);
+    std::string section;
+    const float x0 = a.x + pad, x1 = b.x - pad, name_size = 24 * s;
+    for (int i = 0; i < count; ++i) {
+      const SettingRow& it = rows[i];
+      const float y = top + ys[size_t(i)] - scroll_;
+      if (it.section != section) {
+        section = it.section;
+        const std::string head = Upper(section);
+        Text(d, g_fonts.bf, 19 * s, ImVec2(x0, CapTop(y - sh, sh, 19 * s)), kBfFaint, head);
+        const float hx = x0 + Width(g_fonts.bf, 19 * s, head) + 10 * s;
+        d->AddLine(ImVec2(hx, y - sh * 0.5f), ImVec2(x1, y - sh * 0.5f), IM_COL32(176, 174, 168, 255), 1.0f);
+      }
+      if (y + rh < top || y > bottom) continue;
+      const bool sel = focused && i == row_;
+      const ImVec2 r0(x0, y), r1(x1, y + rh);
+      if (focused && ImGui::IsMouseHoveringRect(r0, r1) && ImGui::GetIO().MouseDelta.y) row_ = i;
+      if (sel) d->AddRectFilled(r0, r1, kBfGreen);
+      const ImU32 ink = it.disabled ? (sel ? IM_COL32(170, 176, 150, 255) : kBfFaint) : sel ? kBfGreenInk : kBfInk;
+      Text(d, g_fonts.bf_med, name_size, ImVec2(x0 + 12 * s, CapTop(y, rh, name_size)), ink, Upper(it.name));
+      std::string shown = it.slider ? (it.format ? it.format(it.val) : std::to_string(it.val))
+                          : it.options.empty() ? it.value
+                                               : it.options[size_t(std::clamp(it.index, 0, int(it.options.size()) - 1))];
+      shown = Upper(shown);
+      const float vs = 23 * s, w = Width(g_fonts.bf_med, vs, shown);
+      const bool changeable = !it.disabled && (it.choose || it.slider);
+      const float vx = x1 - 34 * s - w;
+      Text(d, g_fonts.bf_med, vs, ImVec2(vx, CapTop(y, rh, vs)), sel ? kBfGreenInk : changeable ? kBfInk : kBfFaint, shown);
+      if (Pending(it)) {  // changed, taken at the next start
+        const float ts = 16 * s, tw = Width(g_fonts.bf_med, ts, "NEXT START");
+        Text(d, g_fonts.bf_med, ts, ImVec2(vx - (sel ? 44 : 22) * s - tw, CapTop(y, rh, ts)),
+             sel ? kBfGreenInk : IM_COL32(176, 52, 40, 255), "NEXT START");
+      }
+      if (it.slider) {  // the slider's track left of its value
+        const float t0 = x0 + (x1 - x0) * 0.52f, t1 = vx - 26 * s, ty = y + rh * 0.5f;
+        if (t1 > t0) {
+          const float f = (it.val - it.lo) / std::max(1e-6f, it.hi - it.lo), fx = t0 + (t1 - t0) * f;
+          d->AddRectFilled(ImVec2(t0, ty - 1.5f * s), ImVec2(t1, ty + 1.5f * s),
+                           sel ? IM_COL32(150, 170, 120, 255) : IM_COL32(190, 188, 182, 255));
+          d->AddRectFilled(ImVec2(t0, ty - 1.5f * s), ImVec2(fx, ty + 1.5f * s), sel ? kBfGreenInk : it.disabled ? kBfFaint : kBfInk);
+          d->AddRectFilled(ImVec2(fx - 3 * s, ty - 9 * s), ImVec2(fx + 3 * s, ty + 9 * s), sel ? kBfGreenInk : kBfInk);
+        }
+      }
+      if (sel && changeable) {
+        Text(d, g_fonts.bf_med, vs, ImVec2(vx - 20 * s, CapTop(y, rh, vs)), kBfGreenInk, "<");
+        Text(d, g_fonts.bf_med, vs, ImVec2(x1 - 22 * s, CapTop(y, rh, vs)), kBfGreenInk, ">");
+      }
+      const bool clicked = focused && ImGui::IsMouseHoveringRect(r0, r1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+      if (!sel || it.disabled) continue;
+      // Each change logged, for the player's log and the tests.
+      if (it.activate && (in.accept || clicked)) {
+        REXLOG_INFO("BF settings: {} / {} opened", kTabNames[tab_], it.name);
+        it.activate();
+      } else if (it.slider && (in.left || in.right)) {
+        const float v = std::clamp(it.val + (in.left ? -it.step : it.step), it.lo, it.hi);
+        REXLOG_INFO("BF settings: {} / {} -> {}", kTabNames[tab_], it.name, it.format ? it.format(v) : fmt::format("{}", v));
+        it.set(v);
+      } else if (it.choose && !it.options.empty() && (in.left || in.right || in.accept || clicked)) {
+        const int n = int(it.options.size()), next = (std::clamp(it.index, 0, n - 1) + (in.left ? n - 1 : 1)) % n;
+        REXLOG_INFO("BF settings: {} / {} -> {}", kTabNames[tab_], it.name, it.options[size_t(next)]);
+        it.choose(next);
+      }
+    }
+    d->PopClipRect();
+    // The selected row's help.
+    d->AddLine(ImVec2(x0, bottom + 2 * s), ImVec2(x1, bottom + 2 * s), IM_COL32(60, 60, 58, 255), 1.5f * s);
+    const SettingRow& it = rows[size_t(row_)];
+    if (focused) {
+      Text(d, g_fonts.bf, 24 * s, ImVec2(x0, bottom + 10 * s), it.disabled ? kBfFaint : kBfInk, Upper(it.name));
+      d->AddText(g_fonts.body, 19 * s, ImVec2(x0, bottom + 46 * s), IM_COL32(40, 40, 38, 255), it.help.c_str(), nullptr,
+                 x1 - x0);
+      if (!it.note.empty()) {
+        const float hh = g_fonts.body->CalcTextSizeA(19 * s, FLT_MAX, x1 - x0, it.help.c_str()).y;
+        d->AddText(g_fonts.body, 17 * s, ImVec2(x0, bottom + 50 * s + hh), kBfRed, it.note.c_str(), nullptr, x1 - x0);
+      }
+    } else {
+      Text(d, g_fonts.bf_med, 21 * s, ImVec2(x0, bottom + 14 * s), kBfFaint, "PRESS A TO CHANGE THE SETTINGS");
+    }
+    if (!focused || !in.back) return false;
+    if (sub_ != kSubNone) {
+      row_ = sub_ == kSubRemap ? 14 : 15;
+      sub_ = kSubNone;
+      return false;
+    }
+    return true;
+  }
+
+  // In a match: our menu in place of BF's "Frontline Report". The match keeps running; the soldier stands still
+  // while it is open (the game gets an empty pad).
+  // Dev test (BF_PAUSE_TEST=<spawn s>,<pause s>): in a match, A three times at <spawn s> (Loading complete, spawn),
+  // then at <pause s> our pause menu and Leave match.
+  // BF_MENU_STEPS (tests): our menu's input at set times, "<s from start>:<what>" separated by commas: up, down,
+  // left, right, a, b, lb, rb, and bfb, bfa, bfup, bfdown, bfleft, bfright, bflb, bfrb (the player's press on BF's own
+  // screen). The dev pad's presses go to
+  // the game, not to our menu.
+  void MenuSteps() {
+    static const std::vector<std::pair<double, std::string>> steps = [] {
+      std::vector<std::pair<double, std::string>> out;
+      const char* v = std::getenv("BF_MENU_STEPS");
+      const std::string list = v ? v : "";
+      for (size_t at = 0; at < list.size();) {
+        const size_t end = std::min(list.find(',', at), list.size());
+        const std::string item = list.substr(at, end - at);
+        if (const size_t colon = item.find(':'); colon != std::string::npos)
+          out.push_back({std::atof(item.substr(0, colon).c_str()), item.substr(colon + 1)});
+        at = end + 1;
+      }
+      return out;
+    }();
+    static size_t next = 0;
+    if (release_click_) ImGui::GetIO().AddMouseButtonEvent(0, false), release_click_ = false;
+    while (next < steps.size() && ImGui::GetTime() > steps[next].first) {
+      const std::string& w = steps[next++].second;
+      REXLOG_INFO("BF menu steps: {}", w);
+      std::lock_guard<std::mutex> lock(pad_mutex_);
+      // A controller's press for the prompts (the keyboard's, typing and the mouse's steps are theirs).
+      if (w.find('/') == std::string::npos && w.rfind("bf", 0) != 0) pad_pressed_ = true;
+      if (w == "up") pad_.up = true;
+      else if (w == "down") pad_.down = true;
+      else if (w == "left") pad_.left = true;
+      else if (w == "right") pad_.right = true;
+      else if (w == "a") pad_.accept = true;
+      else if (w == "b") pad_.back = true;
+      else if (w == "lb") pad_.prev_tab = true;
+      else if (w == "rb") pad_.next_tab = true;
+      else if (w == "x") pad_.x = true;
+      else if (w == "y") pad_.y = true;
+      else if (w == "start") pad_.start = true;
+      else if (w == "view") pad_.view = true;
+      // key/<name>: the keyboard's press (enter, esc, up, down, left, right, tab, f, r, p, q, e); type/<text>: typed;
+      // move/<x>/<y> and click/<x>/<y>: the mouse at the 1280 x 720 stage's point.
+      else if (w.rfind("key/", 0) == 0) {
+        const std::string k = w.substr(4);
+        Input& t = test_key_;
+        if (k == "enter") t.accept = true;
+        else if (k == "esc") t.back = true;
+        else if (k == "up") t.up = true;
+        else if (k == "down") t.down = true;
+        else if (k == "left") t.left = true;
+        else if (k == "right") t.right = true;
+        else if (k == "tab") t.view = true;
+        else if (k == "f") t.x = true;
+        else if (k == "r") t.y = true;
+        else if (k == "p") t.start = true;
+        else if (k == "q") t.prev_tab = true;
+        else if (k == "e") t.next_tab = true;
+      } else if (w.rfind("press/", 0) == 0 || w.rfind("hold/", 0) == 0 || w.rfind("release/", 0) == 0) {
+        // press/<key>, hold/<key>, release/<key>: f6, f7, f8 and the arrows as ImGui sees them (the graphics panel)
+        const std::string k = w.substr(w.find('/') + 1);
+        const ImGuiKey key = k == "f8" ? ImGuiKey_F8 : k == "f7" ? ImGuiKey_F7 : k == "f6" ? ImGuiKey_F6
+                             : k == "right" ? ImGuiKey_RightArrow : k == "left" ? ImGuiKey_LeftArrow
+                             : k == "down" ? ImGuiKey_DownArrow : k == "up" ? ImGuiKey_UpArrow : ImGuiKey_None;
+        if (key != ImGuiKey_None) {
+          if (w[0] != 'r') ImGui::GetIO().AddKeyEvent(key, true);
+          if (w[0] != 'h') ImGui::GetIO().AddKeyEvent(key, false);
+        }
+      } else if (w.rfind("type/", 0) == 0) {
+        ImGui::GetIO().AddInputCharactersUTF8(w.substr(5).c_str());
+      } else if (w.rfind("move/", 0) == 0 || w.rfind("click/", 0) == 0) {
+        const bool click = w[0] == 'c';
+        const size_t a = w.find('/'), b = w.find('/', a + 1);
+        const float x = float(std::atof(w.substr(a + 1, b - a - 1).c_str())), y = float(std::atof(w.substr(b + 1).c_str()));
+        const Stage st = StageOf(ImGui::GetIO());
+        const ImVec2 at = st.P(x, y);
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddMousePosEvent(at.x - 2, at.y);  // two moves: the hover follows the mouse (it moved on two frames)
+        io.AddMousePosEvent(at.x, at.y);
+        if (click) io.AddMouseButtonEvent(0, true), release_click_ = true;
+      }
+      else if (w == "bfb") PressBf({kPadB}), Passing(kPadB);  // the player's B on BF's own screen
+      else if (w == "bfa") PressBf({kPadA}), Passing(kPadA);
+      else if (w == "bfdown") PressBf({kPadDown}), Passing(kPadDown);  // BF's own lists (its Help & Options)
+      else if (w == "bfup") PressBf({kPadUp}), Passing(kPadUp);
+      else if (w == "bfright") PressBf({0x0008}), Passing(0x0008);
+      else if (w == "bfleft") PressBf({0x0004}), Passing(0x0004);
+      else if (w == "bfrb") PressBf({0x0200}), Passing(0x0200);
+      else if (w == "bflb") PressBf({0x0100}), Passing(0x0100);
+    }
+  }
+
+  void PauseTest() {
+    static const std::pair<double, double> at = [] {
+      const char* v = std::getenv("BF_PAUSE_TEST");
+      if (!v || !*v) return std::pair<double, double>{-1, -1};
+      return std::pair<double, double>{std::atof(v), std::atof(std::strchr(v, ',') ? std::strchr(v, ',') + 1 : v)};
+    }();
+    if (at.first < 0) return;
+    static double in_match = -1;
+    static int step = 0;
+    const double now = ImGui::GetTime();
+    if (MenuDriverStage() != 5 || (in_match < 0 && !LevelLoaded())) return;  // from Loading complete
+    if (in_match < 0) in_match = now;
+    // BF_PAUSE_BARE=1: the leave walk with our menu closed, so screenshots show BF's own menu.
+    static const bool bare = [] {
+      const char* v = std::getenv("BF_PAUSE_BARE");
+      return v && *v == '1';
+    }();
+    // BF_PAUSE_STEPS (with BF_PAUSE_TEST): what happens after the pause opens, "<s after it>:<what>" separated by
+    // commas: row<n> (the list's row), panel (PC settings gets the focus), down, tab, back, select (A), leave,
+    // bfb and bfa (the player's B or A on BF's own screen: pressed to BF, and seen as the real pad's).
+    // Without it: Exit game 2 s after the pause opens, as before.
+    static const std::vector<std::pair<double, std::string>> steps = [] {
+      std::vector<std::pair<double, std::string>> out;
+      const char* v = std::getenv("BF_PAUSE_STEPS");
+      std::string list = v ? v : "2:leave,3:yes";
+      for (size_t at = 0; at < list.size();) {
+        const size_t end = std::min(list.find(',', at), list.size());
+        const std::string item = list.substr(at, end - at);
+        if (const size_t colon = item.find(':'); colon != std::string::npos)
+          out.push_back({std::atof(item.substr(0, colon).c_str()), item.substr(colon + 1)});
+        at = end + 1;
+      }
+      return out;
+    }();
+    static size_t next = 0;
+    if (bare && step == 1 && now - in_match > at.second) LeaveMatch(), step = 3;
+    if (step == 0 && now - in_match > at.first) RunPauseAction(3), step = 1;
+    else if (step == 1 && now - in_match > at.second) ShowPause(), step = 2;  // ours only: the game's never opens
+    else if (step == 2 && next < steps.size() && now - in_match > at.second + steps[next].first) {
+      const std::string& what = steps[next++].second;
+      REXLOG_INFO("BF pause test: {}", what);
+      std::lock_guard<std::mutex> lock(pad_mutex_);
+      if (what.rfind("row", 0) == 0) pause_row_ = std::atoi(what.c_str() + 3);
+      else if (what == "panel") pause_focus_panel_ = true, row_ = 0, scroll_ = 0;
+      // tabto<n>: the settings panel on that tab; prow=<name>: on that row of it.
+      else if (what.rfind("tabto", 0) == 0) tab_ = std::clamp(std::atoi(what.c_str() + 5), 0, int(kTabCount) - 1), row_ = 0, scroll_ = 0;
+      else if (what.rfind("prow=", 0) == 0) {
+        const std::vector<SettingRow> rows = RowsOf(tab_);
+        for (size_t i = 0; i < rows.size(); ++i)
+          if (rows[i].name == what.substr(5)) row_ = int(i);
+      }
+      else if (what == "down") pad_.down = true;
+      else if (what == "tab") pad_.next_tab = true;
+      else if (what == "back") pad_.back = true;
+      else if (what == "select") pad_.accept = true;
+      else if (what == "right") pad_.right = true;
+      else if (what == "left") pad_.left = true;
+      else if (what == "leave") pause_row_ = kPauseExit, pad_.accept = true;  // its question next: "yes"
+      else if (what == "yes") pad_.accept = true;
+      else if (what == "y") pad_.y = true;  // Y: our private match card copies its address
+      else if (what == "suicide") pause_row_ = kPauseSuicide, pad_.accept = true;
+      else if (what == "bfb") PressBf({kPadB}), Passing(kPadB);  // the player's B on BF's own screen
+      else if (what == "bfa") PressBf({kPadA}), Passing(kPadA);
+      else if (what == "bfdown") PressBf({kPadDown}), Passing(kPadDown);
+      else if (what == "bfup") PressBf({kPadUp}), Passing(kPadUp);
+      else if (what == "bfright") PressBf({0x0008}), Passing(0x0008);
+      else if (what == "bfy") PressBf({0x8000}), Passing(0x8000);
+      else if (what == "bfstart") open_ = false, PressBf({kPadStart});  // ours closed, the game's own pause (traces)
+    }
+  }
+
+  // Our pause, in place of the game's (TekRantGaming, 10 Nov 2026: a 100% replacement whose rows do what they say, by the
+  // game's own commands; docs/MENUS-PLAN.md). The game's own pause is never opened: Start reaches ours only
+  // (auto_join.cpp), the match goes on behind it darkened (multiplayer), and the game reads an empty pad meanwhile.
+  // Exit Game and Suicide ask first, as the game's did, then send doExitLevel and suicide.
+  static constexpr const char* kPauseRows[] = {"RESUME",   "MY SQUAD",     "SCOREBOARD",   "SETTINGS", "CONTROLS",
+                                               "LEADERBOARDS", "ACHIEVEMENTS", "EXIT GAME", "SUICIDE"};
+  static constexpr int kPauseResume = 0, kPauseSquad = 1, kPauseScoreboard = 2, kPauseSettingsRow = 3,
+                       kPauseControls = 4, kPauseLeaderboards = 5, kPauseAchievements = 6, kPauseExit = 7,
+                       kPauseSuicide = 8;
+  bool ach_from_pause_ = false;  // the achievements opened from the pause: B goes back there
+  int pause_confirm_ = -1;  // the row whose question is up (Exit Game, Suicide), else -1
+
+  // Our pause, or a page opened from it (its Scoreboard, Controls, Leaderboards and Achievements).
+  bool InPause() const {
+    return page_ == Page::kPause || page_ == Page::kScoreboard || (page_ == Page::kControls && ctl_from_pause_) ||
+           (page_ == Page::kLeaderboards && lb_from_pause_) || (page_ == Page::kAchievements && ach_from_pause_);
+  }
+  // Back to the match from wherever in the pause (its next opening starts on its first row).
+  void ClosePause(const char* by) {
+    REXLOG_INFO("BF pause: closed by {}", by);
+    open_ = false, page_ = Page::kPause, pause_confirm_ = -1, pause_focus_panel_ = false;
+    ctl_from_pause_ = lb_from_pause_ = ach_from_pause_ = false;
+  }
+
+  void PauseAct(int row) {
+    if (row == kPauseResume) {
+      ClosePause("RESUME");
+    } else if (row == kPauseSettingsRow) {
+      pause_focus_panel_ = true, row_ = 0, scroll_ = 0;
+    } else if (row == kPauseSquad) {
+      pause_confirm_ = row;  // its card: find an open squad, or leave this one
+    } else if (row == kPauseScoreboard) {
+      page_ = Page::kScoreboard, sb_asked_at_ = -100;
+    } else if (row == kPauseControls) {  // the game's in game Help & Options > Controls
+      page_ = Page::kControls, ctl_tab_ = 0, ctl_from_pause_ = true;
+    } else if (row == kPauseLeaderboards) {
+      page_ = Page::kLeaderboards, lb_from_pause_ = true, lb_asked_at_ = -100;
+    } else if (row == kPauseAchievements) {
+      page_ = Page::kAchievements, ach_scroll_ = 0, ach_from_pause_ = true;
+    } else if (row == kPauseExit || row == kPauseSuicide) {
+      pause_confirm_ = row;
+    }
+  }
+
+  void PausePage(ImDrawList* d, float s, ImGuiIO& io, const Input& in) {
+    (void)s;
+    const ImVec2 sz = io.DisplaySize;
+    const kit::Fonts& f = kit::GetFonts();
+    const float u = sz.y / 1080.0f;
+    const int count = int(std::size(kPauseRows));
+    // The match behind, darker toward the column.
+    d->AddRectFilledMultiColor(ImVec2(0, 0), sz, IM_COL32(6, 7, 5, 222), IM_COL32(6, 7, 5, 120),
+                               IM_COL32(6, 7, 5, 120), IM_COL32(6, 7, 5, 222));
+    const float cx0 = sz.x * 0.05f, cx1 = cx0 + 560 * u;
+    d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(15, 17, 13, 238));
+    d->AddRectFilled(ImVec2(cx1, 0), ImVec2(cx1 + 2 * u, sz.y), IM_COL32(201, 183, 122, 110));
+    // The heading: the brand, a typed caption, a stencilled PAUSED and a red rule.
+    kit::Brand(d, ImVec2(cx0, 58 * u), u * 0.9f);
+    const float hy = 170 * u;
+    kit::Spaced(d, f.typed, 20 * u, ImVec2(cx0, hy), kit::kKhakiDim, "IN THE FIELD", 4 * u);
+    Text(d, f.stencil, 96 * u, ImVec2(cx0 - 4 * u, hy + 26 * u), kit::kCream, "PAUSED");
+    d->AddRectFilled(ImVec2(cx0, hy + 138 * u), ImVec2(cx0 + 64 * u, hy + 144 * u), kit::kStamp);
+    // The settings panel takes input only when it already had the focus as this frame began: the A that opens it
+    // from the SETTINGS row is not also its first row's press (TekRantGaming, 10 Nov: it switched the game to a window).
+    const bool panel_focused_before = pause_focus_panel_;
+    // The rows (nine since CONTROLS: a little tighter, clear of the prompts).
+    const float ry = hy + 186 * u, rh = 66 * u;
+    const bool rows_have_input = pause_confirm_ < 0 && !pause_focus_panel_;
+    if (rows_have_input) {
+      if (in.up) pause_row_ = (pause_row_ + count - 1) % count;
+      if (in.down) pause_row_ = (pause_row_ + 1) % count;
+    }
+    int clicked = -1;
+    for (int i = 0; i < count; ++i) {
+      const ImVec2 a(cx0 - 28 * u, ry + rh * i), b(cx1, ry + rh * (i + 1));
+      const bool sel = i == pause_row_;
+      const bool hover = ImGui::IsMouseHoveringRect(a, b);
+      if (rows_have_input && hover && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) pause_row_ = i;
+      if (rows_have_input && hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
+      if (sel) {
+        d->AddRectFilled(a, b, IM_COL32(201, 183, 122, 26));
+        d->AddRectFilled(a, ImVec2(a.x + 8 * u, b.y), kit::kStamp);
+      }
+      d->AddRectFilled(ImVec2(cx0, b.y - 1 * u), ImVec2(cx1 - 40 * u, b.y), IM_COL32(201, 183, 122, 34));
+      kit::Spaced(d, f.typed, 16 * u, ImVec2(cx0, a.y + 24 * u), sel ? kit::kStamp : kit::kKhakiDim,
+                  fmt::format("{:02d}", i + 1), 2 * u);
+      kit::Spaced(d, f.ui_bold, 38 * u, ImVec2(cx0 + 52 * u, a.y + 12 * u), sel ? kit::kCream : kit::kKhakiText,
+                  kPauseRows[i], 3 * u);
+    }
+    if (rows_have_input && in.accept) clicked = pause_row_;
+    if (rows_have_input && in.back) {  // Start closed it already (OnDraw)
+      ClosePause("B or Esc");
+      return;
+    }
+    if (clicked >= 0) pause_row_ = clicked, PauseAct(clicked);
+    // The right side: the settings while their row is chosen, or a row's question.
+    const ImVec2 pa(cx1 + sz.x * 0.05f, sz.y * 0.14f), pb(sz.x * 0.95f, sz.y * 0.86f);
+    if ((pause_row_ == kPauseSettingsRow || pause_focus_panel_) && pause_confirm_ < 0) {
+      if (SettingsPanel(d, pa, pb, panel_focused_before ? in : Input{}, pause_focus_panel_)) {
+        pause_focus_panel_ = false;
+      } else if (!pause_focus_panel_ && ImGui::IsMouseHoveringRect(pa, pb) &&
+                 ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        pause_focus_panel_ = true;
+      }
+    }
+    if (pm_hosting_ && pm_joining_ && pause_confirm_ < 0 && pause_row_ != kPauseSettingsRow && !pause_focus_panel_)
+      PrivateMatchPauseCard(d, io, in);  // our private match: its players, its reach, the address for friends
+    if (pause_confirm_ == kPauseSquad) {  // My Squad: the game's own squad commands (traced, run squadtrace1)
+      const float w = 760 * u, h = 280 * u;
+      const ImVec2 ca((pa.x + pb.x - w) * 0.5f, sz.y * 0.5f - h * 0.5f), cb(ca.x + w, ca.y + h);
+      kit::Paper(d, ca, cb, u, false);
+      kit::Spaced(d, f.typed, 18 * u, ImVec2(ca.x + 40 * u, ca.y + 34 * u), kit::kInkFaint, "MY SQUAD", 4 * u);
+      Text(d, f.stencil, 50 * u, ImVec2(ca.x + 38 * u, ca.y + 64 * u), kit::kInk, "SQUAD UP");
+      kit::Wrapped(d, f.typed, 20 * u, ImVec2(ca.x + 40 * u, ca.y + 132 * u), kit::kInkSoft,
+                   "Join an open squad to spawn on your squad mates, or leave the one you are in.", w - 80 * u);
+      const ImVec2 ya(ca.x + 40 * u, cb.y - 80 * u), yb(ca.x + 380 * u, cb.y - 28 * u);
+      const ImVec2 na(ca.x + 400 * u, cb.y - 80 * u), nb(ca.x + 720 * u, cb.y - 28 * u);
+      d->AddRectFilled(ya, yb, kit::kInk);
+      d->AddRectFilled(na, nb, kit::kPaperDim);
+      const float gy = kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(ya.x + 14 * u, (ya.y + yb.y) * 0.5f), 28 * u);
+      kit::Spaced(d, f.ui_bold, 22 * u, ImVec2(ya.x + 24 * u + gy, ya.y + 13 * u), kit::kStripText, "FIND AN OPEN SQUAD", 2 * u);
+      const float gn = kit::Glyph(d, PromptStyle(), kit::Button::kX, "F", ImVec2(na.x + 14 * u, (na.y + nb.y) * 0.5f), 28 * u);
+      kit::Spaced(d, f.ui_bold, 22 * u, ImVec2(na.x + 24 * u + gn, na.y + 13 * u), kit::kInk, "LEAVE SQUAD", 2 * u);
+      const bool find = (in.accept && clicked < 0) ||
+                        (ImGui::IsMouseHoveringRect(ya, yb) && ImGui::IsMouseClicked(ImGuiMouseButton_Left));
+      const bool leave = in.x || (ImGui::IsMouseHoveringRect(na, nb) && ImGui::IsMouseClicked(ImGuiMouseButton_Left));
+      if (find || leave) {
+        REXLOG_INFO("BF pause: {} (the game's own command)", find ? "find an open squad" : "leave the squad");
+        GameCommand(find ? "triggerLookingForSquad" : "leaveSquad", "");
+        pause_confirm_ = -1;
+        open_ = false;
+        return;
+      }
+      if (in.back) pause_confirm_ = -1;
+    } else if (pause_confirm_ >= 0) {
+      const bool exit = pause_confirm_ == kPauseExit;
+      const float w = 760 * u, h = 300 * u;
+      const ImVec2 ca((pa.x + pb.x - w) * 0.5f, sz.y * 0.5f - h * 0.5f), cb(ca.x + w, ca.y + h);
+      kit::Paper(d, ca, cb, u, false);
+      kit::Spaced(d, f.typed, 18 * u, ImVec2(ca.x + 40 * u, ca.y + 34 * u), kit::kInkFaint,
+                  exit ? "EXIT GAME" : "SUICIDE", 4 * u);
+      Text(d, f.stencil, 54 * u, ImVec2(ca.x + 38 * u, ca.y + 64 * u), kit::kInk,
+           exit ? "LEAVE THIS MATCH?" : "END THIS LIFE?");
+      kit::Wrapped(d, f.typed, 20 * u, ImVec2(ca.x + 40 * u, ca.y + 140 * u), kit::kInkSoft,
+                   exit ? (pm_hosting_ ? "You go back to the main menu, and your private match ends for everyone in it."
+                                       : "You go back to the main menu. Your score in this round stays with the server.")
+                        : "Your soldier dies and you pick a new spawn point. It counts as a death.",
+                   w - 80 * u);
+      const ImVec2 ya(ca.x + 40 * u, cb.y - 84 * u), yb(ca.x + 300 * u, cb.y - 30 * u);
+      const ImVec2 na(ca.x + 330 * u, cb.y - 84 * u), nb(ca.x + 590 * u, cb.y - 30 * u);
+      d->AddRectFilled(ya, yb, kit::kInk);
+      d->AddRectFilled(na, nb, kit::kPaperDim);
+      const float gy = kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter",
+                                  ImVec2(ya.x + 14 * u, (ya.y + yb.y) * 0.5f), 30 * u);
+      kit::Spaced(d, f.ui_bold, 26 * u, ImVec2(ya.x + 26 * u + gy, ya.y + 12 * u), kit::kStripText, "YES", 3 * u);
+      const float gn = kit::Glyph(d, PromptStyle(), kit::Button::kB, "Esc",
+                                  ImVec2(na.x + 14 * u, (na.y + nb.y) * 0.5f), 30 * u);
+      kit::Spaced(d, f.ui_bold, 26 * u, ImVec2(na.x + 26 * u + gn, na.y + 12 * u), kit::kInk, "NO", 3 * u);
+      const bool yes = in.accept || (ImGui::IsMouseHoveringRect(ya, yb) && ImGui::IsMouseClicked(ImGuiMouseButton_Left));
+      const bool no = in.back || (ImGui::IsMouseHoveringRect(na, nb) && ImGui::IsMouseClicked(ImGuiMouseButton_Left));
+      if (yes && clicked < 0) {
+        REXLOG_INFO("BF pause: {} chosen (the game's own command)", exit ? "Exit Game" : "Suicide");
+        pause_confirm_ = -1;
+        if (exit) {
+          Leave();
+          return;
+        }
+        SuicideNow();
+        open_ = false;
+        return;
+      }
+      if (no) pause_confirm_ = -1;
+    }
+    // The prompts (the playtest stamp is the menu's own, top right).
+    const float py = sz.y - 64 * u;
+    float x = cx0;
+    x += kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(x, py), 34 * u) + 10 * u;
+    x += kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(x, py - 14 * u), kit::kKhakiText, "SELECT", 3 * u) + 34 * u;
+    x += kit::Glyph(d, PromptStyle(), kit::Button::kB, "Esc", ImVec2(x, py), 34 * u) + 10 * u;
+    kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(x, py - 14 * u), kit::kKhakiText,
+                pause_confirm_ >= 0 || pause_focus_panel_ ? "BACK" : "RESUME", 3 * u);
+  }
+
+  void RunPauseRow(int clicked) {
+    const ListItem& it = kPauseItems[clicked];
+    // BF's selection moves from where it is (BF keeps it between pauses, run origpause3) to the row.
+    std::vector<std::pair<double, uint16_t>> presses = BfRowPresses(bf_cursor_, it.bf_row);
+    if (it.does == Does::kNothing) {  // BF does nothing with it on PC, as on the original
+      PressBfTimed(presses);
+      return;
+    }
+    if (it.does == Does::kLeave) {  // the game's own Exit Game command (doExitLevel), not its rows pressed
+      LeaveMatch();
+      page_ = Page::kLeaving;
+      leaving_at_ = ImGui::GetTime();
+      return;
+    }
+    if (it.does == Does::kQuestion) {  // Suicide: the game's own command; the pause closes as the game's does
+      SuicideNow();
+      open_ = false;
+      return;
+    }
+    // BF's own screen takes over with the real pad once the presses are done (ours stays over BF's list until
+    // then, so its selection moving never shows); ours comes back when the player backs out to BF's list.
+    PressBfTimed(presses);
+    handing_over_ = clicked;
+  }
+
+  // While BF's own screen (from the main menu or the pause) has the real pad: B back to BF's list brings our list
+  // back over it. Each A on a screen of BF's goes one screen deeper, each B one back. The scoreboard's B and the
+  // Suicide question's A end the pause (BF goes back to the match), as does Start in the pause. Under pad_mutex_.
+  void Passing(uint16_t pressed) {
+    if (passing_ < 0) return;
+    const Does does = (passing_main_ ? kMainItems : kPauseItems)[passing_].does;
+    if ((pressed & kPadStart) && !passing_main_) {
+      passing_ = -1;
+    } else if (does == Does::kHelp) {
+      // BF's Help & Options in the pause (runs pausehelp3 to pausehelp9; TekRantGaming, 9 Nov: going in and out was janky): its
+      // list (Controls, Settings, How to Play) and the screens under it, where B goes back a screen, or in How to Play
+      // a page (and Y leaves it). Where a B leads cannot be counted, so after each B or Y our list comes back only if
+      // BF's pause list is then on screen (ReopenPause looks).
+      if (pressed & (kPadB | 0x8000)) {
+        reopen_at_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(450);
+        reopen_check_ = true, reopen_tries_ = 0;
+      }
+    } else if (pressed & kPadB) {
+      if (passing_depth_ > 0) --passing_depth_;
+      else if (does == Does::kScreenThenGame) passing_ = -1;
+      else if (does == Does::kScreenThenOk) passing_asked_ = true;  // BF's question; its OK goes back
+      else reopen_at_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(350);
+    } else if (pressed & kPadA) {
+      if (does == Does::kQuestion) passing_ = -1;
+      else if (does == Does::kScreenThenOk && passing_asked_) {
+        reopen_at_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(600);
+      } else if (does == Does::kScreen || does == Does::kScreenThenOk) ++passing_depth_;
+    }
+  }
+  void ReopenPause() {
+    std::lock_guard<std::mutex> lock(pad_mutex_);
+    if (passing_ < 0 || reopen_at_ == std::chrono::steady_clock::time_point{} ||
+        std::chrono::steady_clock::now() < reopen_at_)
+      return;
+    // In a match, only while BF's own pause is still up (its menu signal): a B that resumed the game instead leaves
+    // ours closed (it sat over the match, TekRantGaming, 9 Nov).
+    if (!passing_main_ && SecondsSinceGameMenuSignal() > 2.5) {
+      REXLOG_INFO("BF pause: BF's own pause is closed: ours stays closed");
+      passing_ = -1, reopen_at_ = {};
+      return;
+    }
+    // Where it is not known that BF's pause list is back (Help & Options), a look at the screen: not yet, wait for the
+    // player's next B.
+    if (reopen_check_) {
+      if (!BfListShotShowing(1, kPauseItems[passing_].bf_row)) {
+        // BF's list fades in: looked at again three times, 0.4 s apart.
+        if (++reopen_tries_ < 4) reopen_at_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+        else reopen_check_ = false, reopen_at_ = {};
+        return;
+      }
+      reopen_check_ = false;
+    }
+    if (passing_main_) page_ = Page::kMain, row_ = passing_;
+    else page_ = Page::kPause, pause_row_ = passing_, pause_focus_panel_ = false, pause_opened_at_ = ImGui::GetTime();
+    passing_ = -1, reopen_at_ = {};
+    pad_ = {};
+    open_ = true;
+  }
+
+  void Leave() {
+    page_ = Page::kLeaving;
+    leaving_at_ = ImGui::GetTime();
+    LeaveMatch();
+  }
+
+  // BF's "Connecting" box: paper with a black heading and its turning arrow, on a plain backdrop (BF's own screens
+  // change underneath while the driver walks them).
+  void BfNotice(ImDrawList* d, ImGuiIO& io, const std::string& title, const std::string& line, bool spinner) {
+    const ImVec2 sz = io.DisplaySize;
+    const float s = io_scale_;
+    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(44, 54, 64, 255));
+    const ImVec2 a(sz.x * 0.306f, sz.y * 0.36f), b(sz.x * 0.697f, sz.y * 0.62f);
+    d->AddRectFilled(ImVec2(a.x + 5, a.y + 7), ImVec2(b.x + 5, b.y + 7), IM_COL32(0, 0, 0, 70));
+    d->AddRectFilled(a, b, kBfPaper);
+    Text(d, g_fonts.bf, 34 * s, ImVec2(a.x + 18 * s, a.y + 6 * s), kBfInk, Upper(title));
+    Text(d, g_fonts.bf_med, 26 * s, ImVec2(a.x + 18 * s, a.y + 64 * s), IM_COL32(50, 50, 48, 255), Upper(line));
+    if (spinner) {  // BF's turning arrow, bottom right
+      const ImVec2 c(b.x - 52 * s, b.y - 52 * s);
+      const float r = 26 * s, t = float(ImGui::GetTime()) * 4.0f;
+      d->PathArcTo(c, r, t, t + 5.0f, 32);
+      d->PathStroke(IM_COL32(70, 70, 68, 255), 0, 6 * s);
+      const ImVec2 tip(c.x + std::cos(t + 5.0f) * r, c.y + std::sin(t + 5.0f) * r);
+      d->AddCircleFilled(tip, 7 * s, IM_COL32(70, 70, 68, 255));
+    }
+  }
+
+  bool joined_from_start_ = false;  // the join began before the game had signed in (a server picked on Home)
+  double joining_load_at_ = -1;     // when the joined level's load began (our page waits for its loading screen)
+
+  // The map a join or a match is on, by its title, as MainBackdrop's index (-1: not one of the four).
+  static int MapIndexOf(const std::string& title) {
+    static constexpr const char* kTitles[] = {"Wake Island", "Guadalcanal", "Iwo Jima", "Coral Sea"};
+    for (int i = 0; i < 4; ++i)
+      if (title == kTitles[i]) return i;
+    return -1;
+  }
+
+  // Joining and leaving a match in the new look (as the main menu and our private match page): the map from the air
+  // behind the column, a typed caption, the map's name stencilled, the server's name, and the steps with a turning
+  // marker on the one under way. Opaque, so the game's own screens changing underneath never show.
+  void TransitPage(ImDrawList* d, ImGuiIO& io, int map, const std::string& caption, const std::string& heading,
+                   const std::string& sub, const std::vector<std::string>& steps, int at, const std::string& error) {
+    const ImVec2 sz = io.DisplaySize;
+    const kit::Fonts& f = kit::GetFonts();
+    const float u = sz.y / 1080.0f;
+    MainBackdrop(d, sz, map);
+    const float cx0 = sz.x * 0.05f, cx1 = cx0 + 680 * u;
+    d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(15, 17, 13, 226));
+    d->AddRectFilled(ImVec2(cx1, 0), ImVec2(cx1 + 2 * u, sz.y), IM_COL32(201, 183, 122, 110));
+    kit::Brand(d, ImVec2(cx0, 58 * u), u * 0.9f);
+    const float hy = 150 * u;
+    kit::Spaced(d, f.typed, 20 * u, ImVec2(cx0, hy), kit::kKhakiDim, Upper(caption), 4 * u);
+    // The heading at its size, smaller when it would not fit the column (a long server name as the heading).
+    float hs = 78 * u;
+    while (hs > 40 * u && kit::TextWidth(f.stencil, hs, Upper(heading)) > cx1 - cx0 - 30 * u) hs -= 4 * u;
+    Text(d, f.stencil, hs, ImVec2(cx0 - 4 * u, hy + 24 * u + (78 * u - hs) * 0.5f), kit::kCream, Upper(heading));
+    d->AddRectFilled(ImVec2(cx0, hy + 120 * u), ImVec2(cx0 + 64 * u, hy + 126 * u), kit::kStamp);
+    float y = hy + 150 * u;
+    if (!sub.empty()) {
+      kit::Spaced(d, f.ui_bold, 26 * u, ImVec2(cx0, y), kit::kKhakiText, Upper(sub), 3 * u);
+      y += 56 * u;
+    }
+    const float rh = 58 * u;
+    for (size_t i = 0; i < steps.size(); ++i) {
+      const float ry = y + rh * float(i);
+      const bool done = int(i) < at, now = int(i) == at && error.empty();
+      const ImVec2 c(cx0 + 10 * u, ry + rh * 0.5f);
+      if (done) d->AddCircleFilled(c, 8 * u, kit::kGreenBright);
+      else if (now) d->AddCircle(c, 8 * u, kit::kGold, 0, 2.5f * u);
+      else d->AddCircle(c, 8 * u, IM_COL32(169, 154, 104, 120), 0, 2 * u);
+      if (now) {  // a turning arc over the step under way
+        const float a0 = float(ImGui::GetTime()) * 5.0f;
+        d->PathArcTo(c, 14 * u, a0, a0 + 2.2f, 16);
+        d->PathStroke(kit::kStamp, 0, 3 * u);
+      }
+      kit::Spaced(d, f.ui_bold, 26 * u, ImVec2(cx0 + 40 * u, ry + 15 * u),
+                  done ? kit::kKhakiText : now ? kit::kCream : kit::kKhakiDim, Upper(steps[i]), 3 * u);
+    }
+    if (!error.empty()) {
+      kit::Wrapped(d, f.typed, 20 * u, ImVec2(cx0, y + rh * float(steps.size()) + 24 * u), kit::kStamp, Upper(error),
+                   cx1 - cx0 - 40 * u);
+      const float py = sz.y - 64 * u;
+      const float gw = kit::Glyph(d, PromptStyle(), kit::Button::kB, "Esc", ImVec2(cx0, py), 34 * u);
+      kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(cx0 + gw + 10 * u, py - 14 * u), kit::kKhakiText, "BACK", 3 * u);
+    }
+  }
+
+  void LeavingPage(ImDrawList* d, float s, ImGuiIO& io) {
+    (void)s;
+    // Still in the match after 30 s (the walk takes about 17): BF's Exit Game did not go through; back to the match.
+    if (MenuDriverStage() == 5 && ImGui::GetTime() - leaving_at_ > 30) open_ = false, page_ = Page::kMain;
+    const int map = MapIndexOf(joining_map_);
+    if (lost_) {
+      TransitPage(d, io, map, "The connection to the server was lost", "Disconnected", joining_,
+                  {"Back to the main menu"}, 0, "");
+      return;
+    }
+    if (tutorial_) {  // the game's tutorial: its training ground, no server
+      TransitPage(d, io, map, "Exit game", "Leaving the tutorial", "", {"Leaving the training ground", "Back to the main menu"},
+                  MenuDriverStage() == 5 ? 0 : 1, "");
+      return;
+    }
+    TransitPage(d, io, map, "Exit game", "Leaving the match", joining_, {"Leaving the server", "Back to the main menu"},
+                MenuDriverStage() == 5 ? 0 : 1, "");
+  }
+
+  void JoiningPage(ImDrawList* d, float s, ImGuiIO& io, const Input& in) {
+    (void)s;
+    const int stage = MenuDriverStage();
+    // The steps of a join: the game's hidden start and sign in first when it was not running yet (a server picked on
+    // Home), then connecting, the server's own join, and the map's load.
+    std::vector<std::string> steps;
+    const bool starting = joined_from_start_;
+    if (starting) steps.push_back("Starting the game");
+    steps.push_back("Connecting");
+    steps.push_back("Joining the server");
+    steps.push_back(joining_map_.empty() ? "Loading the map" : "Loading " + joining_map_);
+    const int base = starting ? 1 : 0;
+    const int at = stage < 2 ? 0 : stage == 5 ? base + 2 : stage == 4 ? base + 1 : base;
+    if (tutorial_) {  // the game's tutorial: no server, its training level only
+      TransitPage(d, io, 0, failed_ ? "The tutorial did not start" : "Training", "Wake Island", "The game's tutorial",
+                  {"Loading the training ground"}, 0, failed_ ? "The training level did not load." : "");
+      if (failed_ && in.back) page_ = Page::kHelp, help_row_ = 0, tutorial_ = false;
+      return;
+    }
+    TransitPage(d, io, MapIndexOf(joining_map_), failed_ ? "The join did not go through" : "Joining",
+                joining_map_.empty() ? "Battlefield 1943" : joining_map_, joining_, steps, at,
+                failed_ ? "Could not join the server. It may be full, or it stopped." : "");
+    if (failed_ && in.back) page_ = Page::kMain, row_ = 1;
+  }
+
+#include "game_menu_launcher.inc"
+
+  // Which device the prompts show (King Kong's rules): a controller's press, or a key, a click, the wheel or the
+  // mouse moving on two frames in a row.
+  void TrackDevice(ImGuiIO& io, bool pad_pressed, const Input& key) {
+    const bool key_used = key.up || key.down || key.left || key.right || key.accept || key.back || key.prev_tab ||
+                          key.next_tab || key.x || key.y || key.start || key.view || io.InputQueueCharacters.Size > 0;
+    mouse_frames_ = io.MouseDelta.x != 0 || io.MouseDelta.y != 0 ? mouse_frames_ + 1 : 0;
+    const bool mouse_used = mouse_frames_ >= 2 || ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
+                            ImGui::IsMouseClicked(ImGuiMouseButton_Right) || io.MouseWheel != 0;
+    Device to = device_;
+    if (key_used || mouse_used) to = Device::kKeyboard;
+    if (pad_pressed) to = Device::kPad;
+    if (to == device_) return;
+    device_ = to;
+    REXLOG_INFO("BF launcher: prompts now the {}'s", to == Device::kPad ? "controller" : "keyboard and mouse");
+  }
+  // One press per action across the controller and the keyboard: Steam's desktop layout types keys for a controller,
+  // so the same action from the other device within 0.25 s is the same press (King Kong's rule).
+  Input MergeInput(const Input& pad, const Input& key) {
+    const double now = ImGui::GetTime();
+    Input out;
+    int i = 0;
+    for (bool Input::*m : {&Input::up, &Input::down, &Input::left, &Input::right, &Input::accept, &Input::back,
+                           &Input::prev_tab, &Input::next_tab, &Input::x, &Input::y, &Input::start, &Input::view}) {
+      bool p = pad.*m, k = key.*m;
+      if (p) pad_at_[i] = now;
+      if (k && now - pad_at_[i] < 0.25) k = false;
+      if (p && !k && key_at_[i] > 0 && now - key_at_[i] < 0.25) p = false;
+      if (k) key_at_[i] = now;
+      out.*m = p || k;
+      if (m == &Input::accept) accept_from_key_ = k && !p;  // the name page: Enter saves, the pad's A edits
+      ++i;
+    }
+    return out;
+  }
+  bool LauncherPage(Page p) const {
+    switch (p) {
+      case Page::kIntro: case Page::kSetup: case Page::kName: case Page::kShaders: case Page::kSetupSettings: case Page::kPrompts:
+      case Page::kPlaystyle: case Page::kAllSet: case Page::kHome: case Page::kProjects: case Page::kReport:
+      case Page::kStarting: case Page::kUpdate: return true;
+      case Page::kSettings: return from_home_;
+      default: return false;
+    }
+  }
+  // Every frame: whether BF may sign in behind the launcher (a name chosen, and the backend's answer to it in), and the
+  // time in matches for the rank.
+  void UpdateWalk(ImGuiIO& io) {
+    if (name_ready_at_ > 0) {
+      const bool late = ImGui::GetTime() - name_ready_at_ > 3.0;
+      if (PollNameCheck(late) || late) name_ready_at_ = 0;
+    }
+    const bool named = settings_.Get("player_name_chosen", "") == "1";
+    // With the launcher before the game, the game started from it (Play, or a server picked on Home) boots hidden
+    // behind our pages and signs in by itself (TekRantGaming, 10 Nov 2026: our startup videos in place of the game's own
+    // startup, a join straight into the server; it replaces the 7 Nov rule of the player pressing Start on its title).
+    LauncherWalks().store((!launcher_first_ || started_from_launcher_) && !SkipLauncher() && named && name_ready_at_ == 0,
+                          std::memory_order_relaxed);
+    // The player's score events (auto_join.cpp TakeScoreEvents), kept as stat.<label> = events,points for Stats &
+    // Awards; saved when there are new ones, at most every 10 s.
+    if (ImGui::GetTime() - stats_taken_at_ > 10) {
+      stats_taken_at_ = ImGui::GetTime();
+      const auto events = TakeScoreEvents();
+      for (const auto& [label, v] : events) match_score_ += v.second;
+      for (const auto& [label, v] : events) {
+        const std::string key = "stat." + label, old = settings_.Get(key, "0,0");
+        const size_t comma = old.find(',');
+        const int n = std::atoi(old.c_str()) + v.first;
+        const double pts = (comma == std::string::npos ? 0.0 : std::atof(old.c_str() + comma + 1)) + v.second;
+        settings_.values[key] = fmt::format("{},{:.0f}", n, pts);
+      }
+      if (!events.empty()) settings_.Save(), SendLeaderboard();  // our backend's Leaderboards
+    }
+    // The match score for the pause's Scoreboard: reset as each match begins, sent every 10 s while in it.
+    {
+      static int last_stage = -1;
+      const int stage = MenuDriverStage();
+      if (stage == 5 && last_stage != 5) match_score_ = 0;
+      last_stage = stage;
+      if (stage == 5 && !joined_gid_.empty() && ImGui::GetTime() - match_score_sent_at_ > 10) {
+        match_score_sent_at_ = ImGui::GetTime();
+        std::string name;
+        for (char c : settings_.Get("player_name", ""))
+          if (std::isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_') name += c;
+        if (!name.empty()) {
+          const std::string req = fmt::format("{{\"op\": \"match_score\", \"gid\": \"{}\", \"name\": \"{}\", \"score\": {:.0f}}}",
+                                              joined_gid_, name, match_score_);
+          std::thread([req] {
+            std::string reply;
+            RegistryRequest(req, reply);
+          }).detach();
+        }
+      }
+    }
+    if (MenuDriverStage() == 5 && LevelLoaded()) {
+      match_accum_ += io.DeltaTime;
+      if (match_accum_ >= 60) {
+        const double total = std::atof(settings_.Get("match_seconds", "0").c_str()) + match_accum_;
+        settings_.values["match_seconds"] = std::to_string(int64_t(total));
+        settings_.Save();
+        match_accum_ = 0;
+      }
+    }
+  }
+
+  // ---- the launcher's state (game_menu_launcher.inc)
+  enum class Device { kPad, kKeyboard };
+  Device device_ = Device::kPad;
+  int mouse_frames_ = 0;
+  double pad_at_[12] = {}, key_at_[12] = {};
+  bool pad_pressed_ = false;  // pad_mutex_
+  bool release_click_ = false;  // a test's click: the button goes up a frame later
+  Input test_key_;            // pad_mutex_: the tests' key presses (BF_MENU_STEPS key/...)
+  std::string logged_page_;
+  bool setup_active_ = false, from_home_ = false, skip_popup_ = false, quit_popup_ = false, files_help_ = false;
+  bool steam_added_ = false, signed_in_once_ = false, name_setup_ = false, name_keys_ = false;
+  std::atomic<bool> send_game_settings_{false};  // Show: the game's own options to send (SendGameSettings)
+  int setup_tab_ = 0, prompts_row_ = 0, popup_row_ = 0, home_row_ = 0, project_ = 0, files_card_ = 0, allset_row_ = 0;
+  double settle_until_ = 0, next_page_at_ = 0, starting_at_ = 0, shader_started_ = -1, name_ready_at_ = 0;
+  uint32_t shader_started_done_ = 0;
+  double update_checked_at_ = 0;  // the start's check is CreateGameMenu's
+  bool relaunched_ = false;
+  float match_accum_ = 0;
+  static constexpr int kNameMax = 15;
+  std::string name_text_, name_error_, name_saved_;
+  int name_key_ = 10;
+  bool typed_logged_ = false;
+  bool accept_from_key_ = false;
+  int applied_cap_ = -1;            // the outside frame limit ApplyFrameRate last saw
+  std::string applied_rate_;        // the frame rate it last applied  // this frame's accept was the keyboard's Enter (MergeInput)
+  bool name_caps_ = true;
+  Page name_from_ = Page::kHome;
+
+  Settings settings_;
+  std::function<void(bool)> fullscreen_;
+  std::function<void()> quit_;
+  ServerList list_;
+  std::atomic<bool> open_{false};
+  Page page_ = Page::kMain;
+  int row_ = 0;
+  bool failed_ = false, auto_joined_ = false, from_pause_ = false, lost_ = false;
+  double leaving_at_ = 0;
+  std::string joining_, joining_map_;
+  std::string pending_;  // a join picked while the game was still starting
+  bool servers_from_home_ = false;  // the server browser opened from Home (before the game): B goes back there
+  std::string joined_gid_;          // the server joined last (Join)
+  double match_score_ = 0;          // this match's score so far (the HUD's score events since it began)
+  double match_score_sent_at_ = 0;
+  double stats_taken_at_ = 0;       // the score events last taken (UpdateWalk)
+  bool started_from_launcher_ = false;  // the game started from our launcher (Play, a server on Home): it signs in hidden
+  ShaderProgressFn shader_progress_ = nullptr;
+  enum Sub { kSubNone, kSubRemap, kSubKeys };
+  int tab_ = 0;          // the settings' tab (kTabDisplay...)
+  Sub sub_ = kSubNone;   // a page under Controls
+  float scroll_ = 0;     // the settings' rows scrolled up by
+  std::string capture_;  // the keybind_* setting waiting for a key
+  std::function<rex::ui::Window*()> window_;
+  std::vector<DisplayMode> modes_;  // the monitor's fullscreen modes, listed once per monitor
+  std::vector<MonitorInfo> displays_;
+  int modes_monitor_ = -1;
+  bool modes_listed_ = false;
+  int pause_row_ = 0;             // the pause list's row (kPauseItems)
+  int bf_cursor_ = 0;             // BF's own pause list's selected row, under ours
+  int pause_pending_row_ = -1, pause_probe_frames_ = 0;  // a row of BF's chosen: BF's selection read first
+  bool gpu_benchmark_started_ = false;  // D150: the GPU's speed timed, from gpu_benchmark_at_ (2 s after the shaders)
+  double gpu_benchmark_at_ = 0;
+  int main_cursor_ = 0;           // BF's own main menu list's selected row, under ours
+  bool passing_main_ = false;     // passing_ is a kMainItems row (else kPauseItems)
+  bool passing_asked_ = false;    // BF asked its question on the way back (kScreenThenOk)
+  int bf_letters_ = -1;           // BF's lettering: -1 not tried yet, 0 not found, 1 loaded
+  int shot_tries_ = 0;            // copies of BF's list tried (bf_list_shot.cpp)
+  int pause_shot_tries_ = 0;      // the same for BF's pause list
+  double pause_shot_wait_ = -1;
+  double shot_wait_ = -1;         // when our list was hidden for the copy
+  std::function<fs::path()> game_dir_;
+  int last_stage_ = -1;
+  int passing_ = -1;              // the kPauseItems row whose BF screen has the real pad, or -1
+  int passing_depth_ = 0;         // My squad's screens opened below it
+  bool reopen_check_ = false;     // ReopenPause looks for BF's pause list first (Does::kHelp)
+  int reopen_tries_ = 0;          // its looks so far
+  double pause_opened_at_ = 0;    // when our pause list last opened over BF's
+  int handing_over_ = -1;         // the row whose BF presses are running (our list stays up until they are done)
+  std::chrono::steady_clock::time_point reopen_at_{};
+  bool pause_focus_panel_ = false;  // the pause's PC settings panel has the focus
+  float io_scale_ = 1;    // the display's height / 1080, for this frame
+  float shader_bar_ = 0;  // the bar as drawn: eases towards the count, never back
+  bool shaders_shown_ = false;
+  std::mutex pad_mutex_;
+  Input pad_;
+  uint16_t last_pad_ = 0;
+};
+
+GameMenu* g_menu = nullptr;
+
+}  // namespace
+
+void LoadMenuFonts(ImFontAtlas* atlas) {
+#if defined(_WIN32)
+  const fs::path dir = "C:\\Windows\\Fonts";
+#else
+  const fs::path dir = "/usr/share/fonts";
+#endif
+  auto add = [&](const char* file, float size) -> ImFont* {
+    std::error_code ec;
+    const fs::path p = dir / file;
+    if (!fs::exists(p, ec)) return nullptr;
+    return atlas->AddFontFromFileTTF(p.string().c_str(), size);
+  };
+  g_fonts.title = add("bahnschrift.ttf", 92);
+  g_fonts.header = add("bahnschrift.ttf", 40);
+  g_fonts.item = add("segoeui.ttf", 32);
+  g_fonts.body = add("segoeui.ttf", 22);
+  g_fonts.bold = add("seguisb.ttf", 32);
+  // Oswald (SIL Open Font License 1.1), shipped beside the exe: the condensed capitals of BF's menus.
+  auto add_ours = [&](const char* file, float size) -> ImFont* {
+    std::error_code ec;
+    const fs::path p = ExecutableDir() / "fonts" / file;
+    if (!fs::exists(p, ec)) return nullptr;
+    return atlas->AddFontFromFileTTF(p.string().c_str(), size);
+  };
+  g_fonts.bf = add_ours("Oswald-Bold.ttf", 44);
+  g_fonts.bf_med = add_ours("Oswald-Medium.ttf", 30);
+  REXLOG_INFO("BF menu fonts: Oswald from {} ({})", (ExecutableDir() / "fonts").string(),
+              g_fonts.bf ? "loaded" : "missing, Bahnschrift instead");
+  if (!g_fonts.bf) g_fonts.bf = g_fonts.header;
+  if (!g_fonts.bf_med) g_fonts.bf_med = g_fonts.body;
+  // The launcher's stencil and typed lettering, and its Oswald (launcher_kit.cpp).
+  kit::LoadFonts(atlas, ExecutableDir(), g_fonts.bf_med, g_fonts.bf);
+  ImFont* fallback = atlas->Fonts.empty() ? nullptr : atlas->Fonts[0];
+  for (ImFont** f : {&g_fonts.title, &g_fonts.header, &g_fonts.item, &g_fonts.body, &g_fonts.bold, &g_fonts.bf,
+                     &g_fonts.bf_med})
+    if (!*f) *f = fallback;
+}
+
+void CreateGameMenu(rex::ui::ImGuiDrawer* drawer, const fs::path& user_dir, std::function<void(bool)> fullscreen,
+                    std::function<void()> quit, std::function<rex::ui::Window*()> window,
+                    std::function<fs::path()> game_dir) {
+  // A dedicated server shows no menu: since our menu opens on the first frame, a server's window looked like the game's
+  // (TekRantGaming, 5 Nov).
+  if (!REXCVAR_GET(bf_launcher) || REXCVAR_GET(server) || g_menu) return;
+  const fs::path game = game_dir ? game_dir() : fs::path();
+  g_menu = new GameMenu(drawer, user_dir / "bf1943-settings.txt", std::move(fullscreen), std::move(quit),
+                        std::move(window), std::move(game_dir));
+  // Updates (update.h; always on, TekRantGaming, 8 Nov 2026): the player's folders are never written, the .old files the
+  // last update left are removed, then on a worker this version's first start check and the check for a newer one.
+  update::SetProtectedFolders({user_dir, game});
+  update::CleanUpAfterUpdate();
+  update::StartInBackground(user_dir / "update-check.txt");
+}
+
+// The renderer chosen in Settings > Graphics > Graphics API: Vulkan (our rexgpu-bfnative) unless the player chose
+// the SDK's Direct3D 12 one (TekRantGaming, 5 Nov: Vulkan is the renderer we work with). A command line or bf1943.toml
+// gpu_plugin outranks it (OnPreSetup only asks when neither set one).
+std::string StartupGpuPlugin(const fs::path&) {
+  // Vulkan only (DECISIONS.md, 5 Nov 2026 evening): a saved Direct3D 12 choice from an older version is ignored. A
+  // dedicated server gets the plugin's null backend (bf1943_app.h), which draws nothing.
+  return "bfnative";
+}
+
+// The Display settings that take effect when the window is made (before OnCreateDialogs): the window mode, the
+// monitor, the window size, the aspect ratio and VSync, from the settings file, as runtime settings. A setting the
+// file doesn't have keeps the runtime's own value (so a test's --fullscreen=false stays).
+// A new install's settings (TekRantGaming, 10 Nov 2026: on by default for every new install, the player changes them in the
+// first start's setup or Settings): written once into a settings file whose setup never started, before anything
+// applies them. The window is Borderless (fullscreen at the desktop's own resolution; TekRantGaming, the same day: 0.1.30's
+// exclusive Fullscreen left the game minimised behind the setup's file picker). Not in test runs (a
+// window kept in the background or hidden, as tools\run_game.ps1 starts it) unless BF_DEV_NEW_INSTALL=1, and their
+// window is never made fullscreen.
+void NewInstallDefaults(Settings& settings) {
+  // 0.1.30's new install Fullscreen (exclusive, "install_defaults = 1") becomes Borderless once.
+  if (settings.Get("install_defaults", "") == "1" && settings.Get("fullscreen", "") == "on" &&
+      ParseDisplayMode(settings.Get("fullscreen_mode", ""))) {
+    settings.values["fullscreen_mode"] = "desktop", settings.values["install_defaults"] = "2";
+    settings.Save();
+    REXLOG_INFO("BF settings: 0.1.30's new install Fullscreen is Borderless now");
+  }
+  // 0.1.30 to 0.1.33 turned the performance metrics on for new installs (FPS only, then the full overlay;
+  // "install_defaults" 1 to 3): they are off once, as for new installs now (TekRantGaming, 11 Nov 2026: "the performance
+  // metrics is now defaulted to off"). F2 or Settings turns them on again.
+  if (const std::string d = settings.Get("install_defaults", ""); d == "1" || d == "2" || d == "3") {
+    const std::string was = settings.Get("cvar.bf_performance_metrics", "");
+    const bool moved = was == "fps" || was == "full";
+    if (moved) settings.values["cvar.bf_performance_metrics"] = "off";
+    settings.values["install_defaults"] = "4";
+    settings.Save();
+    if (moved) REXLOG_INFO("BF settings: the performance metrics ({}) are off now, the default since v0.2.0", was);
+  }
+  // 0.2.1 (TekRantGaming, 11 Nov 2026): no Render resolution any more, the game draws the display's. A render resolution of
+  // 720p chosen before (the auto detect's slow tier set it) with the upscaler Off becomes AMD FSR 1 at Performance,
+  // which draws 720p for a 1080p display, so that player's frame rate stays (King Kong's rule: an update does not
+  // change a player's picture); any other render resolution just goes.
+  if (settings.Get("install_defaults", "") == "4") {
+    const std::string scale = settings.Get("cvar.native_x_renderer_resolution_scale", "");
+    const std::string scaling = settings.Get("cvar.native_x_renderer_scaling", "bilinear");
+    const double s = scale.empty() ? 0.0 : std::atof(scale.c_str());
+    const bool to_fsr = scaling == "bilinear" && s > 0.0 && s <= 1.0;
+    if (to_fsr) {
+      settings.values["cvar.native_x_renderer_scaling"] = "fsr";
+      settings.values["cvar.bf_upscaler_mode"] = "performance";
+    }
+    settings.values.erase("cvar.native_x_renderer_resolution_scale");
+    settings.values["install_defaults"] = "5";
+    settings.Save();
+    REXLOG_INFO("BF settings: no render resolution since v0.2.1 (it was {}){}", scale.empty() ? "Auto" : scale,
+                to_fsr ? ": 720p with the upscaler Off is AMD FSR 1 at Performance now" : "");
+  }
+  if (REXCVAR_GET(server) || !settings.Get("launcher_setup", "").empty() || !settings.Get("install_defaults", "").empty())
+    return;
+  const std::string start = rex::cvar::GetFlagByName("window_start");
+  const bool test_window = start == "background" || start == "hidden";
+  bool asked = false;
+#if defined(BF_DEV_TOOLS)
+  if (const char* v = std::getenv("BF_DEV_NEW_INSTALL"); v && *v == '1') asked = true;
+#endif
+  if (test_window && !asked) return;
+  static const std::pair<const char*, const char*> kDefaults[] = {
+      // Display
+      {"frame_rate", "60"}, {"vsync", "on"}, {"cvar.bf_fov", "86"}, {"cvar.bf_motion_blur", "false"},
+      // Graphics: FXAA, shadows High (2x), sharpness High, 16x texture filtering, ambient occlusion Strong at High
+      // quality, global illumination High to Medium distance, grass to the full map (always on: no row turns it off)
+      {"cvar.native_x_renderer_antialiasing", "fxaa"}, {"cvar.native_x_renderer_shadow_scale", "2.000000"},
+      {"cvar.native_x_renderer_sharpness", "0.800000"}, {"cvar.anisotropic_override", "5"},
+      {"cvar.native_ao_mode", "1"}, {"cvar.native_ao_strength", "3"}, {"cvar.native_ao_samples", "3"},
+      {"cvar.native_gi_mode", "1"}, {"cvar.native_gi_quality", "3"}, {"cvar.native_gi_distance", "2"},
+      {"cvar.native_grass", "true"}, {"cvar.native_grass_radius", "1440.000000"},
+      // Upscaler AMD FSR 1 at Quality, King Kong's default (TekRantGaming, 11 Nov 2026, v0.2.1). Only new installs: a settings
+      // file from before has no upscaler, so its picture stays as it was (King Kong's settings version 2 did the same).
+      {"cvar.native_x_renderer_scaling", "fsr"}, {"cvar.bf_upscaler_mode", "quality"},
+      // Controls: camera response Modern. Gameplay: performance metrics off (the setting's own default).
+      {"cvar.bf_camera_modern", "true"}, {"cvar.bf_performance_metrics", "off"}};
+  for (const auto& [key, value] : kDefaults) settings.values[key] = value;
+  settings.values["fullscreen_mode"] = "desktop";  // Borderless (a test window stays a window)
+  if (!test_window) settings.values["fullscreen"] = "on";
+  settings.values["install_defaults"] = "5";  // 0.2.1's: no render resolution to move (above)
+  std::error_code ec;
+  fs::create_directories(settings.path.parent_path(), ec);
+  settings.Save();
+  REXLOG_INFO("BF settings: a new install: its default settings written{}", test_window ? " (a test window: not fullscreen)" : "");
+}
+
+void ApplyStartupDisplaySettings(const fs::path& user_dir) {
+  Settings settings;
+  settings.path = user_dir / "bf1943-settings.txt";
+  settings.Load();
+  NewInstallDefaults(settings);
+  auto set = [&](const char* key, const char* cvar) {
+    if (auto it = settings.values.find(key); it != settings.values.end()) rex::cvar::SetFlagByName(cvar, it->second);
+  };
+  // Every runtime setting the menu saved ("cvar.<name>"), except the renderer, which OnPreSetup chooses itself
+  // (StartupGpuPlugin).
+  for (const auto& [key, value] : settings.values)
+    if (key.rfind("cvar.", 0) == 0 && key != "cvar.gpu_plugin") rex::cvar::SetFlagByName(key.substr(5), value);
+  // Grass and shrubs are always on (TekRantGaming, 10 Nov 2026: no longer a setting; only their distance is): a saved Off
+  // from an older version is not taken. The F8 panel still switches them for the session.
+  if (!REXCVAR_GET(server)) rex::cvar::SetFlagByName("native_grass", "true");
+  // Antialiasing is Off or FXAA (TekRantGaming, 9 Nov 2026): FXAA by default and in place of a mode no longer offered
+  // (SMAA, DLAA, DLSS, FSR 3.1); no frame generation (it needed those).
+  if (!REXCVAR_GET(server)) {
+    const std::string aa = rex::cvar::GetFlagByName("native_x_renderer_antialiasing");
+    if (aa != "off" && aa != "fxaa") rex::cvar::SetFlagByName("native_x_renderer_antialiasing", "fxaa");
+    rex::cvar::SetFlagByName("native_x_renderer_frame_generation", "false");
+  }
+  // The Upscaler (ApplyUpscaler): the sharpness as the settings and the command line give it is the one for Off.
+  if (!REXCVAR_GET(server)) {
+    g_plain_sharpness = rex::cvar::GetFlagByName("native_x_renderer_sharpness");
+    ApplyUpscaler(true, settings.Get("nis_support", ""));
+  }
+  if (auto it = settings.values.find("fullscreen"); it != settings.values.end())
+    rex::cvar::SetFlagByName("fullscreen", it->second == "on" ? "true" : "false");
+  set("monitor", "monitor");
+  set("window_width", "window_width");
+  set("window_height", "window_height");
+  if (auto it = settings.values.find("letterbox"); it != settings.values.end())
+    rex::cvar::SetFlagByName("present_letterbox", it->second == "on" ? "true" : "false");
+  // VSync, as King Kong's row: off lets frames show at once (tearing allowed, Vulkan's immediate or mailbox
+  // present), on waits for the screen's refresh.
+  if (auto it = settings.values.find("vsync"); it != settings.values.end()) {
+    const char* tear = it->second == "on" ? "false" : "true";
+    rex::cvar::SetFlagByName("d3d12_allow_variable_refresh_rate_and_tearing", tear);
+    rex::cvar::SetFlagByName("vulkan_allow_present_mode_immediate", tear);
+    rex::cvar::SetFlagByName("vulkan_allow_present_mode_mailbox", tear);
+  }
+}
+
+// The player's name and id (live_layers.cpp): each game its own, so no two players log in as the runtime's "User"
+// (the backend renames the second, and a renamed player's game crashes joining). Made at the first start and saved:
+// player_name (letters, digits and spaces, at most 15) and player_id (the XUID's low word). bf_player_name wins.
+void SetPlayerIdentity(const std::string& name, uint32_t id);  // live_layers.cpp
+void StartNameCheck(const std::string& name, uint32_t player_id);  // below
+void ApplyPlayerIdentity(const fs::path& user_dir) {
+  if (REXCVAR_GET(server)) return;  // a dedicated server keeps the runtime's profile
+  Settings settings;
+  settings.path = user_dir / "bf1943-settings.txt";
+  settings.Load();
+  auto clean = [](std::string name) {
+    std::string out;
+    for (char c : name)
+      if (std::isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_') out += c;
+    out.erase(0, out.find_first_not_of(' '));
+    if (out.size() > 15) out.resize(15);
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+  };
+  std::random_device random;
+  bool changed = false;
+  std::string name = clean(settings.Get("player_name", ""));
+  if (name.empty()) {
+    name = "Soldier" + std::to_string(1000 + random() % 9000);
+    settings.values["player_name"] = name;
+    changed = true;
+  }
+  uint32_t id = 0;
+  try {
+    id = static_cast<uint32_t>(std::stoul(settings.Get("player_id", "0"), nullptr, 16));
+  } catch (...) {
+  }
+  if (!id) {
+    while (!id) id = random();
+    char text[9];
+    std::snprintf(text, sizeof(text), "%08X", id);
+    settings.values["player_id"] = text;
+    changed = true;
+  }
+  if (changed) settings.Save();
+  if (const std::string forced = clean(REXCVAR_GET(bf_player_name)); !forced.empty()) name = forced;
+  SetPlayerIdentity(name, id);
+  StartNameCheck(name, id);
+}
+
+// Two players with the same name (TekRantGaming, 7 Nov 2026: "give them a number at the end"): before the game logs in, the
+// backend's registry gives this player's name, or it with the smallest free number (TekRantGaming2), and holds it for this
+// player's id (server/plasma.py free_name). Asked on a thread from the start; the answer is waited for (3 s at most)
+// just before the game starts (bf1943_app.h OnPreLaunchModule), so the game only ever sees the one name. The
+// backend's own rename at login is the last resort: a game that sees another name than the backend's crashes
+// joining (live_layers.cpp). The saved name stays the player's; the number is for this session.
+namespace {
+struct NameCheck {
+  std::mutex mutex;
+  std::condition_variable done_cv;
+  bool done = false;
+  std::string answer;
+  uint32_t id = 0;
+};
+std::shared_ptr<NameCheck> g_name_check;
+}  // namespace
+uint32_t OnlinePlayerId();          // live_layers.cpp
+const std::string& PlayerName();   // live_layers.cpp
+void StartNameCheck(const std::string& name, uint32_t player_id) {
+  if (REXCVAR_GET(server) || REXCVAR_GET(bf_online_host).empty() || name.empty()) return;
+  auto check = std::make_shared<NameCheck>();
+  check->id = player_id;
+  g_name_check = check;
+  char id[9];
+  std::snprintf(id, sizeof(id), "%08X", OnlinePlayerId());
+  const std::string request = "{\"op\": \"name\", \"name\": \"" + name + "\", \"id\": \"" + id + "\"}";
+  std::thread([check, request] {
+#if defined(_WIN32)
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+    std::string reply, answer;
+    if (RegistryRequest(request, reply)) answer = JsonField(reply, "name");
+    std::lock_guard lock(check->mutex);
+    check->answer = answer;
+    check->done = true;
+    check->done_cv.notify_all();
+  }).detach();
+}
+uint32_t PlayerId();  // live_layers.cpp
+void NameChosen(const std::string& name) {
+  SetPlayerIdentity(name, PlayerId());
+  StartNameCheck(name, PlayerId());
+}
+// The answer, if it is in (true then, or with abandon: the check is dropped, the name stays as chosen).
+bool PollNameCheck(bool abandon) {
+  const auto check = g_name_check;
+  if (!check) return true;
+  std::unique_lock lock(check->mutex);
+  if (!check->done && !abandon) return false;
+  const std::string answer = check->done ? check->answer : std::string();
+  const bool done = check->done;
+  lock.unlock();
+  g_name_check.reset();
+  if (!done) REXLOG_INFO("BF name: the backend did not answer in 3 s; playing as {}", PlayerName());
+  else if (!answer.empty() && answer != PlayerName()) {
+    REXLOG_INFO("BF name: {} is taken online; playing as {} this time", PlayerName(), answer);
+    SetPlayerIdentity(answer, check->id);
+  } else if (!answer.empty()) {
+    REXLOG_INFO("BF name: {} is free online", answer);
+  }
+  return true;
+}
+void FinishNameCheck() {
+  const auto check = g_name_check;
+  if (!check) return;
+  std::unique_lock lock(check->mutex);
+  check->done_cv.wait_for(lock, std::chrono::seconds(3), [&] { return check->done; });
+  const std::string answer = check->done ? check->answer : std::string();
+  lock.unlock();
+  g_name_check.reset();
+  if (!check->done) {
+    REXLOG_INFO("BF name: the backend did not answer in 3 s; playing as {}", PlayerName());
+  } else if (answer.empty()) {
+    REXLOG_INFO("BF name: no answer from the backend; playing as {}", PlayerName());
+  } else if (answer != PlayerName()) {
+    REXLOG_INFO("BF name: {} is taken online; playing as {} this time", PlayerName(), answer);
+    SetPlayerIdentity(answer, check->id);
+  } else {
+    REXLOG_INFO("BF name: {} is free online", answer);
+  }
+}
+
+bool GraphicsPanelOpen();               // f8_panel.cpp
+void GraphicsPanelPad(uint16_t buttons);  // f8_panel.cpp
+// Our menus or the graphics panel (F8) have the controller and the mouse.
+bool GameMenuOpen() { return (g_menu && g_menu->open()) || GraphicsPanelOpen(); }
+bool LauncherShowing() { return g_menu && g_menu->ShowingLauncher(); }
+bool LauncherKeyboardLast() { return g_menu && g_menu->KeyboardLast(); }
+std::string MenuSetting(const std::string& key, const std::string& def) { return g_menu ? g_menu->Setting(key, def) : def; }
+void SetMenuSetting(const std::string& key, const std::string& value) {
+  if (g_menu) g_menu->SetSetting(key, value);
+}
+fs::path MenuUserDir() { return g_menu ? g_menu->UserDir() : fs::path(); }
+// After an update (bf1943_app.h, before the renderer opens its storage): the driver's pipeline cache deleted when the
+// shaders were prepared for another version, so the shader page compiles them all again (King Kong's forced rebuild).
+namespace {
+bool g_shaders_after_update = false;
+}
+void CheckShadersAfterUpdate(const fs::path& user_dir, const fs::path& cache) {
+  Settings settings;
+  settings.path = user_dir / "bf1943-settings.txt";
+  settings.Load();
+  g_shaders_after_update = update::PrepareShadersAfterUpdate(cache, settings.Get("shaders_prepared_for", ""));
+}
+bool ShadersAfterUpdate() { return g_shaders_after_update; }
+// For auto_join.cpp: BF signs in by itself behind the launcher (Start through its films and title) once allowed.
+bool LauncherLetsGameSignIn() { return g_menu && LauncherWalks().load(std::memory_order_relaxed); }
+// The first start's setup (bf1943_app.h, OnFinalizePaths): shown until the game is installed.
+void BeginGameSetup(const fs::path& game_dir, std::function<void(fs::path)> done) {
+  if (g_menu) g_menu->BeginSetup(game_dir, std::move(done));
+}
+// Whether the first start asks for the player's name (bf1943_app.h OnFinalizePaths): they never chose one, our menu
+// is on, and no name is forced (bf_player_name; test runs).
+bool NameNeeded(const fs::path& user_dir) {
+  // Since 8 Nov 2026 the name is the launcher's page 3, shown while the game boots (game_menu_launcher.inc): BF signs
+  // in only once it is chosen (LauncherWalks).
+  return false;
+  if (!g_menu || REXCVAR_GET(server) || !REXCVAR_GET(bf_launcher) || !REXCVAR_GET(bf_player_name).empty()) return false;
+#if defined(BF_DEV_TOOLS)
+  const char* dev_name = std::getenv("BF_DEV_NAME");
+  if (const char* v = std::getenv("BF_AUTO_JOIN"); v && *v == '1' && !(dev_name && *dev_name)) return false;
+#endif
+  Settings settings;
+  settings.path = user_dir / "bf1943-settings.txt";
+  settings.Load();
+  return settings.Get("player_name_chosen", "") != "1";
+}
+void BeginNameSetup(std::function<void()> done) {
+  if (g_menu) g_menu->BeginName(std::move(done));
+}
+// Whether a player's start shows the launcher before the game (bf1943_app.h): our menu on, not a server, and not a
+// test that joins by itself (BF_AUTO_JOIN=1 without BF_LAUNCHER_TEST=1).
+bool GameMenuEnabled();
+bool LauncherFirst() {
+  const char* a = std::getenv("BF_AUTO_JOIN");
+  const char* t = std::getenv("BF_LAUNCHER_TEST");
+  return g_menu && GameMenuEnabled() && !(a && *a == '1' && !(t && *t == '1'));
+}
+void BeginLauncher(std::function<void()> start) {
+  if (g_menu) g_menu->BeginLauncher(std::move(start));
+}
+// The game folder the player chose at setup (an unpacked game used where it is), or empty.
+fs::path SavedGameDir(const fs::path& user_dir) {
+  Settings settings;
+  settings.path = user_dir / "bf1943-settings.txt";
+  settings.Load();
+  return settings.Get("game_dir", "");
+}
+bool GameMenuEnabled() { return REXCVAR_GET(bf_launcher) && !REXCVAR_GET(server); }
+// For perf_overlay.cpp: 0 bold, 1 semibold.
+ImFont* MenuFont(int which) { return which == 0 ? g_fonts.bold : g_fonts.item; }
+void GameMenuPad(uint16_t buttons, int16_t lx, int16_t ly) {
+  GraphicsPanelPad(buttons);  // L3 with R3 toggles it; open, the controller is its own
+  if (GraphicsPanelOpen()) return;
+  if (g_menu) g_menu->Pad(buttons, lx, ly, true);  // closed: it only watches for the way back from BF's pause screens
+}
+bool GameMenuPassing() { return g_menu && g_menu->passing(); }
+void NoteGameMenuSignal() {
+  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  const int64_t last = g_game_menu_signal_at.exchange(now, std::memory_order_relaxed);
+  // Once each time one comes up (its calls come about once a second): in a match it should never be.
+  if (!last || std::chrono::steady_clock::duration(now - last) > std::chrono::seconds(3))
+    REXLOG_INFO("BF menu: the game's own menu screen is up (its couch call){}", InMatch() ? ", in a match" : "");
+}
+bool TakeEscapePress() { return g_escape_press.exchange(false, std::memory_order_relaxed); }
+// Tests (the match script's "esc"): the keyboard's Esc as our menu sees it with the menu closed.
+void PressEscapeForTest() { g_escape_press.store(true, std::memory_order_relaxed); }
+void ShowGameMenu() {
+  if (g_menu) g_menu->Show();
+}
+void ShowPauseMenu() {
+  if (g_menu) g_menu->ShowPause();
+}
+void ShowLostNotice() {
+  if (g_menu) g_menu->ShowLost();
+}
+
+}  // namespace bf1943

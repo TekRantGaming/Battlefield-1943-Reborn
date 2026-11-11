@@ -1,0 +1,121 @@
+// NativeXRenderer - helpers shared by the library's features (internal).
+
+#pragma once
+
+#include <native_x_renderer/native_x_renderer.h>
+
+#include <rex/ppc/context.h>
+#include <rex/system/xmemory.h>
+
+#include <algorithm>
+#include <bit>
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+
+namespace native_x_renderer::sdk {
+// The SDK cvars forwarded to the GPU plugin's values (sdk_cvars.h) are looked up again from the next frame on.
+// The renderer calls it at the end of every frame.
+void NextFrame();
+}  // namespace native_x_renderer::sdk
+
+namespace native_x_renderer::internal {
+
+// kPackets: the call writes packets into the device's command buffer although r3 is not the device (Query
+// Issue): the state tracker reads them with the device of the last device call.
+// kInlineBegin, kInlineEnd: an inline draw the game fills itself. The begin call (BeginVertices) writes the
+// flush and the draw packet but leaves the write pointer where it was; the end call (EndVertices) moves it
+// past them, so the end is the draw, with the dirty masks the begin's flush saw.
+enum CallFlags : uint32_t {
+  kDraw = 1u << 0,
+  kFrameEnd = 1u << 1,
+  kPackets = 1u << 2,
+  kInlineBegin = 1u << 3,
+  kInlineEnd = 1u << 4,
+  kReplay = 1u << 5,  // runs a recorded command buffer (calls.inc, RunCommandBuffer)
+};
+
+struct CallInfo {
+  const char* name;
+  const char* arguments;  // see calls.inc
+  uint32_t flags;
+  bool device;  // r3 is the D3D device
+};
+
+const CallInfo& Info(Call call);
+
+uint32_t CurrentThreadId();
+
+// Time spent creating host objects (shader analyses and translations, pipelines), for the renderer's log:
+// creations on the render thread stall the frame.
+struct CreationTime {
+  uint32_t count = 0;
+  double ms = 0, max_ms = 0;
+
+  void Add(double t) {
+    ++count;
+    ms += t;
+    max_ms = std::max(max_ms, t);
+  }
+  void Merge(const CreationTime& other) {
+    count += other.count;
+    ms += other.ms;
+    max_ms = std::max(max_ms, other.max_ms);
+  }
+};
+
+// Adds the time from its construction to its destruction to a CreationTime.
+class ScopedCreationTime {
+ public:
+  explicit ScopedCreationTime(CreationTime& time) : time_(time), start_(std::chrono::steady_clock::now()) {}
+  ~ScopedCreationTime() {
+    time_.Add(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_).count());
+  }
+
+ private:
+  CreationTime& time_;
+  std::chrono::steady_clock::time_point start_;
+};
+
+// A guest virtual address in host memory (D76). The SDK maps the 0xE0000000 view (physical memory in 4 KB
+// pages) 4 KB lower on hosts whose allocation granularity is coarser than 4 KB (Windows): the recompiled code
+// adds the 4 KB back (rex::memory::GuestPtr), and so must every read of guest memory by its virtual address.
+// Physical addresses read through the 0xA0000000 view or TranslatePhysical need nothing.
+inline const uint8_t* GuestPointer(const uint8_t* base, uint32_t address) {
+  return rex::memory::GuestPtr<const uint8_t*>(const_cast<uint8_t*>(base), address);
+}
+
+// Guest memory is big-endian.
+inline uint32_t Load32(const uint8_t* base, uint32_t address) {
+  uint32_t value;
+  std::memcpy(&value, GuestPointer(base, address), sizeof(value));
+  return std::byteswap(value);
+}
+
+inline uint64_t Load64(const uint8_t* base, uint32_t address) {
+  uint64_t value;
+  std::memcpy(&value, GuestPointer(base, address), sizeof(value));
+  return std::byteswap(value);
+}
+
+inline float LoadFloat(const uint8_t* base, uint32_t address) {
+  return std::bit_cast<float>(Load32(base, address));
+}
+
+// The return address of the function that made the hooked call, one level above the call's own (ctx.lr),
+// from the guest stack (D65): `sp` is that function's stack pointer (r1 at the call), whose back chain
+// points at its caller's; the Xbox 360 compiler saves a function's return address 8 bytes below its
+// caller's stack pointer (__savegprlr, or `stw r12,-8(r1)`), before it moves the stack pointer. A function
+// that saves it otherwise gives a meaningless value.
+inline uint32_t OuterReturnAddress(const uint8_t* base, uint32_t sp) {
+  uint32_t caller_sp = Load32(base, sp);
+  return caller_sp >= 8 ? Load32(base, caller_sp - 8) : 0;
+}
+
+// The physical address the GPU uses for a CPU virtual address, as the XDK computes it (the
+// 0xE0000000 view is offset by 4 KB).
+inline uint32_t GpuAddress(uint32_t address) {
+  return (address & 0x1FFFFFFF) + (((address >> 20) + 0x200) & 0x1000);
+}
+
+}  // namespace native_x_renderer::internal

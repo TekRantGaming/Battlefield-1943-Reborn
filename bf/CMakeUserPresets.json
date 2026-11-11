@@ -1,0 +1,24 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "user-env",
+            "hidden": true,
+            "cacheVariables": {
+                "CMAKE_PREFIX_PATH": "${sourceDir}/../sdk/src-bf/out/install/win-amd64",
+                "rexglue_DIR": "${sourceDir}/../sdk/src-bf/out/install/win-amd64/lib/cmake/rexglue",
+                "CMAKE_FIND_USE_PACKAGE_REGISTRY": "OFF"
+            }
+        },
+        { "name": "bf-debug",          "inherits": ["win-amd64-debug",          "user-env"] },
+        { "name": "bf-release",        "inherits": ["win-amd64-release",        "user-env"] },
+        { "name": "bf-relwithdebinfo", "inherits": ["win-amd64-relwithdebinfo", "user-env"] },
+        { "name": "bf-dev",            "inherits": ["bf-relwithdebinfo"], "cacheVariables": { "BF_DEV_TOOLS": "ON" } }
+    ],
+    "buildPresets": [
+        { "name": "bf-debug",          "configurePreset": "bf-debug" },
+        { "name": "bf-release",        "configurePreset": "bf-release" },
+        { "name": "bf-relwithdebinfo", "configurePreset": "bf-relwithdebinfo" },
+        { "name": "bf-dev",            "configurePreset": "bf-dev" }
+    ]
+}

@@ -1,0 +1,732 @@
+// NativeXRenderer - see targets.h.
+
+#include "targets.h"
+
+#include "guest_memory.h"
+#include "internal.h"
+
+#include <rex/graphics/pipeline/texture/info.h>
+#include <rex/graphics/xenos.h>
+#include <rex/logging.h>
+#include <rex/system/xmemory.h>
+
+#include "GraphicsAccessories.hpp"
+
+#include <xxhash.h>
+
+#include <algorithm>
+#include <cstdlib>
+#include <set>
+#include <string>
+
+namespace native_x_renderer {
+
+using namespace Diligent;
+namespace xenos = rex::graphics::xenos;
+
+bool Fixed16Range() {
+  static const bool on = [] {
+    const char* v = std::getenv("NXR_D139");
+    return !(v && *v == '0');
+  }();
+  return on;
+}
+
+bool GuestColorRange(uint32_t format, float range[4]) {
+  if (!Fixed16Range()) return false;
+  auto set = [&](float color_low, float alpha_low, float color_high, float alpha_high) {
+    range[0] = color_low, range[1] = alpha_low, range[2] = color_high, range[3] = alpha_high;
+    return true;
+  };
+  switch (xenos::GetStorageColorFormat(xenos::ColorRenderTargetFormat(format))) {
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
+      return set(0.0f, 0.0f, 31.875f, 1.0f);
+    case xenos::ColorRenderTargetFormat::k_16_16:
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16:
+      return set(-32.0f, -32.0f, 32.0f, 32.0f);
+    case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
+      return set(-65504.0f, -65504.0f, 65504.0f, 65504.0f);
+    default:
+      return false;  // normalized formats clamp on the host too; 32-bit floats are floats on both
+  }
+}
+
+GuestSurface ReadSurface(const uint8_t* base, uint32_t object, bool depth, const ObjectLayout& layout) {
+  GuestSurface s;
+  if (!object) return s;
+  s.object = object;
+  s.depth = depth;
+  s.surface_info = internal::Load32(base, object + layout.surface_info);
+  s.info = internal::Load32(base, object + layout.surface_color_depth_info);
+  uint32_t size = internal::Load32(base, object + layout.surface_size);
+  s.width = layout.surface_width_minus_one.Get(size) + 1;
+  s.height = layout.surface_height_minus_one.Get(size) + 1;
+  return s;
+}
+
+TEXTURE_FORMAT HostColorFormat(uint32_t format) {
+  switch (xenos::ColorRenderTargetFormat(format)) {
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
+      return TEX_FORMAT_RGBA8_UNORM;
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
+      return TEX_FORMAT_RGBA16_FLOAT;
+    // 16-bit fixed point, -32 to 32 on the Xenos: half floats here, which hold that range and blend as the guest's
+    // values (D130; SNORM held -1 to 1, or a 32nd of the value with its alpha too, and blending was wrong).
+    case xenos::ColorRenderTargetFormat::k_16_16:
+      return TEX_FORMAT_RG16_FLOAT;
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16:
+      return TEX_FORMAT_RGBA16_FLOAT;
+    case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
+      return TEX_FORMAT_RG16_FLOAT;
+    case xenos::ColorRenderTargetFormat::k_32_FLOAT:
+      return TEX_FORMAT_R32_FLOAT;
+    case xenos::ColorRenderTargetFormat::k_32_32_FLOAT:
+      return TEX_FORMAT_RG32_FLOAT;
+    default:
+      return TEX_FORMAT_UNKNOWN;
+  }
+}
+
+TEXTURE_FORMAT HostDepthFormat(uint32_t format, bool unorm24) {
+  return xenos::DepthRenderTargetFormat(format) == xenos::DepthRenderTargetFormat::kD24FS8 || !unorm24
+             ? TEX_FORMAT_D32_FLOAT_S8X24_UINT
+             : TEX_FORMAT_D24_UNORM_S8_UINT;
+}
+
+bool DepthUnorm24Supported(IRenderDevice* device) {
+  constexpr BIND_FLAGS kNeeded = BIND_DEPTH_STENCIL | BIND_SHADER_RESOURCE;
+  return (device->GetTextureFormatInfoExt(TEX_FORMAT_D24_UNORM_S8_UINT).BindFlags & kNeeded) == kNeeded;
+}
+
+void RenderTargets::Initialize(IRenderDevice* device, const RenderScale& scale) {
+  device_ = device;
+  scale_ = scale;
+  reduced_scale_ = scale;
+  shadow_scale_ = scale;
+  depth_unorm24_ = DepthUnorm24Supported(device);
+  if (!depth_unorm24_) {
+    REXLOG_INFO("[native_x_renderer] the device has no D24_UNORM_S8_UINT depth targets: the guest's D24S8 depth is "
+                "D32_FLOAT_S8X24_UINT (D103)");
+  }
+}
+
+TEXTURE_FORMAT HostTextureFormat(uint32_t format) {
+  switch (xenos::TextureFormat(format)) {
+    case xenos::TextureFormat::k_8:
+      return TEX_FORMAT_R8_UNORM;
+    case xenos::TextureFormat::k_8_8:
+      return TEX_FORMAT_RG8_UNORM;
+    case xenos::TextureFormat::k_8_8_8_8:
+    case xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16:
+    case xenos::TextureFormat::k_5_6_5:
+    case xenos::TextureFormat::k_1_5_5_5:
+    case xenos::TextureFormat::k_4_4_4_4:
+      return TEX_FORMAT_RGBA8_UNORM;
+    case xenos::TextureFormat::k_2_10_10_10:
+    case xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16:
+      return TEX_FORMAT_RGB10A2_UNORM;
+    case xenos::TextureFormat::k_10_11_11:
+    case xenos::TextureFormat::k_11_11_10:
+      return TEX_FORMAT_R11G11B10_FLOAT;
+    case xenos::TextureFormat::k_16:
+      return TEX_FORMAT_R16_UNORM;
+    case xenos::TextureFormat::k_16_16:
+      return TEX_FORMAT_RG16_UNORM;
+    case xenos::TextureFormat::k_16_16_16_16:
+      return TEX_FORMAT_RGBA16_UNORM;
+    case xenos::TextureFormat::k_16_FLOAT:
+    case xenos::TextureFormat::k_16_EXPAND:
+      return TEX_FORMAT_R16_FLOAT;
+    case xenos::TextureFormat::k_16_16_FLOAT:
+    case xenos::TextureFormat::k_16_16_EXPAND:
+      return TEX_FORMAT_RG16_FLOAT;
+    case xenos::TextureFormat::k_16_16_16_16_FLOAT:
+    case xenos::TextureFormat::k_16_16_16_16_EXPAND:
+      return TEX_FORMAT_RGBA16_FLOAT;
+    case xenos::TextureFormat::k_32_FLOAT:
+    case xenos::TextureFormat::k_24_8:
+    case xenos::TextureFormat::k_24_8_FLOAT:
+      return TEX_FORMAT_R32_FLOAT;
+    case xenos::TextureFormat::k_32_32_FLOAT:
+      return TEX_FORMAT_RG32_FLOAT;
+    case xenos::TextureFormat::k_32_32_32_32_FLOAT:
+      return TEX_FORMAT_RGBA32_FLOAT;
+    default:
+      return TEX_FORMAT_UNKNOWN;
+  }
+}
+
+// Keyed by the EDRAM storage format, as the SDK does: the color formats "_AS_" only change what resolves convert
+// the data to, and the XDK rewrites a surface's format between its draws and its resolve (xdk-d3d-reference.md).
+RenderTargets::SurfaceTuple RenderTargets::SurfaceKey(const GuestSurface& s) {
+  uint32_t guest_format =
+      s.depth ? s.format() : uint32_t(xenos::GetStorageColorFormat(xenos::ColorRenderTargetFormat(s.format())));
+  return {s.depth, s.edram_base(), s.pitch(), s.msaa(), guest_format, s.width, s.height};
+}
+
+HostTarget* RenderTargets::FindMsaaAlias(const GuestSurface& s, uint32_t& samples_x, uint32_t& samples_y) {
+  if (!s || !s.msaa()) return nullptr;
+  samples_x = s.msaa() >= 2 ? 2 : 1;
+  samples_y = 2;
+  SurfaceTuple key = SurfaceKey(s);
+  HostTarget* found = nullptr;
+  for (auto& [target_key, target] : targets_) {
+    const SurfaceTuple& t = std::get<0>(target_key);
+    // A reduced target too (D121): the surface last drawn in an upscaled view is there.
+    if (std::get<1>(target_key) == Kind::kShadow || !target.texture || std::get<0>(t) != s.depth) continue;
+    if (std::get<1>(t) != std::get<1>(key) || std::get<3>(t) != 0 || std::get<4>(t) != std::get<4>(key)) continue;
+    if (std::get<2>(t) != s.pitch() * samples_x) continue;
+    if (!found || target.written > found->written) found = &target;
+  }
+  if (found) found->last_used = frame_;
+  return found;
+}
+
+HostTarget* RenderTargets::FindColorOverDepth(const GuestSurface& s, Kind kind, uint64_t written) {
+  if (!s || !s.depth || s.msaa()) return nullptr;
+  constexpr uint32_t k8888 = uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8);
+  // The targets are ordered by their key: the single-sampled k_8_8_8_8 color ones at this base and pitch are one run
+  // (any size first: none is 0x0). Every draw with depth asks (D122: walking them all was 1 % of the renderer).
+  HostTarget* found = nullptr;
+  Key from{SurfaceTuple{false, s.edram_base(), s.pitch(), 0, k8888, 0, 0}, Kind::kRender};
+  for (auto it = targets_.lower_bound(from); it != targets_.end(); ++it) {
+    const SurfaceTuple& t = std::get<0>(it->first);
+    if (std::get<0>(t) || std::get<1>(t) != s.edram_base() || std::get<2>(t) != s.pitch() || std::get<3>(t) != 0 ||
+        std::get<4>(t) != k8888) {
+      break;
+    }
+    HostTarget& target = it->second;
+    if (std::get<1>(it->first) != kind || !target.texture || target.written <= written) continue;
+    if (!found || target.written > found->written) found = &target;
+  }
+  return found;
+}
+
+HostTarget* RenderTargets::Get(const GuestSurface& s, Kind kind) {
+  if (!s) return nullptr;
+  // No Xenos surface is wider or taller than 8192 (a texture's limit, and far more than the EDRAM holds): such a
+  // surface was read from memory that no longer holds one. Its draws are dropped, instead of asking for gigabytes.
+  if (s.width > 8192 || s.height > 8192) {
+    static uint32_t logged = 0;
+    if (logged < 16) {
+      ++logged;
+      REXLOG_WARN("[native_x_renderer] surface of {}x{} (pitch {}, EDRAM base {}, format {}) ignored: no Xenos surface is "
+                  "that large{}",
+                  s.width, s.height, s.pitch(), s.edram_base(), s.format(), logged == 16 ? " (not logged again)" : "");
+    }
+    return nullptr;
+  }
+  Key key{SurfaceKey(s), kind};
+  uint32_t guest_format = std::get<4>(std::get<0>(key));
+  bool reduced = kind == Kind::kReduced, shadow = kind == Kind::kShadow;
+  auto it = targets_.find(key);
+  if (it != targets_.end()) {
+    it->second.last_used = frame_;
+    return it->second.texture ? &it->second : nullptr;
+  }
+  HostTarget& target = targets_[key];
+  target.last_used = frame_;
+  target.created_frame = frame_;
+
+  TEXTURE_FORMAT format = s.depth ? HostDepthFormat(guest_format, depth_unorm24_) : HostColorFormat(guest_format);
+  if (format == TEX_FORMAT_UNKNOWN) {
+    REXLOG_WARN("[native_x_renderer] render target format {} not supported", guest_format);
+    return nullptr;
+  }
+  TextureDesc desc;
+  std::string name = std::string(s.depth ? "NativeXRenderer depth " : "NativeXRenderer color ") + std::to_string(s.width) +
+                     "x" + std::to_string(s.height) + " base " + std::to_string(s.edram_base()) +
+                     (s.depth ? "" : " format " + std::to_string(guest_format)) +  // for captures: 5 is k_16_16_16_16
+                     (reduced ? " reduced" : shadow ? " shadow" : "");
+  const RenderScale& scale = reduced ? reduced_scale_ : shadow ? shadow_scale_ : scale_;
+  desc.Name = name.c_str();
+  desc.Type = RESOURCE_DIM_TEX_2D;
+  desc.Width = scale.HostWidth(s.width);
+  desc.Height = scale.HostHeight(s.height);
+  desc.Format = format;
+  // Without the game's MSAA (D31, D60): one sample per pixel, whatever the surface has. On the console MSAA
+  // is what splits a scene into EDRAM tiles; NativeXRenderer antialiases with its own techniques.
+  desc.SampleCount = 1;
+  desc.BindFlags = BIND_SHADER_RESOURCE | (s.depth ? BIND_DEPTH_STENCIL : BIND_RENDER_TARGET);
+  device_->CreateTexture(desc, nullptr, &target.texture);
+  if (!target.texture) {
+    REXLOG_ERROR("[native_x_renderer] could not create the render target {}", name);
+    return nullptr;
+  }
+  target.view = target.texture->GetDefaultView(s.depth ? TEXTURE_VIEW_DEPTH_STENCIL : TEXTURE_VIEW_RENDER_TARGET);
+  target.srv = target.texture->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+  if (s.depth) {
+    TextureViewDesc stencil;
+    stencil.ViewType = TEXTURE_VIEW_SHADER_RESOURCE;
+    stencil.Format = format == TEX_FORMAT_D32_FLOAT_S8X24_UINT ? TEX_FORMAT_X32_TYPELESS_G8X24_UINT
+                                                               : TEX_FORMAT_X24_TYPELESS_G8_UINT;
+    target.texture->CreateView(stencil, &target.stencil_srv);
+  }
+  target.width = desc.Width;
+  target.height = desc.Height;
+  target.guest_width = s.width;
+  target.guest_height = s.height;
+  target.samples = desc.SampleCount;
+  target.format = format;
+  target.depth = s.depth;
+  target.depth_float24 =
+      s.depth && xenos::DepthRenderTargetFormat(guest_format) == xenos::DepthRenderTargetFormat::kD24FS8;
+  target.reduced = reduced;
+  target.shadow = shadow;
+  target.scale = scale;
+  REXLOG_INFO("[native_x_renderer] new render target: {} (pitch {}, {}x MSAA in the guest, guest format {}; {}x{} on the "
+              "host)",
+              name, s.pitch(), s.samples(), guest_format, desc.Width, desc.Height);
+  return &target;
+}
+
+ITextureView* ResolvedTexture::SliceView(uint32_t slice) {
+  if (!texture || slice >= slices) return nullptr;
+  if (slice_views_.empty()) slice_views_.resize(slices);
+  RefCntAutoPtr<ITextureView>& view = slice_views_[slice];
+  if (!view) {
+    TextureViewDesc desc;
+    desc.ViewType = TEXTURE_VIEW_RENDER_TARGET;
+    desc.TextureDim = RESOURCE_DIM_TEX_2D_ARRAY;
+    desc.FirstArraySlice = slice;
+    desc.NumArraySlices = 1;
+    texture->CreateView(desc, &view);
+  }
+  return view;
+}
+
+ITextureView* ResolvedTexture::PackedSliceView(IRenderDevice* device, uint32_t slice) {
+  if (!texture || cube || slice >= slices) return nullptr;
+  if (!packed_) {
+    TextureDesc desc;
+    std::string name = std::string("NativeXRenderer resolve packed ") + std::to_string(guest_width) + "x" +
+                       std::to_string(guest_height) + "x" + std::to_string(slices);
+    desc.Name = name.c_str();
+    desc.Type = RESOURCE_DIM_TEX_2D_ARRAY;
+    desc.Width = width;
+    desc.Height = height;
+    desc.ArraySize = slices;
+    desc.Format = TEX_FORMAT_RGBA8_UNORM;
+    desc.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+    device->CreateTexture(desc, nullptr, &packed_);
+    if (!packed_) return nullptr;
+    packed_array_view_ = packed_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+    packed_slice_views_.resize(slices);
+  }
+  RefCntAutoPtr<ITextureView>& view = packed_slice_views_[slice];
+  if (!view) {
+    TextureViewDesc desc;
+    desc.ViewType = TEXTURE_VIEW_RENDER_TARGET;
+    desc.TextureDim = RESOURCE_DIM_TEX_2D_ARRAY;
+    desc.FirstArraySlice = slice;
+    desc.NumArraySlices = 1;
+    packed_->CreateView(desc, &view);
+  }
+  return view;
+}
+
+void ResolvedTextures::Watch(GuestMemory* memory) {
+  if (memory_ && watch_) memory_->memory().UnregisterPhysicalMemoryInvalidationCallback(watch_);
+  watch_ = nullptr;
+  memory_ = memory;
+  if (memory_) watch_ = memory_->memory().RegisterPhysicalMemoryInvalidationCallback(OnMemoryInvalidated, this);
+}
+
+std::pair<uint32_t, uint32_t> ResolvedTextures::OnMemoryInvalidated(void* context, uint32_t start, uint32_t length,
+                                                                    bool exact_range) {
+  // A guest thread, in the global critical region, for a page some listener watches: a CPU write to it (not
+  // exact: the page written), or an allocation, a release, a protection change, a file read (exact). The pages a
+  // resolve covers are watched (ResolveWritten).
+  auto* self = static_cast<ResolvedTextures*>(context);
+  if (length) {
+    uint32_t first = start, last = start + (length - 1);
+    bool cpu_write = !exact_range;
+    std::lock_guard lock(self->pending_mutex_);
+    auto& pending = self->pending_;
+    if (!pending.empty() && pending.back().cpu_write == cpu_write && first <= pending.back().last + 1 &&
+        last + 1 >= pending.back().first) {
+      pending.back() = {std::min(first, pending.back().first), std::max(last, pending.back().last), cpu_write};
+    } else {
+      pending.push_back({first, last, cpu_write});
+    }
+    self->has_pending_.store(true, std::memory_order_release);
+  }
+  // Whatever the others unwatch.
+  return {0, UINT32_MAX};
+}
+
+uint64_t ResolvedTextures::HashGuest(const ResolvedTexture& texture) const {
+  const uint8_t* data = memory_ ? memory_->memory().TranslatePhysical<const uint8_t*>(texture.address) : nullptr;
+  return data && texture.guest_bytes ? XXH3_64bits(data, texture.guest_bytes) : 0;
+}
+
+void ResolvedTextures::ApplyInvalidations() {
+  if (!has_pending_.load(std::memory_order_acquire)) return;
+  {
+    std::lock_guard lock(pending_mutex_);
+    applying_.swap(pending_);
+    has_pending_.store(false, std::memory_order_relaxed);
+  }
+  for (auto& [key, texture] : textures_) {
+    if (!texture.texture || texture.invalidated || !texture.guest_bytes) continue;
+    uint32_t first = texture.address, last = texture.address + (texture.guest_bytes - 1);
+    bool cpu_write = false, other = false;
+    uint32_t range_first = 0, range_last = 0;
+    for (const Range& range : applying_) {
+      if (range.first > last || range.last < first) continue;
+      (range.cpu_write ? cpu_write : other) = true;
+      range_first = range.first;
+      range_last = range.last;
+      if (cpu_write) break;
+    }
+    if (!cpu_write && !other) continue;
+    if (!cpu_write && HashGuest(texture) == texture.guest_hash) {
+      // Allocated, released, reprotected or read into, with its data unchanged so far. A file read reports its range
+      // before it writes it, and this thread runs behind the game's: marked a resolve's again now, the memory would
+      // take the read's data unseen (Battlefield 1943 streams soldier textures into the memory of its loading
+      // screen's resolve, and they stayed black). Unwatched until it is hashed again two frames on (RecheckKept,
+      // D127).
+      texture.watched = false;
+      texture.recheck_frame = frame_ + 2;
+      recheck_pending_ = true;
+      continue;
+    }
+    Invalidate(texture, cpu_write, range_first, range_last);
+  }
+  applying_.clear();
+}
+
+void ResolvedTextures::Invalidate(ResolvedTexture& texture, bool cpu_write, uint32_t range_first,
+                                  uint32_t range_last) {
+  texture.invalidated = true;
+  texture.watched = false;
+  texture.recheck_frame = 0;
+  ++generation_;
+  ++invalidated_;
+  NoteGone(texture, false);
+  if (logged_invalidations_ < 32) {
+    ++logged_invalidations_;
+    REXLOG_INFO("[native_x_renderer] resolve target {:#x} {}x{}x{} guest format {} invalidated: guest memory "
+                "{:#x}-{:#x} {}, {} frames after its last resolve{}",
+                texture.address, texture.guest_width, texture.guest_height, texture.slices, texture.guest_format,
+                range_first, range_last,
+                cpu_write ? "written by the CPU" : "allocated, released or read into with new data",
+                frame_ - texture.last_resolve_frame, logged_invalidations_ == 32 ? " (not logged again)" : "");
+  }
+}
+
+namespace {
+// Whether guest physical memory [first, last] is allocated, readable and writable, in one of the views of physical
+// memory (0xA0000000, 0xC0000000, 0xE0000000, which maps it from 0x1000). The SDK watches a view's pages only where
+// that view has them allocated: released memory cannot be watched.
+bool AllocatedForWrites(rex::memory::Memory& memory, uint32_t first, uint32_t last) {
+  struct View {
+    uint32_t base, physical_offset;
+  };
+  for (const View& view : {View{0xA0000000u, 0}, View{0xC0000000u, 0}, View{0xE0000000u, 0x1000}}) {
+    if (first < view.physical_offset || last >= 0x20000000u) continue;
+    const uint32_t low = view.base + (first - view.physical_offset), high = view.base + (last - view.physical_offset);
+    rex::memory::BaseHeap* heap = memory.LookupHeap(low);
+    if (heap && heap->QueryRangeAccess(low, high) == rex::memory::PageAccess::kReadWrite) return true;
+  }
+  return false;
+}
+}  // namespace
+
+void ResolvedTextures::RecheckKept() {
+  if (!recheck_pending_) return;
+  ApplyInvalidations();
+  recheck_pending_ = false;
+  for (auto& [key, texture] : textures_) {
+    if (!texture.recheck_frame) continue;
+    if (texture.invalidated) {
+      texture.recheck_frame = 0;
+      continue;
+    }
+    if (frame_ < texture.recheck_frame) {
+      recheck_pending_ = true;
+      continue;
+    }
+    texture.recheck_frame = 0;
+    const uint32_t first = texture.address, last = texture.address + (texture.guest_bytes - 1);
+    // Released (the SDK reports a release before it happens), or changed: the memory no longer holds the resolve.
+    // Marked a resolve's again while released, it was watched nowhere, and the data the game put there after
+    // allocating it again never reached the mirror (Battlefield 1943's soldier textures, in its loading screen's
+    // memory, drew black).
+    if (!AllocatedForWrites(memory_->memory(), first, last) || HashGuest(texture) != texture.guest_hash) {
+      Invalidate(texture, false, first, last);
+      continue;
+    }
+    // As on the console, the memory still holds the resolve. Watched again, so that the CPU's next write is
+    // reported (D74).
+    ++kept_;
+    if (logged_kept_ < 32) {
+      ++logged_kept_;
+      REXLOG_INFO("[native_x_renderer] resolve target {:#x} {}x{}x{} guest format {} kept: guest memory "
+                  "{:#x}-{:#x} allocated, released or reprotected with its data unchanged, {} frames after its "
+                  "last resolve{}",
+                  texture.address, texture.guest_width, texture.guest_height, texture.slices, texture.guest_format,
+                  first, last, frame_ - texture.last_resolve_frame, logged_kept_ == 32 ? " (not logged again)" : "");
+    }
+    memory_->ResolveWritten(texture.address, texture.guest_bytes);
+    texture.watched = true;
+  }
+}
+
+void ResolvedTextures::Touch(ResolvedTexture* texture, uint32_t guest_bytes) {
+  ApplyInvalidations();  // what happened before this resolve
+  texture->last_resolve = ++counter_;
+  ++generation_;
+  texture->last_used = frame_;
+  texture->last_resolve_frame = frame_;
+  texture->invalidated = false;
+  texture->recheck_frame = 0;
+  gone_.erase(texture->address);
+  // Marking the pages again each resolve walks them in three heaps; nothing unwatches them without the watch
+  // reporting it, which clears `watched`.
+  if (texture->watched && texture->guest_bytes == guest_bytes) return;
+  texture->guest_bytes = guest_bytes;
+  texture->watched = memory_ && guest_bytes;
+  if (texture->watched) {
+    memory_->ResolveWritten(texture->address, guest_bytes);
+    texture->guest_hash = HashGuest(*texture);
+  }
+}
+
+bool ResolvableFormat(uint32_t texture_format) {
+  // DXT, DXN, CTX1 and the like: blocks of 4x4 texels. The formats that read a 32-bit word as several narrower
+  // texels (k_32_AS_8, ...) are blocks of one row and may read a resolve.
+  const rex::graphics::FormatInfo* info = rex::graphics::FormatInfo::Get(texture_format);
+  return info && info->block_height == 1;
+}
+
+ResolvedTexture* ResolvedTextures::GetOrCreate(uint32_t address, uint32_t guest_format, uint32_t width,
+                                               uint32_t height, uint32_t slices, bool cube, bool shadow) {
+  ApplyInvalidations();
+  if (cube) slices = 6;
+  Key key{address, guest_format, width, height, slices, cube, shadow};
+  auto it = textures_.find(key);
+  if (it != textures_.end()) return it->second.texture ? &it->second : nullptr;
+  ResolvedTexture& texture = textures_[key];
+  ++generation_;
+  texture.last_used = frame_;
+  TEXTURE_FORMAT format = HostTextureFormat(guest_format);
+  if (format == TEX_FORMAT_UNKNOWN) {
+    REXLOG_WARN("[native_x_renderer] resolve to texture format {} not supported", guest_format);
+    return nullptr;
+  }
+  TextureDesc desc;
+  std::string name = std::string(cube ? "NativeXRenderer resolve cube " : "NativeXRenderer resolve ") +
+                     std::to_string(width) + "x" + std::to_string(height) + "x" + std::to_string(slices) + " at " +
+                     std::to_string(address) + (shadow ? " shadow" : "");
+  const RenderScale& scale = shadow ? shadow_scale_ : scale_;
+  desc.Name = name.c_str();
+  // A cube is a 2D array of six faces that can also be viewed as a cube (its default view).
+  desc.Type = cube ? RESOURCE_DIM_TEX_CUBE : RESOURCE_DIM_TEX_2D_ARRAY;
+  desc.Width = scale.HostWidth(width);
+  desc.Height = scale.HostHeight(height);
+  desc.ArraySize = slices;
+  desc.Format = format;
+  desc.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+  device_->CreateTexture(desc, nullptr, &texture.texture);
+  if (!texture.texture) return nullptr;
+  texture.array_view_ = texture.texture->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+  if (!cube) {
+    TextureViewDesc slice_0;
+    slice_0.ViewType = TEXTURE_VIEW_SHADER_RESOURCE;
+    slice_0.TextureDim = RESOURCE_DIM_TEX_2D;
+    slice_0.FirstArraySlice = 0;
+    slice_0.NumArraySlices = 1;
+    texture.texture->CreateView(slice_0, &texture.slice_0_);
+    texture.srv = texture.slice_0_;
+  }
+  texture.width = desc.Width;
+  texture.height = desc.Height;
+  texture.guest_width = width;
+  texture.guest_height = height;
+  texture.slices = slices;
+  texture.guest_format = guest_format;
+  texture.format = format;
+  texture.cube = cube;
+  texture.address = address;
+  texture.scale = scale;
+  texture.shadow = shadow;
+  REXLOG_INFO("[native_x_renderer] new resolve target: {:#x} {}x{}x{}{}{} guest format {} ({}x{} on the host)",
+              address, width, height, slices, cube ? " cube" : "", shadow ? " (shadow map)" : "", guest_format,
+              desc.Width, desc.Height);
+  return &texture;
+}
+
+ResolvedTexture* ResolvedTextures::Find(uint32_t address, uint32_t guest_format, uint32_t width, uint32_t height,
+                                        uint32_t slices, bool cube, bool shadow) {
+  ApplyInvalidations();
+  auto it = textures_.find(Key{address, guest_format, width, height, cube ? 6 : slices, cube, shadow});
+  return it != textures_.end() && it->second.texture ? &it->second : nullptr;
+}
+
+ResolvedTexture* ResolvedTextures::FindNewest(uint32_t address) {
+  ApplyInvalidations();
+  ResolvedTexture* newest = nullptr;
+  for (auto it = textures_.lower_bound(Key{address, 0, 0, 0, 0, false, false});
+       it != textures_.end() && std::get<0>(it->first) == address; ++it) {
+    if (it->second.texture && (!newest || it->second.last_resolve > newest->last_resolve)) newest = &it->second;
+  }
+  return newest && !newest->invalidated ? newest : nullptr;
+}
+
+ResolvedTexture* ResolvedTextures::FindNewest(uint32_t address, bool cube) {
+  ApplyInvalidations();
+  ResolvedTexture* newest = nullptr;
+  for (auto it = textures_.lower_bound(Key{address, 0, 0, 0, 0, false, false});
+       it != textures_.end() && std::get<0>(it->first) == address; ++it) {
+    if (it->second.texture && it->second.cube == cube &&
+        (!newest || it->second.last_resolve > newest->last_resolve)) {
+      newest = &it->second;
+    }
+  }
+  return newest && !newest->invalidated ? newest : nullptr;
+}
+
+uint64_t TextureBytes(const TextureDesc& desc) {
+  uint64_t bytes = 0;
+  for (uint32_t mip = 0; mip < desc.MipLevels; ++mip) bytes += GetMipLevelProperties(desc, mip).MipSize;
+  return bytes * desc.GetArraySize() * std::max(desc.SampleCount, 1u);
+}
+
+namespace {
+
+// Every 600 frames, the entries not used for `unused_frames` are freed (D52). DiligentCore keeps their
+// memory until the GPU is done with them. Entries without a texture (an unsupported format) stay, so that
+// their warning is not logged again.
+template <typename Map>
+Freed FreeUnused(Map& map, uint64_t& frame, uint64_t unused_frames) {
+  Freed freed;
+  if (++frame % 600 != 0) return freed;
+  for (auto it = map.begin(); it != map.end();) {
+    if (it->second.texture && it->second.last_used + unused_frames < frame) {
+      ++freed.count;
+      freed.bytes += TextureBytes(it->second.texture->GetDesc());
+      it = map.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return freed;
+}
+
+template <typename Map>
+uint64_t Bytes(const Map& map) {
+  uint64_t bytes = 0;
+  for (const auto& [key, entry] : map) {
+    if (entry.texture) bytes += TextureBytes(entry.texture->GetDesc());
+  }
+  return bytes;
+}
+
+}  // namespace
+
+uint64_t RenderTargets::bytes() const { return Bytes(targets_); }
+
+uint64_t ResolvedTextures::bytes() const {
+  uint64_t bytes = Bytes(textures_);
+  for (const auto& [key, entry] : textures_) {
+    if (entry.packed_) bytes += TextureBytes(entry.packed_->GetDesc());
+  }
+  return bytes;
+}
+
+Freed RenderTargets::EndFrame(uint64_t unused_frames) { return FreeUnused(targets_, frame_, unused_frames); }
+
+Freed ResolvedTextures::EndFrame(uint64_t unused_frames, uint64_t keep_bytes) {
+  Freed freed;
+  ++frame_;
+  RecheckKept();
+  if (frame_ % 600 != 0) return freed;
+  // The textures not used for `unused_frames` (D52). An invalidated one is freed: its memory holds newer data, so no
+  // fetch finds it again. One that still holds its resolve is what the console's memory would still hold, and the
+  // game may sample it any time later (GH Metallica's post-processing mask, resolved once and sampled only in its
+  // pause menu and a few moments of a song): those are kept while all the resolved textures take at most
+  // `keep_bytes`, and above it the least recently used are freed first (D96).
+  auto entry_bytes = [](const ResolvedTexture& texture) {
+    uint64_t bytes = TextureBytes(texture.texture->GetDesc());
+    if (texture.packed_) bytes += TextureBytes(texture.packed_->GetDesc());
+    return bytes;
+  };
+  uint64_t total = 0;
+  std::vector<decltype(textures_)::iterator> unused;
+  for (auto it = textures_.begin(); it != textures_.end(); ++it) {
+    if (!it->second.texture) continue;  // an unsupported format: kept, so that its warning is not logged again
+    total += entry_bytes(it->second);
+    if (it->second.last_used + unused_frames < frame_) unused.push_back(it);
+  }
+  std::sort(unused.begin(), unused.end(), [](const auto& a, const auto& b) {
+    if (a->second.invalidated != b->second.invalidated) return a->second.invalidated;
+    return a->second.last_used < b->second.last_used;
+  });
+  for (auto it : unused) {
+    ResolvedTexture& texture = it->second;
+    if (!texture.invalidated && total <= keep_bytes) break;
+    if (texture.last_resolve_frame) NoteGone(texture, true);  // for the diagnosis of later reads there
+    ++freed.count;
+    freed.bytes += TextureBytes(texture.texture->GetDesc());
+    total -= entry_bytes(texture);
+    textures_.erase(it);
+  }
+  if (freed.count) ++generation_;
+  return freed;
+}
+
+void ResolvedTextures::NoteGone(const ResolvedTexture& texture, bool freed) {
+  Gone& gone = gone_[texture.address];
+  gone = {texture.guest_width, texture.guest_height, texture.guest_format, texture.last_resolve_frame, frame_, freed,
+          false};
+}
+
+ResolvedTexture* ResolvedTextures::VertexSource(uint32_t begin, uint32_t size) {
+  if (index_generation_ != generation_) {
+    index_generation_ = generation_;
+    index_.clear();
+    for (auto& [key, texture] : textures_) {
+      if (!texture.texture || !texture.last_resolve_frame || !texture.guest_bytes) continue;
+      index_.push_back({texture.address, uint64_t(texture.address) + texture.guest_bytes, &texture});
+    }
+    std::sort(index_.begin(), index_.end(), [](const Span& a, const Span& b) { return a.address < b.address; });
+  }
+  if (index_.empty() || !size) return nullptr;
+  const uint64_t end = uint64_t(begin) + size;
+  // The spans starting before the range's end; resolve destinations do not overlap each other, so the nearest few
+  // are enough.
+  auto it = std::upper_bound(index_.begin(), index_.end(), end, [](uint64_t value, const Span& s) { return value <= s.address; });
+  for (int n = 0; n < 4 && it != index_.begin(); ++n) {
+    --it;
+    if (it->end <= begin) continue;
+    ResolvedTexture* t = it->texture;
+    if (!t->invalidated && frame_ - t->last_resolve_frame <= 1) return t;
+  }
+  return nullptr;
+}
+
+void ResolvedTextures::NoteGuestRead(uint32_t address) {
+  auto it = gone_.find(address);
+  if (it == gone_.end()) return;
+  ++gone_reads_;
+  Gone& gone = it->second;
+  if (gone.logged || logged_gone_reads_ >= 32) return;
+  gone.logged = true;
+  ++logged_gone_reads_;
+  REXLOG_INFO("[native_x_renderer] a draw reads guest memory at {:#x}, where a resolve wrote a {}x{} texture of guest "
+              "format {}: {} {} frames ago, {} frames after its last resolve; it reads what guest memory holds there "
+              "instead{}",
+              address, gone.width, gone.height, gone.format, gone.freed ? "freed unused" : "invalidated",
+              frame_ - gone.gone_frame, gone.gone_frame - gone.last_resolve_frame,
+              logged_gone_reads_ == 32 ? " (not logged again)" : "");
+}
+
+}  // namespace native_x_renderer

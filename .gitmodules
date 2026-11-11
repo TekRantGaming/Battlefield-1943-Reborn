@@ -1,0 +1,3 @@
+[submodule "bf/third_party/native-x-renderer/thirdparty/diligent-core"]
+	path = bf/third_party/native-x-renderer/thirdparty/diligent-core
+	url = https://github.com/DiligentGraphics/DiligentCore.git
