@@ -1,7 +1,10 @@
 # Third party notices
 
-The port's own code is under the MIT License ([LICENSE](LICENSE)). This repository also holds other people's code and
-art under their own licences. Each keeps its licence text in the place given here.
+The port's own code is under the MIT License ([LICENSE](LICENSE)). That licence covers the port's own source code
+only: the game's data and the code recompiled from the game's executable are not part of this repository and are not
+covered by it. This repository also holds other people's code and art under their own licences: the ReXGlue SDK
+(`sdk/src-bf`), NativeXRenderer (`bf/third_party/native-x-renderer`), DiligentCore and the rest below. Each keeps its
+licence text in the place given here.
 
 | Component | Where | Licence | Licence text |
 |---|---|---|---|

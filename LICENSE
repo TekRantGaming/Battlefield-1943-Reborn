@@ -19,10 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-This licence covers the port's own source code. The game's data and the
-recompiled code derived from the game's executable are not part of this
-repository and are not covered by it. The ReXGlue SDK (sdk/src-bf),
-NativeXRenderer (bf/third_party/native-x-renderer), DiligentCore and the other
-third party code in this repository keep their own licences, listed in
-THIRD_PARTY_NOTICES.md.
