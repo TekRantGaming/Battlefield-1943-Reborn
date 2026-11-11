@@ -14,7 +14,7 @@ brought back on servers that anyone can run.
 This is a fan project by TekRantGaming. It is not made, endorsed or supported by Electronic Arts or DICE. It contains
 no game files: you need your own copy of the Xbox 360 game (Xbox Live Arcade, title ID `5841097E`).
 
-**Latest build: [0.2.0](../../releases/latest)** (Windows and Linux) &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
+**Latest build: [0.2.1](../../releases/latest)** (Windows and Linux) &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
 
 - [Download and play](#download-and-play)
 - [Requirements](#requirements)
@@ -57,8 +57,8 @@ Your settings, logs and crash reports stay in the folder `user` next to the game
 **Updates install themselves.** At every start the game looks at this page's latest release; a newer one is downloaded,
 checked against the release's `SHA256SUMS.txt`, installed and started. On Windows only the files that changed are
 replaced, and if any of them cannot be, every one is put back; on Linux the AppImage replaces itself. Your `game` and
-`user` folders are never touched. Builds before 0.2.0 cannot update themselves: download 0.2.0 once and unzip it over
-your folder (Windows), or put the AppImage in place of the old one (Linux).
+`user` folders are never touched. Builds before 0.2.0 cannot update themselves: download the latest build once and
+unzip it over your folder (Windows), or put the AppImage in place of the old one (Linux).
 
 If Windows says *"rexruntime.dll is either not designed to run on Windows or it contains an error"* (Bad Image,
 0xc0e90002), it is not a broken download: the builds are not code signed yet, and Windows 11's Smart App Control has
@@ -95,17 +95,20 @@ not cleared this build's files.
 - Any frame rate: a limit from 30 to 240 or none, and VSync. The game still runs its world 30 times a second as on
   the console, but the camera turns on every frame, and soldiers, vehicles and vehicle cameras move smoothly between
   the game's updates.
-- Graphics: render resolution up to 2160p (three times the console's 720p), shadow quality up to four times the
-  original, FXAA, sharpening (AMD CAS), texture filtering up to 16x, ambient occlusion (Intel's XeGTAO, with strength
-  and quality settings) and global illumination (one bounce, with quality and distance settings).
+- Graphics: drawn at your display's resolution, or at a share of it scaled up and sharpened by AMD FSR 1 or NVIDIA
+  Image Scaling (NIS), shadow quality up to four times the original, FXAA, sharpening (AMD CAS), texture filtering up
+  to 16x, ambient occlusion (Intel's XeGTAO, with strength and quality settings) and global illumination (one bounce,
+  with quality and distance settings).
 - Grass and shrubs on Wake Island, Guadalcanal and Iwo Jima, placed from each level's own data, drawn as far as the
   whole map.
 - Field of view, motion blur on or off, camera shake and its strength, brightness and gamma.
-- Keyboard and mouse beside controllers, with rebindable keys and the mouse aiming vehicle guns and turrets directly.
+- Keyboard and mouse beside controllers, with rebindable keys and the mouse aiming vehicle guns and turrets directly;
+  the game's button prompts show the keys you play with, on foot and in vehicles.
 - Volume for master, music, effects and voices, menu music and sounds.
 - Performance metrics in the corner (off unless you turn them on; F2: off, FPS only or full), and crash and hang
   reports in `user\crashes`.
 - Updates that install themselves (see [Download and play](#download-and-play)).
+- Add to Steam from the launcher's Home, with the game's artwork.
 
 ## Controls
 
@@ -146,8 +149,8 @@ Everything is in our Settings menu, from the main menu and the pause menu.
 - **Display**: window mode (windowed or borderless), monitor, window size, resolution, refresh rate, aspect ratio
   (the game is 16:9: letterbox or stretch), brightness, gamma, VSync, frame rate limit, field of view, motion blur,
   camera shake.
-- **Graphics**: antialiasing (FXAA), render resolution, shadow quality, sharpness, texture filtering, ambient
-  occlusion, global illumination, grass distance, HD textures.
+- **Graphics**: antialiasing (FXAA), upscaler (Off, AMD FSR 1 or NVIDIA NIS) and its mode, shadow quality,
+  sharpness, texture filtering, ambient occlusion, global illumination, grass distance, HD textures.
 - **Audio**: master, music, effects and voices volume, menu music and sounds, the game's sound system and
   voiceover language.
 - **Controls**: Keyboard and mouse on or off, button prompts, camera turning (every frame or 30 times a second as on
@@ -161,18 +164,20 @@ Everything is in our Settings menu, from the main menu and the pause menu.
 EA's servers for Battlefield 1943 are gone. Reborn brings online play back with its own main backend, which every
 player logs in to and which lists every server.
 
-- **Official servers** are run by TekRantGaming. During the playtest the official list holds the Playtest Server;
-  others come and go for test events.
+- **Official servers** are run by TekRantGaming: for Classic and for Modern, two with all maps in turn, one each for
+  Wake Island, Iwo Jima and Guadalcanal around the clock, and Air Superiority on Coral Sea.
 - **Community servers**: anyone can host dedicated servers with `BF1943-Reborn-Server-<version>-windows.zip`. Each
   server has its own name, description, maps, movement (Classic or Modern) and pause between rounds, and shows in
   everyone's server browser under Community. See [docs/SERVER.md](docs/SERVER.md).
 
 ## Known issues
 
-This is an alpha. The main ones in 0.2.0:
+This is an alpha. The main ones in 0.2.1:
 
 - **Avoid flying with mouse and keyboard for now.** Take a boat to get to land, or use a controller to fly
   (controllers fly as on the Xbox 360). This will be fixed in a later update; mouse and keyboard work everywhere else.
+- With keyboard and mouse a tank aims the opposite way up and down to the soldier on foot, and one invert setting
+  covers both ([issue 3](../../issues/3)).
 - The first person weapon and hands still move 30 times a second at high frame rates (the view itself turns on every
   frame).
 - Stats, awards and leaderboards are kept only while the official backend runs: they reset when it restarts.
@@ -264,6 +269,10 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 - **Oswald** (SIL Open Font Licence): the menus' font.
 - Button prompts: **Xelu's Free Controllers and Keyboard Prompts** by Nicolae Berbece (CC0) and **Input Prompts** by
   Kenney (CC0).
+- The Discord and Steam marks in the launcher from **Simple Icons** (CC0). Discord and Steam are trademarks of their
+  owners.
+- Add to Steam's artwork and More from TRG Studios' pictures from **SteamGridDB** (https://www.steamgriddb.com),
+  downloaded when used.
 
 Every download includes the full licence texts in its `licences` folder.
 

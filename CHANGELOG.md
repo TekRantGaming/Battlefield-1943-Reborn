@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.2.1 (11 November 2026): AMD FSR 1 and NVIDIA NIS, Add to Steam with artwork, prompts that show your keys
+
+An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. 0.2.0 installs update to it by
+themselves at their next start, on Windows and Linux.
+
+**New**
+- **AMD FSR 1 and NVIDIA NIS.** Settings > Graphics has an **Upscaler** row: Off, AMD FSR 1 or NVIDIA NIS. Both scale
+  the picture up to your screen and sharpen it, for a clearer image when the game draws fewer pixels than your screen
+  has, and both work on any graphics card, on Windows and on Linux. With one of them the **Upscaler mode** row
+  (Native, Quality, Balanced, Performance) says how many pixels the game draws: your screen's size divided by 1, 1.5,
+  1.7 or 2, never below the console's 720p. Off is the plain smooth scaling, with the Sharpness row as before. Applies
+  at the next start.
+- New installs start with AMD FSR 1 at Quality (the first start's auto detect picks Performance for slow graphics
+  cards). An existing install keeps its picture until you choose an upscaler.
+- **No more Render resolution row:** the game draws at the resolution you choose for your display (the largest 16:9
+  picture it holds, never more), and with an upscaler at the Upscaler mode's share of it. An install that had picked
+  720p with no upscaler (the auto detect's choice for slow graphics cards) moves to AMD FSR 1 at Performance, which
+  draws the same 720p for a 1080p screen, so its frame rate stays and the picture gets sharper.
+- **NVIDIA NIS only where it runs:** the game checks once at each start whether NIS runs on your graphics card, and
+  the Upscaler row offers it only after a check has found that it does (FSR 1 and Off before that). On a ROG Ally (AMD,
+  Linux) it runs, at the same cost as FSR 1.
+- **Add to Steam with artwork:** the game's capsule, wide grid, hero, logo and icon from SteamGridDB, downloaded when
+  you press Add to Steam (never shipped), with Steam Input off as before. Steam closes only while its list is written,
+  then opens again. The button and the Discord one show the real Steam and Discord marks.
+- **More from TRG Studios has its pictures:** each project's SteamGridDB artwork, or the first picture of its GitHub
+  README, fetched when the launcher opens and kept in your user folder's cache (refreshed once a day).
+- **193 more pipelines prepared before you play:** the pipelines players' games built in 0.1.33 and 0.2.0 (sent with
+  Share graphics data, on all four maps) are now in the game's own list, so the shader screen builds them too and
+  fewer things pop in the first time you see them.
+
+**Fixed**
+- **The shader screen shows only after you install and after each update.** Before, a slower PC could see it on every
+  start while the game made its pipelines again; now a start after the first one goes straight on, and the game
+  finishes them behind the menus in a few seconds. After an update the shader screen builds every pipeline again,
+  once, keeping the ones your game learned while you played.
+- **Keyboard and mouse prompts name the key that does the action** ([issue 1](../../issues/1)). In a vehicle the
+  prompts now show the vehicle keys: W to throttle (a landing boat's THROTTLE TO RELEASE BOAT showed the mouse, the
+  zoom key on foot), S to brake and the right mouse button for the second weapon (a plane's bombs, a tank's coax gun);
+  on foot they show the keys on foot again. They follow the keys you bind and the buttons you remap, and a bind with
+  two keys shows the first (Up for CHANGE CAMERAS, where the controller's direction pad showed before). A key or
+  prompt style changed in a match shows at once, no longer from the next map. The comma, period and backslash keys
+  have pictures now, and the slash key no longer shows a backslash.
+- Linux: in exclusive Fullscreen on a desktop with display scaling (KDE at 185% on a ROG Ally), about one start in
+  three laid the menus out for the scaled desktop's size (squeezed) and rebuilt the picture's swap chain 90 times a
+  second. The game now takes the window's real size from the graphics driver when the desktop's report is late.
+- Linux: Borderless on a desktop with display scaling gave the game only the scaled desktop's size (1038x584 on a ROG
+  Ally), stretched up by the desktop, so the picture and the menus were soft. Borderless now uses the display's own
+  resolution there (1920x1080), as Fullscreen does, without changing the display.
+
+**Known issues**
+- Avoid flying with mouse and keyboard for now: take a boat to get to land, or use a controller to fly. This will be
+  fixed in a later update; mouse and keyboard work everywhere else.
+- With keyboard and mouse a tank aims the opposite way up and down to the soldier on foot, and one invert setting
+  covers both ([issue 3](../../issues/3)).
+- The first person weapon and hands still move 30 times a second at high frame rates.
+- Stats, awards and leaderboards reset when the official backend restarts.
+- Linux: the Vulkan renderer needs X11 or XWayland; the game's tutorial (Help) can drop back to the menu at once;
+  dedicated servers on Linux are not tested yet.
+- No HDR, no ultrawide picture (letterbox or stretch).
+- The builds are not code signed yet: Windows 11's Smart App Control can refuse `rexruntime.dll` (Bad Image,
+  0xc0e90002). It is not a broken download.
+
 ## 0.2.0 (11 November 2026): Linux, and updates that install themselves
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset.
