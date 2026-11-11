@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.2.2 (11 November 2026): voice chat, text chat and a profanity filter
+
+An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. 0.2.0 and 0.2.1 installs update
+to it by themselves at their next start, on Windows and Linux.
+
+**New**
+- **Proximity voice chat.** Talk to the players around you, on both teams: full volume within 4 m, fading to silent
+  at 50 m, and from their side (left or right of you). Hold **B** to talk (push to talk, the default), or choose
+  **Open mic** (it sends while you speak) or **Off** in Settings > Audio > Voice chat, with Voice volume and
+  Microphone sensitivity beside it. The game opens your microphone only when you first use it. A green MIC shows
+  while your voice goes out, and the names of the players you hear show top left.
+- **Text chat.** Messages show top left in a match: **T** to everyone, **Y** to your team, **U** to your squad; Tab
+  changes the channel, Enter sends, Esc closes. Team and squad messages reach only your team and squad, from the
+  deploy screen on. Settings > Gameplay > Text chat turns it off; Settings > Controls > Keyboard bindings has the keys.
+- **Profanity filter.** In text chat, words with profanity show as stars. A soldier name with profanity cannot be
+  used: the name page refuses it, and a player who already has one chooses a new name at their next start.
+- Voice and text chat need the server's update: the official servers have it. Community servers need the 0.2.2
+  server package; on an older server the game says chat is not available there yet.
+- Server package: the crash fix the official servers got on 11 November (a server could stop when a game object list
+  had an empty slot), and a watchdog that starts a stopped server or backend again within about 15 seconds.
+
+**Fixed**
+- **Laptops with two graphics cards** (King Kong Recompiled's fix): the game now runs on the dedicated graphics card
+  instead of the integrated one, which made it slow on some laptops. A graphics card you chose yourself still wins.
+
+**Known issues**
+- Avoid flying with mouse and keyboard for now: take a boat to get to land, or use a controller to fly. This will be
+  fixed in a later update; mouse and keyboard work everywhere else.
+- With keyboard and mouse a tank aims the opposite way up and down to the soldier on foot, and one invert setting
+  covers both ([issue 3](../../issues/3)).
+- Voice chat has no echo cancelling: with Open mic, use headphones. Push to talk and the chat keys are keyboard keys:
+  with a controller only (Steam Deck, ROG Ally), use Open mic, or map a back button to B in Steam Input.
+- The first person weapon and hands still move 30 times a second at high frame rates.
+- Stats, awards and leaderboards reset when the official backend restarts.
+- Linux: the Vulkan renderer needs X11 or XWayland; the game's tutorial (Help) can drop back to the menu at once;
+  dedicated servers on Linux are not tested yet.
+
 ## 0.2.1 (11 November 2026): AMD FSR 1 and NVIDIA NIS, Add to Steam with artwork, prompts that show your keys
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. 0.2.0 installs update to it by

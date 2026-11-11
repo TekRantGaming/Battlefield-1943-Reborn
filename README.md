@@ -14,7 +14,7 @@ brought back on servers that anyone can run.
 This is a fan project by TekRantGaming. It is not made, endorsed or supported by Electronic Arts or DICE. It contains
 no game files: you need your own copy of the Xbox 360 game (Xbox Live Arcade, title ID `5841097E`).
 
-**Latest build: [0.2.1](../../releases/latest)** (Windows and Linux) &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
+**Latest build: [0.2.2](../../releases/latest)** (Windows and Linux) &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
 
 - [Download and play](#download-and-play)
 - [Requirements](#requirements)
@@ -105,6 +105,8 @@ not cleared this build's files.
 - Keyboard and mouse beside controllers, with rebindable keys and the mouse aiming vehicle guns and turrets directly;
   the game's button prompts show the keys you play with, on foot and in vehicles.
 - Volume for master, music, effects and voices, menu music and sounds.
+- Proximity voice chat that both teams hear (hold B to talk, or open mic), and text chat to everyone, your team or
+  your squad (T, Y, U), with a profanity filter.
 - Performance metrics in the corner (off unless you turn them on; F2: off, FPS only or full), and crash and hang
   reports in `user\crashes`.
 - Updates that install themselves (see [Download and play](#download-and-play)).
@@ -131,6 +133,8 @@ Keyboard bindings.
 | C or Ctrl | crouch | |
 | V or Up | | vehicle camera (the bomb sight in the air raid) |
 | Tab | command (tap), score (hold) | the same |
+| T, Y, U | chat to everyone, your team, your squad | the same |
+| B | push to talk (hold) | the same |
 | Esc or Enter | pause menu | pause menu |
 | F2 | performance metrics | the same |
 
@@ -152,12 +156,12 @@ Everything is in our Settings menu, from the main menu and the pause menu.
 - **Graphics**: antialiasing (FXAA), upscaler (Off, AMD FSR 1 or NVIDIA NIS) and its mode, shadow quality,
   sharpness, texture filtering, ambient occlusion, global illumination, grass distance, HD textures.
 - **Audio**: master, music, effects and voices volume, menu music and sounds, the game's sound system and
-  voiceover language.
+  voiceover language, voice chat (push to talk, open mic or off), voice volume, microphone sensitivity.
 - **Controls**: Keyboard and mouse on or off, button prompts, camera turning (every frame or 30 times a second as on
   the Xbox 360), mouse sensitivity (with its own for aiming down sights and for vehicles), aim hold or toggle, mouse
   vertical, controller camera sensitivity, response, dead zone, inversion, vibration and its strength, button
   remapping, keyboard bindings, and the game's own control layouts, vertical look and vertical fly.
-- **Gameplay**: your name, performance metrics, and sharing (see [Privacy](#privacy)).
+- **Gameplay**: your name, text chat, performance metrics, and sharing (see [Privacy](#privacy)).
 
 ## Online play and servers
 
@@ -172,7 +176,7 @@ player logs in to and which lists every server.
 
 ## Known issues
 
-This is an alpha. The main ones in 0.2.1:
+This is an alpha. The main ones in 0.2.2:
 
 - **Avoid flying with mouse and keyboard for now.** Take a boat to get to land, or use a controller to fly
   (controllers fly as on the Xbox 360). This will be fixed in a later update; mouse and keyboard work everywhere else.
@@ -184,6 +188,8 @@ This is an alpha. The main ones in 0.2.1:
 - No HDR, and no ultrawide picture (the game is 16:9: letterbox or stretch).
 - Linux: the Vulkan renderer needs X11 or XWayland (a Wayland only session falls back to a slower one); the game's
   tutorial (Help) can drop back to the menu at once; dedicated servers on Linux are not tested yet.
+- Voice chat has no echo cancelling: with Open mic, use headphones. Push to talk and the chat keys are keyboard
+  keys: with a controller only (Steam Deck, ROG Ally), use Open mic, or map a back button to B in Steam Input.
 - The builds are not code signed yet (see [Download and play](#download-and-play)).
 - HD textures can be imported (Settings > Graphics), but no texture pack has been published.
 
@@ -250,6 +256,9 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
   (render settings and shader numbers: no game files, no name, nothing about you) to our server, at most every 15
   minutes and only when something new was built, so the next update has them ready and everyone gets less stutter.
 - Playing online, the backend sees the name you chose and your IP address, as any game server does.
+- **Voice and text chat** go through the server you play on: your voice only to the players near you, and only
+  while you hold push to talk (or speak, with Open mic); the game opens your microphone only when you first use
+  it. Servers keep a log of text chat for moderation; voice is passed on, never recorded.
 - The game's own Telemetry setting changes nothing: its reports went to EA's servers, which are gone.
 - Settings, logs and crash reports stay on your PC, in the folder `user`.
 
