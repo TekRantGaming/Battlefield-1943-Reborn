@@ -11,7 +11,7 @@ name no longer carries the version: `BF1943-Reborn-linux-x86_64.AppImage` in eve
 working when a new download goes over the old file. The Windows downloads are unchanged.
 
 **New**
-- **Linux.** Battlefield 1943 Reborn runs on Linux as an AppImage (`BF1943-Reborn-0.2.0-linux-x86_64.AppImage`). It
+- **Linux.** Battlefield 1943 Reborn runs on Linux as an AppImage (`BF1943-Reborn-linux-x86_64.AppImage`). It
   was played in a real match on the official Playtest server from a ROG Ally (Bazzite). Put it in a folder of its own:
   its `game` and `user` folders go beside it.
 - **Updates install themselves**, on Windows and Linux. At every start the game looks at the latest release here; a
