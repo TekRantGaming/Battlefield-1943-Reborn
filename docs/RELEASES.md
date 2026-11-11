@@ -13,7 +13,7 @@ stay as they are, no other file's name may contain them, and the program's own v
 |---|---|---|
 | `BF1943-Reborn-<version>-windows-x64.zip` | `tools\make_packages.ps1 -Version <version> -AppImage <file>` | `bf1943.exe` at the top (started by itself: no batch file or script), its libraries, `data`, `fonts`, `glyphs`, the player guide, the licences, and the updater's lists `bf-files.txt` (every file with its size and SHA256) and `bf-retired.txt` (files earlier releases had that this one does not) |
 | `BF1943-Reborn-Server-<version>-windows.zip` | the same run | `bin`, `server` (the backend and the hosts), the setup window and its scripts, the server guide, the licences |
-| `BF1943-Reborn-<version>-linux-x86_64.AppImage` | `tools/linux/build_linux.sh` and `build_appimage.sh` (WSL), added by `-AppImage` | the Linux game in one file |
+| `BF1943-Reborn-linux-x86_64.AppImage` | `tools/linux/build_linux.sh` and `build_appimage.sh` (WSL), added by `-AppImage` | the Linux game in one file, its name the same in every release (no version): a new download keeps the name a player's Steam shortcut starts, and the updater writes each version over the player's file |
 | `SHA256SUMS.txt` | the same run | the SHA256 of both zips, the AppImage and the game's three Windows binaries |
 
 ## Before a release goes up

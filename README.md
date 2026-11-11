@@ -36,9 +36,12 @@ no game files: you need your own copy of the Xbox 360 game (Xbox Live Arcade, ti
 2. Start `bf1943.exe`.
 
 **Linux**
-1. Download `BF1943-Reborn-<version>-linux-x86_64.AppImage` from the [Releases](../../releases/latest) page into a
-   folder of its own (for example `~/Games/BF1943-Reborn`): its `game` and `user` folders go beside it.
+1. Download `BF1943-Reborn-linux-x86_64.AppImage` from the [Releases](../../releases/latest) page into a folder of its
+   own (for example `~/Games/BF1943-Reborn`): its `game` and `user` folders go beside it.
 2. Make it runnable (`chmod +x` on the file, or Allow executing in its properties) and start it.
+
+Its name is the same in every release. Updates install themselves; to update by hand, put the new file over the old one
+(not in Downloads), so your settings, game files and Steam shortcut stay.
 
 **Then, on both**
 1. The first time, select your own Battlefield 1943 (Xbox 360) package: the single file in `5841097E\000D0000` from
