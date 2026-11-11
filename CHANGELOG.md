@@ -4,6 +4,10 @@
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset.
 
+**11 November, the Linux AppImage replaced:** its first start setup could not open anything to choose your game files
+(the two choices only highlighted); it now opens a file browser that works with the mouse, the keyboard and a
+controller. The Windows downloads are unchanged.
+
 **New**
 - **Linux.** Battlefield 1943 Reborn runs on Linux as an AppImage (`BF1943-Reborn-0.2.0-linux-x86_64.AppImage`). It
   was played in a real match on the official Playtest server from a ROG Ally (Bazzite). Put it in a folder of its own:
