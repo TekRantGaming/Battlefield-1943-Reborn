@@ -14,7 +14,7 @@ brought back on servers that anyone can run.
 This is a fan project by TekRantGaming. It is not made, endorsed or supported by Electronic Arts or DICE. It contains
 no game files: you need your own copy of the Xbox 360 game (Xbox Live Arcade, title ID `5841097E`).
 
-**Latest build: [0.2.3](../../releases/latest)** (Windows and Linux) &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
+**Latest build: [0.3.0](../../releases/latest)** (Windows and Linux) &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
 
 - [Download and play](#download-and-play)
 - [Requirements](#requirements)
@@ -95,6 +95,7 @@ not cleared this build's files.
 - Any frame rate: a limit from 30 to 240 or none, and VSync. The game still runs its world 30 times a second as on
   the console, but the camera turns on every frame, and soldiers, vehicles and vehicle cameras move smoothly between
   the game's updates.
+- Graphics presets from Potato to Ultra, for older and low end PCs as well as fast ones.
 - Graphics: drawn at your display's resolution, or at a share of it scaled up and sharpened by AMD FSR 1 or NVIDIA
   Image Scaling (NIS), shadow quality up to four times the original, FXAA, sharpening (AMD CAS), texture filtering up
   to 16x, ambient occlusion (Intel's XeGTAO, with strength and quality settings) and global illumination (one bounce,
@@ -105,6 +106,7 @@ not cleared this build's files.
 - Keyboard and mouse beside controllers, with rebindable keys and the mouse aiming vehicle guns and turrets directly;
   the game's button prompts show the keys you play with, on foot and in vehicles.
 - Volume for master, music, effects and voices, menu music and sounds.
+- The game in English, French, German, Italian, Spanish or Japanese, and aim assist on or off.
 - Proximity voice chat that both teams hear (hold B to talk, or open mic), and text chat to everyone, your team or
   your squad (T, Y, U), with a profanity filter.
 - Performance metrics in the corner (off unless you turn them on; F2: off, FPS only or full), and crash and hang
@@ -153,15 +155,18 @@ Everything is in our Settings menu, from the main menu and the pause menu.
 - **Display**: window mode (windowed or borderless), monitor, window size, resolution, refresh rate, aspect ratio
   (the game is 16:9: letterbox or stretch), brightness, gamma, VSync, frame rate limit, field of view, motion blur,
   camera shake.
-- **Graphics**: antialiasing (FXAA), upscaler (Off, AMD FSR 1 or NVIDIA NIS) and its mode, shadow quality,
+- **Graphics**: graphics preset (Potato, Low, Medium, High, Ultra), antialiasing (FXAA), upscaler (Off, AMD FSR 1
+  or NVIDIA NIS) and its mode, shadow quality,
   sharpness, texture filtering, ambient occlusion, global illumination, grass distance, HD textures.
 - **Audio**: master, music, effects and voices volume, menu music and sounds, the game's sound system and
   voiceover language, voice chat (push to talk, open mic or off), voice volume, microphone sensitivity.
 - **Controls**: Keyboard and mouse on or off, button prompts, camera turning (every frame or 30 times a second as on
   the Xbox 360), mouse sensitivity (with its own for aiming down sights and for vehicles), aim hold or toggle, mouse
-  vertical, controller camera sensitivity, response, dead zone, inversion, vibration and its strength, button
+  vertical and mouse vertical in vehicles, aim assist (for the controller and for keyboard and mouse), controller
+  camera sensitivity, response, dead zone, inversion, vibration and its strength, button
   remapping, keyboard bindings, and the game's own control layouts, vertical look and vertical fly.
-- **Gameplay**: your name, text chat, performance metrics, and sharing (see [Privacy](#privacy)).
+- **Gameplay**: your name, game language (English, French, German, Italian, Spanish or Japanese), text chat,
+  performance metrics, and sharing (see [Privacy](#privacy)).
 
 ## Online play and servers
 
@@ -176,12 +181,10 @@ player logs in to and which lists every server.
 
 ## Known issues
 
-This is an alpha. The main ones in 0.2.3:
+This is an alpha. The main ones in 0.3.0:
 
 - **Avoid flying with mouse and keyboard for now.** Take a boat to get to land, or use a controller to fly
   (controllers fly as on the Xbox 360). This will be fixed in a later update; mouse and keyboard work everywhere else.
-- With keyboard and mouse a tank aims the opposite way up and down to the soldier on foot, and one invert setting
-  covers both ([issue 3](../../issues/3)).
 - The first person weapon and hands still move 30 times a second at high frame rates (the view itself turns on every
   frame).
 - Stats, awards and leaderboards are kept only while the official backend runs: they reset when it restarts.

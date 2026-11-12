@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.3.0 (12 November 2026): mouse aiming in vehicles, graphics presets, smooth play at low frame rates
+
+An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. 0.2.0 to 0.2.3 installs update
+to it by themselves at their next start, on Windows and Linux.
+
+**New**
+- **Mouse aiming in vehicles.** A tank's gun, the jeep's machine gun and the landing craft's guns follow the mouse
+  directly instead of acting like a joystick: the gun turns to where you aim as fast as the vehicle allows, a fast
+  turn is no longer cut short, and moving the mouse up aims up, as on foot. Vehicles have their own invert setting:
+  Settings > Controls > Mouse vertical in vehicles ([issue 3](../../issues/3), [issue 5](../../issues/5)).
+- **Graphics presets.** Settings > Graphics starts with Graphics preset: Potato, Low, Medium, High or Ultra (Custom
+  once you change a row). Potato and Low are for older and low end PCs, and Ultra draws at full resolution with the
+  highest shadows, ambient occlusion and global illumination. The automatic graphics settings now pick Low, Medium or
+  High.
+- **Aim assist on or off**, for the controller and for keyboard and mouse: Settings > Controls. Both are on by
+  default ([issue 4](../../issues/4)).
+- **Game language**: Settings > Gameplay > Game language: English, French, German, Italian, Spanish or Japanese, the
+  game's own translations of its menus, HUD and loading screens. It applies at the next start
+  ([issue 2](../../issues/2)).
+- A crash now writes where it happened into `user\bf1943.log`, so a log sent with a report tells us much more.
+
+**Fixed**
+- **Stutter at low frame rates.** Below 30 FPS the motion smoothing jumped back every few frames, which made the game
+  stutter on slower PCs. It now stays smooth: at 24 FPS the camera moves about three to four times more evenly.
+- **A crash some players had right after a match ended**: a read of an empty memory address on one of the game's
+  threads no longer closes the game.
+- **A black outline round ships against the water** (Wake Island's carrier spawn) and **a white glow round palm
+  leaves and roofs** against the sky: the water and the haze read the picture one pixel off at our higher
+  resolutions. Fixed for every resolution.
+- **Effects that vanish for a moment** the first time they show up: 226 more graphics pipelines are now prepared
+  before you play, many of them from the data players shared.
+- Changing seat in a vehicle no longer swings the gun from mouse movement made before you got there.
+- Server package: Start finds a Python that works and says plainly when there is none.
+
+**Known issues**
+- Avoid flying with mouse and keyboard for now: take a boat to get to land, or use a controller to fly. This will be
+  fixed in a later update; mouse and keyboard work everywhere else.
+- Voice chat has no echo cancelling: with Open mic, use headphones. Push to talk and the chat keys are keyboard keys:
+  with a controller only (Steam Deck, ROG Ally), use Open mic, or map a back button to B in Steam Input.
+- The first person weapon and hands still move 30 times a second at high frame rates.
+- Stats, awards and leaderboards reset when the official backend restarts.
+- Linux: the Vulkan renderer needs X11 or XWayland; the game's tutorial (Help) can drop back to the menu at once;
+  dedicated servers on Linux are not tested yet.
+
 ## 0.2.3 (11 November 2026): general bug fixes
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. 0.2.0, 0.2.1 and 0.2.2 installs
