@@ -106,6 +106,11 @@ try {
     if (-not $Interactive) {
         $env:SDL_WINDOW_ACTIVATE_WHEN_SHOWN = "0"
         $env:SDL_WINDOW_ACTIVATE_WHEN_RAISED = "0"
+        # The PC's own controller and mouse never drive a test launcher (only BF_MENU_STEPS does), and its links and
+        # folders are only logged, never opened (11 Nov 2026: a test window at the back took the mouse over it, and a
+        # scripted A on Report an issue opened the Discord invite and Explorer over the person's screen).
+        $env:BF_DEV_SCRIPTED = "1"
+        $env:BF_DEV_NO_OPEN = "1"
     }
     $env:BF_DEV_PAD = $DevPad
     $env:BF_DEV_STACKS = $Stacks

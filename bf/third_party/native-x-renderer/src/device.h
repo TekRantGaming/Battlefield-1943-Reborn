@@ -27,6 +27,8 @@ struct HostWindow {
   void* wayland_surface = nullptr;  // wl_surface*
   uint32_t x11_window = 0;
   uint32_t (*pixel_size)(bool height) = nullptr;
+  // D159: the window's real size when the SDK's is out of date (an X11 surface keeps its own size): the SDK is told.
+  void (*real_pixel_size)(uint32_t width, uint32_t height) = nullptr;
 };
 #endif
 
@@ -97,6 +99,9 @@ class Device {
   std::string present_mode_;
   bool present_mode_applied_ = false;
   bool force_vsync_ = false;
+  // D159: a size the surface did not take (UpdateSize), not asked for again until the SDK's size changes.
+  uint32_t refused_width_ = 0, refused_height_ = 0;
+  int real_size_notes_ = 0;
 };
 
 }  // namespace native_x_renderer

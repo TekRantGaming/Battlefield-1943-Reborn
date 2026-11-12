@@ -161,6 +161,13 @@ class DrawPath {
   bool TakeProjection(GtaoProjection& out, float& z_min, float& z_max);
   // The grass prototype (grass.h): the main view's terrain draws are kept in `terrain` (null: none).
   void SetTerrainCapture(TerrainFrame* terrain) { terrain_ = terrain; }
+  // D163: the night's lamps on models: a main view draw that writes depth with one of these index counts reports its
+  // world-view-projection (column form) to `report`; null: none.
+  // `index_counts` holds pairs: an index count, the first register of the model's world matrix.
+  void SetModelLamps(const std::vector<uint32_t>* index_counts, void (*report)(uint32_t, const Mat4d&)) {
+    model_lamp_counts_ = index_counts;
+    model_lamp_report_ = report;
+  }
   // The vote of the main view's draws since the last call (column form: last clip = r x this clip), and starts the
   // next. False when no draw offered one. The winner is also kept for DrawObjectMotion (D120).
   bool TakeCameraVote(Mat4d& reprojection, uint32_t& votes, uint32_t& offers) {
@@ -179,6 +186,8 @@ class DrawPath {
     wait_budget_ms_ = budget_ms;
   }
   // The float constants that hold a texture's size (Profile::texture_size_constants, D93).
+  // D164: pixel shaders that read their pixel position get it as the host pixel's centre less one guest pixel.
+  void SetParamGenTexelCentre(bool on) { param_gen_texel_centre_ = on; }
   void SetTextureSizeConstants(const Profile::TextureSizeConstant* constants, uint32_t count) {
     texture_size_constants_ = std::span(constants, count);
   }
@@ -355,6 +364,8 @@ class DrawPath {
   bool waiting_for_scene_ = false, jitter_scene_ = false, scene_started_ = false;  // D119
   Mat4d scene_start_matrix_{};
   bool projection_vote_ = false;
+  const std::vector<uint32_t>* model_lamp_counts_ = nullptr;  // D163
+  void (*model_lamp_report_)(uint32_t, const Mat4d&) = nullptr;
   TerrainFrame* terrain_ = nullptr;  // the grass prototype's (grass.h)
   std::vector<std::pair<GtaoProjection, uint32_t>> projections_;
   std::vector<std::pair<float, float>> projection_ranges_;  // each candidate's viewport depth range (its first draw's)
@@ -362,6 +373,7 @@ class DrawPath {
   bool camera_winner_valid_ = false;
   Mat4d camera_winner_{};
   std::span<const Profile::TextureSizeConstant> texture_size_constants_;
+  bool param_gen_texel_centre_ = false;
   // native_x_renderer_alpha_to_coverage (D69, D114): blended by the alpha on surfaces the game draws with MSAA
   // (`msaa`), at 1x (`one`); else the shader's dither.
   struct {

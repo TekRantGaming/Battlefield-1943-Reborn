@@ -19,6 +19,7 @@
 #include "aa.h"
 #include "gtao.h"
 #include "grass.h"
+#include "night.h"
 #include "ssgi.h"
 #include "upscaler.h"
 #include "framegen.h"
@@ -98,6 +99,20 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_frame_generation, false, "NativeXRenderer"
                     "AMD FSR 3.1 frame generation (read at startup, D123): a frame between each two of the game's, "
                     "presented before the game's. Needs DLSS or FSR 3.1 (their 3D view and motion vectors) and a game "
                     "running at half the display's refresh rate; with V-Sync the two are shown a refresh apart");
+REXCVAR_DEFINE_BOOL(native_x_renderer_night, false, "NativeXRenderer",
+                    "Night (D162): the finished scene drawn as a moonlit night, before the HUD (Battlefield 1943 "
+                    "Reborn's Night Ops servers)");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_brightness, 1.0, "NativeXRenderer",
+                      "Night: how bright the moonlight is (1 the default, 0.5 darker, 2 brighter)");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_haze, 700.0, "NativeXRenderer",
+                      "Night: the distance in metres at which the night haze hides about two thirds of the view");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_glow, 1.0, "NativeXRenderer",
+                      "Night (D163): how strongly the effects keep their own light (muzzle flashes, tracers, fire, "
+                      "explosions; 0 none)");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_lamps, 1.0, "NativeXRenderer",
+                      "Night (D163): how strongly the level's lamps light their surroundings and glow (0 none)");
+REXCVAR_DEFINE_INT32(native_x_renderer_night_debug, 0, "NativeXRenderer",
+                     "Night (D163), tests: 1 shows each pixel's place in the world (5 m checks), 2 the lights alone");
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_hitch_ms, 0.0, "NativeXRenderer",
                       "A frame whose interval between presents is above this many ms is logged with what the "
                       "renderer did in it: shaders and pipelines created, draws skipped or waiting for them, texture "
@@ -108,6 +123,10 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_pipeline_wait_budget_ms, 2.0, "NativeXRe
                       "target's draws still wait up to 3 s (D101)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_pipeline_storage, true, "NativeXRenderer",
                     "Keep the shaders and pipelines used between runs, and prepare them at startup (read at startup)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_param_gen_texel_centre, true, "NativeXRenderer",
+                    "With the game's profile asking for it (D164): pixel shaders that read their pixel position get the "
+                    "host pixel's centre less one guest pixel (read at startup); false: the SDK's floor(position) / "
+                    "scale");
 REXCVAR_DEFINE_BOOL(native_x_renderer_wait_offscreen_pipelines, true, "NativeXRenderer",
                     "A draw into a target not of the game's output size (post-processing, masks, shadows) waits for "
                     "its shaders and pipeline instead of being skipped (D101); false: skipped, as the scene's draws");
@@ -188,6 +207,54 @@ Scaling g_scaling;     // the image scaled into the window by FSR 1 or NIS, and 
 std::atomic<int> g_nis_support{-1};
 std::string g_gpu_name;
 Antialiasing g_aa;     // on the finished scene (D41)
+Night g_night;         // the finished scene as a moonlit night (D162)
+// D162: the main view's depth (its shader view) kept at the view's end for the night's haze, the view's share of it,
+// and the frame it is from.
+Diligent::RefCntAutoPtr<Diligent::ITextureView> g_night_depth;
+float g_night_depth_uv[2] = {1.0f, 1.0f};
+uint64_t g_night_depth_frame = ~0ull;
+bool g_night_pending = false;  // the scene's copy was made: the night follows the game's composite
+// D162: the world's depth from before the first person weapon (the profile's AO depth copy), and its frame.
+Diligent::RefCntAutoPtr<Diligent::ITexture> g_night_world;
+uint64_t g_night_world_frame = ~0ull;
+float g_night_world_uv[2] = {1.0f, 1.0f};  // the view's share of it
+// D163: the effects' layer (the game's half size pass of its emissive particles, copied with its mips), its frame.
+Diligent::RefCntAutoPtr<Diligent::ITexture> g_night_glow;
+uint64_t g_night_glow_frame = ~0ull;
+uint64_t g_night_glow_frames = 0;  // frames with one since the last log line
+// D163: the camera from the terrain's draws (world to clip, the terrain's viewport and NDC transform), its frame, and
+// the main view's size on the host (its depth target's pixels).
+struct NightCamera {
+  float wvp[4][4] = {};
+  Diligent::Viewport viewport;
+  float ndc_scale[3] = {}, ndc_offset[3] = {};
+  float view_width = 0, view_height = 0;
+  uint64_t frame = ~0ull;
+} g_night_camera;
+// D163: the level's lamps the game gave (NightLamps), and the frame's choice of them.
+std::mutex g_night_lamps_mutex;
+std::vector<NightLamp> g_night_lamps;
+std::atomic<bool> g_night_lamps_present{false};
+// D163: the models with lamps (NightModels, under the lamps' lock, and its version), the render thread's copy and their
+// index counts for the draw path, and this frame's draws of them (index count, world-view-projection).
+std::vector<NightModelLamps> g_night_models;
+uint64_t g_night_models_version = 0;
+std::vector<NightModelLamps> g_night_models_render;
+std::vector<uint32_t> g_night_model_counts;
+uint64_t g_night_models_render_version = 0;
+struct NightModelDraw {
+  uint32_t index_count;
+  Mat4d m;
+};
+std::vector<NightModelDraw> g_night_model_draws;
+uint64_t g_night_models_placed = 0;  // models placed with their lamps since the last log line
+void ReportNightModelDraw(uint32_t index_count, const Mat4d& m) {
+  if (g_night_model_draws.size() < 48) g_night_model_draws.push_back({index_count, m});
+}
+std::vector<NightLight> g_night_frame_lights;
+std::vector<NightSprite> g_night_frame_sprites;
+bool NightLightsWanted();
+bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings& s);
 Gtao g_gtao;           // ambient occlusion at the end of the main view's opaque draws (D132)
 bool g_gtao_on = false;
 bool g_gtao_done = false;  // the opaque effects ran in this frame's view
@@ -645,6 +712,9 @@ void ExecuteDraw(const Command& c) {
     if (g_draw_failed) return;
     auto* kernel = rex::system::kernel_state();
     auto draw = std::make_unique<DrawPath>();
+    // D164, before the stored pipelines are read (Initialize), which take it too.
+    draw->SetParamGenTexelCentre(g_profile->param_gen_texel_centre &&
+                                 REXCVAR_GET(native_x_renderer_param_gen_texel_centre));
     if (!kernel || !kernel->memory() ||
         !draw->Initialize(*g_device, *g_registers, *kernel->memory(), g_resolved, g_scale,
                           StoragePath(kernel->title_id()))) {
@@ -691,7 +761,14 @@ void ExecuteDraw(const Command& c) {
   g_draw->SetObjectMotion(g_object_motion);
   g_draw->SetCameraVote(g_camera_vote);
   g_draw->SetProjectionVote((g_gtao_on || g_ssgi_on) && g_scene_view && !g_gtao_done);
-  g_draw->SetTerrainCapture(g_scene_view && !g_gtao_done && GrassOn() ? &g_terrain : nullptr);
+  // The terrain's draws: the grass's, and the night's lights' camera (D163).
+  g_draw->SetTerrainCapture(g_scene_view && !g_gtao_done && (GrassOn() || NightLightsWanted()) ? &g_terrain : nullptr);
+  // D163: the models with lamps (a jeep's headlights), at night.
+  g_draw->SetModelLamps(g_scene_view && !g_night_model_counts.empty() && REXCVAR_GET(native_x_renderer_night) &&
+                                REXCVAR_GET(native_x_renderer_night_lamps) > 0.0
+                            ? &g_night_model_counts
+                            : nullptr,
+                        &ReportNightModelDraw);
   std::array<DrawPath::Copy, 2> copies;
   for (uint32_t i = 0; i < c.copy_count; ++i) {
     copies[i] = {c.copies[i].address, c.data.data() + c.copies[i].offset, c.copies[i].size};
@@ -700,6 +777,49 @@ void ExecuteDraw(const Command& c) {
   g_draw->Draw(c.programs[0] ? *c.programs[0] : StateTracker::kNoProgram,
                c.programs[1] ? *c.programs[1] : StateTracker::kNoProgram, std::span(copies.data(), c.copy_count),
                targets, g_tiling);
+  // D162: the night on the game's composite, the first draw into a target of the output size after the scene's copy
+  // (Battlefield 1943: its bloom chain draws only smaller targets in between): the picture with the game's bloom and
+  // exposure, before the HUD drawn over it.
+  if (g_night_pending && targets[0] && targets[0]->guest_width == g_profile->output_width &&
+      targets[0]->guest_height == g_profile->output_height) {
+    g_night_pending = false;
+    HostTarget* t = targets[0];
+    if (t->texture && t->view && t->samples == 1) {
+      NightSettings night;
+      night.brightness = float(std::clamp(REXCVAR_GET(native_x_renderer_night_brightness), 0.1, 4.0));
+      night.haze_m = float(std::clamp(REXCVAR_GET(native_x_renderer_night_haze), 50.0, 20000.0));
+      const bool depth = g_night_depth && g_night_depth_frame == g_device->frames_presented();
+      // The depth's coordinates from the target's: its texture may be larger than the output (the EDRAM's pitch).
+      const TextureDesc& desc = t->texture->GetDesc();
+      const float view_w = float(t->scale.HostWidth(g_profile->output_width));
+      const float view_h = float(t->scale.HostHeight(g_profile->output_height));
+      const bool world = g_night_world && g_night_world_frame == g_device->frames_presented();
+      // Each depth with its own share of its texture (with an upscaler the textures can differ from the target's).
+      const float to_u = view_w > 0 ? float(desc.Width) / view_w : 1.0f;
+      const float to_v = view_h > 0 ? float(desc.Height) / view_h : 1.0f;
+      night.glow = float(std::clamp(REXCVAR_GET(native_x_renderer_night_glow), 0.0, 8.0));
+      night.lamps = float(std::clamp(REXCVAR_GET(native_x_renderer_night_lamps), 0.0, 8.0));
+      night.debug = REXCVAR_GET(native_x_renderer_night_debug);
+      NightFrame f;
+      f.depth = depth ? g_night_depth.RawPtr() : nullptr;
+      f.depth_uv[0] = to_u * g_night_depth_uv[0], f.depth_uv[1] = to_v * g_night_depth_uv[1];
+      f.world = world ? g_night_world->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
+      f.world_uv[0] = to_u * g_night_world_uv[0], f.world_uv[1] = to_v * g_night_world_uv[1];
+      // D163: the effects' layer covers the view (half its size).
+      if (g_night_glow && g_night_glow_frame == g_device->frames_presented()) {
+        f.glow = g_night_glow->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+        f.glow_uv[0] = to_u, f.glow_uv[1] = to_v;
+      }
+      // D163: the camera and the lamps it shows.
+      if (BuildNightCamera(f, to_u, to_v, night)) {
+        f.lights = g_night_frame_lights.data(), f.light_count = uint32_t(g_night_frame_lights.size());
+        f.sprites = g_night_frame_sprites.data(), f.sprite_count = uint32_t(g_night_frame_sprites.size());
+      }
+      g_night.Apply(g_device->device(), g_device->context(), t->texture, t->view, f, night);
+      t->written = ++g_target_writes;
+      g_draw->TargetsChanged();
+    }
+  }
   // D113: which depth resolve's words the draw read, for a depth target at a color target's EDRAM.
   uint32_t packed = g_draw->TakePackedRead();
   const ResolvedTexture* words = packed ? g_resolved.FindNewest(packed) : nullptr;
@@ -868,6 +988,246 @@ void ResolveClears(const Command& c, HostTarget* source, const Blitter::Rect& co
 // clear the color, the depth and stencil afterwards (ResolveClears).
 void UpscaleScene();
 
+// D163: the night's lights need the camera: night on and lamps wanted (asked on every draw: no lock).
+bool NightLightsWanted() {
+  return (g_night_lamps_present.load(std::memory_order_relaxed) || !g_night_model_counts.empty()) &&
+         REXCVAR_GET(native_x_renderer_night) && REXCVAR_GET(native_x_renderer_night_lamps) > 0.0;
+}
+
+// D163: the terrain's camera kept for the night's lights (at the AO's moment, before the terrain's frame is reset): its
+// world-view-projection (the world in the level's own units), viewport and NDC transform, and the view's host size.
+void NoteNightCamera() {
+  if (!g_device || !g_terrain.valid || g_night_camera.frame == g_device->frames_presented()) return;
+  if (!REXCVAR_GET(native_x_renderer_night)) return;
+  std::memcpy(g_night_camera.wvp, g_terrain.wvp, sizeof(g_night_camera.wvp));
+  g_night_camera.viewport = g_terrain.viewport;
+  for (int i = 0; i < 3; ++i) {
+    g_night_camera.ndc_scale[i] = g_terrain.ndc_scale[i];
+    g_night_camera.ndc_offset[i] = g_terrain.ndc_offset[i];
+  }
+  g_night_camera.view_width = g_scene_depth ? float(g_scene_depth->scale.HostWidth(g_profile->output_width))
+                                            : g_terrain.viewport.Width;
+  g_night_camera.view_height = g_scene_depth ? float(g_scene_depth->scale.HostHeight(g_profile->output_height))
+                                             : g_terrain.viewport.Height;
+  g_night_camera.frame = g_device->frames_presented();
+}
+
+// D163: this frame's camera for the night pass (`to_u`, `to_v`: the night target's texture coordinates to the view's
+// 0 to 1), and the lamps it lights and shows: the nearest whose light reaches into the view, and the nearest bulbs in
+// it. False without this frame's camera.
+bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings& s) {
+  const NightCamera& cam = g_night_camera;
+  if (!g_device || cam.frame != g_device->frames_presented()) return false;
+  const float(*m)[4] = cam.wvp;
+  // World from clip x, y and w: the inverse of those three rows' 3x3 part, in double precision.
+  const double a[3][3] = {{m[0][0], m[0][1], m[0][2]}, {m[1][0], m[1][1], m[1][2]}, {m[3][0], m[3][1], m[3][2]}};
+  const double det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+                     a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+  if (!(std::abs(det) > 1e-12)) return false;
+  double inv[3][3];
+  inv[0][0] = (a[1][1] * a[2][2] - a[1][2] * a[2][1]) / det;
+  inv[0][1] = (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / det;
+  inv[0][2] = (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / det;
+  inv[1][0] = (a[1][2] * a[2][0] - a[1][0] * a[2][2]) / det;
+  inv[1][1] = (a[0][0] * a[2][2] - a[0][2] * a[2][0]) / det;
+  inv[1][2] = (a[0][2] * a[1][0] - a[0][0] * a[1][2]) / det;
+  inv[2][0] = (a[1][0] * a[2][1] - a[1][1] * a[2][0]) / det;
+  inv[2][1] = (a[0][1] * a[2][0] - a[0][0] * a[2][1]) / det;
+  inv[2][2] = (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / det;
+  const double t[3] = {m[0][3], m[1][3], m[3][3]};
+  for (int r = 0; r < 3; ++r) {
+    for (int c = 0; c < 3; ++c) f.inverse[r][c] = float(inv[r][c]);
+    f.inverse_t[r] = float(t[r]);
+    f.eye[r] = float(-(inv[r][0] * t[0] + inv[r][1] * t[1] + inv[r][2] * t[2]));  // where clip x, y and w are 0
+  }
+  // The night target's texture coordinates to NDC: to the view's 0 to 1, its depth target's pixels, the terrain's
+  // viewport (DiligentCore's, Direct3D's way round: NDC y +1 at its top), then the translated shaders' NDC transform
+  // undone.
+  const Diligent::Viewport& vp = cam.viewport;
+  if (!(vp.Width > 0.0f && vp.Height > 0.0f && cam.ndc_scale[0] != 0.0f && cam.ndc_scale[1] != 0.0f)) return false;
+  f.to_ndc[0] = to_u * cam.view_width * 2.0f / (vp.Width * cam.ndc_scale[0]);
+  f.to_ndc[1] = -to_v * cam.view_height * 2.0f / (vp.Height * cam.ndc_scale[1]);
+  f.to_ndc[2] = (-vp.TopLeftX * 2.0f / vp.Width - 1.0f - cam.ndc_offset[0]) / cam.ndc_scale[0];
+  f.to_ndc[3] = (vp.TopLeftY * 2.0f / vp.Height + 1.0f - cam.ndc_offset[1]) / cam.ndc_scale[1];
+  f.camera = true;
+  // The lamps: their light where its sphere meets the view (clip -w <= x, y <= w, w >= 0), nearest first; their bulbs
+  // where they are in the view, nearest first.
+  g_night_frame_lights.clear();
+  g_night_frame_sprites.clear();
+  if (!(s.lamps > 0.0f)) return true;
+  struct Near {
+    float distance;
+    uint32_t index;
+  };
+  static std::vector<Near> lit, shown;
+  lit.clear(), shown.clear();
+  // The level's lamps, and the models' placed from this frame's draws of them (their world matrices).
+  static std::vector<NightLamp> lamps;
+  {
+    std::lock_guard lock(g_night_lamps_mutex);
+    lamps = g_night_lamps;
+  }
+  uint32_t placed_models = 0;
+  for (size_t d = 0; d < g_night_model_draws.size(); ++d) {
+    const NightModelDraw& draw = g_night_model_draws[d];
+    const NightModelLamps* model = nullptr;
+    for (const NightModelLamps& mm : g_night_models_render)
+      if (mm.index_count == draw.index_count) model = &mm;
+    if (!model) continue;
+    // The draw's world matrix (rows: world = R x local + T).
+    const Mat4d& mm = draw.m;
+    double R[3][3], T[3];
+    for (int r = 0; r < 3; ++r) {
+      for (int c = 0; c < 3; ++c) R[r][c] = mm[r * 4 + c];
+      T[r] = mm[r * 4 + 3];
+    }
+    // The same model drawn twice in the frame: once.
+    bool seen = false;
+    for (size_t e = 0; e < d && !seen; ++e) {
+      const Mat4d& o = g_night_model_draws[e].m;
+      seen = g_night_model_draws[e].index_count == draw.index_count && std::abs(o[3] - mm[3]) < 0.05 &&
+             std::abs(o[7] - mm[7]) < 0.05 && std::abs(o[11] - mm[11]) < 0.05;
+    }
+    if (seen) continue;
+    ++placed_models;
+    {
+      static uint64_t logged_at = 0;
+      if (g_device->frames_presented() >= logged_at + 600) {
+        logged_at = g_device->frames_presented();
+        REXLOG_INFO("[native_x_renderer] night: a model with lamps ({} indices) at {:.2f} {:.2f} {:.2f}, its axes x {:.2f} "
+                    "{:.2f} {:.2f} y {:.2f} {:.2f} {:.2f} z {:.2f} {:.2f} {:.2f}; eye {:.1f} {:.1f} {:.1f} (D163)",
+                    draw.index_count, T[0], T[1], T[2], R[0][0], R[1][0], R[2][0], R[0][1], R[1][1], R[2][1], R[0][2],
+                    R[1][2], R[2][2], f.eye[0], f.eye[1], f.eye[2]);
+      }
+    }
+    for (uint32_t i = 0; i < model->lamp_count && i < 4; ++i) {
+      const NightLamp& local = model->lamps[i];
+      NightLamp w = local;
+      for (int r = 0; r < 3; ++r) {
+        w.position[r] = float(R[r][0] * local.position[0] + R[r][1] * local.position[1] + R[r][2] * local.position[2] + T[r]);
+        w.direction[r] = float(R[r][0] * local.direction[0] + R[r][1] * local.direction[1] + R[r][2] * local.direction[2]);
+      }
+      const float n = std::sqrt(w.direction[0] * w.direction[0] + w.direction[1] * w.direction[1] +
+                                w.direction[2] * w.direction[2]);
+      for (float& v : w.direction) v = n > 1e-4f ? v / n : 0.0f;
+      lamps.push_back(w);
+    }
+  }
+  g_night_models_placed += placed_models;
+  const float planes[5][4] = {
+      {m[3][0] + m[0][0], m[3][1] + m[0][1], m[3][2] + m[0][2], m[3][3] + m[0][3]},
+      {m[3][0] - m[0][0], m[3][1] - m[0][1], m[3][2] - m[0][2], m[3][3] - m[0][3]},
+      {m[3][0] + m[1][0], m[3][1] + m[1][1], m[3][2] + m[1][2], m[3][3] + m[1][3]},
+      {m[3][0] - m[1][0], m[3][1] - m[1][1], m[3][2] - m[1][2], m[3][3] - m[1][3]},
+      {m[3][0], m[3][1], m[3][2], m[3][3]}};
+  for (uint32_t i = 0; i < lamps.size(); ++i) {
+    const NightLamp& l = lamps[i];
+    const float dx = l.position[0] - f.eye[0], dy = l.position[1] - f.eye[1], dz = l.position[2] - f.eye[2];
+    const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    bool in_view = distance < l.range + 250.0f;
+    for (int p = 0; p < 5 && in_view; ++p) {
+      const float n = std::sqrt(planes[p][0] * planes[p][0] + planes[p][1] * planes[p][1] + planes[p][2] * planes[p][2]);
+      const float side = planes[p][0] * l.position[0] + planes[p][1] * l.position[1] + planes[p][2] * l.position[2] + planes[p][3];
+      if (n > 0.0f && side < -l.range * n) in_view = false;
+    }
+    if (in_view) lit.push_back({distance, i});
+    if (l.glow > 0.0f && distance < 400.0f) shown.push_back({distance, i});
+  }
+  auto nearest = [](std::vector<Near>& v, size_t keep) {
+    std::sort(v.begin(), v.end(), [](const Near& x, const Near& y) { return x.distance < y.distance; });
+    if (v.size() > keep) v.resize(keep);
+  };
+  nearest(lit, Night::kMaxLights);
+  nearest(shown, Night::kMaxSprites * 2);
+  {
+    static uint64_t logged_at = 0;
+    const uint64_t frame = g_device->frames_presented();
+    if (frame >= logged_at + 600) {
+      logged_at = frame;
+      const NightLamp* l = lit.empty() ? nullptr : &lamps[lit[0].index];
+      REXLOG_INFO("[native_x_renderer] night: eye {:.1f} {:.1f} {:.1f}; {} lamps lit, the nearest at {:.1f} {:.1f} {:.1f} "
+                  "({:.1f} m); to NDC {:.4f} {:.4f} {:.4f} {:.4f}; viewport {:.0f} {:.0f} {:.0f}x{:.0f}, view {:.0f}x{:.0f} "
+                  "(D163)",
+                  f.eye[0], f.eye[1], f.eye[2], lit.size(), l ? l->position[0] : 0.0f, l ? l->position[1] : 0.0f,
+                  l ? l->position[2] : 0.0f, lit.empty() ? 0.0f : lit[0].distance, f.to_ndc[0], f.to_ndc[1],
+                  f.to_ndc[2], f.to_ndc[3], vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, cam.view_width,
+                  cam.view_height);
+    }
+  }
+  const float rad = 3.14159265f / 180.0f;
+  for (const Near& n : lit) {
+    const NightLamp& l = lamps[n.index];
+    NightLight o;
+    std::memcpy(o.position, l.position, sizeof(o.position));
+    o.range = l.range;
+    std::memcpy(o.color, l.color, sizeof(o.color));
+    std::memcpy(o.direction, l.direction, sizeof(o.direction));
+    o.cos_outer = std::cos(l.cone_outer * rad);
+    o.cos_inner = std::cos(l.cone_inner * rad);
+    g_night_frame_lights.push_back(o);
+  }
+  const float row_x = std::sqrt(m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[0][2] * m[0][2]);
+  const float row_y = std::sqrt(m[1][0] * m[1][0] + m[1][1] * m[1][1] + m[1][2] * m[1][2]);
+  for (const Near& n : shown) {
+    if (g_night_frame_sprites.size() >= Night::kMaxSprites) break;
+    const NightLamp& l = lamps[n.index];
+    const float* p = l.position;
+    const float cx = m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2] + m[0][3];
+    const float cy = m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2] + m[1][3];
+    const float cw = m[3][0] * p[0] + m[3][1] * p[1] + m[3][2] * p[2] + m[3][3];
+    if (!(cw > 0.2f)) continue;
+    const float nx = cx / cw, ny = cy / cw;
+    if (std::abs(nx) > 1.1f || std::abs(ny) > 1.1f) continue;
+    NightSprite o;
+    o.uv[0] = (nx - f.to_ndc[2]) / f.to_ndc[0];
+    o.uv[1] = (ny - f.to_ndc[3]) / f.to_ndc[1];
+    // A halo eight times the bulb's radius, and never under four pixels of the target across.
+    const float halo = l.glow * 8.0f;
+    const float min_uv = 4.0f / std::max(1.0f, cam.view_width / std::max(to_u, 1e-3f));
+    o.radius[0] = std::max(std::abs(halo * row_x / cw / f.to_ndc[0]), min_uv);
+    o.radius[1] = std::max(std::abs(halo * row_y / cw / f.to_ndc[1]), min_uv * std::abs(f.to_ndc[0] / f.to_ndc[1]));
+    o.depth = 0.1f / cw;
+    const float through = std::exp(-n.distance / std::max(s.haze_m, 1.0f));  // the haze between
+    for (int c = 0; c < 3; ++c) o.color[c] = l.color[c] * 0.35f * through;
+    g_night_frame_sprites.push_back(o);
+  }
+  return true;
+}
+
+// D163: the effects' layer (`from`: the source's host rectangle) copied for the night pass, with its mips for the glow.
+void CopyNightGlow(HostTarget* source, const Blitter::Rect& from) {
+  using namespace Diligent;
+  if (!g_device || !source->srv || !from.width || !from.height) return;
+  if (!g_night_glow || g_night_glow->GetDesc().Width != from.width || g_night_glow->GetDesc().Height != from.height) {
+    g_night_glow.Release();
+    TextureDesc d;
+    d.Name = "NativeXRenderer night effects";
+    d.Type = RESOURCE_DIM_TEX_2D;
+    d.Width = from.width;
+    d.Height = from.height;
+    d.MipLevels = 0;  // all of them
+    d.Format = TEX_FORMAT_RGBA16_FLOAT;
+    d.Usage = USAGE_DEFAULT;
+    d.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+    d.MiscFlags = MISC_TEXTURE_FLAG_GENERATE_MIPS;
+    g_device->device()->CreateTexture(d, nullptr, &g_night_glow);
+    if (!g_night_glow) return;
+  }
+  const Blitter::Rect to{0, 0, from.width, from.height};
+  g_blit.Copy(g_device->context(), source->srv, Blitter::Source::kColor, from,
+              g_night_glow->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), to, Blitter::Options{});
+  g_device->context()->GenerateMips(g_night_glow->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
+  g_night_glow_frame = g_device->frames_presented();
+  ++g_night_glow_frames;
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    REXLOG_INFO("[native_x_renderer] night: the effects' layer found, {}x{} on the host ({}x{} in the game), for their "
+                "own light (D163)", from.width, from.height, source->guest_width, source->guest_height);
+  }
+  if (g_draw) g_draw->TargetsChanged();
+}
+
 // D132, D133: at the end of the main view's opaque draws, the ambient occlusion (GTAO) multiplied into the scene's
 // colour, then the global illumination (SSGI) added to it, both King Kong Recompiled's, with one camera.
 void ApplyOpaqueEffects() {
@@ -880,6 +1240,7 @@ void ApplyOpaqueEffects() {
       g_draw->TargetsChanged();
     }
   }
+  NoteNightCamera();  // D163
   g_terrain.Reset();
   GtaoSettings ao = GtaoSettings::FromCvars();
   ao.temporal_upscaler = g_temporal;
@@ -980,6 +1341,39 @@ void ExecuteResolve(const Command& c) {
     ApplyOpaqueEffects();
   }
   HostTarget* source = TargetFor(surface);
+  // D163: the night's camera from the terrain, if the opaque effects did not take it (they reset the terrain's frame).
+  if (c.caller == g_profile->ao_resolve_caller && surface.depth) NoteNightCamera();
+  // D162: the world's depth for the night's haze, at the same depth copy (once a frame): the first person weapon's
+  // draws clear the depth after it, so on foot the view's depth at its end held only the weapon and the night took
+  // everything else for the far sky (run nightzip1). Copied into a float texture's red channel.
+  if (REXCVAR_GET(native_x_renderer_night) && c.caller == g_profile->ao_resolve_caller && surface.depth && source &&
+      source->srv && source->texture && surface.width == g_profile->output_width &&
+      surface.height == g_profile->output_height && g_night_world_frame != g_device->frames_presented()) {
+    const TextureDesc& d = source->texture->GetDesc();
+    if (!g_night_world || g_night_world->GetDesc().Width != d.Width || g_night_world->GetDesc().Height != d.Height) {
+      g_night_world.Release();
+      TextureDesc w;
+      w.Name = "NativeXRenderer night world depth";
+      w.Type = RESOURCE_DIM_TEX_2D;
+      w.Width = d.Width;
+      w.Height = d.Height;
+      w.Format = TEX_FORMAT_R32_FLOAT;
+      w.Usage = USAGE_DEFAULT;
+      w.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+      g_device->device()->CreateTexture(w, nullptr, &g_night_world);
+    }
+    if (g_night_world) {
+      Blitter::Options options;
+      options.samples = source->samples;
+      const Blitter::Rect all{0, 0, d.Width, d.Height};
+      g_blit.Copy(g_device->context(), source->srv, source->samples > 1 ? Blitter::Source::kDepthMsaa : Blitter::Source::kDepth,
+                  all, g_night_world->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), all, options);
+      g_night_world_frame = g_device->frames_presented();
+      g_night_world_uv[0] = float(source->scale.HostWidth(g_profile->output_width)) / float(d.Width);
+      g_night_world_uv[1] = float(source->scale.HostHeight(g_profile->output_height)) / float(d.Height);
+      if (g_draw) g_draw->TargetsChanged();
+    }
+  }
   // The rectangle the copy reads, then narrowed to what it copied: the clears' rectangle, which they get however
   // the copy goes.
   Blitter::Rect copied{0, 0, surface.width, surface.height};
@@ -1133,6 +1527,29 @@ void ExecuteResolve(const Command& c) {
                                        : (source->samples > 1 ? Blitter::Source::kColorMsaa : Blitter::Source::kColor);
   if (scaled) kind = source->depth ? Blitter::Source::kDepthScaled : Blitter::Source::kColorScaled;
   g_blit.Copy(g_device->context(), source->srv, kind, from, target_view, to, options);
+  // D163: the effects' layer for the night: a colour copy of half the output's size after the world's opaque draws (the
+  // night's world depth taken this frame) whose last draw blended: Battlefield 1943's half size pass of its emissive
+  // particles (muzzle flashes, tracers, fire, explosions: run nightrd2, its premultiplied draws then one draw over the
+  // scene); its other half size pass, the sky's, draws without blending.
+  // (Before the scene's copy: every copy goes through the scene copy's caller, the bloom chain's half size ones after it.)
+  if (REXCVAR_GET(native_x_renderer_night) && REXCVAR_GET(native_x_renderer_night_glow) > 0.0 && !source->depth &&
+      !source->shadow && !scaled && source->samples == 1 && !g_night_pending && slice == 0 && !cube &&
+      g_night_world_frame == g_device->frames_presented() && source->last_draw_blended &&
+      copied.width * 2 == g_profile->output_width && copied.height * 2 == g_profile->output_height) {
+    CopyNightGlow(source, from);
+  }
+  if (REXCVAR_GET(native_x_renderer_night_debug) == 3 && !source->depth && !source->shadow) {
+    static uint32_t logged = 0;
+    if (logged < 400 && copied.width * 4 >= g_profile->output_width && copied.width < g_profile->output_width) {
+      ++logged;
+      REXLOG_INFO("[native_x_renderer] night test: resolve {}x{} (surface {}x{}, target {}x{}) blended {} scene {} "
+                  "after the world {} samples {} scaled {} caller {:08X} frame {}",
+                  copied.width, copied.height, surface.width, surface.height, source->guest_width,
+                  source->guest_height, source->last_draw_blended, c.scene_caller,
+                  g_night_world_frame == g_device->frames_presented(), source->samples, scaled, c.caller,
+                  g_device->frames_presented());
+    }
+  }
   // A depth resolve that a fetch reads as k_8_8_8_8 (for the stencil): the words too (D64).
   if (source->depth && target->read_packed && !scaled && !cube && source->stencil_srv) {
     if (ITextureView* packed = target->PackedSliceView(g_device->device(), slice)) {
@@ -1192,6 +1609,12 @@ void ExecuteResolve(const Command& c) {
       !(g_profile->scene_resolve_once && g_scene_antialiased)) {
     g_aa.Apply(g_device->context(), target->texture, target_view);
     g_scene_antialiased = true;
+  }
+  // Night (D162): the scene's copy arms it; it runs after the game's composite (ExecuteDraw). Graded here, before the
+  // bloom chain, the game's automatic exposure (its 1x1 luminance) brightened it back (runs night_wake2, night_gc2).
+  if (REXCVAR_GET(native_x_renderer_night) && c.scene_caller && slice == 0 &&
+      target->guest_width == g_profile->output_width && target->guest_height == g_profile->output_height) {
+    g_night_pending = true;
   }
   // The grass's water picture (grass.h): the finished scene, the water in it, against the grass's snapshot.
   if (c.scene_caller && slice == 0 && g_grass_ready && Grass::On() &&
@@ -1371,6 +1794,14 @@ void UpscaleScene() {
     if (g_draw) g_draw->TargetsChanged();
   }
   PromoteReduced(upscaled ? g_scene_color : nullptr);
+  // D162: the view's depth for the night at the scene's copy, which follows in this frame.
+  if (REXCVAR_GET(native_x_renderer_night) && g_scene_depth && g_scene_depth->srv && g_scene_depth->texture) {
+    const TextureDesc& depth = g_scene_depth->texture->GetDesc();
+    g_night_depth = g_scene_depth->srv;
+    g_night_depth_uv[0] = float(g_scene_depth->scale.HostWidth(g_profile->output_width)) / float(depth.Width);
+    g_night_depth_uv[1] = float(g_scene_depth->scale.HostHeight(g_profile->output_height)) / float(depth.Height);
+    g_night_depth_frame = g_device->frames_presented();
+  }
   g_scene_color = g_scene_depth = nullptr;
 }
 
@@ -1765,6 +2196,21 @@ void ExecutePresent(const Command& c) {
   g_gtao_done = false;
   g_terrain.Reset();
   g_scene_antialiased = false;
+  g_night_pending = false;  // a frame whose composite never came
+  // D163: this frame's model draws are used; the models the game gave, taken for the next frames.
+  g_night_model_draws.clear();
+  {
+    std::lock_guard lock(g_night_lamps_mutex);
+    if (g_night_models_render_version != g_night_models_version) {
+      g_night_models_render_version = g_night_models_version;
+      g_night_models_render = g_night_models;
+      g_night_model_counts.clear();
+      for (const NightModelLamps& m : g_night_models_render) {
+        g_night_model_counts.push_back(m.index_count);
+        g_night_model_counts.push_back(m.matrix_register);
+      }
+    }
+  }
   if (g_temporal) g_upscaler.NextFrame();
   if (!g_device->UpdateSize()) {
     // Minimized: the frame drawn but not shown is still ended (D125). Returning without it left every frame's work
@@ -2007,6 +2453,20 @@ uint32_t HostPixelSize(bool height) {
   if (!g_host_window) return 0;
   return height ? g_host_window->GetActualPhysicalHeight() : g_host_window->GetActualPhysicalWidth();
 }
+// D159: the window's real size (its X11 surface's) when the SDK's is out of date: an SDL pixel size event of our
+// own, which the SDK takes on its UI thread as it takes SDL's (WindowSDL::HandleWindowEvent), so its size, ImGui's
+// and ours agree again. SDL_PushEvent is safe from the renderer's thread.
+void HostRealPixelSize(uint32_t width, uint32_t height) {
+  if (!g_host_window || !width || !height) return;
+  SDL_Window* sdl = static_cast<rex::ui::WindowSDL*>(g_host_window)->sdl_window();
+  if (!sdl) return;
+  SDL_Event event{};
+  event.type = SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED;
+  event.window.windowID = SDL_GetWindowID(sdl);
+  event.window.data1 = int32_t(width);
+  event.window.data2 = int32_t(height);
+  if (!SDL_PushEvent(&event)) REXLOG_WARN("[native_x_renderer] the window's real size not sent: {}", SDL_GetError());
+}
 void* LinuxHostWindow(rex::ui::Window* window) {
   static HostWindow host;
   SDL_Window* sdl = window ? static_cast<rex::ui::WindowSDL*>(window)->sdl_window() : nullptr;
@@ -2023,6 +2483,7 @@ void* LinuxHostWindow(rex::ui::Window* window) {
   }
   g_host_window = window;
   host.pixel_size = HostPixelSize;
+  host.real_pixel_size = HostRealPixelSize;
   REXLOG_INFO("[native_x_renderer] the game window is on {}", host.wayland_surface ? "Wayland" : "X11");
   return &host;
 }
@@ -2430,6 +2891,22 @@ bool NisSupport(bool* runs, std::string* gpu) {
   return true;
 }
 
+void NightModels(const NightModelLamps* models, uint32_t count) {
+  std::lock_guard lock(g_night_lamps_mutex);
+  if (models && count) g_night_models.assign(models, models + count);
+  else g_night_models.clear();
+  ++g_night_models_version;
+  REXLOG_INFO("[native_x_renderer] night: {} models with lamps (D163)", g_night_models.size());
+}
+
+void NightLamps(const NightLamp* lamps, uint32_t count) {
+  std::lock_guard lock(g_night_lamps_mutex);
+  if (lamps && count) g_night_lamps.assign(lamps, lamps + count);
+  else g_night_lamps.clear();
+  g_night_lamps_present.store(!g_night_lamps.empty());
+  REXLOG_INFO("[native_x_renderer] night: {} lamps of the level (D163)", g_night_lamps.size());
+}
+
 void StorageProgress(uint32_t* queued, uint32_t* done, uint32_t* loading, uint32_t* finished) {
   StoredPipelineProgress(queued, done, loading, finished);
 }
@@ -2614,6 +3091,17 @@ void ExecuteFrameEnd(const Command& c) {
       REXLOG_INFO("[native_x_renderer] renderer: frame {}: antialiasing ({}) applied {} times in {} frames ({} sets of "
                   "its image sized textures made, D141)",
                   frame, Antialiasing::ModeName(g_aa.mode()), g_aa.TakeApplied(), g_uploads.frames, g_aa.TakeMade());
+    }
+    if (REXCVAR_GET(native_x_renderer_night)) {
+      uint64_t world = 0, glow = 0, lights = 0, sprites = 0;
+      const uint64_t applied = g_night.TakeApplied();
+      g_night.TakeCounts(world, glow, lights, sprites);
+      REXLOG_INFO("[native_x_renderer] renderer: frame {}: night applied {} times in {} frames, {} with the world's "
+                  "depth from before the weapon (D162); the effects' light in {} ({} copies of their layer), {} lights "
+                  "and {} lamp glows drawn in all, {} models' lamps placed (D163)", frame, applied, g_uploads.frames,
+                  world, glow, g_night_glow_frames, lights, sprites, g_night_models_placed);
+      g_night_glow_frames = 0;
+      g_night_models_placed = 0;
     }
     if (g_gtao_on) {
       REXLOG_INFO("[native_x_renderer] renderer: frame {}: ambient occlusion (GTAO) applied {} times in {} frames",

@@ -91,6 +91,9 @@ struct HostTarget {
   // counter, else 0 (D113).
   uint32_t words_from = 0;
   uint64_t words_from_resolve = 0;
+  // Color targets: whether the last draw into it blended (D163: Battlefield 1943's half size layer of its emissive
+  // particles is told from its sky's, drawn without blending).
+  bool last_draw_blended = false;
 };
 
 // The memory of a texture: its mips, slices and samples, compressed blocks included.

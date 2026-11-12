@@ -19,6 +19,7 @@
 
 #include <array>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 #include <memory>
 
@@ -98,6 +99,11 @@ class GuestTextures final : public rex::graphics::TextureCache {
 
   class HostTexture;
   bool LoadFromMemory(HostTexture& texture, bool load_base, bool load_mips);
+  // D142, D160: the game's patcher over a texture whose base level is loaded (`again`: offered again, its data the
+  // same); the textures it took are kept in `patched_` for RepatchTextures.
+  void Patch(HostTexture& texture, bool again);
+  std::unordered_set<HostTexture*> patched_;
+  uint32_t repatched_ = 0;  // the RepatchTextures count last served
   // D149: the HD pack's texture for a game texture's current data, or null.
   Diligent::ITextureView* HdView(HostTexture& texture);
   std::unordered_map<uint64_t, Diligent::RefCntAutoPtr<Diligent::ITexture>> hd_textures_;

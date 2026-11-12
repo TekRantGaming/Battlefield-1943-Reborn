@@ -495,8 +495,9 @@ class Registry:
     """Dedicated servers register here (server/gmhost.py run by the server package) and stay listed while their
     connection lasts. One JSON object per line:
       server:  {"op": "register", "name", "port", "map", "max_players", "mode", "description", "maps", "listed",
-                "official"?, "address"?}
+                "official"?, "address"?, "night"?}
                mode: "classic" or "modern", the movement and aiming the server plays (default classic)
+               night: true for a Night Ops server (its maps drawn at night in players' games; default false)
                the address: the one the registration came from (a loopback one: this backend's --theater-host);
                "address" [host, port] only from older packages and tests (SERVERS-PLAN.md section 6)
                listed false: not in the list, joined by Direct connect ("find") only
@@ -629,6 +630,7 @@ class Registry:
                                   'UGID': 'NOGUID', 'B-version': 'RETAIL429432', 'B-U-type': 'RANKED',
                                   'gmhost': RemoteHost(writer), 'map': m.get('map', ''),
                                   'mode': 'modern' if m.get('mode') == 'modern' else 'classic',
+                                  'night': m.get('night') is True,  # Night Ops: its maps at night
                                   'description': ''.join(c for c in str(m.get('description', ''))
                                                          if c.isprintable())[:200],
                                   'maps': [str(x)[:32] for x in m.get('maps', []) if isinstance(x, str)][:8],
@@ -747,12 +749,13 @@ def listing(g):
     return {'gid': g['GID'], 'name': g['N'], 'address': [g['I'], g['P']], 'map': g.get('map', ''),
             'players': g['AP'], 'max_players': g['MAX-PLAYERS'], 'mode': g.get('mode', 'classic'),
             'description': g.get('description', ''), 'official': bool(g.get('official')),
-            'next_map': g.get('next_map', ''), 'maps': g.get('maps', [])}
+            'next_map': g.get('next_map', ''), 'maps': g.get('maps', []), 'night': bool(g.get('night'))}
 
 
 def public(g):
     """A game's fields without our own bookkeeping."""
-    return {k: v for k, v in g.items() if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode')}
+    return {k: v for k, v in g.items()
+            if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night')}
 
 
 async def http_client(reader, writer, log):

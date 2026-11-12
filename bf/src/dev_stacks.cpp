@@ -40,9 +40,13 @@ void DumpThreads() {
       stack += fmt::format(" {:08X}", dev::SafeLoad32(base, back - 8));
       sp = back;
     }
-    REXLOG_INFO("BF STACKS thread {}{}{} lr={:08X} ctr={:08X} r1={:08X} r3={:08X}:{}", thread->thread_id(),
-                thread->main_thread() ? " main" : "", thread->is_guest_thread() ? " guest" : "",
-                static_cast<uint32_t>(ctx->lr), ctx->ctr.u32, ctx->r1.u32, ctx->r3.u32, stack);
+    // The handle (the runtime's "on thread 0x..." in an access violation's line), the start address and the context
+    // it was given, to tell the game's worker threads apart.
+    REXLOG_INFO("BF STACKS thread {}{}{} handle={:08X} start={:08X}({:08X}) '{}' lr={:08X} ctr={:08X} r1={:08X} "
+                "r3={:08X}:{}",
+                thread->thread_id(), thread->main_thread() ? " main" : "", thread->is_guest_thread() ? " guest" : "",
+                thread->handle(), thread->creation_params()->start_address, thread->creation_params()->start_context,
+                thread->name(), static_cast<uint32_t>(ctx->lr), ctx->ctr.u32, ctx->r1.u32, ctx->r3.u32, stack);
   }
 }
 

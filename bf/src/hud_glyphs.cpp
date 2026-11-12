@@ -9,9 +9,17 @@
 // King Kong found its sheet by scanning guest memory (its freezes, issue 11). Here nothing is scanned: NativeXRenderer
 // hands each k_8_8_8_8 texture it loads (D142); one of those sizes is hashed, and a known atlas gets the chosen
 // style's pictures (bf/glyphs, Xelu's and Kenney's CC0 prompts) drawn over its Xbox 360 ones. The Xbox 360 style
-// leaves them as they are. A style chosen in a match shows from the next load of the atlas (the next menu or map).
+// leaves them as they are.
+// The keyboard style names the key that presses each button where the player is (GitHub issue 1: in a landing boat
+// "THROTTLE TO RELEASE BOAT" showed the mouse, the zoom key on foot, while W throttles there): of the controller
+// buttons the remapping turns into that button, the keys bound to them, on foot or in a vehicle (input_settings.cpp's
+// vehicle keys), the first one with a picture. The pad hook tells us the seat (HudGlyphsTick); when what the prompts
+// show changes (the seat, the style, a key or a remap), NativeXRenderer offers the atlases again (D160) and they are
+// drawn again before the next draw.
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -19,6 +27,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <native_x_renderer/native_x_renderer.h>
@@ -31,8 +40,13 @@ namespace bf1943 {
 std::filesystem::path ExecutableDir();  // shader_prep.cpp
 bool LauncherKeyboardLast();            // game_menu.cpp: the keyboard or mouse was used last in our menus
 std::string PadFamily();                // game_menu.cpp: the controller in use (xbox_series, ps5, steam_deck)
+// input_settings.cpp: the controller buttons the remapping turns into a game button, and the keys that press one.
+std::vector<std::string> ButtonsPressing(const std::string& game_button);
+std::vector<const char*> KeybindsPressing(const std::string& button, bool seated);
 
 namespace {
+
+std::atomic<bool> g_seated{false};  // the local soldier sits in a vehicle (HudGlyphsTick, from the pad hook)
 
 struct Rect {
   const char* button;  // a, b, x, y, lb, rb, lt, rt, start, back, dpad_up/down/left/right, ls, rs, ls_click, ...
@@ -103,36 +117,58 @@ const Picture* Load(const std::string& set, const std::string& name) {
   return slot.rgba.empty() ? nullptr : &slot;
 }
 
-// The keyboard's key for a controller button (the SDK's keybind_* settings), as a picture name.
-std::string KeyFor(const std::string& button) {
-  static const std::map<std::string, const char*> kBinds = {
-      {"a", "keybind_a"},           {"b", "keybind_b"},
-      {"x", "keybind_x"},           {"y", "keybind_y"},
-      {"lb", "keybind_left_shoulder"}, {"rb", "keybind_right_shoulder"},
-      {"lt", "keybind_left_trigger"}, {"rt", "keybind_right_trigger"},
-      {"start", "keybind_start"},   {"back", "keybind_back"},
-      {"dpad_up", "keybind_dpad_up"}, {"dpad_down", "keybind_dpad_down"},
-      {"dpad_left", "keybind_dpad_left"}, {"dpad_right", "keybind_dpad_right"},
-      {"ls_click", "keybind_lstick_press"}, {"rs_click", "keybind_rstick_press"}};
-  if (button == "ls" || button == "ls_lr" || button == "ls_ud") return "WASD";
-  if (button == "rs" || button == "rs_lr" || button == "rs_ud") return "Mouse_Simple";
-  auto it = kBinds.find(button);
-  if (it == kBinds.end()) return {};
-  std::string k = rex::cvar::GetFlagByName(it->second);
-  if (k == "Return") k = "Enter";
-  if (k == "Escape") k = "Esc";
-  if (k == "Control") k = "Ctrl";
-  return k;
+// A key's picture name: the SDK's key names (rex/ui keybinds.cpp), a few as the set calls them.
+std::string PictureName(std::string_view key) {
+  if (key == "Return") return "Enter";
+  if (key == "Escape") return "Esc";
+  if (key == "Control") return "Ctrl";
+  return std::string(key);
 }
 
-// The picture for a button in a style: the set's own, else Xbox Series'. The d-pad's directions are its up turned.
-const Picture* PictureFor(const std::string& set, const std::string& button, int& turns) {
-  turns = 0;
+// The key that presses a game button (an atlas rectangle's name) now, as a picture name, empty for none: of the
+// controller buttons the remapping turns into it (the button itself first), the keys bound to them where the player
+// is (on foot or in a vehicle), the first with a picture. A bind lists keys separated by commas ("Up,V": the first
+// with a picture); a key that needs a modifier ("Shift+W") has no picture of its own and is passed over.
+std::string KeyFor(const std::string& button, bool seated) {
+  if (button == "ls" || button == "ls_lr" || button == "ls_ud") return "WASD";
+  if (button == "rs" || button == "rs_lr" || button == "rs_ud") return "Mouse_Simple";
+  std::string game = button;  // the atlas's names as input_settings.cpp's
+  if (button.rfind("dpad_", 0) == 0) game = button.substr(5);
+  if (button == "ls_click") game = "ls";
+  if (button == "rs_click") game = "rs";
+  for (const std::string& pad : ButtonsPressing(game))
+    for (const char* bind : KeybindsPressing(pad, seated)) {
+      const std::string keys = rex::cvar::GetFlagByName(bind);
+      for (size_t at = 0; at <= keys.size();) {
+        size_t comma = keys.find(',', at);
+        if (comma == std::string::npos) comma = keys.size();
+        std::string_view key(keys.data() + at, comma - at);
+        at = comma + 1;
+        while (!key.empty() && key.front() == ' ') key.remove_prefix(1);
+        while (!key.empty() && key.back() == ' ') key.remove_suffix(1);
+        if (key.empty() || key.find_first_of("+./\\") != std::string_view::npos) continue;  // a combination, no name
+        const std::string name = PictureName(key);
+        if (Load("keyboard", name)) return name;
+      }
+    }
+  return {};
+}
+
+// The picture a button gets in a style: the set's own, else Xbox Series'. The d-pad's directions are its up turned.
+struct Choice {
+  std::string set, name;
+  int turns = 0;
+};
+bool Choose(const std::string& set, const std::string& button, bool seated, Choice& out) {
   if (set == "keyboard") {
-    if (const Picture* p = Load("keyboard", KeyFor(button))) return p;
-    return PictureFor("xbox_series", button, turns);
+    if (std::string key = KeyFor(button, seated); !key.empty()) {
+      out = {"keyboard", key, 0};
+      return true;
+    }
+    return Choose("xbox_series", button, seated, out);
   }
   std::string name = button;
+  int turns = 0;
   if (button.rfind("dpad_", 0) == 0) {
     name = "dpad_up";
     turns = button == "dpad_right" ? 1 : button == "dpad_down" ? 2 : button == "dpad_left" ? 3 : 0;
@@ -143,8 +179,11 @@ const Picture* PictureFor(const std::string& set, const std::string& button, int
   } else if (button == "ls_lr" || button == "ls_ud" || button == "rs_lr" || button == "rs_ud") {
     name = "stick_move";
   }
-  if (const Picture* p = Load(set, name)) return p;
-  return set == "xbox_series" ? nullptr : PictureFor("xbox_series", button, turns);
+  if (Load(set, name)) {
+    out = {set, name, turns};
+    return true;
+  }
+  return set != "xbox_series" && Choose("xbox_series", button, seated, out);
 }
 
 // `p` drawn into the rectangle, fitted and centred, bilinear, over a cleared rectangle.
@@ -189,38 +228,102 @@ std::string StyleSet() {
   return {};  // Xbox 360: the game's own pictures
 }
 
-bool Patch(uint32_t width, uint32_t height, const uint8_t* guest, std::vector<uint8_t>& rgba) {
+// What the prompts show now, every atlas's buttons in the style for the seat: drawn again when it changes (a seat
+// changes only the keyboard's).
+std::string Shown(const std::string& set, bool seated) {
+  std::string shown = set.empty() ? "xbox360" : set;
+  if (set.empty()) return shown;
+  for (const Atlas& atlas : Atlases())
+    for (const Rect& r : atlas.rects) {
+      Choice c;
+      shown += Choose(set, r.button, seated, c) ? " " + c.set + "/" + c.name + "/" + std::to_string(c.turns) : " -";
+    }
+  return shown;
+}
+
+// The game's texels of each atlas (A, R, G, B bytes, tiled) as RGBA, made once: an atlas is known by its data's hash.
+std::map<const Atlas*, std::vector<uint8_t>> g_untouched;
+const std::vector<uint8_t>& Untouched(const Atlas& atlas, const uint8_t* guest) {
+  std::vector<uint8_t>& rgba = g_untouched[&atlas];
+  if (!rgba.empty()) return rgba;
+  rgba.resize(size_t(atlas.width) * atlas.height * 4);
+  for (uint32_t y = 0; y < atlas.height; ++y)
+    for (uint32_t x = 0; x < atlas.width; ++x) {
+      const uint8_t* s = guest + size_t(TiledIndex(x, y, atlas.width)) * 4;
+      uint8_t* d = &rgba[(size_t(y) * atlas.width + x) * 4];
+      d[0] = s[1], d[1] = s[2], d[2] = s[3], d[3] = s[0];
+    }
+  return rgba;
+}
+
+// NativeXRenderer's patcher (D142): a known atlas gets the chosen style's pictures. Each one is taken in every style
+// (D160), so a later style or seat draws it again (`again`: offered again, its data unchanged since, so it is not
+// hashed again); in the Xbox 360 style a first load is left as it is and a texture offered again gets its own
+// pictures back.
+bool Patch(uint32_t width, uint32_t height, const uint8_t* guest, std::vector<uint8_t>& rgba, bool again) {
   const Atlas* atlas = nullptr;
   for (const Atlas& a : Atlases())
     if (a.width == width && a.height == height) atlas = &a;
   if (!atlas) return false;
+  if (!again && Fnv(guest, size_t(width) * height * 4) != atlas->hash) return false;  // another texture of that size
   const std::string set = StyleSet();
-  if (set.empty()) return false;
-  if (Fnv(guest, size_t(width) * height * 4) != atlas->hash) return false;  // another texture of that size
+  const bool seated = g_seated.load(std::memory_order_relaxed);
   std::lock_guard lock(g_mutex);
-  // The game's texels (A, R, G, B bytes, tiled) as RGBA, then the chosen style over its buttons.
-  rgba.resize(size_t(width) * height * 4);
-  for (uint32_t y = 0; y < height; ++y)
-    for (uint32_t x = 0; x < width; ++x) {
-      const uint8_t* s = guest + size_t(TiledIndex(x, y, width)) * 4;
-      uint8_t* d = &rgba[(size_t(y) * width + x) * 4];
-      d[0] = s[1], d[1] = s[2], d[2] = s[3], d[3] = s[0];
-    }
+  if (set.empty() && !again) return true;
+  rgba = Untouched(*atlas, guest);
   int drawn = 0;
-  for (const Rect& r : atlas->rects) {
-    int turns = 0;
-    if (const Picture* p = PictureFor(set, r.button, turns)) Draw(rgba, width, r, *p, turns), ++drawn;
-  }
+  if (!set.empty())
+    for (const Rect& r : atlas->rects) {
+      Choice c;
+      if (!Choose(set, r.button, seated, c)) continue;
+      if (const Picture* p = Load(c.set, c.name)) Draw(rgba, width, r, *p, c.turns), ++drawn;
+    }
   // The host texture holds each guest word byte swapped (B, G, R, A, as the loader writes it; run glyph1 showed the
   // flags red for blue with R, G, B, A).
   for (size_t i = 0; i < rgba.size(); i += 4) std::swap(rgba[i], rgba[i + 2]);
-  REXLOG_INFO("BF prompts: {} of {} buttons in the game's {} atlas in the {} style", drawn, atlas->rects.size(),
-              atlas->name, set);
-  return drawn > 0;
+  if (set.empty()) {
+    REXLOG_INFO("BF prompts: the game's {} atlas has its own pictures again", atlas->name);
+  } else {
+    std::string keys;  // the keyboard's choices for the log: the HUD's hints are what the issue was about
+    if (set == "keyboard")
+      for (const char* b : {"a", "b", "x", "y", "lb", "rb", "lt", "rt", "dpad_up"}) {
+        Choice c;
+        keys += std::string(" ") + b + "=" + (Choose(set, b, seated, c) ? c.name : "-");
+      }
+    REXLOG_INFO("BF prompts: {} of {} buttons in the game's {} atlas in the {} style{}{}{}", drawn,
+                atlas->rects.size(), atlas->name, set, seated ? ", seated" : "", keys.empty() ? "" : ":", keys);
+  }
+  return true;
 }
 
 }  // namespace
 
 void InstallHudGlyphs() { native_x_renderer::SetTexturePatcher(&Patch); }
+
+// From the pad hook (auto_join.cpp), at each of the game's pad reads: whether the local soldier sits in a vehicle. What
+// the prompts show is checked at once when the seat changes and twice a second otherwise (a key, a remap or the style
+// changed in our menus); a change has NativeXRenderer offer the atlases again (D160).
+void HudGlyphsTick(bool seated) {
+  using Clock = std::chrono::steady_clock;
+  static std::mutex mutex;
+  std::unique_lock lock(mutex, std::try_to_lock);  // the game reads the pad from more than one thread
+  if (!lock.owns_lock()) return;
+  static bool was_seated = false;
+  static Clock::time_point checked{};
+  static std::string shown;
+  const auto now = Clock::now();
+  if (seated == was_seated && checked.time_since_epoch().count() && now - checked < std::chrono::milliseconds(500))
+    return;
+  was_seated = seated, checked = now;
+  g_seated.store(seated, std::memory_order_relaxed);
+  std::string next;
+  {
+    std::lock_guard pictures(g_mutex);
+    next = Shown(StyleSet(), seated);
+  }
+  if (next == shown) return;
+  shown = std::move(next);
+  native_x_renderer::RepatchTextures();
+}
 
 }  // namespace bf1943

@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "night_ops.h"
+
 #include <atomic>
 #include <chrono>
 #include <algorithm>
@@ -46,6 +48,7 @@ struct ServerInfo {
   int players = 0, max_players = 0;
   std::string description, next_map;
   bool official = false;
+  bool night = false;  // a Night Ops server: its maps drawn at night (NativeXRenderer D162) while playing there
   int ping_ms = -1;  // -1: not measured (an older server does not answer)
 };
 
@@ -269,6 +272,7 @@ class ServerList {
     s.description = JsonField(obj, "description");
     s.next_map = JsonField(obj, "next_map");
     s.official = JsonField(obj, "official") == "true";
+    s.night = kNightOps && JsonField(obj, "night") == "true";  // night_ops.h: none without Night Ops
     return s;
   }
 

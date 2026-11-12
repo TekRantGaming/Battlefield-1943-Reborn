@@ -26,7 +26,9 @@ param(
     [ValidateSet("classic", "modern")][string]$Mode = "classic",  # the movement and aiming the server plays (bf\src\modern_mode.cpp)
     [string]$UserFrom = "",  # run_game.ps1 -UserFrom: an earlier run's user folder (a finished launcher setup, say)
     [string[]]$BackendArgs = @(),  # extra backend flags, e.g. --official-key-file <file> (browser tests)
-    [switch]$BuiltInHost  # the dedicated server runs our own GameManager host (bf\src\gm_host.cpp), no gmhost.py
+    [switch]$BuiltInHost,  # the dedicated server runs our own GameManager host (bf\src\gm_host.cpp), no gmhost.py
+    [string]$Stacks = "",  # run_game.ps1 -Stacks: seconds at which the client logs every guest thread (bf-dev)
+    [switch]$Night  # the server is a Night Ops server (gmhost.py --night): players' games draw its map at night
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -47,15 +49,17 @@ if ($BuiltInHost) {
                    "--bf_gm_listed=true " + $ServerArgs).Trim()
 } elseif (-not $InProcess) {
     $gmLog = Join-Path $root "runs\gmhost_$Name.log"
-    $gm = Start-Process -FilePath $python -ArgumentList "-I", (Join-Path $root "server\gmhost.py"), "--backend",
-        "127.0.0.1:18250", "--listen", $gateway, "--game-server", "127.0.0.1:1003", "--name", "`"Local test server`"", "--mode", $Mode,
-        "--log", $gmLog -WindowStyle Hidden -RedirectStandardOutput (Join-Path $root "runs\gmhost_$Name.out") -PassThru
+    $gmArgs = @("-I", (Join-Path $root "server\gmhost.py"), "--backend", "127.0.0.1:18250", "--listen", $gateway,
+                "--game-server", "127.0.0.1:1003", "--name", "`"Local test server`"", "--mode", $Mode, "--log", $gmLog)
+    if ($Night) { $gmArgs += "--night" }  # Start-Process takes no empty argument
+    $gm = Start-Process -FilePath $python -ArgumentList $gmArgs -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $root "runs\gmhost_$Name.out") -PassThru
     $log = $gmLog
 }
 Start-Sleep 1
 try {
     & (Join-Path $PSScriptRoot "run_game.ps1") -Name $Name -Seconds $Seconds -Preset $Preset -NetTrace:(-not $NoNetTrace) -WithServer `
-        -ServerCl $(if ($Level) { "-dedicated -level $Level" } else { "-dedicated" }) -ServerWarmup 25 -DevPad $DevPad -Shots $Shots -SeedCache $SeedCache -PeerPad $PeerPad -PeerArgs $PeerArgs -ServerArgs $(if ($Mode -eq "modern") { ($ServerArgs + " --bf_modern_mode=true").Trim() } else { $ServerArgs }) -RuntimeDll $RuntimeDll -GameArgs $GameArgs -Launcher:$Launcher -StopServerAt $StopServerAt -GpuPlugin $GpuPlugin -UserFrom $UserFrom | Select-Object -Last 3
+        -ServerCl $(if ($Level) { "-dedicated -level $Level" } else { "-dedicated" }) -ServerWarmup 25 -DevPad $DevPad -Shots $Shots -SeedCache $SeedCache -PeerPad $PeerPad -PeerArgs $PeerArgs -ServerArgs $(if ($Mode -eq "modern") { ($ServerArgs + " --bf_modern_mode=true").Trim() } else { $ServerArgs }) -RuntimeDll $RuntimeDll -GameArgs $GameArgs -Launcher:$Launcher -StopServerAt $StopServerAt -GpuPlugin $GpuPlugin -UserFrom $UserFrom -Stacks $Stacks | Select-Object -Last 3
 } finally {
     Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
     if ($gm) { Stop-Process -Id $gm.Id -Force -ErrorAction SilentlyContinue }

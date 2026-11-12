@@ -33,6 +33,8 @@
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
 
+#include "comms.h"
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -56,10 +58,12 @@ void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated);  //
 void LookPad(uint8_t* gamepad);                                  // look.cpp
 bool LocalOnFoot();                                              // look.cpp: the vehicle seeker
 bool LocalSeated(const uint8_t* base);                           // look.cpp: in a vehicle, any seat
+void HudGlyphsTick(bool seated);                                 // hud_glyphs.cpp: the prompts drawn again on a change
 void NoteLevelChange();                                          // modern_mode.cpp: scan the new level's values
 #if defined(BF_DEV_TOOLS)
 extern std::atomic<float> g_dev_camera[3];                       // look.cpp: the local camera's position
 extern std::atomic<float> g_dev_view_pos[3];                     // dev_matscan.cpp: the rendered camera's
+void DevTeamScan(const uint8_t* base, bool in_world);              // dev_team_scan.cpp: BF_DEV_TEAMSCAN
 #endif
 bool TickBlendNearestTree(uint32_t parts, const float from[3], float out[3], double* dist);  // tick_blend.cpp
 // game_menu.cpp
@@ -1092,7 +1096,8 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     const bool key_axes = rex::input::mnk::LastKeyAxes();
     // Whether our menu was open before it gets this read's presses: the Start that closes it must not open it again
     // if the menu closes between here and the check below.
-    const bool menu_was_open = bf1943::GameMenuOpen();
+    // The chat box's Enter or Esc (comms_ui.cpp) is not the pause's Start.
+    const bool menu_was_open = bf1943::GameMenuOpen() || bf1943::comms::TypingOrJustClosed();
     bf1943::GameMenuPad(uint16_t(buttons & ~rex::input::mnk::LastKeyButtons()), key_axes ? 0 : int16_t(p[8] << 8 | p[9]),
                         key_axes ? 0 : int16_t(p[10] << 8 | p[11]));
     // Start in a match: our pause opens (game_menu.cpp, PausePage), in place of the game's, which never opens (the
@@ -1131,7 +1136,9 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
       p[5] &= ~0x10;
     }
   }
-  const bool menu = bf1943::GameMenuOpen();
+  // While the chat box is open (and just after it closes) the game gets no input, as with our menus open: the keys
+  // typed are the chat's.
+  const bool menu = bf1943::GameMenuOpen() || bf1943::comms::TypingOrJustClosed();
   const uint16_t press = bf1943::Step();
   // No real pad: always a connected one with only our presses, as the dev pad does. BF keeps the state in its pad
   // object (sub_821CEF88) and drops the pad on an error.
@@ -1179,8 +1186,15 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     const char* v = std::getenv("BF_AB_OFF");
     return v && std::string(v).find("input") != std::string::npos;
   }();
+  const bool seated = bf1943::LocalSeated(base);
+  bf1943::comms::NoteInWorld(seated || bf1943::LocalOnFoot());  // voice goes out only from the world
+  bf1943::comms::ReadTeam(base, bf1943::LevelLoaded());  // team and squad chat (comms.cpp), the deploy screen too
+#if defined(BF_DEV_TOOLS)
+  bf1943::DevTeamScan(base, seated || bf1943::LocalOnFoot());  // BF_DEV_TEAMSCAN (dev_team_scan.cpp)
+#endif
   if (!input_off)  // Settings > Controls
-    bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, bf1943::LocalSeated(base));
+    bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, seated);
+  bf1943::HudGlyphsTick(seated);  // hud_glyphs.cpp: the keyboard prompts follow the seat's keys
   if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4);  // look.cpp: the mouse in a vehicle
   const uint16_t buttons = uint16_t(p[4] << 8 | p[5]) | press;
   p[4] = uint8_t(buttons >> 8);

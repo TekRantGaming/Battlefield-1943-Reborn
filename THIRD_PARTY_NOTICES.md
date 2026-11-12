@@ -17,6 +17,7 @@ licence text in the place given here.
 | Button prompts: Xelu's Free Controllers and Keyboard Prompts (Nicolae Berbece) and Input Prompts (Kenney) | `bf/glyphs` | CC0 | `bf/glyphs/LICENSE.txt` |
 | [vgmstream](https://github.com/vgmstream/vgmstream): the layout of the game's menu music, as `bf/src/game_music.cpp` reads it | | ISC | `bf/licences/vgmstream.txt` |
 | [GHMetalRecomp](https://github.com/ElGuslml/GHMetalRecomp), Gustavo Garcia: the NativeXRenderer profile that Battlefield's (`bf/src/native_x_renderer_bf1943.cpp`) started from | | MIT | `bf/licences/GHMetalRecomp.txt` |
+| [King Kong Recompiled](https://github.com/TekRantGaming/king-kong-recompiled), TekRantGaming and contributors: the choice of the dedicated graphics card on PCs that have two, ported as it is | `bf/src/gpu_choice.h`, `bf/src/gpu_preference.cpp`, `bf/tests/gpu_choice_tests.cpp` | MIT | `bf/third_party/native-x-renderer/thirdparty/king-kong-recompiled/LICENSE` |
 
 The SDK's prebuilt test tools (GNU binutils for PowerPC and Cygwin, GPL) are left out of `sdk/src-bf/tools`: only the
 SDK's own tests use them (`REXGLUE_BUILD_TESTS`), and this project builds without them. They are in the

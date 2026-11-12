@@ -35,6 +35,11 @@ const native_x_renderer::Profile& NativeXRendererProfile() {
     // after the scene's opaque draws, before its water, particles and the first person weapon (drawn after a depth
     // clear), so those are never darkened (run gcrd2: opaque draws to 1645, the depth copy, blended draws from 1647).
     p.ao_resolve_caller = 0x825868A4;
+    // D164 (TekRantGaming, 12 Nov 2026: a black outline round the ships against the water, a white glow round palm
+    // leaves and buildings): the game's pixel shaders that read their pixel position sample at it plus one texel (the
+    // water's depth read at (VPOS + 1) / 1280, run rdship1: two host rows above a landing craft's hull read the hull's
+    // depth and drew the water black), so with a render scale they get the host pixel's centre less one guest pixel.
+    p.param_gen_texel_centre = true;
     native_x_renderer::DeviceLayout& d = p.device;
     // XDK 2.0.7978 (Guitar Hero: Metallica's): six dirty masks from +0 (VS constants, PS constants, register groups
     // and the program, fetch slots with slot 0 in bit 31, the 0x2300/0x2380 groups, the tile dependent state).

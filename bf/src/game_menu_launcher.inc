@@ -116,6 +116,11 @@
     // it (its films, title and menus never show, TekRantGaming's 10 Nov brief); then our main menu (StartingPage).
     if (played_) {
       played_ = false;
+      if (join_after_shaders_) {  // a server picked on Home (the shader page came first): its Joining page now
+        join_after_shaders_ = false;
+        page_ = Page::kJoining;
+        return;
+      }
       page_ = Page::kStarting, starting_at_ = ImGui::GetTime();
       REXLOG_INFO("BF launcher: the game's shaders are ready; it signs in behind our page");
       return;
@@ -129,6 +134,7 @@
       page_ = Page::kHome, home_row_ = 0;
       return;
     }
+    if (RenameRequired()) return;
     setup_active_ = true;
     settings_.values["launcher_setup"] = "started";
     settings_.Save();
@@ -218,23 +224,15 @@
   // Quality; TekRantGaming, 11 Nov 2026, v0.2.1), with the upscaler at its default, AMD FSR 1 (King Kong's presets put it back to
   // its default). No render resolution any more (TekRantGaming, 11 Nov 2026): the game draws the display's, or with the
   // upscaler the mode's share of it, so a slow GPU's lighter picture is FSR 1 at Performance.
+  // Since 12 Nov 2026 the tiers are the Graphics presets (GraphicsPresets): slow Low, middle Medium, fast High, so the
+  // Graphics preset row names what the auto detect chose. Their texture filtering (2x, 8x, 16x) and the fast tier's
+  // grass to the whole map (its default before) are the presets'; the sharpness and AO strength as before.
+  static constexpr const char* kTierPresets[] = {"Low", "Medium", "High"};
   static std::vector<std::pair<const char*, const char*>> TierSettings(int tier) {
-    std::vector<std::pair<const char*, const char*>> s = {{"native_x_renderer_antialiasing", "fxaa"},
-                                                           {"native_x_renderer_sharpness", "0.250000"},
-                                                           {"native_x_renderer_scaling", "fsr"},
-                                                           {"bf_upscaler_mode", tier == 0 ? "performance" : "quality"}};
-    if (tier == 2) {
-      s.insert(s.end(), {{"native_x_renderer_shadow_scale", "2.000000"}, {"native_ao_mode", "1"}, {"native_ao_strength", "2"},
-                         {"native_ao_samples", "2"}, {"native_gi_mode", "1"}, {"native_gi_quality", "2"},
-                         {"native_gi_distance", "2"}});
-    } else if (tier == 1) {
-      s.insert(s.end(), {{"native_x_renderer_shadow_scale", "0.000000"}, {"native_ao_mode", "1"}, {"native_ao_strength", "2"},
-                         {"native_ao_samples", "1"}, {"native_gi_mode", "1"}, {"native_gi_quality", "1"},
-                         {"native_gi_distance", "1"}, {"native_grass_radius", "180.000000"}});
-    } else {
-      s.insert(s.end(), {{"native_x_renderer_shadow_scale", "0.000000"}, {"native_ao_mode", "0"}, {"native_gi_mode", "0"},
-                         {"native_grass_radius", "45.000000"}});
-    }
+    std::vector<std::pair<const char*, const char*>> s = {{"native_x_renderer_sharpness", "0.250000"}};
+    if (tier > 0) s.push_back({"native_ao_strength", "2"});
+    for (const auto& p : GraphicsPresets())
+      if (std::string(p.name) == kTierPresets[std::clamp(tier, 0, 2)]) s.insert(s.end(), p.settings.begin(), p.settings.end());
     return s;
   }
   // A tier's settings applied, its frame rate too: the highest offered that divides into 30 (the screen's and a limit
@@ -253,9 +251,9 @@
     settings_.Save();
     ApplyFrameRate();
     for (const auto& [name, value] : TierSettings(tier)) SetCvar(name, value);
-    static const char* kTiers[] = {"slow: FSR 1 Performance, AO and GI off, grass to 45 m",
-                                   "middle: FSR 1 Quality, shadows Original, AO and GI Low, grass to 180 m",
-                                   "fast: FSR 1 Quality, shadows High, AO and GI at Medium"};
+    static const char* kTiers[] = {"slow: the Low preset (FSR 1 Performance, AO and GI off, grass to 45 m)",
+                                   "middle: the Medium preset (FSR 1 Quality, shadows Original, AO and GI Low, grass to 180 m)",
+                                   "fast: the High preset (FSR 1 Quality, shadows High, AO and GI at Medium, grass to the whole map)"};
     REXLOG_INFO("BF launcher: auto detect{}: {} FPS for a {} Hz screen, FXAA; the GPU {} ({:.1f} times an RTX 4070 Ti's "
                 "time), so {}",
                 when, fps, refresh, slowness > 0 ? "timed" : "not timed yet", slowness, kTiers[tier]);
@@ -729,6 +727,7 @@
     ShaderProgress p;
     if (shader_progress_) shader_progress_(&p.queued, &p.done, &p.loading, &p.finished);
     else p.finished = 1;  // a GPU plugin without the storage's progress: nothing to wait for
+    bool forced = false;
 #if defined(BF_DEV_TOOLS)
     // BF_SHADER_SCREEN_TEST=<s>: the screen for that many seconds with a made up count (screenshots; the driver
     // keeps its pipelines, so a real first start can't be repeated here).
@@ -737,15 +736,23 @@
       return v && *v ? std::atof(v) : 0.0;
     }();
     if (ImGui::GetTime() < test_for) {
-      p.loading = 1, p.finished = 0, p.queued = 1688;
+      p.loading = 1, p.finished = 0, p.queued = 1688, forced = true;
       p.done = uint32_t(1688 * std::min(1.0, ImGui::GetTime() / test_for));
     }
 #endif
-    if (p.finished) {
+    // King Kong's rule (CheckShadersAfterUpdate): this version's shaders were prepared at an earlier start, so no
+    // shader page; the renderer goes on making its stored pipelines behind the menus (OnDraw logs when they are done).
+    const bool behind = !p.finished && !forced && (ShadersPreparedAtStart() || shaders_prepared_hint_);
+    if (p.finished || behind) {
       if (shaders_shown_) REXLOG_INFO("BF shader screen: {} pipelines made", p.done);
-      if (settings_.Get("shaders_prepared_for", "") != BfVersion()) {
-        settings_.values["shaders_prepared_for"] = BfVersion();  // King Kong's marker: written once all are made
+      if (behind) {
+        shaders_behind_ = true, shaders_behind_from_ = ImGui::GetTime();
+      } else if (settings_.Get("shaders_prepared_for", "") != BfVersion()) {
+        // King Kong's marker: written once the page has made them all, never for a page left before the end.
+        settings_.values["shaders_prepared_for"] = BfVersion();
         settings_.Save();
+        REXLOG_INFO("BF shaders: prepared for v{} ({} pipelines); no shader page again until an update", BfVersion(),
+                    p.done);
       }
       AfterShaders();
 #if defined(BF_DEV_TOOLS)
@@ -856,8 +863,20 @@
     // With a controller in hand the keys start open (TekRantGaming, 9 Nov: the controller could not reach them).
     name_key_ = 10, name_keys_ = device_ == Device::kPad, name_caps_ = name_text_.empty();  // on Q
     name_error_.clear();
+    if (settings_.Get("player_name_refused", "") == "1") name_error_ = "Your soldier name is not allowed. Choose a new one.";
     if (page_ != Page::kName) name_from_ = page_;
     page_ = Page::kName, open_ = true;
+  }
+  // The saved name was refused at the start (profanity; ApplyPlayerIdentity in game_menu.cpp) after the setup was
+  // done: Home with the name page over it, saying why, and no Back until a new name is saved. BF signs in only then
+  // (LauncherWalks waits for a chosen name), under the new name. A setup not yet done asks for the name in its turn.
+  bool RenameRequired() {
+    if (settings_.Get("player_name_refused", "") != "1" || settings_.Get("launcher_setup", "") != "done") return false;
+    page_ = Page::kHome, home_row_ = 0;
+    BeginAccount(false);  // its error line says why
+    name_required_ = true;
+    REXLOG_INFO("BF name: the name page for a new name (the saved one was refused)");
+    return true;
   }
   static bool NameChar(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
   void NameType(char c) {
@@ -887,9 +906,17 @@
       name_error_ = "A name needs 3 to 15 letters, numbers or underscores.";
       return;
     }
+    // Our profanity filter (text_filter.h): such a name is never saved; the player chooses another.
+    if (!text_filter::NameAllowed(name)) {
+      name_error_ = "That name is not allowed. Choose another one.";
+      REXLOG_INFO("BF name: a name with profanity was refused on the name page");
+      return;
+    }
     const bool changed = name != settings_.Get("player_name", "") || settings_.Get("player_name_chosen", "") != "1";
     settings_.values["player_name"] = name;
     settings_.values["player_name_chosen"] = "1";
+    settings_.values.erase("player_name_refused");
+    name_required_ = false;
     settings_.Save();
     REXLOG_INFO("BF name: the player chose {}", name);
     // Before BF signs in (the setup on a first start) the name is used at once; after, from the next start.
@@ -948,11 +975,11 @@
       // The keyboard types straight into the name: no Edit (its Enter saves).
       prompts = {{kit::Button::kY, "Random name", "Tab"},
                  {kit::Button::kStart, name_setup_ ? "Save and continue" : "Save", "Enter", true}};
-      if (!name_setup_) prompts.push_back({kit::Button::kB, "Back", "Esc"});
+      if (!name_setup_ && !name_required_) prompts.push_back({kit::Button::kB, "Back", "Esc"});
     } else {
       prompts = {{kit::Button::kA, "Edit name", "Enter"}, {kit::Button::kY, "Random name", "Tab"},
                  {kit::Button::kStart, name_setup_ ? "Save and continue" : "Save", "Enter", true}};
-      if (!name_setup_) prompts.push_back({kit::Button::kB, "Back", "Esc"});
+      if (!name_setup_ && !name_required_) prompts.push_back({kit::Button::kB, "Back", "Esc"});
     }
     Prompts(d, st, st.P(120, 720 - 30 - 42), prompts, in);
     // Enter here is the keyboard's after the merge with the controller (MergeInput), not the raw key: Steam's desktop
@@ -1110,7 +1137,7 @@
       NameSave();
       return;
     }
-    if (in.back && !name_setup_) page_ = name_from_;
+    if (in.back && !name_setup_ && !name_required_) page_ = name_from_;
 #if defined(BF_DEV_TOOLS)
     // BF_DEV_NAME=<name> (tests): typed for the player 5 s after the page first shows, then saved.
     static double dev_at = -1;
@@ -2518,6 +2545,8 @@
     joining_ = "The game's tutorial";
     joining_map_ = "Wake Island";
     joined_gid_.clear();
+    comms::NoteJoined("");  // no server: no voice or text chat in the tutorial
+    SetJoinedServerNight(false);  // nor a Night Ops server's night
     failed_ = false;
     joined_from_start_ = false;
     page_ = Page::kJoining;
@@ -2686,6 +2715,7 @@
       pre_game_ = false, played_ = true, started_from_launcher_ = true;
       NoteStartValues();  // the renderer takes its settings now
       page_ = Page::kShaders, shaders_shown_ = false;
+      shaders_prepared_hint_ = ShadersPreparedForPlay();  // prepared before: this page goes on at once (ShadersPage)
       auto start = std::move(start_game_);
       start();
       return;

@@ -141,6 +141,14 @@ bool Device::Create(void* native_window, bool half_precision) {
 
   EngineVkCreateInfo create_info;
   create_info.EnableValidation = false;
+  // D161: the GPU the SDK's provider uses, its vulkan_device: the player's, or the high-performance GPU the game
+  // points it at before the provider is made (Battlefield 1943's gpu_preference.cpp, King Kong's choice). An index
+  // in vkEnumeratePhysicalDevices' order, which is DiligentCore's too. -1 (automatic, a single GPU or the first one
+  // already the best): DiligentCore's own choice, discrete before integrated.
+  if (const int32_t vulkan_device = rex::cvar::Query<int32_t>("vulkan_device"); vulkan_device >= 0) {
+    create_info.AdapterId = uint32_t(vulkan_device);
+    REXLOG_INFO("[native_x_renderer] Vulkan device {} (vulkan_device, D161)", vulkan_device);
+  }
   // NXR_DEBUG_NAMES=1 (a bring-up aid): VK_EXT_debug_utils without DiligentCore's validation (which keeps
   // Battlefield 1943 on its start screen), so the Vulkan objects carry their names (shaders: their guest hash) in a
   // RenderDoc capture.
@@ -254,7 +262,34 @@ bool Device::UpdateSize() {
 #endif
   if (!width || !height) return false;
   const auto& desc = swap_chain_->GetDesc();
-  if (desc.Width != width || desc.Height != height) swap_chain_->Resize(width, height);
+  if (desc.Width == width && desc.Height == height) return true;
+#ifndef _WIN32
+  // D159: an X11 surface (XWayland too) has a size of its own, and DiligentCore makes the swap chain at that size
+  // whatever it is asked. The SDK's size can be out of date: under XWayland on a scaled desktop, an SDL size event
+  // lost in the exclusive Fullscreen's emulated mode switch left the SDK at the desktop's maximised 1038x506 while the
+  // window was 1920x1080 (the ROG Ally at 185%, 3 game starts of 9 on 11 Nov 2026). Asking for it again every frame
+  // rebuilt the swap chain 90 times a second, and the menus were laid out for the wrong size. A size the surface did
+  // not take is not asked for again, and the SDK is told the surface's (an SDL size event of its own), so both agree
+  // from then on.
+  if (width == refused_width_ && height == refused_height_) return true;
+  swap_chain_->Resize(width, height);
+  const auto& now = swap_chain_->GetDesc();
+  if (now.Width != width || now.Height != height) {
+    refused_width_ = width, refused_height_ = height;
+    if (real_size_notes_ < 5) {
+      ++real_size_notes_;
+      REXLOG_WARN("[native_x_renderer] the window's size as the SDK has it, {}x{}, is not its surface's, {}x{}: the "
+                  "surface's size is kept and given to the SDK (D159)",
+                  width, height, now.Width, now.Height);
+    }
+    const auto* host = static_cast<const HostWindow*>(window_);
+    if (host && host->real_pixel_size) host->real_pixel_size(now.Width, now.Height);
+  } else {
+    refused_width_ = refused_height_ = 0;
+  }
+#else
+  swap_chain_->Resize(width, height);
+#endif
   return true;
 }
 

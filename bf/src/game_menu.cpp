@@ -46,6 +46,8 @@
 #include "server_list.h"
 #include "projects_art.h"
 #include "steam_shortcut.h"
+#include "comms.h"
+#include "text_filter.h"
 #include "update.h"
 
 #if defined(_WIN32)
@@ -114,6 +116,55 @@ std::pair<int, int> DrawnSizeFor(int out_w, int out_h, double ratio) {
   const double fit = std::min(double(std::max(out_w, 1)) / 1280.0, double(std::max(out_h, 1)) / 720.0);
   const double scale = std::max(1.0, fit / std::max(ratio, 1.0));
   return {int(std::lround(1280.0 * scale)), int(std::lround(720.0 * scale))};
+}
+// Graphics presets (TekRantGaming, 12 Nov 2026: "graphic presets Potato, low, medium, high, ultra all with appropriate
+// presets for players"): the Graphics page's settings that cost frame time. Low, Medium and High are the auto detect's
+// slow, middle and fast tiers (TierSettings): Medium is the GTX 1060 or RX 580 at 1080p and 60 FPS, High an RTX 2060 or
+// 3060 and up. Potato is below Low for integrated graphics (no antialiasing, no texture filtering), Ultra every setting
+// at its most with the game drawn at the display's resolution (the upscaler Off). A setting a preset leaves out stays
+// the player's: the look's own (AO strength, sharpness), AO's and GI's quality where they are off, HD textures above
+// Low (they need a pack imported; Potato and Low turn them off for the graphics memory).
+struct GraphicsPreset {
+  const char* name;
+  std::vector<std::pair<const char*, const char*>> settings;
+};
+const std::vector<GraphicsPreset>& GraphicsPresets() {
+  static const std::vector<GraphicsPreset> kPresets = {
+      {"Potato",
+       {{"native_x_renderer_antialiasing", "off"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "performance"},
+        {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "0"}, {"native_ao_mode", "0"},
+        {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"}}},
+      {"Low",
+       {{"native_x_renderer_antialiasing", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "performance"},
+        {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "2"}, {"native_ao_mode", "0"},
+        {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"}}},
+      {"Medium",
+       {{"native_x_renderer_antialiasing", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
+        {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "4"}, {"native_ao_mode", "1"},
+        {"native_ao_samples", "1"}, {"native_gi_mode", "1"}, {"native_gi_quality", "1"}, {"native_gi_distance", "1"},
+        {"native_grass_radius", "180.000000"}}},
+      {"High",
+       {{"native_x_renderer_antialiasing", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
+        {"native_x_renderer_shadow_scale", "2.000000"}, {"anisotropic_override", "5"}, {"native_ao_mode", "1"},
+        {"native_ao_samples", "2"}, {"native_gi_mode", "1"}, {"native_gi_quality", "2"}, {"native_gi_distance", "2"},
+        {"native_grass_radius", "1440.000000"}}},
+      {"Ultra",
+       {{"native_x_renderer_antialiasing", "fxaa"}, {"native_x_renderer_scaling", "bilinear"},
+        {"native_x_renderer_shadow_scale", "4.000000"}, {"anisotropic_override", "5"}, {"native_ao_mode", "1"},
+        {"native_ao_samples", "3"}, {"native_gi_mode", "1"}, {"native_gi_quality", "3"}, {"native_gi_distance", "4"},
+        {"native_grass_radius", "1440.000000"}}},
+  };
+  return kPresets;
+}
+// A setting's value as a preset has it: "2" and "2.000000" are the same, and NVIDIA NIS stands in for AMD FSR 1 (the
+// upscaler the player picked stays: ApplyGraphicsPreset).
+bool PresetValueMatches(const std::string& name, const std::string& now, const std::string& want) {
+  if (now == want) return true;
+  if (name == "native_x_renderer_scaling" && want == "fsr" && now == "nis") return true;
+  char* e1 = nullptr;
+  char* e2 = nullptr;
+  const double a = std::strtod(now.c_str(), &e1), b = std::strtod(want.c_str(), &e2);
+  return !now.empty() && !want.empty() && !*e1 && !*e2 && a == b;
 }
 // The sharpness for the upscaler Off (the settings file's, else the command line's or the renderer's default), as the
 // start found it and the menu's Sharpness row changes it.
@@ -309,6 +360,7 @@ bool LoadingScreenShown();  // auto_join.cpp: the level's loading screen is up a
 void NameChosen(const std::string& name);  // below: the name the player chose on the first start, in use at once
 bool PollNameCheck(bool abandon);           // below: the backend's answer to a chosen name, applied once it is in
 bool ShadersAfterUpdate();                  // below: the shaders are prepared again after an update
+bool ShadersPreparedAtStart();              // below: this version's shaders were prepared before: no shader page
 const char* BfVersion();                    // pipeline_upload.cpp
 
 // Whether BF may sign in behind the launcher's pages (auto_join.cpp): a name was chosen and the backend answered.
@@ -637,7 +689,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   void OnDraw(ImGuiIO& io) override {
     // The keyboard's Esc in a match with our menu closed opens the pause, as the controller's Start does (auto_join.cpp
     // takes it at the next pad read; only with the soldier in the world, as Start).
-    if (!open_ && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) g_escape_press.store(true, std::memory_order_relaxed);
+    if (!open_ && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !comms::TypingOrJustClosed())
+      g_escape_press.store(true, std::memory_order_relaxed);  // not the chat box's Esc (comms_ui.cpp)
     UpdateWalk(io);
     if (hd_import_->turn_on.exchange(false)) SetCvar("native_x_renderer_hd_textures", "true");
     // D150: the GPU's speed, timed once (the log keeps it) after the stored pipelines are made and 3 s of steady
@@ -653,8 +706,19 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 #else
     const bool want_time = settings_.Get("auto_detect_gpu", "") == "pending";
 #endif
+    // A prepared start (no shader page): when the renderer has made its stored pipelines behind the menus.
+    if (shaders_behind_ && shader_progress_) {
+      ShaderProgress sp;
+      shader_progress_(&sp.queued, &sp.done, &sp.loading, &sp.finished);
+      if (sp.finished) {
+        shaders_behind_ = false;
+        REXLOG_INFO("BF shaders: {} stored pipelines made behind the menus, {:.1f} s after the menu came up", sp.done,
+                    ImGui::GetTime() - shaders_behind_from_);
+      }
+    }
     if (!gpu_benchmark_started_ && want_time && !REXCVAR_GET(server)) {
-      if (page_ == Page::kShaders || pre_game_ || io.DeltaTime > 0.05f) gpu_benchmark_at_ = ImGui::GetTime() + 3.0;
+      if (page_ == Page::kShaders || shaders_behind_ || pre_game_ || io.DeltaTime > 0.05f)
+        gpu_benchmark_at_ = ImGui::GetTime() + 3.0;
       else if (ImGui::GetTime() >= gpu_benchmark_at_) gpu_benchmark_started_ = true, native_x_renderer::GpuBenchmarkStart();
     }
     if (!REXCVAR_GET(server)) AutoDetectWhenTimed(), NoteNisSupport();
@@ -694,6 +758,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // A new match: BF's pause list starts on its first row again.
     if (const int stage = MenuDriverStage(); stage != last_stage_) {
       if (stage == 5) bf_cursor_ = 0;
+      // Back at BF's online menu (the match over, or its join failed): no Night Ops server's night here. A map change
+      // on the server never comes back here, so its next map stays at night.
+      if (stage == 2 && last_stage_ > 2) SetJoinedServerNight(false);
       last_stage_ = stage;
     }
     if (page_ == Page::kJoining) {
@@ -765,7 +832,19 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       host_reads_ = host_reads;
       REXLOG_INFO("BF launcher: the controller read by {}", host_reads ? "the launcher (the game is not reading it)" : "the game");
     }
-    if (host_reads) HostPad();
+#if defined(BF_DEV_TOOLS)
+    // BF_DEV_SCRIPTED=1 (tools\run_game.ps1's test runs): only the scripted steps drive the launcher. The PC's own
+    // controller and mouse are not read: a test window at the back took the person's mouse over it and their
+    // controller (11 Nov 2026: Home's cursor moved to Report an issue, so a scripted A opened its links).
+    static const bool scripted = [] {
+      const char* v = std::getenv("BF_DEV_SCRIPTED");
+      return v && *v == '1';
+    }();
+    if (scripted) io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX), io.MouseDelta = ImVec2(0, 0);
+#else
+    constexpr bool scripted = false;
+#endif
+    if (host_reads && !scripted) HostPad();
     Input pad, key;
     bool pad_pressed = false;
     {
@@ -776,22 +855,24 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       pad_pressed_ = false;
     }
     // The keyboard: arrows, Enter and Esc everywhere; the launcher's letters (F, R, P, Tab, Q and E) where nothing is
-    // typed.
+    // typed. Not in a scripted test (BF_DEV_SCRIPTED above).
     const bool typing = page_ == Page::kName || !capture_.empty();
-    key.up |= ImGui::IsKeyPressed(ImGuiKey_UpArrow);
-    key.down |= ImGui::IsKeyPressed(ImGuiKey_DownArrow);
-    key.left |= ImGui::IsKeyPressed(ImGuiKey_LeftArrow);
-    key.right |= ImGui::IsKeyPressed(ImGuiKey_RightArrow);
-    key.accept |= ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
-    key.back |= ImGui::IsKeyPressed(ImGuiKey_Escape);
-    if (!typing) {
-      key.prev_tab |= ImGui::IsKeyPressed(ImGuiKey_Q);
-      key.next_tab |= ImGui::IsKeyPressed(ImGuiKey_E);
-      if (LauncherPage(page_)) {
-        key.x |= ImGui::IsKeyPressed(ImGuiKey_F, false);
-        key.y |= ImGui::IsKeyPressed(ImGuiKey_R, false);
-        key.start |= ImGui::IsKeyPressed(ImGuiKey_P, false);
-        key.view |= ImGui::IsKeyPressed(ImGuiKey_Tab, false);
+    if (!scripted) {
+      key.up |= ImGui::IsKeyPressed(ImGuiKey_UpArrow);
+      key.down |= ImGui::IsKeyPressed(ImGuiKey_DownArrow);
+      key.left |= ImGui::IsKeyPressed(ImGuiKey_LeftArrow);
+      key.right |= ImGui::IsKeyPressed(ImGuiKey_RightArrow);
+      key.accept |= ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+      key.back |= ImGui::IsKeyPressed(ImGuiKey_Escape);
+      if (!typing) {
+        key.prev_tab |= ImGui::IsKeyPressed(ImGuiKey_Q);
+        key.next_tab |= ImGui::IsKeyPressed(ImGuiKey_E);
+        if (LauncherPage(page_)) {
+          key.x |= ImGui::IsKeyPressed(ImGuiKey_F, false);
+          key.y |= ImGui::IsKeyPressed(ImGuiKey_R, false);
+          key.start |= ImGui::IsKeyPressed(ImGuiKey_P, false);
+          key.view |= ImGui::IsKeyPressed(ImGuiKey_Tab, false);
+        }
       }
     }
     // The kind of controller that pressed (the automatic prompts), on this thread: XInput reads of empty slots are slow.
@@ -1146,6 +1227,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     start_game_ = std::move(start);
     pre_game_ = true, launcher_first_ = true, open_ = true;
     REXLOG_INFO("BF launcher: before the game (it starts at Play)");
+    if (!kNightOps) SetJoinedServerNight(false);  // night_ops.h: no night in this build, whatever a setting says
     // Run the game, the startup videos, our main menu (TekRantGaming, 10 Nov 2026): the game's own startup cards and logo
     // music, extracted from the player's files (shader_prep.cpp ExtractGameArt), played by us before anything else;
     // the setting Startup cards off (bf_startup_cards = false) skips them.
@@ -1162,6 +1244,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       page_ = Page::kHome, home_row_ = 0;
       return;
     }
+    if (RenameRequired()) return;  // the saved name was refused (profanity): only a new name, not the whole setup
     setup_active_ = true;
     settings_.values["launcher_setup"] = "started";
     settings_.Save();
@@ -1745,9 +1828,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (!list_.Reserve(sv.gid)) return;
     // The game plays what the server plays (modern_mode.cpp): its movement and aiming match the server's.
     SetJoinedServerMode(sv.mode == "modern");
+    SetJoinedServerNight(sv.night);
     joining_ = sv.name;
     joining_map_ = sv.map;
     joined_gid_ = sv.gid;  // the pause's Scoreboard and the match score sent to the backend
+    comms::NoteJoined(sv.address);  // voice and text chat go to this server's host (comms.cpp)
     joined_from_start_ = MenuDriverStage() < 2;  // its joining page shows the game's start first
     tutorial_ = false;
     NotePlayedLevel(sv.map.empty() ? "Wake Island" : sv.map);
@@ -1762,6 +1847,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       REXLOG_INFO("BF launcher: a server picked on Home: the game starts, the join follows its sign in");
       pre_game_ = false, played_ = true, started_from_launcher_ = true;
       NoteStartValues();  // the renderer takes its settings now
+      // King Kong's rule: shaders not prepared for this version (just updated, or never) get the shader page first,
+      // then this join (AfterShaders); prepared ones are made behind the Joining page.
+      shaders_prepared_hint_ = ShadersPreparedForPlay();
+      if (!shaders_prepared_hint_) page_ = Page::kShaders, shaders_shown_ = false, join_after_shaders_ = true;
       auto start = std::move(start_game_);
       start();
     }
@@ -1787,6 +1876,16 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   std::string browser_mode_ = "classic";  // the movement whose servers the browser shows
   std::string movement_error_;
   static std::string ModeOf(const ServerInfo& sv) { return sv.mode == "modern" ? "modern" : "classic"; }
+  // Night Ops (TekRantGaming, 11 Nov 2026): a night server's maps drawn at night (NativeXRenderer D162), only while
+  // playing there: on at the join, off at another server's, at the match's end and in the tutorial.
+  static void SetJoinedServerNight(bool night) {
+    if (!kNightOps) night = false;  // night_ops.h: not in this build
+    const std::string was = rex::cvar::GetFlagByName("native_x_renderer_night");
+    if (was == (night ? "true" : "false")) return;
+    const bool set = rex::cvar::SetFlagByName("native_x_renderer_night", night ? "true" : "false");
+    REXLOG_INFO("BF night: {} (the renderer's setting was \"{}\", set: {}, now \"{}\")",
+                night ? "on, a Night Ops server" : "off", was, set, rex::cvar::GetFlagByName("native_x_renderer_night"));
+  }
   void ChooseMovement(bool quick, bool from_home) {
     page_ = Page::kMovement, movement_quick_ = quick, movement_from_home_ = from_home;
     movement_row_ = browser_mode_ == "modern" ? 1 : 0;
@@ -2065,7 +2164,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (sel) d->AddRectFilled(r0, r1, kTableGreen);
       const std::string ping = sv.ping_ms < 0 ? "?" : std::to_string(sv.ping_ms) + " MS";
       const std::string cells[] = {Upper(sv.name), Upper(sv.map.empty() ? "Wake Island" : sv.map),
-                                   sv.mode == "modern" ? "MODERN" : "CLASSIC",
+                                   std::string(sv.mode == "modern" ? "MODERN" : "CLASSIC") + (sv.night ? ", NIGHT" : ""),
                                    std::to_string(sv.players) + " / " + std::to_string(sv.max_players) + (full ? "  FULL" : ""),
                                    ping};
       for (int c = 0; c < 5; ++c) {
@@ -2097,6 +2196,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
              sv.official ? "RUN BY TRG STUDIOS  \xC2\xB7  OFFICIAL" : "COMMUNITY SERVER");
         Text(d, g_fonts.bf_med, 22 * s, ImVec2(rx, oy + 44 * s), IM_COL32(230, 240, 220, 255),
              sv.mode == "modern" ? "MODERN MOVEMENT AND AIMING" : "CLASSIC MOVEMENT AND AIMING");
+        if (sv.night)
+          Text(d, g_fonts.bf_med, 22 * s, ImVec2(rx, oy + 78 * s), IM_COL32(170, 200, 255, 255), "NIGHT OPS: ITS MAPS AT NIGHT");
         const ImVec2 j0(rx, oy + 116 * s), j1(x1 - pad, oy + 172 * s);
         d->AddRect(j0, j1, IM_COL32(255, 255, 255, 255), 0, 0, 3 * s);
         const float jk = BfButton(d, ImVec2(j0.x + 18 * s, (j0.y + j1.y) * 0.5f), 34 * s, "A");
@@ -2374,7 +2475,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // than the first match).
   static constexpr const char* kStartCvars[] = {"native_x_renderer_antialiasing", "native_x_renderer_frame_generation",
                                                 "native_x_renderer_shadow_scale", "native_x_renderer_sharpness",
-                                                "native_x_renderer_scaling", "bf_upscaler_mode"};
+                                                "native_x_renderer_scaling", "bf_upscaler_mode", "user_language"};
   static constexpr const char* kStartKeys[] = {"vsync", "monitor", "window_width", "window_height"};
   std::map<std::string, std::string> started_with_;
   std::string StartValue(const std::string& key) {
@@ -2741,8 +2842,47 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     return rows;
   }
 
+  // The preset the Graphics page's settings are now (GraphicsPresets), or -1: Custom.
+  int CurrentGraphicsPreset() {
+    const auto& presets = GraphicsPresets();
+    for (size_t i = 0; i < presets.size(); ++i) {
+      bool all = true;
+      for (const auto& [name, value] : presets[i].settings) all = all && PresetValueMatches(name, Cvar(name), value);
+      if (all) return int(i);
+    }
+    return -1;
+  }
+  void ApplyGraphicsPreset(size_t i, const char* why) {
+    const auto& presets = GraphicsPresets();
+    if (i >= presets.size()) return;
+    for (const auto& [name, value] : presets[i].settings) {
+      // NVIDIA NIS where this GPU runs it stays for a preset's AMD FSR 1: both are the upscaler.
+      if (std::string(name) == "native_x_renderer_scaling" && std::string(value) == "fsr" &&
+          Cvar(name) == "nis" && settings_.Get("nis_support", "") == "1")
+        continue;
+      SetCvar(name, value);
+    }
+    REXLOG_INFO("BF settings: graphics preset {}{}", presets[i].name, why);
+  }
+
   std::vector<SettingRow> GraphicsRows() {
     std::vector<SettingRow> rows;
+    // The preset first: it sets the rows below it (GraphicsPresets); Custom once one of them is changed.
+    {
+      const auto& presets = GraphicsPresets();
+      SettingRow r{"Quality", "Graphics preset",
+                   "Sets every setting on this page at once. Potato is for integrated graphics and the oldest cards, "
+                   "Medium for a GTX 1060 or RX 580 at 1080p, Ultra for the fastest cards. Custom means a setting below "
+                   "was changed since. Some of them apply at the next start."};
+      for (const auto& p : presets) r.options.push_back(p.name);
+      r.index = CurrentGraphicsPreset();
+      if (r.index < 0) {
+        r.options.push_back("Custom");
+        r.index = int(presets.size());
+      }
+      r.choose = [this](int i) { ApplyGraphicsPreset(size_t(i), ""); };
+      rows.push_back(r);
+    }
     // No Graphics API row: Vulkan, our renderer, is the only one (DECISIONS.md, 5 Nov 2026 evening). The rows set
     // NativeXRenderer's own settings: the presenter's swap_post_effect and present_effect, which these rows set before,
     // are not used when NativeXRenderer draws (they changed nothing).
@@ -2909,11 +3049,25 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                               "The soldiers' voices: Localized in your game's language, Original as they were "
                               "recorded.",
                               "GstAudio", {"VOLanguage"}, "0", {{"Localized", "0"}, {"Original", "1"}}));
+    // Voice chat in matches (comms.cpp): players near you hear you, both teams.
+    rows.push_back(Choice("Voice chat", "Voice chat",
+                          "Talk to the players near you through your microphone: both teams hear a voice close by, "
+                          "fading with distance. Push to talk sends while its key is held (Keyboard bindings), Open "
+                          "mic whenever you speak.",
+                          "bf_voice_mode", {{"Push to talk", "push"}, {"Open mic", "open"}, {"Off", "off"}}));
+    rows.push_back(Slider("Voice chat", "Voice volume", "How loud other players' voices are.", "bf_voice_volume", 0, 200,
+                          5, Percent, 100));
+    rows.push_back(Slider("Voice chat", "Microphone sensitivity",
+                          "Open mic: higher picks up quieter speech, and more of the room around you.",
+                          "bf_voice_mic_sensitivity", 0, 100, 5, Percent, 50));
     SettingRow reset{"Reset", "Reset page", "Put these settings back to their defaults."};
     reset.activate = [this] {
       SetCvar("bf_master_volume", "100");
       SetGameValue("GstAudio", {"SoundSystemSize"}, "1");
       SetGameValue("GstAudio", {"VOLanguage"}, "0");
+      SetCvar("bf_voice_mode", "push");
+      SetCvar("bf_voice_volume", "100");
+      SetCvar("bf_voice_mic_sensitivity", "50");
     };
     rows.push_back(reset);
     return rows;
@@ -2968,6 +3122,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "Hold: keep the left trigger held to aim, as on the console. Toggle: press it once to aim and "
                           "again to stop. Opening the menu stops aiming.",
                           "bf_toggle_aim", "Hold", "Toggle"));
+    // Aim assist (GitHub issue 4): the game's own, one setting for each device (look.cpp, sub_822B0F40).
+    rows.push_back(Toggle("Controller", "Aim assist",
+                          "The game's own help with aiming at enemies while you aim with a controller. Off, the aim "
+                          "moves only as you move it.",
+                          "bf_aim_assist"));
     rows.push_back(Toggle("Controller", "Vibration", "Controller rumble.", "bf_vibration"));
     {
       SettingRow strength = Slider("Controller", "Vibration strength",
@@ -3013,6 +3172,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                               "bf_mouse_toggle_aim", "Hold", "Toggle");
       if (!mnk) aim.disabled = true, aim.note = mnk_note;
       rows.push_back(aim);
+      SettingRow assist = Toggle("Keyboard & mouse", "Aim assist",
+                                 "The game's own help with aiming at enemies, made for controllers, while you aim with "
+                                 "the mouse. Off, the aim moves only as you move the mouse. The controller has its own "
+                                 "choice.",
+                                 "bf_aim_assist_mouse");
+      if (!mnk) assist.disabled = true, assist.note = mnk_note;
+      rows.push_back(assist);
       SettingRow cam = Toggle("Keyboard & mouse", "Mouse camera",
                               "Turn the camera with the mouse. Off, it turns with the keys bound to the right stick.",
                               "mnk_mouse");
@@ -3022,6 +3188,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                               "bf_mouse_invert_y", "Normal", "Inverted");
       if (!mnk || !Truthy(Cvar("mnk_mouse"))) inv.disabled = true, inv.note = mnk_note;
       rows.push_back(inv);
+      // Issue #3: vehicles' own, so the soldier and a tank can each be normal or inverted.
+      SettingRow vinv = Toggle("Keyboard & mouse", "Mouse vertical in vehicles",
+                               "Which way moving the mouse up and down aims a tank's gun, a jeep's or a boat's machine "
+                               "gun and other turrets. Normal: up aims up, as on foot.",
+                               "bf_mouse_invert_y_vehicle", "Normal", "Inverted");
+      if (!mnk || !Truthy(Cvar("mnk_mouse"))) vinv.disabled = true, vinv.note = mnk_note;
+      rows.push_back(vinv);
     }
     // The game's own Controls page, row for row, with its names and choices.
     rows.push_back(GameChoice("Game controls", "Soldier controls",
@@ -3120,7 +3293,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         {"keybind_rstick_up", "Look up (mouse camera off)"},
         {"keybind_rstick_down", "Look down (mouse camera off)"},
         {"keybind_rstick_left", "Look left (mouse camera off)"},
-        {"keybind_rstick_right", "Look right (mouse camera off)"}};
+        {"keybind_rstick_right", "Look right (mouse camera off)"},
+        {"keybind_push_to_talk", "Push to talk (voice chat)"},
+        {"keybind_chat_all", "Chat to everyone"},
+        {"keybind_chat_team", "Chat to your team"},
+        {"keybind_chat_squad", "Chat to your squad"}};
     std::vector<SettingRow> rows;
     for (const auto& [cvar, label] : kBinds) {
       SettingRow r{"Keyboard bindings", label,
@@ -3147,6 +3324,20 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     name.value = settings_.Get("player_name", "");
     name.activate = [this] { BeginName(nullptr); };
     rows.push_back(name);
+    // The game's language (GitHub issue 2: "the game supports other localizations and not only English"): the
+    // console's language setting as the runtime gives it (user_language, read by the game through
+    // ExGetXConfigSetting's XCONFIG_USER_LANGUAGE at its start), the six the game has text for (build_overlay-00.fbrb
+    // language_<name>_normal.bin). Run lang1: French, "APPUYER SUR B POUR ENTRER" on the HUD.
+    rows.push_back(Choice("Player", "Game language",
+                          "The language of the game's own text: its menus, HUD and loading screens. The menus of this "
+                          "launcher stay in English. Applies at the next start.",
+                          "user_language",
+                          {{"English", "1"}, {"French", "4"}, {"German", "3"}, {"Italian", "6"}, {"Spanish", "5"},
+                           {"Japanese", "2"}}));
+    rows.push_back(Toggle("Player", "Text chat",
+                          "Messages top left in a match: T to everyone, Y to your team, U to your squad (Keyboard "
+                          "bindings). Off hides them and the chat box.",
+                          "bf_text_chat"));
     rows.push_back(Choice("Overlay", "Performance metrics",
                           "Readings in the top left corner while you play. F2 switches between them.",
                           "bf_performance_metrics", {{"Off", "off"}, {"FPS only", "fps"}, {"Full", "full"}}));
@@ -3366,8 +3557,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }
     if (!focused || !in.back) return false;
     if (sub_ != kSubNone) {
-      row_ = sub_ == kSubRemap ? 14 : 15;
+      const char* back_to = sub_ == kSubRemap ? "Button remapping" : "Keyboard bindings";
       sub_ = kSubNone;
+      const std::vector<SettingRow> page = ControlsRows();
+      row_ = 0;
+      for (size_t i = 0; i < page.size(); ++i)
+        if (page[i].name == back_to) row_ = int(i);
       return false;
     }
     return true;
@@ -3379,7 +3574,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // then at <pause s> our pause menu and Leave match.
   // BF_MENU_STEPS (tests): our menu's input at set times, "<s from start>:<what>" separated by commas: up, down,
   // left, right, a, b, lb, rb, and bfb, bfa, bfup, bfdown, bfleft, bfright, bflb, bfrb (the player's press on BF's own
-  // screen). The dev pad's presses go to
+  // screen); in dev builds set/<setting>/<value> (below). The dev pad's presses go to
   // the game, not to our menu.
   void MenuSteps() {
     static const std::vector<std::pair<double, std::string>> steps = [] {
@@ -3435,9 +3630,14 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       } else if (w.rfind("press/", 0) == 0 || w.rfind("hold/", 0) == 0 || w.rfind("release/", 0) == 0) {
         // press/<key>, hold/<key>, release/<key>: f6, f7, f8 and the arrows as ImGui sees them (the graphics panel)
         const std::string k = w.substr(w.find('/') + 1);
+        // A single letter (the chat's T, Y, U and push to talk's B), enter, esc, tab, backspace: the chat box tests.
         const ImGuiKey key = k == "f8" ? ImGuiKey_F8 : k == "f7" ? ImGuiKey_F7 : k == "f6" ? ImGuiKey_F6
                              : k == "right" ? ImGuiKey_RightArrow : k == "left" ? ImGuiKey_LeftArrow
-                             : k == "down" ? ImGuiKey_DownArrow : k == "up" ? ImGuiKey_UpArrow : ImGuiKey_None;
+                             : k == "down" ? ImGuiKey_DownArrow : k == "up" ? ImGuiKey_UpArrow
+                             : k == "enter" ? ImGuiKey_Enter : k == "esc" ? ImGuiKey_Escape : k == "tab" ? ImGuiKey_Tab
+                             : k == "backspace" ? ImGuiKey_Backspace
+                             : k.size() == 1 && k[0] >= 'a' && k[0] <= 'z' ? ImGuiKey(ImGuiKey_A + (k[0] - 'a'))
+                                                                           : ImGuiKey_None;
         if (key != ImGuiKey_None) {
           if (w[0] != 'r') ImGui::GetIO().AddKeyEvent(key, true);
           if (w[0] != 'h') ImGui::GetIO().AddKeyEvent(key, false);
@@ -3455,6 +3655,20 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         io.AddMousePosEvent(at.x, at.y);
         if (click) io.AddMouseButtonEvent(0, true), release_click_ = true;
       }
+#if defined(BF_DEV_TOOLS)
+      // set/<setting>/<value>: a runtime setting changed as our menus change it, not saved (a key or the prompts'
+      // style changed in a match: hud_glyphs.cpp draws the prompts again).
+      else if (w.rfind("set/", 0) == 0 && w.find('/', 4) != std::string::npos) {
+        const size_t slash = w.find('/', 4);
+        rex::cvar::SetFlagByName(w.substr(4, slash - 4), w.substr(slash + 1));
+      }
+      // cmd/<name>/<args>: one of the game's own menu commands (selectTeam, leaveSquad...), as its menu sends them.
+      else if (w.rfind("cmd/", 0) == 0) {
+        const size_t slash = w.find('/', 4);
+        GameCommand(w.substr(4, slash == std::string::npos ? std::string::npos : slash - 4),
+                    slash == std::string::npos ? "" : w.substr(slash + 1));
+      }
+#endif
       else if (w == "bfb") PressBf({kPadB}), Passing(kPadB);  // the player's B on BF's own screen
       else if (w == "bfa") PressBf({kPadA}), Passing(kPadA);
       else if (w == "bfdown") PressBf({kPadDown}), Passing(kPadDown);  // BF's own lists (its Help & Options)
@@ -4052,6 +4266,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   std::string logged_page_;
   bool setup_active_ = false, from_home_ = false, skip_popup_ = false, quit_popup_ = false, files_help_ = false;
   bool steam_added_ = false, signed_in_once_ = false, name_setup_ = false, name_keys_ = false;
+  bool name_required_ = false;  // the saved name was refused (profanity): the name page has no Back until a new one
   std::atomic<bool> send_game_settings_{false};  // Show: the game's own options to send (SendGameSettings)
   int setup_tab_ = 0, prompts_row_ = 0, popup_row_ = 0, home_row_ = 0, project_ = 0, files_card_ = 0, allset_row_ = 0;
   double settle_until_ = 0, next_page_at_ = 0, starting_at_ = 0, shader_started_ = -1, name_ready_at_ = 0;
@@ -4123,6 +4338,19 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   float io_scale_ = 1;    // the display's height / 1080, for this frame
   float shader_bar_ = 0;  // the bar as drawn: eases towards the count, never back
   bool shaders_shown_ = false;
+  bool shaders_behind_ = false;      // a prepared start: the stored pipelines still being made behind the menus
+  double shaders_behind_from_ = 0;
+  bool shaders_prepared_hint_ = false;  // decided at Play (ShadersPreparedForPlay), before the game has loaded
+  bool join_after_shaders_ = false;     // a server picked on Home: its join once the shader page is done
+
+  // King Kong's rule decided at Play: the start's own check (CheckShadersAfterUpdate) runs once the game has loaded,
+  // a moment after Play, from the same marker and storage; deciding here too means a version prepared before never
+  // shows the shader page, not even for that moment.
+  bool ShadersPreparedForPlay() const {
+    std::error_code ec;
+    return settings_.Get("shaders_prepared_for", "") == BfVersion() &&
+           fs::is_regular_file(UserDir() / "cache" / "native_x_renderer" / "5841097E.pipelines", ec);
+  }
   std::mutex pad_mutex_;
   Input pad_;
   uint16_t last_pad_ = 0;
@@ -4342,6 +4570,16 @@ void ApplyPlayerIdentity(const fs::path& user_dir) {
   std::random_device random;
   bool changed = false;
   std::string name = clean(settings.Get("player_name", ""));
+  // A saved name with profanity (our filter, text_filter.h; TekRantGaming, 11 Nov 2026: "we can't allow them to have
+  // the name at all. They'll have to select a new name"): never used. A made up one stands in, the name counts as not
+  // chosen, so BF does not sign in before the launcher's name page has a new one (player_name_refused: that page shows
+  // on its own, with why).
+  if (!name.empty() && !text_filter::NameAllowed(name)) {
+    REXLOG_INFO("BF name: the saved name is not allowed (profanity): the player chooses a new one");
+    name.clear();
+    settings.values["player_name_chosen"] = "";
+    settings.values["player_name_refused"] = "1";
+  }
   if (name.empty()) {
     name = "Soldier" + std::to_string(1000 + random() % 9000);
     settings.values["player_name"] = name;
@@ -4360,7 +4598,10 @@ void ApplyPlayerIdentity(const fs::path& user_dir) {
     changed = true;
   }
   if (changed) settings.Save();
-  if (const std::string forced = clean(REXCVAR_GET(bf_player_name)); !forced.empty()) name = forced;
+  if (const std::string forced = clean(REXCVAR_GET(bf_player_name)); !forced.empty()) {
+    if (text_filter::NameAllowed(forced)) name = forced;
+    else REXLOG_INFO("BF name: bf_player_name is not allowed (profanity): not used");
+  }
   SetPlayerIdentity(name, id);
   StartNameCheck(name, id);
 }
@@ -4459,18 +4700,38 @@ void SetMenuSetting(const std::string& key, const std::string& value) {
   if (g_menu) g_menu->SetSetting(key, value);
 }
 fs::path MenuUserDir() { return g_menu ? g_menu->UserDir() : fs::path(); }
-// After an update (bf1943_app.h, before the renderer opens its storage): the driver's pipeline cache deleted when the
-// shaders were prepared for another version, so the shader page compiles them all again (King Kong's forced rebuild).
+// King Kong's rule exactly (its shader_prepared.h; TekRantGaming, 11 Nov 2026: shaders compile when the game files
+// are first given, then never again until the game updates, when they are all compiled again; "Copy Kong exactly").
+// At each start (bf1943_app.h, before the shaders are prepared and before the renderer opens its storage):
+// - shaders prepared for another version: an update; the shader page makes every pipeline again, over the cache
+//   (nothing deleted: update.cpp), "UPDATED TO VERSION";
+// - prepared for this version (shaders_prepared_for, written once the page has compiled them all) and the renderer's
+//   storage still there: no shader page; the renderer makes its stored pipelines behind the menus, from the driver's
+//   cache (pipelines first met in play are kept in the storage and made the same way at the next start);
+// - otherwise (a first start, a setup closed half way, a cache someone deleted): the shader page.
 namespace {
-bool g_shaders_after_update = false;
+std::atomic<bool> g_shaders_after_update{false};  // set at the start (the runtime's thread), read by the menu
+std::atomic<bool> g_shaders_prepared{false};
 }
 void CheckShadersAfterUpdate(const fs::path& user_dir, const fs::path& cache) {
   Settings settings;
   settings.path = user_dir / "bf1943-settings.txt";
   settings.Load();
-  g_shaders_after_update = update::PrepareShadersAfterUpdate(cache, settings.Get("shaders_prepared_for", ""));
+  const std::string prepared_for = settings.Get("shaders_prepared_for", "");
+  g_shaders_after_update = update::PrepareShadersAfterUpdate(cache, prepared_for);
+  std::error_code ec;
+  const bool storage = fs::is_regular_file(cache / "native_x_renderer" / "5841097E.pipelines", ec);
+  g_shaders_prepared = !g_shaders_after_update && prepared_for == BfVersion() && storage;
+  if (g_shaders_prepared)
+    REXLOG_INFO("BF shaders: prepared for v{} already: no shader page, the stored pipelines are made behind the menus",
+                BfVersion());
+  else if (!g_shaders_after_update)
+    REXLOG_INFO("BF shaders: not prepared for v{} yet ({}): the shader page compiles them", BfVersion(),
+                prepared_for.empty() ? "never prepared: a first start, or a setup closed before they were done"
+                                     : "the renderer's storage is gone");
 }
 bool ShadersAfterUpdate() { return g_shaders_after_update; }
+bool ShadersPreparedAtStart() { return g_shaders_prepared; }
 // For auto_join.cpp: BF signs in by itself behind the launcher (Start through its films and title) once allowed.
 bool LauncherLetsGameSignIn() { return g_menu && LauncherWalks().load(std::memory_order_relaxed); }
 // The first start's setup (bf1943_app.h, OnFinalizePaths): shown until the game is installed.

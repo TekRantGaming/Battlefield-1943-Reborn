@@ -196,6 +196,25 @@ void LimitFrame() {
     while (Clock::now() < outside_next) std::this_thread::yield();
     outside_next += step;
   }
+  // BF_DEV_SLOW_FRAMES=<min ms>,<max ms> (tests: a slow computer): each frame at least a random time in that range after
+  // the last, whatever the chosen frame rate (our own limit is then left out).
+  static const std::pair<double, double> slow = [] {
+    const char* v = std::getenv("BF_DEV_SLOW_FRAMES");
+    if (!v || !*v) return std::pair<double, double>{0.0, 0.0};
+    const double lo = std::atof(v);
+    const char* comma = std::strchr(v, ',');
+    return std::pair<double, double>{lo, comma ? std::max(lo, std::atof(comma + 1)) : lo};
+  }();
+  if (slow.first > 0) {
+    static Clock::time_point slow_last{};
+    static uint32_t seed = 12345;
+    seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5;
+    const double ms = slow.first + (slow.second - slow.first) * double(seed & 0xFFFF) / 65535.0;
+    const auto until = slow_last + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double, std::milli>(ms));
+    while (Clock::now() < until) std::this_thread::sleep_for(std::chrono::microseconds(200));
+    slow_last = Clock::now();
+    return;
+  }
 #endif
   const auto now = Clock::now();
   // A limit outside the game (frame_cap.cpp): the frames' intervals that ours did not make.

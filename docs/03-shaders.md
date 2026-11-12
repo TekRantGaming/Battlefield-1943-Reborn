@@ -25,8 +25,7 @@ and made none during play.
   <storage folders>`. 4 Nov: 662 shaders, 669 pipelines (Direct3D 12) from all runs so far.
 
 ## NativeXRenderer (6 Nov 2026, what players run)
-Players draw through NativeXRenderer (Vulkan), which keeps its own storage, `<cache>
-ative_x_renderer841097E.pipelines`
+Players draw through NativeXRenderer (Vulkan), which keeps its own storage, `<cache>\native_x_renderer\5841097E.pipelines`
 (shader microcode, translations, pipelines; D42) and makes everything in it at its first draw. Before this, nothing
 seeded it, so a first session made every pipeline during play (TekRantGaming's first session: 1,368 pipelines, about 31,000
 draws skipped, objects flickering in).
@@ -46,6 +45,42 @@ draws skipped, objects flickering in).
   2 to 7 new pipelines a match on each of the four maps.
 - To grow the list: play or script runs on NativeXRenderer (each map, vehicles, weapons, effects), then
   `python -I tools/shader_list.py --game input/pkg --out bf/data/shaders --scan runs`.
+
+## Once per version (11 Nov 2026, King Kong's rule)
+TekRantGaming: shaders compile when the game files are first given, then never again until the game updates, when
+they are all compiled again; then "Copy Kong exactly". King Kong's own rule (its kk/src/shader_prepared.h, owner 18
+Oct 2026; the King Kong Linux lead's notes, side-session note kk-shaders-for-bf1943.md): one preparation per version,
+at the first setup or after an update; a version already prepared is never checked or rebuilt at a start; and on an
+update nothing is deleted: everything is made again over the old files.
+- The marker is `shaders_prepared_for` in `user/bf1943-settings.txt`: the version whose shader page compiled every
+  stored pipeline. It is written only when the page reaches its end (a page left half way is not a preparation).
+- At each start, before the shaders are prepared and before the renderer opens its storage
+  (`bf1943_app.h` OnPostLoadXexImage, `game_menu.cpp` CheckShadersAfterUpdate):
+  - marker of another version: an update (`update.cpp` PrepareShadersAfterUpdate). Nothing is deleted: the
+    preparation adds this version's list to the renderer's storage from the player's game files, the pipelines
+    this PC learned in play stay, the driver's pipeline cache stays (Vulkan ignores one from another driver or
+    device), and the shader page ("UPDATED TO VERSION") makes every stored pipeline again. Until it has finished,
+    each start counts as updated and the page finishes the job.
+  - (11 Nov, first try, replaced the same day at "Copy Kong exactly": the whole cache was deleted on an update,
+    which also lost the pipelines learned in play.)
+  - marker of this version and the renderer's storage still there: no shader page. The renderer makes its stored
+    pipelines behind the menus from the driver's cache (the log says when they are done); pipelines first met in
+    play are kept in the storage and made the same way at the next start.
+  - no marker (a first start, a setup closed before the page finished) or the storage gone: the shader page.
+- A driver or GPU change does not show the page (King Kong's rule too): Vulkan ignores a pipeline cache made by
+  another driver or device, so the renderer makes the pipelines again behind the menus, cold.
+
+## Players' pipelines (the Cloudflare Worker)
+Players' games send their storage's pipelines and translations (no shader code) to the Kong Worker
+(`pipeline_upload.cpp`), which keeps the two newest versions. At a release they are fetched with
+`node F:\KK-native-renderer\server-api\scripts\fetch-bf-pipelines.mjs <version> runs\uploads_<date>\<version>` (the
+script reads its token itself; never open `.dev.vars`) and merged over a test run's storage prepared from the shipped
+list, so every shipped entry stays: `python -I tools/shader_list.py --game input/pkg --out <scratch> <that run's
+native_x_renderer and shaders/shareable folders> <the uploads folders>`, then the new `5841097E.nxr` is checked (old
+translations and pipelines all kept) and copied to `bf/data/shaders`.
+- 8 Nov (0.1.11 to 0.1.14): 91 pipelines and 13 translations added (1,943 pipelines, 1,042 translations).
+- 11 Nov (0.1.33 and 0.2.0, 49 files, all four maps): 193 pipelines and 46 translations added (2,136 pipelines,
+  1,088 translations); the shader list itself unchanged (1,089 shaders, every one found in the game files).
 
 ## Next
 - More coverage: every map, vehicles, weapons, effects, menus; a Vulkan recording (Linux uses Vulkan).

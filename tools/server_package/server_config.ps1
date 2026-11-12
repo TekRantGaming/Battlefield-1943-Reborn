@@ -26,9 +26,17 @@ function Test-OfficialPackage {
     try { return [bool]((Get-Content $p -Raw | ConvertFrom-Json).official) } catch { return $false }
 }
 
+# Night Ops (package.json "night_ops": true, test packages only until it is released): the window's Night Ops box
+# and the hosts' --night. Without it a server is never a night one, whatever server.json says.
+function Test-NightOpsPackage {
+    $p = Join-Path $ServerRoot 'package.json'
+    if (-not (Test-Path $p)) { return $false }
+    try { return [bool]((Get-Content $p -Raw | ConvertFrom-Json).night_ops) } catch { return $false }
+}
+
 function New-ServerEntry([string]$name) {
     [pscustomobject]@{ name = $name; description = ''; maps = @('wake', 'guadalcanal', 'iwo', 'coral'); movement = 'classic'
-                       round_end_delay = 45; listed = $true }
+                       round_end_delay = 45; listed = $true; night = $false }
 }
 
 function Read-ServerConfig {
@@ -51,6 +59,7 @@ function Read-ServerConfig {
             if ($_.movement -eq 'modern') { $s.movement = 'modern' }
             if ($_.round_end_delay) { $s.round_end_delay = [int]$_.round_end_delay }
             if ($null -ne $_.listed) { $s.listed = [bool]$_.listed }
+            if ($null -ne $_.night) { $s.night = [bool]$_.night }  # Night Ops: its maps at night in players' games
             $s
         })
     } else {

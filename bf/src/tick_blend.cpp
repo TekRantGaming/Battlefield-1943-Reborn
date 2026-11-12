@@ -382,8 +382,14 @@ Plan Follow(Track& t, const Xf& now_xf, uint64_t tick, uint64_t frame, const Tol
     t.cur = now_xf, t.have = true, t.seen_tick = tick;
   } else if (t.seen_tick != tick) {  // the first time since a tick
     const double last_move = t.step_move, last_turn = t.step_turn;
-    t.prev = t.cur, t.cur = now_xf;
-    t.step = tick - t.seen_tick == 1;
+    const uint64_t n = tick - t.seen_tick;
+    // Below 30 FPS a frame holds two ticks at times: the tick before the last is taken on the way from the last frame's
+    // value (a step of two ticks was left unblended, the game's value shown a tick ahead, then blended back a tick
+    // behind on the next frame: run slowfps2 at 24 FPS, the camera stalled on one frame in eleven).
+    Xf before_last = t.cur;
+    if (n >= 2 && n <= 4 && !Blend(t.cur, now_xf, 1.0 - 1.0 / double(n), before_last)) before_last = t.cur;
+    t.prev = before_last, t.cur = now_xf;
+    t.step = n >= 1 && n <= 4;
     t.seen_tick = tick;
     t.step_move = t.step_turn = 0;
     for (int c = 0; c < 3; ++c) {
@@ -1720,8 +1726,13 @@ void TickBlendFrame() {
   const auto now = Clock::now();
   // A frame the game ran no tick in had its own time since the tick under one tick: ours is capped to that, so the
   // frames between ticks never all sit at the end (a start a frame late carried on: run mot1, 0.53 and 1.0 by turns).
+  // After the frame's ticks the game's own remainder is under a tick (it runs ticks until it is), with or without a
+  // tick this frame; ours never more. Below 30 FPS a frame holds two ticks at times, and a long frame's time can be
+  // dropped by the game: capping here (no longer resetting in the tick) keeps the phase the game's (run walkslow2:
+  // at 24 FPS the reset at two ticks put frames back a tick every fifth frame).
   double phase = g_phase.load(std::memory_order_relaxed);
-  if (!g_ticked.exchange(false, std::memory_order_relaxed) && phase > kTick * 0.98) phase = kTick * 0.98;
+  g_ticked.exchange(false, std::memory_order_relaxed);
+  if (phase > kTick * 0.98) phase = kTick * 0.98;
   if (g_frame_at != Clock::time_point{})
     phase += std::min(0.25, std::chrono::duration<double>(now - g_frame_at).count());
   g_phase.store(phase, std::memory_order_relaxed);
@@ -1777,7 +1788,7 @@ void TickBlendFrame() {
 // After each client tick (vehicle_camera.cpp's sub_82380600 hook).
 void TickBlendTick() {
   const double p = g_phase.load(std::memory_order_relaxed);
-  g_phase.store(p > 2 * kTick ? 0.0 : std::max(0.0, p - kTick), std::memory_order_relaxed);  // a hitch: start again
+  g_phase.store(std::max(0.0, p - kTick), std::memory_order_relaxed);  // TickBlendFrame caps what is left over
   g_ticked.store(true, std::memory_order_relaxed);
 }
 

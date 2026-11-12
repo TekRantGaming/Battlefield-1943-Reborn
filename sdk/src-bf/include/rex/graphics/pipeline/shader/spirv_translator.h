@@ -88,6 +88,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
       uint32_t param_gen_point : 1;
       // For host render targets - depth / stencil output mode.
       DepthStencilMode depth_stencil_mode : 3;
+      // With a draw resolution scale, the pixel position in PsParamGen is the host pixel's centre in guest pixels
+      // less one guest pixel, (floor(position) + 0.5) / scale - 1 (at least 0), instead of floor(position) / scale:
+      // for a game whose shaders sample at their position plus one texel (Battlefield 1943's water and its half
+      // resolution layers' composites), so that they read the texel under the host pixel. Also at scale 1.
+      uint32_t param_gen_texel_centre : 1;
     } pixel;
     uint64_t value = 0;
 

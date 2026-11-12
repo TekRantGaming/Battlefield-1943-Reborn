@@ -33,6 +33,9 @@ void GpuBenchmarkStart();
 bool GpuBenchmarkResult(double* ms);
 // D158: whether NVIDIA Image Scaling runs on this GPU, and the GPU's name; false until known.
 bool NisSupport(bool* runs, std::string* gpu);
+// D163: see native_x_renderer::NightLamps.
+void NightLamps(const NightLamp* lamps, uint32_t count);
+void NightModels(const NightModelLamps* models, uint32_t count);
 // The stored pipelines made at start (D134).
 void StorageProgress(uint32_t* queued, uint32_t* done, uint32_t* loading, uint32_t* finished);
 void SetGameAspectBox(bool on);

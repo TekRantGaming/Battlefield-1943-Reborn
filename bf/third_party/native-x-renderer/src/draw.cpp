@@ -362,7 +362,13 @@ void DrawPath::OpenStorage(const std::filesystem::path& storage) {
   // Every stored translation, also those of draws that make no pipeline (no target, for one).
   for (const auto& translation : translations) {
     if (rg::SpirvShader* shader = shaders_->Find(xenos::ShaderType(translation.type), translation.hash)) {
-      shaders_->GetHostShader(*shader, translation.modification, pending);
+      uint64_t modification = translation.modification;
+      if (xenos::ShaderType(translation.type) == xenos::ShaderType::kPixel) {  // D164, as the pipelines below
+        Translator::Modification m(modification);
+        if (m.pixel.param_gen_enable) m.pixel.param_gen_texel_centre = param_gen_texel_centre_ ? 1 : 0;
+        modification = m.value;
+      }
+      shaders_->GetHostShader(*shader, modification, pending);
     }
   }
   // Records from a device with D24_UNORM_S8_UINT depth, on one without it: its draws ask for the fallback (D103).
@@ -379,9 +385,17 @@ void DrawPath::OpenStorage(const std::filesystem::path& storage) {
       stored_motion_.push_back(stored);
       continue;
     }
+    // D164: a stored pixel shader that reads its pixel position takes this run's way of giving it (a list stored
+    // before D164, or with the other setting, matches the draws again).
+    uint64_t pixel_modification = record.pixel_modification;
+    {
+      Translator::Modification m(pixel_modification);
+      if (m.pixel.param_gen_enable) m.pixel.param_gen_texel_centre = param_gen_texel_centre_ ? 1 : 0;
+      pixel_modification = m.value;
+    }
     Stored stored{shaders_->Find(xenos::ShaderType::kVertex, record.vertex_hash), record.vertex_modification,
                   record.pixel_hash ? shaders_->Find(xenos::ShaderType::kPixel, record.pixel_hash) : nullptr,
-                  record.pixel_modification, record.state};
+                  pixel_modification, record.state};
     if (!stored.vertex_shader || (record.pixel_hash && !stored.pixel_shader)) continue;
     if (!depth_unorm24 && stored.state.dsv_format == TEX_FORMAT_D24_UNORM_S8_UINT) {
       stored.state.dsv_format = TEX_FORMAT_D32_FLOAT_S8X24_UINT;
@@ -929,6 +943,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       pixel_modification.pixel.param_gen_enable = 1;
       pixel_modification.pixel.param_gen_interpolator = param_gen_position;
       pixel_modification.pixel.param_gen_point = uint32_t(guest_primitive_type == xenos::PrimitiveType::kPointList);
+      pixel_modification.pixel.param_gen_texel_centre = param_gen_texel_centre_ ? 1 : 0;  // D164
     } else {
       pixel_modification.pixel.param_gen_enable = 0;
       pixel_modification.pixel.param_gen_interpolator = 0;
@@ -1134,6 +1149,10 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       target.op = target.op_alpha = uint8_t(BLEND_OPERATION_ADD);
     }
   }
+  // D163: whether each color target's last draw blended.
+  for (uint32_t i = 0; i < render_target_count; ++i) {
+    if (render_target_views[i] && targets[i]) targets[i]->last_draw_blended = state.targets[i].blend_enable != 0;
+  }
   bool created = false;
   Pipeline* pipeline = pipelines_->Get(state, *vertex_shader, pixel_shader, &created);
   if (created) {
@@ -1295,7 +1314,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     uint8_t* out = map.data();
     const rg::Shader::ConstantRegisterMap& constants = shader->constant_register_map();
     uint32_t first = stage ? rg::XE_GPU_REG_SHADER_CONSTANT_256_X : rg::XE_GPU_REG_SHADER_CONSTANT_000_X;
-    bool keep = !stage && (object_motion_on_ || camera_vote_on_ || tick_interpolation_);
+    bool keep = !stage && (object_motion_on_ || camera_vote_on_ || tick_interpolation_ || model_lamp_counts_);
     uint8_t* const mapped_start = out;
     // A constant that holds the size of a resolved texture the shader samples, as the game wrote it for the guest
     // texture: its host size instead (D93).
@@ -1670,6 +1689,44 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   } else {
     DrawAttribs attribs{primitives.host_draw_vertex_count, DRAW_FLAG_NONE};
     context->Draw(attribs);
+  }
+  // D163: a model with lamps (a jeep's body, by its index count): its world matrix for the night's lights, in the
+  // registers given with it (rigid rows, the position in their fourth floats); taken only when rigid.
+  if (model_lamp_counts_ && model_lamp_report_ && index_buffer && output_sized && state.depth_write) {
+    const uint32_t n = primitives.guest_draw_vertex_count;
+    uint32_t first = UINT32_MAX;
+    for (size_t k = 0; k + 1 < model_lamp_counts_->size(); k += 2)
+      if ((*model_lamp_counts_)[k] == n) first = (*model_lamp_counts_)[k + 1];
+    if (first <= 253) {
+      float w[12];
+      std::memcpy(w, &regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X + first * 4], sizeof(w));
+      static int dumped = 0;
+      if (dumped < 2 && std::getenv("NXR_MODEL_LAMP_DUMP")) {
+        ++dumped;
+        std::string line;
+        for (uint32_t r = 0; r < 40; ++r) {
+          float q[4];
+          std::memcpy(q, &regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X + r * 4], sizeof(q));
+          line += fmt::format(" c{} {:.3f} {:.3f} {:.3f} {:.3f};", r, q[0], q[1], q[2], q[3]);
+        }
+        std::string used;
+        for (uint8_t r : vertex_registers_) used += fmt::format(" {}", r);
+        REXLOG_INFO("[native_x_renderer] model lamps test: {} indices, VS registers used:{}; constants:{}", n, used, line);
+      }
+      bool rigid = true;
+      for (int r = 0; r < 3 && rigid; ++r) {
+        for (int q = 0; q < 3 && rigid; ++q) {
+          const float d = w[r * 4] * w[q * 4] + w[r * 4 + 1] * w[q * 4 + 1] + w[r * 4 + 2] * w[q * 4 + 2];
+          rigid = std::abs(d - (r == q ? 1.0f : 0.0f)) < 0.02f;
+        }
+      }
+      if (rigid && std::abs(w[3]) < 1e5f && std::abs(w[7]) < 1e5f && std::abs(w[11]) < 1e5f) {
+        Mat4d m{};
+        for (int k = 0; k < 12; ++k) m[k] = w[k];
+        m[15] = 1.0;
+        model_lamp_report_(n, m);
+      }
+    }
   }
 
   // Object motion (D48): the main view's draws that write depth, matched with the last frame's; those that

@@ -17,8 +17,9 @@
 // download over an older folder, an antivirus) are fetched by downloading this version's release again, and the
 // retired files are removed. A passed check is remembered in the user folder (update-check.txt).
 //
-// After an update (the version differs from the one the shaders were prepared for) the renderer's driver pipeline
-// cache is deleted, so every stored pipeline is compiled again on the shader page (PrepareShadersAfterUpdate).
+// After an update (the version differs from the one the shaders were prepared for) the shader page makes every
+// pipeline again, once, over the existing cache: nothing is deleted, the pipelines learned in play stay
+// (PrepareShadersAfterUpdate; King Kong's rule exactly).
 //
 // Developer builds: BF_DEV_UPDATE_ZIP=<a release zip, or on Linux an AppImage, on this PC> is offered as version
 // BF_DEV_UPDATE_VERSION (default 9.9.9) and installed from that file (checked against a SHA256SUMS.txt beside it when
@@ -75,9 +76,8 @@ bool RelaunchSelf();
 bool RestartSelf();
 // At start: the .old files an update left (in use then) removed; on Linux a half written AppImage.
 void CleanUpAfterUpdate();
-// At start, before the renderer opens its storage: when the shaders were last prepared for another version, the
-// driver's pipeline cache is deleted so they are all compiled again. True when that happened (the shader page then
-// says the game was updated).
+// At start, before the renderer opens its storage: true when the shaders were last prepared for another version (an
+// update), so the shader page makes every pipeline again and says the game was updated. Nothing is deleted.
 bool PrepareShadersAfterUpdate(const std::filesystem::path& cache_root, const std::string& prepared_for);
 // True when version a ("0.2.1") is newer than b. A version with a suffix comes before the same numbers without one
 // (0.2.0-preview < 0.2.0); suffixes with numbers count up (0.2.0-beta.2 < 0.2.0-beta.3).

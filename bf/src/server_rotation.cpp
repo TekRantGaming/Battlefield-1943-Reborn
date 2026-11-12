@@ -232,6 +232,9 @@ REX_EXTERN(__imp__sub_824123F0);
 namespace bf1943 {
 void ModernModeTick(uint8_t* base);  // modern_mode.cpp: the movement and aiming values for this server's mode
 void GmHostStart();  // gm_host.cpp: our GameManager host, once (bf_gm_backend)
+#if defined(BF_DEV_TOOLS)
+void RunGameFixTest(PPCContext& ctx, uint8_t* base);  // game_fixes.cpp: the empty slot guard, tested once
+#endif
 }  // namespace bf1943
 // The server's own tick rate, logged every 30 s (a dedicated server only): how many ticks a second, the longest gap
 // between two and the tick's own time, so a server on a slow machine shows in its log (TekRantGaming's 7 Nov 2026 play test:
@@ -422,6 +425,7 @@ REX_HOOK_RAW(sub_824123F0) {
   if (slow_ms > 0) std::this_thread::sleep_for(std::chrono::microseconds(int64_t(slow_ms * 1000)));
   DevMoveSpawns(base);
   DevTickets(base);
+  bf1943::RunGameFixTest(ctx, base);  // game_fixes.cpp: BF_DEV_FIX_TEST=1, once
 #endif
   NoteServerTick(std::chrono::duration<double, std::milli>(Clock::now() - tick_start).count());
   bf1943::ModernModeTick(base);

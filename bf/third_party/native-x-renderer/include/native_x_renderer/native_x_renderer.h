@@ -202,6 +202,11 @@ struct Profile {
   };
   const TextureSizeConstant* texture_size_constants = nullptr;
   uint32_t texture_size_constant_count = 0;
+  // The game's pixel shaders that read their pixel position (PsParamGen) sample at it plus one texel (Battlefield
+  // 1943's water and the composites of its half resolution layers): with a render scale the position given them is
+  // the host pixel's centre less one guest pixel, so they read the texel under the host pixel (D164; the SDK
+  // translator's param_gen_texel_centre). False: the SDK's floor(position) / scale.
+  bool param_gen_texel_centre = false;
 };
 
 // Call once, before the guest starts (for example in ReXApp::OnPostSetup). Reads the cvars, logs the
@@ -229,8 +234,17 @@ void StorageProgress(uint32_t* queued, uint32_t* done, uint32_t* loading, uint32
 // `fn` gets its size and its guest data (as the game holds it: tiled, big endian, width * height * 4 bytes) and may
 // fill `rgba` (width * height * 4, RGBA8, top row first), which is then written over level 0. No scan: only textures
 // the game draws are seen, once per load. Null: none. From any thread; the call is on the renderer's thread.
-using TexturePatchFn = bool (*)(uint32_t width, uint32_t height, const uint8_t* guest_data, std::vector<uint8_t>& rgba);
+// D160: `fn` returning true takes the texture as one of its own, filled or not (an empty `rgba` leaves the texture as
+// it is): after RepatchTextures, each texture it took is offered again with `again` true, its guest data unchanged
+// since it was last offered (a texture whose data changed is offered at its load, `again` false), before the next draw
+// that follows.
+using TexturePatchFn = bool (*)(uint32_t width, uint32_t height, const uint8_t* guest_data, std::vector<uint8_t>& rgba,
+                                bool again);
 void SetTexturePatcher(TexturePatchFn fn);
+// D160: the textures the patcher took are offered to it again before the next draw, for pictures that follow the
+// game's state (Battlefield 1943's keyboard prompts: the keys of a vehicle's seat differ from a soldier's on foot).
+// From any thread.
+void RepatchTextures();
 
 // How much wider the rendered image is than the game's (output aspect ratio over the game's), when
 // NativeXRenderer fills an output that is not 16:9 (Profile::widens_cameras, D43): above 1 for a wider output,
@@ -264,6 +278,32 @@ bool GrassProbeResult(uint32_t* id, float* ground);
 // first cell's corner at world (x0, z0), its columns along x and rows along z; copied. Width 0 with cell 0: the level's
 // map is being read (no grass until it comes); width 0 with cell < 0: none known (grass decides from the screen).
 void GrassMap(const uint8_t* distance, uint32_t width, uint32_t height, float x0, float z0, float cell);
+
+// D163: a lamp of the level, for the night (native_x_renderer_night; Battlefield 1943 Reborn's Night Ops servers: the
+// level's lampposts, from its own files): where its light comes from, where it points, how far it reaches, its colour.
+struct NightLamp {
+  float position[3] = {};                // the bulb in the world (the game's units, metres, y up)
+  float direction[3] = {};               // a spot's axis (unit); 0, 0, 0: a point light
+  float color[3] = {1.0f, 0.8f, 0.55f};  // linear, times its strength
+  float range = 15.0f;                   // metres: no light beyond
+  float cone_inner = 35.0f, cone_outer = 60.0f;  // a spot's half angles in degrees: full light within, none beyond
+  float glow = 0.25f;                    // the bulb's glow, its radius in metres (0: none)
+};
+// The level's lamps, copied (count 0: none). Lit only at night.
+void NightLamps(const NightLamp* lamps, uint32_t count);
+
+// D163: lamps that move with a model (a jeep's headlights): a draw of the main view with this many indices (one of the
+// model's levels of detail) is that model; its lamps are in its own space (x right, y up, z forward), placed each frame
+// by its world matrix, three rigid rows (the position in their fourth floats) in its vertex shader's float constants
+// from `matrix_register` (Battlefield 1943: the camera in c16, then a matrix per part of the model from c17 in the
+// parts' order). Copied (count 0: none). Lit only at night.
+struct NightModelLamps {
+  uint32_t index_count = 0;
+  uint32_t matrix_register = 17;
+  NightLamp lamps[4];
+  uint32_t lamp_count = 0;
+};
+void NightModels(const NightModelLamps* models, uint32_t count);
 
 // The game starts drawing a view: a camera's image (its 3D scene, a reflection, a shadow map, a 2D layer).
 // `scene_view_projection`: for a view of the 3D world, its view-projection matrix (16 floats, rows, as the

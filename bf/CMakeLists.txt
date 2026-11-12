@@ -19,6 +19,7 @@ set(BF1943_SOURCES
     src/socket_fixes.cpp
     src/socket_overlapped.cpp
     src/kernel_fixes.cpp
+    src/game_fixes.cpp
     src/shader_prep.cpp
     src/frame_stats.cpp
     src/frame_rate.cpp
@@ -44,6 +45,9 @@ set(BF1943_SOURCES
     src/perf_overlay.cpp
     src/audio_settings.cpp
     src/auto_join.cpp
+    src/comms.cpp
+    src/comms_ui.cpp
+    src/gpu_preference.cpp
     third_party/miniz/miniz.c
     src/server_mode.cpp
     src/break_trace.cpp
@@ -63,7 +67,9 @@ set(BF1943_SOURCES
     src/vehicle_camera.cpp
     src/tick_blend.cpp
     src/effects.cpp
+    src/night_lamps.cpp
     src/dev_types.cpp
+    src/dev_team_scan.cpp
     src/modern_mode.cpp
     src/pipeline_upload.cpp
     src/game_options.cpp
@@ -155,6 +161,10 @@ set_source_files_properties(src/game_music.cpp PROPERTIES INCLUDE_DIRECTORIES
 # The launcher's PNG and JPEG pictures (src/picture_decode.cpp): stb_image from the SDK copy's thirdparty/stb, static.
 set_source_files_properties(src/picture_decode.cpp PROPERTIES INCLUDE_DIRECTORIES
     "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src-bf/thirdparty/stb")
+# src/gpu_preference.cpp: the SDK's Vulkan instance header includes RenderDoc's API header (in every build, not only
+# the developer one's src/dev_renderdoc.cpp).
+set_source_files_properties(src/gpu_preference.cpp PROPERTIES INCLUDE_DIRECTORIES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src-bf/thirdparty/renderdoc")
 native_x_renderer_copy_runtime(bf1943)
 
 # Our data next to the exe: data/shaders/bf1943-shaders.list and the pipeline descriptions (src/shader_prep.cpp),
@@ -186,6 +196,13 @@ endforeach()
 
 # Developer aids (src/break_trace.cpp, src/dev_pad.cpp, src/net_trace.cpp, src/online_trace.cpp,
 # src/dev_stacks.cpp). Never in a release build.
+# Night Ops (src/night_ops.h): not in releases until TekRantGaming says it is ready (12 Nov 2026, for 0.3.0); ON for
+# the private test builds and development.
+option(BF_NIGHT_OPS "Night Ops: a night server's maps drawn at night in players' games" OFF)
+if(BF_NIGHT_OPS)
+    target_compile_definitions(bf1943 PRIVATE BF_NIGHT_OPS=1)
+endif()
+
 if(BF_DEV_TOOLS)
     target_compile_definitions(bf1943 PRIVATE BF_DEV_TOOLS=1)
     # src/dev_renderdoc.cpp: RenderDoc's in-application API header, from our SDK copy.
@@ -212,6 +229,7 @@ if(WIN32)
     target_link_libraries(bf1943 PRIVATE pdh)  # src/perf_overlay.cpp: the GPU counters
     target_link_libraries(bf1943 PRIVATE dbghelp winmm bcrypt ole32 oleaut32 comdlg32)  # dev_profiler.cpp; game_install.cpp (SHA1), the setup pickers; gm_host.cpp (UPnP)
     target_link_libraries(bf1943 PRIVATE winhttp)  # src/pipeline_upload.cpp
+    target_link_libraries(bf1943 PRIVATE d3d12 dxgi)  # src/gpu_preference.cpp: the high-performance GPU
     # UTF-8 as the program's code page, and a linker map for decoding crash reports.
     target_link_options(bf1943 PRIVATE "LINKER:/MANIFEST:EMBED" "LINKER:/MANIFESTUAC:NO"
                         "LINKER:/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/src/bf1943.manifest"

@@ -22,6 +22,8 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <rex/cvar.h>
 #include <rex/input/mnk/mnk_input_driver.h>
@@ -53,6 +55,9 @@ REXCVAR_DEFINE_BOOL(bf_mouse_toggle_aim, false, "BF1943/Controls", "Aim with the
 REXCVAR_DEFINE_BOOL(bf_vibration, true, "BF1943/Controls", "Controller rumble");
 REXCVAR_DEFINE_DOUBLE(bf_vibration_strength, 100.0, "BF1943/Controls", "Rumble strength, 10 to 200 (%)");
 REXCVAR_DEFINE_BOOL(bf_mouse_invert_y, false, "BF1943/Controls", "Mouse vertical inverted (Keyboard & mouse)");
+// Issue #3 (a player: one invert for the soldier and the tank, and they went opposite ways): vehicles' own.
+REXCVAR_DEFINE_BOOL(bf_mouse_invert_y_vehicle, false, "BF1943/Controls",
+                    "Mouse vertical inverted in vehicles' guns and turrets (Keyboard & mouse)");
 REXCVAR_DECLARE(bool, mnk_mode);
 REXCVAR_DECLARE(bool, mnk_mouse);
 
@@ -117,8 +122,20 @@ uint32_t BitOf(const std::string& name) {
   return 0;  // "none"
 }
 
-// What each button in kButtons presses, from the bf_remap_* settings: read twice a second, not on every pad read
-// (the game reads the pad many times a frame; looking 16 settings up by name each time cost frames, run vkf_base).
+// What each button in kButtons presses, from the bf_remap_* settings as they are now.
+std::array<uint32_t, 16> ReadRemap() {
+  const std::string values[16] = {
+      REXCVAR_GET(bf_remap_a),  REXCVAR_GET(bf_remap_b),     REXCVAR_GET(bf_remap_x),     REXCVAR_GET(bf_remap_y),
+      REXCVAR_GET(bf_remap_lb), REXCVAR_GET(bf_remap_rb),    REXCVAR_GET(bf_remap_lt),    REXCVAR_GET(bf_remap_rt),
+      REXCVAR_GET(bf_remap_ls), REXCVAR_GET(bf_remap_rs),    REXCVAR_GET(bf_remap_back),  REXCVAR_GET(bf_remap_start),
+      REXCVAR_GET(bf_remap_up), REXCVAR_GET(bf_remap_down),  REXCVAR_GET(bf_remap_left),  REXCVAR_GET(bf_remap_right)};
+  std::array<uint32_t, 16> table{};
+  for (size_t i = 0; i < 16; ++i) table[i] = values[i].empty() ? kButtons[i].bit : BitOf(values[i]);
+  return table;
+}
+
+// The same, read twice a second, not on every pad read (the game reads the pad many times a frame; looking 16
+// settings up by name each time cost frames, run vkf_base).
 const std::array<uint32_t, 16>& RemapTable() {
   using Clock = std::chrono::steady_clock;
   static std::array<uint32_t, 16> table{};
@@ -126,12 +143,7 @@ const std::array<uint32_t, 16>& RemapTable() {
   const auto now = Clock::now();
   if (read.time_since_epoch().count() && now - read < std::chrono::milliseconds(500)) return table;
   read = now;
-  const std::string values[16] = {
-      REXCVAR_GET(bf_remap_a),  REXCVAR_GET(bf_remap_b),     REXCVAR_GET(bf_remap_x),     REXCVAR_GET(bf_remap_y),
-      REXCVAR_GET(bf_remap_lb), REXCVAR_GET(bf_remap_rb),    REXCVAR_GET(bf_remap_lt),    REXCVAR_GET(bf_remap_rt),
-      REXCVAR_GET(bf_remap_ls), REXCVAR_GET(bf_remap_rs),    REXCVAR_GET(bf_remap_back),  REXCVAR_GET(bf_remap_start),
-      REXCVAR_GET(bf_remap_up), REXCVAR_GET(bf_remap_down),  REXCVAR_GET(bf_remap_left),  REXCVAR_GET(bf_remap_right)};
-  for (size_t i = 0; i < 16; ++i) table[i] = values[i].empty() ? kButtons[i].bit : BitOf(values[i]);
+  table = ReadRemap();
   return table;
 }
 
@@ -222,6 +234,55 @@ void KeyboardInVehicle(uint8_t* gamepad) {
 }
 
 }  // namespace
+
+// The keyboard prompts (hud_glyphs.cpp) name the key that presses their button where the player is, as the pad hook
+// below makes it (GitHub issue 1: a landing boat's "THROTTLE TO RELEASE BOAT" showed the mouse, the zoom key on foot,
+// while W throttles there). Both read the settings as they are now, from any thread.
+// The controller buttons (kButtons names) whose remapping presses `game_button`, the button itself first.
+std::vector<std::string> ButtonsPressing(const std::string& game_button) {
+  const uint32_t bit = BitOf(game_button);
+  std::vector<std::string> out;
+  if (!bit) return out;
+  const std::array<uint32_t, 16> remap = ReadRemap();
+  for (size_t i = 0; i < std::size(kButtons); ++i) {
+    if (remap[i] != bit) continue;
+    if (kButtons[i].bit == bit) out.insert(out.begin(), kButtons[i].name);
+    else out.push_back(kButtons[i].name);
+  }
+  return out;
+}
+
+// The SDK's keybind_* settings that press a controller button (a kButtons name), on foot or in a vehicle, the one the
+// prompts show first: in a vehicle KeyboardInVehicle's, the walk keys throttle (the left trigger) and brake (the left
+// bumper) and the zoom key fires the second weapon (the right bumper), the bumpers' own keys still pressing them.
+std::vector<const char*> KeybindsPressing(const std::string& button, bool seated) {
+  if (seated) {
+    if (button == "lt") return {"keybind_lstick_up"};
+    if (button == "lb") return {"keybind_lstick_down", "keybind_left_shoulder"};
+    if (button == "rb") return {"keybind_left_trigger", "keybind_right_shoulder"};
+  }
+  static const std::pair<const char*, const char*> kBinds[] = {
+      {"a", "keybind_a"},
+      {"b", "keybind_b"},
+      {"x", "keybind_x"},
+      {"y", "keybind_y"},
+      {"lb", "keybind_left_shoulder"},
+      {"rb", "keybind_right_shoulder"},
+      {"lt", "keybind_left_trigger"},
+      {"rt", "keybind_right_trigger"},
+      {"ls", "keybind_lstick_press"},
+      {"rs", "keybind_rstick_press"},
+      {"back", "keybind_back"},
+      {"start", "keybind_start"},
+      {"up", "keybind_dpad_up"},
+      {"down", "keybind_dpad_down"},
+      {"left", "keybind_dpad_left"},
+      {"right", "keybind_dpad_right"},
+  };
+  for (const auto& [name, bind] : kBinds)
+    if (button == name) return {bind};
+  return {};
+}
 
 PPCFunc* RuntimeExportForRumble() { return RuntimeExport("__imp__XamInputSetState"); }
 

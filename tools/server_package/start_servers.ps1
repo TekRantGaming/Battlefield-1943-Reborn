@@ -2,10 +2,12 @@
 # (no window, no graphics), and returns. Every path quoted: a folder name may have spaces.
 #   start_servers.ps1          every server (and, in the official package, the main backend)
 #   start_servers.ps1 -Index 2 only the second server (started again if it runs)
+#   start_servers.ps1 -BackendOnly  the official package's main backend when it is not running, nothing else
 # Each server: its own dedicated game process on a loopback address of its own (127.0.0.11, .12 and on: no port to
 # open), and its host (server\gmhost.py) that players reach on UDP 18300, 18301 and on. Logs, the state the window
-# shows, and the game's user folder in logs\server<n>.
-param([switch]$Quiet, [int]$Index = 0)
+# shows, and the game's user folder in logs\server<n>. The watchdog (watch_servers.ps1) is started too when it is not
+# running: a server that crashes is started again.
+param([switch]$Quiet, [int]$Index = 0, [switch]$BackendOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'server_config.ps1')
 $root = $ServerRoot
@@ -20,7 +22,9 @@ $servers = @($config.servers)
 if ($servers.Count -gt $MaxServers) { throw "At most $MaxServers servers." }
 if ($Index -gt $servers.Count) { throw "There is no server $Index." }
 
-if ($Index -eq 0) {
+if ($BackendOnly) {
+    # The watchdog's call: only the official main backend, when it is gone; the servers are left as they are.
+} elseif ($Index -eq 0) {
     # Anything already running from this folder is stopped first. If it can't be (started by another user, or as
     # administrator: Stop-Process is refused), starting a second set would leave two servers fighting over the ports
     # (TekRantGaming, 6 Nov: the second server bound the next port, and the first set kept running).
@@ -43,12 +47,22 @@ if ($Index -eq 0) {
 }
 
 # The interpreter itself, not the py launcher (its child would outlive stop_servers.ps1).
-# Python 3.14's python.exe can be a launcher too (the install manager): ask whichever there is for the real one.
-$launcher = (Get-Command py -ErrorAction SilentlyContinue).Source
-if (-not $launcher) { $launcher = (Get-Command python -ErrorAction SilentlyContinue).Source }
-if (-not $launcher) { throw 'Python is not installed: install Python 3.12 or newer from python.org, with "Add python.exe to PATH".' }
-$python = (& $launcher -c 'import sys; print(sys.executable)' | Select-Object -Last 1).Trim()
-if (-not (Test-Path $python)) { throw "Python did not answer ($launcher)." }
+# Python 3.14's python.exe can be a launcher too (the install manager): ask whichever there is for the real one. The
+# first that answers wins. Windows' own python.exe (its Microsoft Store shortcut, WindowsApps) answers nothing when no
+# Python is installed: that stopped Start with "You cannot call a method on a null-valued expression" (a community
+# host, 12 Nov 2026).
+$python = $null
+foreach ($command in 'py', 'python', 'python3') {
+    $launcher = (Get-Command $command -ErrorAction SilentlyContinue).Source
+    if (-not $launcher) { continue }
+    $answer = $null
+    try { $answer = & $launcher -c 'import sys; print(sys.executable)' | Select-Object -Last 1 } catch { $answer = $null }
+    if ($answer -and (Test-Path ([string]$answer).Trim())) { $python = ([string]$answer).Trim(); break }
+}
+if (-not $python) {
+    throw ('Python is not installed (Windows may only have its Microsoft Store shortcut): install Python 3.12 or newer ' +
+           'from python.org, with "Add python.exe to PATH" ticked, then start again.')
+}
 
 $ports = @()
 $keyFile = Join-Path $root 'official.key'
@@ -57,7 +71,7 @@ if ($official) {
     $public = Get-PublicAddress $config
     $backend = '127.0.0.1'
     $backendUp = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($root) -and $_.CommandLine -match 'plasma\.py' })
-    if ($Index -eq 0 -or -not $backendUp) {
+    if (($Index -eq 0 -and -not $BackendOnly) -or -not $backendUp) {
         # The main backend: login (TCP 18241), Theater (18246), the server registry (18250), open to the internet.
         $b = Start-Process -FilePath $python -ArgumentList @('-I', ('"' + (Join-Path $root 'server\plasma.py') + '"'), '--host', '0.0.0.0',
             '--theater-host', $public, '--official-key-file', ('"' + $keyFile + '"'),
@@ -69,6 +83,7 @@ if ($official) {
 } else {
     $backend = if ($config.backend) { $config.backend } else { '127.0.0.1' }
 }
+if ($BackendOnly) { return }
 
 $env:SDL_WINDOW_ACTIVATE_WHEN_SHOWN = '0'
 $started = @()
@@ -103,6 +118,7 @@ for ($n = 1; $n -le $servers.Count; $n++) {
             '--status-file', ('"' + (Join-Path $dir 'status.json') + '"'), '--log', ('"' + (Join-Path $dir 'host.log') + '"'))
     if ($s.description) { $ha += @('--description', ('"' + ([string]$s.description).Replace('"', "'") + '"')) }
     if (-not $s.listed) { $ha += '--unlisted' }
+    if ($s.night -and (Test-NightOpsPackage)) { $ha += '--night' }  # Night Ops: players' games draw its maps at night
     if ($official) { $ha += @('--official-key-file', ('"' + $keyFile + '"')) }
     $h = Start-Process -FilePath $python -ArgumentList $ha -WindowStyle Hidden -PassThru
     Set-Content (Join-Path $dir 'pids.txt') ("$($server.Id)`r`n$($h.Id)") -Encoding ascii
@@ -125,3 +141,13 @@ if ($config.upnp) {
     Set-Content (Join-Path $logs 'ports.txt') -Encoding ascii -Value $(if ($failed) { "Open these on your router: $($failed -join ', ')" } else { 'Router ports opened (UPnP).' })
 }
 if (-not $Quiet) { $started | ForEach-Object { "started server $_" } }
+
+# The watchdog, one for this folder: a server that crashes is started again (watch_servers.ps1). When it calls this
+# script itself to start a server again, it is the one running.
+$watch = Join-Path $root 'watch_servers.ps1'
+$watching = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($watch) })
+if (-not $watching) {
+    $null = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile',
+        '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ('"' + $watch + '"'))
+    if (-not $Quiet) { 'started the watchdog (watch_servers.ps1: crashed servers are started again)' }
+}

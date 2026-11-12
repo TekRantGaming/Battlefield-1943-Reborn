@@ -687,14 +687,17 @@ void CleanUpAfterUpdate() {
 }
 
 bool PrepareShadersAfterUpdate(const fs::path& cache_root, const std::string& prepared_for) {
+  (void)cache_root;
   if (prepared_for.empty() || prepared_for == BfVersion()) return false;
-  std::error_code ec;
-  int removed = 0;
-  for (auto& e : fs::directory_iterator(cache_root / "native_x_renderer", ec))
-    if (e.path().extension() == ".vkcache" && fs::remove(e.path(), ec)) ++removed;
-  REXLOG_INFO("BF update: shaders were prepared for v{}, this is v{}: the driver's pipeline cache deleted ({} files), "
-              "every pipeline compiles again",
-              prepared_for, BfVersion(), removed);
+  // King Kong's rule exactly (TekRantGaming, 11 Nov 2026: "Copy Kong exactly"; its shader_prepared.h, launcher.cpp
+  // JobAtLauncherStart and shader_pack_service.cpp): after an update everything is made again in full, once, behind
+  // the shader page, and nothing is deleted. The preparation adds this version's list to the renderer's storage from
+  // the player's game files; the pipelines this PC learned in play stay; the driver's pipeline cache stays too (Vulkan
+  // ignores one made by another driver or device), so the page makes every stored pipeline again from it. A page left
+  // before its end leaves the old marker, so the next start is an update again and finishes the job.
+  REXLOG_INFO("BF update: shaders were prepared for v{}, this is v{}: the shader page makes every pipeline again, over "
+              "the cache (nothing deleted, as King Kong does)",
+              prepared_for, BfVersion());
   return true;
 }
 

@@ -52,6 +52,7 @@
 #include <xxhash.h>
 
 #include "../third_party/miniz/miniz.h"
+#include "night_ops.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -1079,6 +1080,8 @@ void ExtractGameArt(const fs::path& game, const fs::path& out_dir) {
 // flat water mesh (its vertices' y: Guadalcanal 173, Wake Island 215, Iwo Jima 5.3, Coral Sea 61.5).
 std::atomic<float> g_sea_level{std::numeric_limits<float>::quiet_NaN()};
 
+void NightLampsFromLevel(const uint8_t* data, size_t size, const std::string& folder);  // night_lamps.cpp (D163)
+
 namespace {
 std::mutex g_level_mutex;
 fs::path g_level_game_root;
@@ -1290,7 +1293,28 @@ void NoteGameFile(const char* path) {
   // D151: no grass until the level's grass map is read (not on a server: it draws nothing).
   const bool grass = !REXCVAR_GET(server);
   if (grass) native_x_renderer::GrassMap(nullptr, 0, 0, 0, 0, 0.0f);
+  // D163: no lamps until the level's own are read (nor on a server).
+  if (grass) native_x_renderer::NightLamps(nullptr, 0);
   std::thread([root, folder, grass] {
+    // D163: the level's lamps for the night, from its main partition (levels/<map>.dbx in reduced-level-00.fbrb).
+    if (grass && kNightOps) {  // night_ops.h
+      const fs::path level_archive = root / "dist" / "xenon" / "levels" / folder / "reduced-level-00.fbrb";
+      Archive l;
+      bool found = false;
+      if (LoadArchive(level_archive, l)) {
+        const std::string want = "levels/" + folder + ".dbx";
+        for (const auto& [name, where] : l.entries) {
+          std::string lower = name;
+          for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+          if (lower != want || size_t(where.first) + where.second > l.data.size()) continue;
+          NightLampsFromLevel(l.data.data() + where.first, where.second, folder);
+          found = true;
+          break;
+        }
+      }
+      if (!found) REXLOG_WARN("BF level {}: no {} in {}: no lamps at night", folder, "levels/" + folder + ".dbx",
+                              level_archive.string());
+    }
     float level = 0;
     const fs::path archive = root / "dist" / "xenon" / "levels" / folder / "terrain-00.fbrb";
     Archive a;

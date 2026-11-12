@@ -4985,3 +4985,162 @@ ratio applies (an upscaler chosen); the renderer only divides.
 **Why:** TekRantGaming (2026-11-11), for Battlefield 1943 Reborn: NVIDIA NIS must not be offered on devices it does not run on.
 The game's launcher shows its settings before the renderer has a device, so it offers NIS by the answer saved from the
 last start.
+
+## D159 — The window's real size when the SDK's is out of date (X11): the surface's size kept and given to the SDK (2026-11-11, Claude for Battlefield 1943)
+
+**Decision:**
+- On Linux, `Device::UpdateSize` asks the swap chain for the SDK's window size, as before. When the swap chain keeps
+  another size (an X11 surface, under XWayland too, has a size of its own: DiligentCore takes `currentExtent`
+  whatever it is asked), that size is not asked for again until the SDK's size changes, and the SDK is told the
+  surface's size: `HostWindow::real_pixel_size`, an `SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED` of our own, which the SDK
+  takes on its UI thread as it takes SDL's (`WindowSDL::HandleWindowEvent`). Logged, at most five times: "the
+  window's size as the SDK has it, WxH, is not its surface's, WxH".
+- Windows (the client rectangle is real) and Wayland (a Wayland surface takes the size asked) are unchanged.
+
+**Why:** on the ROG Ally (KDE Plasma at 185%, the game under XWayland in exclusive Fullscreen 1920x1080@119.93), 3
+game starts of 9 kept the SDK at the scaled desktop's maximised 1038x506, an SDL size event lost in the emulated mode
+switch, while the window and its surface were 1920x1080. UpdateSize asked for 1038x506 at every frame and DiligentCore
+made the swap chain again at 1920x1080 each time (about 90 times a second, 947 times in one run), and the menus were
+laid out for 1038x506 (squeezed) while the picture filled 1920x1080. The swap chain's own size is the truth for
+drawing; the SDK's comes from events. Found by TekRantGaming's ask to look into it (Battlefield 1943 Reborn 0.2.1).
+
+## D160 — The game's pictures drawn again when its state changes: the patcher's textures offered again (2026-11-11, Claude for Battlefield 1943)
+
+**Decision:**
+- The texture patcher (D142, `SetTexturePatcher`) gets `again`, and returning true now means the texture is the
+  patcher's, whether it filled `rgba` or not (an empty `rgba` leaves the texture as it is). `GuestTextures` keeps the
+  textures the patcher took (`patched_`, dropped when the patcher no longer takes one or the texture is destroyed).
+- `RepatchTextures()` (any thread) counts a request. Before the next draw binds its textures (`RequestTextures`),
+  each texture taken is offered again with `again` true: at once when it is not outdated (its memory watch has not
+  fired, so its guest data is the data it was taken with), and an outdated one at its load (the patcher's first look
+  at new data, `again` false) or, when the load finds its data unchanged, there with `again` true. So `again` always
+  means the same data, and the patcher need not check it again.
+
+**Why:** Battlefield 1943's keyboard prompts (GitHub issue 1 of the game): in a vehicle the keys that press the
+controller's buttons are not a soldier's on foot (W throttles, the left trigger there; the right mouse button fires
+the second weapon), so a prompt atlas patched once at its load named the zoom key (the mouse) for a landing boat's
+"THROTTLE TO RELEASE BOAT". The game now asks for the atlases again when the seat, a key, a remap or the prompt style
+changes, and they show the new pictures before the next draw (runs issue1_boat, issue1_live2: in and out of a landing
+boat, a style and a key changed in a match). Cost: one upload of each atlas taken (at most 1 MB) per request, on
+those changes only.
+
+## D161 — The game's GPU for NativeXRenderer's device too: the SDK's vulkan_device as DiligentCore's adapter (2026-11-11, Claude for Battlefield 1943)
+
+**Decision:** `Device::Create` gives DiligentCore the SDK's `vulkan_device` as `EngineVkCreateInfo::AdapterId`
+when it is set (0 or more): the player's choice, or the high-performance GPU Battlefield 1943 points it at before the
+SDK's provider is made (its `gpu_preference.cpp`, King Kong's fix: DXGI's high-performance rank or discrete before
+integrated, never a software or layered device). The index counts `vkEnumeratePhysicalDevices`' order, which is both
+the SDK's `VulkanInstance` order and DiligentCore's `m_PhysicalDevices`. Left at -1 (one GPU, or the first already
+the best), DiligentCore keeps its own choice (discrete, then integrated), which then agrees with the SDK's.
+
+**Why:** players with an integrated and a dedicated GPU had poor performance (TekRantGaming, 11 Nov 2026): the SDK's
+provider took the first device the loader lists, the integrated GPU on a hybrid laptop. The game now points
+`vulkan_device` at the dedicated one; NativeXRenderer's own device must be on that same GPU, never a second one.
+
+## D162 — Night: the game's composite drawn as a moonlit night, before the HUD (2026-11-12, Claude for Battlefield 1943)
+
+**Decision:** `native_x_renderer_night` (off by default; `native_x_renderer_night_brightness`, 1 the default moonlight,
+and `native_x_renderer_night_haze`, the metres at which the haze hides about two thirds of the view) grades the
+game's own day as a night (`src/night.h`, header only, used by `renderer.cpp`). The profile's scene copy
+(`scene_resolve_caller`, D41) arms it, and it runs on the first draw of the output's size after that copy: the game's
+composite, the picture with its bloom and its exposure applied (Battlefield 1943's bloom chain draws only smaller
+targets in between), before the HUD drawn over it. The main view's depth is kept at the view's end (`UpscaleScene`)
+for it. Per pixel, in linear light: the colour mostly taken out, a cool blue, a fifth of the light (moonlight); a
+haze toward a dark navy sky with distance (the game's depth is 0.1 / distance), which also turns the day sky into a
+night sky with its clouds faintly lit. The pass copies the target and draws the graded picture back (the
+antialiasing's way), then tells the draw path its targets changed.
+
+**Why:** Battlefield 1943 Reborn's Night Ops servers (TekRantGaming, 11 Nov 2026: night versions of Wake Island, Iwo
+Jima and Guadalcanal in a rotation of their own, "cant be pitch black due to it being unplayable"). Graded at the scene
+copy itself, before the bloom chain, the game's automatic exposure (its 1x1 luminance) brightened it back: light grey
+ground and a bright cyan sea (runs night_wake2, night_gc2, night_iwo2). On the composite it stays as graded (run
+night_wake3). Keeping the brightest pixels as they were (meant for muzzle flashes) kept sunlit sand, rock and grass
+glowing too, so flashes are darkened like the rest and stay the brightest things on screen.
+
+**On foot (the same day, TekRantGaming's first test: in a vehicle "honestly perfect", in first person "terrible"):**
+the game clears the depth before it draws the first person weapon, so on foot the view's depth at its end held only the
+weapon and everything else read as far away: all haze, a flat navy over the whole world (run nightzip1). The world's
+depth is now also copied at the profile's ambient occlusion depth copy (`ao_resolve_caller`, D132: the end of the
+view's opaque draws, before the weapon), once a frame, into an R32 float texture (the blitter's depth copy, whatever the
+AO settings), and the haze takes per pixel the nearer of the two depths, each read with its own share of its texture.
+On foot it now looks as it does in a vehicle (runs nightfp1 to nightfp4: Wake Island and Iwo Jima on the carrier, the
+landing boat, AMD FSR 1 at half the resolution). The renderer's log counts the night's passes that had the world's
+depth.
+
+**Not done:** stars and a moon, the sun's shadows (they stay, as moon shadows), lights of their own for muzzle flashes
+and explosions. (A Night Ops server's say is the game's: Battlefield 1943 Reborn turns the setting on when its player
+joins one.)
+
+## D163 — Night lights: the effects' own light, lamps from the level, a model's lamps, what flashes light (2026-11-12, Claude for Battlefield 1943)
+
+**Decision:** with `native_x_renderer_night` on, the night pass (D162) also draws light, all of it in its one full
+screen pass after the game's composite, plus a 4 x 2 pass before it:
+- **The effects' own light** (`native_x_renderer_night_glow`, 1): Battlefield 1943 draws its emissive particles (muzzle
+  flashes, tracers, fire, sparks, hit flashes, fireballs: its emitters' Emissive flag) into a half size layer and lays
+  it over the scene in one draw (run nightrd2: the muzzle flash, 11 sprites, premultiplied). A colour copy of half the
+  output's size after the world's opaque draws, before the scene's copy, whose last draw blended is that layer (its
+  sky's half size pass draws without blending; every copy goes through the scene copy's caller): copied with its mips
+  and added back as drawn plus a soft glow from two mips, the pixels of the first person weapon (drawn over the
+  effects) left out. Its grey smoke and dust (drawn in the same layer) would glow white: only what is coloured or very
+  bright counts (`Hot`).
+- **What the effects light:** the pass before finds up to four of the brightest hot places of that layer's coarse mip
+  (about 48 texels across), each at the nearest surface round it (its depth), a little toward the camera: point lights
+  for the night pass, strength from the light found, capped.
+- **The level's lamps** (`NightLamps`, `native_x_renderer_night_lamps`, 1): the game reads them from the level's own
+  files (Battlefield 1943 Reborn: night_lamps.cpp, Wake Island's 92 lampposts with two downward lamps each and its
+  bomb lamp, 185 lamps). Each frame the nearest 24 whose light reaches into the view (a sphere against the frustum's
+  planes) light the surfaces, and the nearest 24 bulbs in view glow where no nearer pixel hides them.
+- **A model's lamps** (`NightModels`): a main view draw with a given index count (a jeep body's levels of detail) is
+  that model; its world matrix is three rigid rows in its vertex shader's constants from a given register
+  (Battlefield 1943: c16 the camera, then a matrix per part from c17 in the parts' alphabetical order; the jeeps' and
+  the landing boat's main body the third, c23 to c25, run nightboat4); its lamps are placed each frame from it.
+- **Where a pixel is:** the terrain's world-view-projection (D151's capture, now also at night) kept at the AO's
+  moment; the world from its x, y and w rows' inverse (the depth partitions differ only in z), the stored depth 0.1 /
+  distance, DiligentCore's viewport the Direct3D way round (NDC y +1 at the top: run nightlamp2 had it upside down).
+  Its facing from its neighbours' places. A surface's colour for the light is its day colour with the sun's bright and
+  shaded brought closer.
+
+**Why:** TekRantGaming, 12 Nov 2026, after testing Night Ops: no muzzle flash and no bullet, explosions muted with no
+flash, "use our global illumination to light a small area around the player when they fire", the telegraph poles'
+lamps on Wake Island and any other light there, the jeeps' headlights; night only, cheap.
+
+**Results:** Wake Island at night: the lampposts' lamps glow and light the ground, rocks and sandbags round them in warm
+light (nightlamp4); tracers, the muzzle flash and hit flashes bright and coloured again (nightfire4); each shot lights
+the gun, the hand and what is near in orange (nightfire7); lamps placed on the landing boats move with them and light
+the cranes ahead (nightboat5, a test's lamps). GPU 11.41 -> 11.91 ms a frame at 3200 x 1800, RTX 4070 Ti, the lamps in
+view (nightlamp5off, nightlamp5); none of it runs in the day.
+
+**Not done:** an explosion not yet seen in a test (the grenades fell beyond the carrier's deck); the jeeps' headlights
+not seen on a jeep (no jeep reached in a test; the placement checked on the boats); fires' own flickering light.
+
+## D164 — A pixel shader's own position given as the host pixel's centre for a game that samples one texel on (2026-11-12, Claude for Battlefield 1943)
+
+**Decision:** a game profile may set `param_gen_texel_centre`. Its pixel shaders that read their pixel position
+(Xenos PsParamGen, the shader modification's param_gen_enable) then get, on each axis, (floor(position) + 0.5) /
+render scale - 1, at least 0, instead of the SDK translator's floor(position) / render scale: the SDK translator's
+new modification bit `param_gen_texel_centre` (sdk/src-bf, spirv_translator.h and .cpp). A stored pipeline or
+translation of such a shader takes this run's way when the storage is read, so lists stored before still match the
+draws. `native_x_renderer_param_gen_texel_centre` (on) is the switch. Battlefield 1943's profile sets it.
+
+**Why:** TekRantGaming, 12 Nov 2026: at Wake Island's ship spawn "a black outline cel shading is around the ship" when
+looking at the water, and palm leaves and buildings with "a slight white hue glow around them" from some angles. A
+RenderDoc capture of the spawn's view (run rdship1, 3200 x 1800, render scale 2.5): two host rows of the water right
+above a landing craft's hull were (0, 0, 0, 0) at the scene's end. Their history: the water's draw (41,352 indices,
+premultiplied blend) wrote 0 there, opaque water everywhere else. The water reads the scene's depth copy at
+(VPOS + 1) / (1280, 720) (its constant 26 and an offset of one texel, from the shader's trace at the pixel): with
+VPOS = floor(position) / 2.5 that is host texel h + 2.5, two rows down, inside the hull, so the water there saw
+nothing behind it and drew nothing over the black under it. The game's half resolution layers (the sky and haze,
+the effects) are composited the same way: half a texel of the half size on, one texel of the full size, so with the
+SDK's position they lay a texel of the half size down and to the right: haze over the edges of what stands against
+the sky. On the Xbox 360 the same reads were half a pixel off at 720p, a one pixel line; with the host pixel's centre
+less one guest pixel the read is at the host pixel itself, at any scale and at 1.
+
+**Results:** the same view (runs lang1 before, d164a after): the rows above the hull from (19, 44, 71) and (36, 40, 46)
+to the water's own (49, 99, 146) and (66, 108, 150); the black line along the hull gone; the hills' edge against the
+sky without its dark line and the palms without their haze fringe.
+
+D163, tuned (2026-11-12 morning): right under a lamppost the ground looked like the day, sun shadows and all (run
+nadenight2, Guadalcanal's spawn 5 m from a lamppost, looking down: the view's mean 112 of 255 against 54 with the lamps
+off, nadenight3). A lamp's light now rolls off with its own strength (lamps / (1 + 1.5 * its brightest channel)), and
+the surface's colour for a light takes less of the day's sun (lin * 0.5 / (luma + 0.2), was 0.6 / (luma + 0.3)): the
+same view 89 (nadenight4), a warm pool rather than the day; light seen from afar is weak enough to keep its strength.

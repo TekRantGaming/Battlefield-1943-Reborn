@@ -18,6 +18,7 @@
 
 #include <native_x_renderer/native_x_renderer.h>
 
+#include "gpu_preference.h"
 #include "game_install.h"
 #include "private_match.h"
 
@@ -51,6 +52,7 @@ void SetPlayerIdentity(const std::string& name, uint32_t id);              // li
 std::string StartupGpuPlugin(const std::filesystem::path& user_dir);      // game_menu.cpp
 void HideServerWindows();                                                // server_mode.cpp
 void CreatePerfOverlay(rex::ui::ImGuiDrawer* drawer);                    // perf_overlay.cpp
+void CreateCommsOverlay(rex::ui::ImGuiDrawer* drawer);                  // comms_ui.cpp
 void CreateGraphicsPanel(rex::ui::ImGuiDrawer* drawer, rex::ui::Window* window);  // f8_panel.cpp
 void InstallHudGlyphs();                                                     // hud_glyphs.cpp
 void InstallLook(rex::ui::Window* window);                               // look.cpp
@@ -107,6 +109,15 @@ class Bf1943App : public rex::ReXApp {
     bf1943::RaiseTimerResolution();  // 1 ms sleeps for the game's waits and our frame limit (frame_rate.cpp)
     bf1943::ApplyStartupDisplaySettings(paths_.user_data_root);  // before the window is made
     bf1943::ApplyPlayerIdentity(paths_.user_data_root);          // the player's own name and XUID
+    // Every graphics device on the high-performance GPU (King Kong's fix, gpu_preference.cpp): before the GPU plugin
+    // makes its provider below, unless the player chose one (vulkan_device, d3d12_adapter). Hybrid laptops ran the game
+    // on the integrated GPU (TekRantGaming, 11 Nov 2026). NativeXRenderer's own device takes the same vulkan_device.
+    if (!REXCVAR_GET(server)) {
+      bf1943::PreferHighPerformanceGpu(bf1943::GpuApi::kVulkan);
+#if defined(_WIN32) && defined(BF_DEV_TOOLS)
+      bf1943::PreferHighPerformanceGpu(bf1943::GpuApi::kD3D12);  // the Xenos plugin's D3D12 backend (developer builds)
+#endif
+    }
     // The renderer: our Vulkan one (rexgpu-bfnative); a dedicated server's draws nothing (its null backend). In the
     // developer build a gpu_plugin on the command line or in bf1943.toml still wins (xenos: reference frames).
     // A dedicated server's window is never shown (our SDK copy's window_start), so nothing pops up over the player's
@@ -289,6 +300,7 @@ class Bf1943App : public rex::ReXApp {
         },
         [this] { return window(); }, [this] { return paths_.game_data_root; });
     if (!AbOff("overlay")) bf1943::CreatePerfOverlay(drawer);  // Settings > Gameplay > Performance metrics, F2
+    if (!REXCVAR_GET(server)) bf1943::CreateCommsOverlay(drawer);  // text chat top left, voice chat (comms_ui.cpp)
     if (!REXCVAR_GET(server)) bf1943::CreateGraphicsPanel(drawer, window());  // F8 (f8_panel.cpp)
     if (!REXCVAR_GET(server)) bf1943::InstallHudGlyphs();  // the game's prompts in the chosen style (hud_glyphs.cpp)
     bf1943::InstallLook(window());  // the camera and look system (look.cpp)
@@ -330,9 +342,11 @@ class Bf1943App : public rex::ReXApp {
   // Shaders from the player's game files into the runtime's storage, before the runtime opens it.
   void OnPostLoadXexImage() override {
     const auto cache = paths_.cache_root.empty() ? paths_.user_data_root / "cache" : paths_.cache_root;
-    bf1943::PrepareShaders(bf1943::ExecutableDir() / "data" / "shaders", paths_.game_data_root, cache);
-    // After an update: every pipeline compiled again (game_menu.cpp, update.cpp; King Kong's forced rebuild).
+    // First, as King Kong does (shader_prepared.h), from the marker and the storage as they were: after an update the
+    // shader page makes every pipeline again (nothing deleted); a version already prepared shows no shader page
+    // (game_menu.cpp, update.cpp).
     if (!REXCVAR_GET(server)) bf1943::CheckShadersAfterUpdate(paths_.user_data_root, cache);
+    bf1943::PrepareShaders(bf1943::ExecutableDir() / "data" / "shaders", paths_.game_data_root, cache);
     // The pipelines this game builds, for the next update's shader list (Settings > Gameplay > Share graphics data).
     bf1943::StartPipelineUploads(paths_.user_data_root, cache);
   }

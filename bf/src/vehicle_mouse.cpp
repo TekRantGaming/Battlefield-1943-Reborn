@@ -29,7 +29,7 @@
 #include <rex/logging.h>
 
 REXCVAR_DECLARE(double, bf_mouse_vehicle_sensitivity);  // look.cpp
-REXCVAR_DECLARE(bool, bf_mouse_invert_y);
+REXCVAR_DECLARE(bool, bf_mouse_invert_y_vehicle);    // input_settings.cpp
 REXCVAR_DEFINE_BOOL(bf_mouse_vehicle_aim, true, "BF1943/Controls",
                     "The mouse aims vehicle guns and turrets at a target angle (false: it pushes the right stick)");
 
@@ -114,7 +114,10 @@ REX_HOOK_RAW(sub_822ADE38) {
       const bool mouse = TakeVehicleMouse(dx, dy, idle);
       if (now - g_taken > std::chrono::milliseconds(500)) g_dx = g_dy = 0;  // out of the seat meanwhile
       const double k = kRadiansPerCount * std::clamp(REXCVAR_GET(bf_mouse_vehicle_sensitivity), 0.05, 10.0);
-      g_dx += dx * k, g_dy += dy * k * (REXCVAR_GET(bf_mouse_invert_y) ? -1.0 : 1.0);
+      // Right as the stick's right; up as the stick's up (issues #3 and #5: the mouse's down was taken as the stick's
+      // up, so a tank's gun and a jeep's machine gun aimed up as the mouse went down, the opposite of on foot). Up:
+      // positive, as the right stick's y (concept 5 +1 when pushed up: the Sherman's gun to its -25 degree stop, up).
+      g_dx += dx * k, g_dy += -dy * k * (REXCVAR_GET(bf_mouse_invert_y_vehicle) ? -1.0 : 1.0);
       Part& p = g_parts[helper];
       const double angle = Angle(base, body), speed = AngularSpeed(base, body);
       if (now - p.seen > std::chrono::seconds(1)) p.engaged = false, p.rate = 0;  // a new seat or a respawn
@@ -129,7 +132,7 @@ REX_HOOK_RAW(sub_822ADE38) {
       if (!mouse || stick) p.engaged = false;
       if (!p.engaged) p.target = angle;
       // The mouse's share for this part: right is the stick's right (concept 6 positive), which turns the angle
-      // down; down is the stick's down (concept 5 negative), which turns it up.
+      // down; up is the stick's up (concept 5 positive), which turns it down too (a gun up).
       double& share = input_concept == 6 ? g_dx : g_dy;
       const double dt = std::chrono::duration<double>(now - p.seen_before).count();
       double moved = 0;
@@ -146,8 +149,9 @@ REX_HOOK_RAW(sub_822ADE38) {
           const double lo = LoadF(base, data + 0x14) * kPi / 180.0, hi = LoadF(base, data + 0x18) * kPi / 180.0;
           if (lo < hi) p.target = std::clamp(p.target, lo, hi);
         }
-        // The target never runs more than half a radian ahead of the part (a gun at its stop does not wind up).
-        p.target = angle + std::clamp(Wrap(p.target - angle), -0.5, 0.5);
+        // The target runs ahead of the part as far as the mouse moved (a fast turn is kept, not dropped: the part
+        // gets there at its own top speed), within its stops above and within most of a half turn round.
+        p.target = angle + std::clamp(Wrap(p.target - angle), -2.8, 2.8);
         // Toward the target, damped by the speed, with the target's own speed fed forward (the part's top speed is
         // about 1.2 radians a second at full input: run vmouse1): positive input turns the angle down.
         const double err = Wrap(p.target - angle);

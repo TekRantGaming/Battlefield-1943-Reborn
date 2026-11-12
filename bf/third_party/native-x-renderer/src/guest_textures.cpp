@@ -111,6 +111,7 @@ HdPack* HdPackOpen() {
   return pack.get();
 }
 std::atomic<TexturePatchFn> g_texture_patcher{nullptr};  // D142
+std::atomic<uint32_t> g_repatch_count{0};                // D160: RepatchTextures calls
 }  // namespace
 
 // The SDK's precompiled SPIR-V texture load shaders (generated with Xenia's `xb buildshaders`).
@@ -331,9 +332,11 @@ class GuestTextures::HostTexture final : public rg::TextureCache::Texture {
     cache.stats_.host_bytes += size;
   }
   ~HostTexture() override {
-    auto& stats = static_cast<GuestTextures&>(texture_cache()).stats_;
+    auto& cache = static_cast<GuestTextures&>(texture_cache());
+    auto& stats = cache.stats_;
     --stats.textures;
     stats.host_bytes -= GetHostMemoryUsage();
+    cache.patched_.erase(this);  // D160
   }
   ITexture* texture() const { return texture_; }
   ITextureView* view() const { return view_; }
@@ -344,6 +347,8 @@ class GuestTextures::HostTexture final : public rg::TextureCache::Texture {
   std::optional<uint64_t> base_hash, mips_hash;
   // The HD pack's texture for that data (D149), or null.
   ITextureView* hd_view = nullptr;
+  // D160: to be offered to the patcher again when its data is next found unchanged (it was outdated at the request).
+  bool repatch = false;
 
  private:
   RefCntAutoPtr<ITexture> texture_;
@@ -436,6 +441,18 @@ bool GuestTextures::Initialize() {
 }
 
 void GuestTextures::RequestTextures(uint32_t used_texture_mask) {
+  // D160: the patcher's textures offered again after RepatchTextures, before this draw binds anything. Only one whose
+  // data is known unchanged since its load: one not outdated (its memory watch has not fired). An outdated one is
+  // offered at its next load (the patcher's first look at the new data) or, when its data is found unchanged there,
+  // again (LoadTextureDataFromResidentMemoryImpl).
+  if (const uint32_t repatch = g_repatch_count.load(std::memory_order_acquire); repatch != repatched_) {
+    repatched_ = repatch;
+    const std::vector<HostTexture*> textures(patched_.begin(), patched_.end());
+    for (HostTexture* texture : textures) {
+      if (texture->outdated_mask() & Texture::kOutdatedBitBase) texture->repatch = true;
+      else Patch(*texture, true);
+    }
+  }
   // Marking all 32 written computed every used binding again in every draw (BindingInfoFromFetchConstant, the
   // host format's swizzle): about 5 % of the renderer thread in Kameo's first level (D83).
   const uint32_t* fetch_constants = &register_file()[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0];
@@ -692,6 +709,7 @@ bool GuestTextures::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool
   }
   if (!load_base && !load_mips) {
     ++stats_.unchanged;
+    if (host_texture.repatch) Patch(host_texture, true);  // D160: asked for while it was outdated, its data the same
     return true;
   }
   {
@@ -925,30 +943,47 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
   }
   ++stats_.loads;
   stats_.loaded_bytes += host_buffer_size;
-  // D142: the game's own pictures over this texture's (SetTexturePatcher).
-  if (TexturePatchFn patch = g_texture_patcher.load(std::memory_order_acquire);
-      patch && load_base && uint32_t(key.format) == 6 /* k_8_8_8_8 */ && key.mip_max_level == 0 &&
-      key.GetDepthOrArraySize() == 1) {
-    const uint32_t w = key.GetWidth(), h = key.GetHeight();
-    if (host_texture.GetGuestBaseSize() >= uint64_t(w) * h * 4) {
-      const uint8_t* guest = memory_.memory().TranslatePhysical<const uint8_t*>(key.base_page << 12);
-      std::vector<uint8_t> rgba;
-      if (patch(w, h, guest, rgba) && rgba.size() == size_t(w) * h * 4) {
-        Box box;
-        box.MaxX = w, box.MaxY = h;
-        TextureSubResData data;
-        data.pData = rgba.data();
-        data.Stride = uint64_t(w) * 4;
-        context_->UpdateTexture(host_texture.texture(), 0, 0, box, data, RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
-                                RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-        REXLOG_INFO("[native_x_renderer] the game's pictures written over the {}x{} texture at {:08X} (D142)", w, h,
-                    uint32_t(key.base_page) << 12);
-      }
-    }
-  }
+  if (load_base) Patch(host_texture, false);
   return true;
 }
 
+// D142: the game's own pictures over this texture's (SetTexturePatcher). D160: the textures the patcher takes are
+// kept, to be offered again after RepatchTextures (`again`); one it no longer takes (other data at that address,
+// before its load) is dropped.
+void GuestTextures::Patch(HostTexture& host_texture, bool again) {
+  host_texture.repatch = false;
+  const TextureKey key = host_texture.key();
+  TexturePatchFn patch = g_texture_patcher.load(std::memory_order_acquire);
+  if (!patch || uint32_t(key.format) != 6 /* k_8_8_8_8 */ || key.mip_max_level != 0 ||
+      key.GetDepthOrArraySize() != 1) {
+    patched_.erase(&host_texture);
+    return;
+  }
+  const uint32_t w = key.GetWidth(), h = key.GetHeight();
+  if (host_texture.GetGuestBaseSize() < uint64_t(w) * h * 4) {
+    patched_.erase(&host_texture);
+    return;
+  }
+  const uint8_t* guest = memory_.memory().TranslatePhysical<const uint8_t*>(key.base_page << 12);
+  std::vector<uint8_t> rgba;
+  if (!patch(w, h, guest, rgba, again)) {
+    patched_.erase(&host_texture);
+    return;
+  }
+  patched_.insert(&host_texture);
+  if (rgba.size() != size_t(w) * h * 4) return;
+  Box box;
+  box.MaxX = w, box.MaxY = h;
+  TextureSubResData data;
+  data.pData = rgba.data();
+  data.Stride = uint64_t(w) * 4;
+  context_->UpdateTexture(host_texture.texture(), 0, 0, box, data, RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
+                          RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  REXLOG_INFO("[native_x_renderer] the game's pictures written over the {}x{} texture at {:08X} ({})", w, h,
+              uint32_t(key.base_page) << 12, again ? "again, D160" : "D142");
+}
+
 void SetTexturePatcher(TexturePatchFn fn) { g_texture_patcher.store(fn, std::memory_order_release); }
+void RepatchTextures() { g_repatch_count.fetch_add(1, std::memory_order_acq_rel); }
 
 }  // namespace native_x_renderer

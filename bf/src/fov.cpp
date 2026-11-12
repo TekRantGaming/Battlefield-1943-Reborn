@@ -22,6 +22,8 @@
 #include <rex/cvar.h>
 #include <rex/hook.h>
 
+#include "comms.h"
+
 REXCVAR_DEFINE_DOUBLE(bf_fov, 0.0, "BF1943",
                       "The camera's horizontal field of view at 16:9 in degrees (60 to 120); 0: the game's own, 85.6");
 
@@ -78,6 +80,14 @@ REX_HOOK_RAW(sub_82583248) {
   }
 #endif
   if (uint32_t(ctx.lr) == kCameraFovCaller) {
+    // The rendered camera (its world matrix at +0x40: right, up, back, position rows): voice chat's listener and the
+    // position a voice comes from (comms.cpp), on foot, in a vehicle or watching after a death alike.
+    if (const uint32_t view = ctx.r3.u32) {
+      const float right[3] = {LoadF(base, view + 0x40), LoadF(base, view + 0x44), LoadF(base, view + 0x48)};
+      const float back[3] = {LoadF(base, view + 0x60), LoadF(base, view + 0x64), LoadF(base, view + 0x68)};
+      const float pos[3] = {LoadF(base, view + 0x70), LoadF(base, view + 0x74), LoadF(base, view + 0x78)};
+      bf1943::comms::NoteCamera(pos, right, back);
+    }
     bf1943::g_game_fov.store(float(ctx.f1.f64), std::memory_order_relaxed);
     const uint32_t manager = ctx.r31.u32;
     const uint32_t controller = manager ? Load32(base, manager + 0xE0) : 0;

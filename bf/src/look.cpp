@@ -35,6 +35,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <native_x_renderer/native_x_renderer.h>
 #include <rex/cvar.h>
@@ -44,6 +45,8 @@
 #include <rex/ui/ui_event.h>
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
+
+#include "comms.h"
 
 REXCVAR_DEFINE_BOOL(bf_look, true, "BF1943/Controls",
                     "Camera turning: true every frame (our look system), false 30 times a second as on the Xbox 360");
@@ -71,6 +74,7 @@ std::atomic<bool> g_dev_camera_valid{false};
 
 namespace bf1943 {
 bool GameMenuOpen();  // game_menu.cpp
+uint64_t ClientTicks();  // vehicle_camera.cpp: the client ticks run so far
 void PulseButton(uint16_t button, int ms);  // input_settings.cpp: our press on the player's pad
 bool LocalOnFoot();  // below
 // A notch of the mouse wheel: on foot, BF's Toggle Weapon (the right bumper; BF's own Help & Options > Controls, run
@@ -174,6 +178,8 @@ struct State {
   double raw_dx = 0, raw_dy = 0;  // window counts (times the display density) not yet taken by a frame
   double vehicle_dx = 0, vehicle_dy = 0;  // window counts not yet taken by the vehicle mouse (vehicle_mouse.cpp)
   Clock::time_point vehicle_moved{};      // the mouse's last movement
+  Clock::time_point vehicle_taken{};      // the vehicle mouse's last take (TakeVehicleMouse)
+  Clock::time_point stick_moved{};        // the controller's right stick last pushed (not by the mouse)
   // The mouse's movements over the last kPadWindow, for the right stick push in a vehicle (window counts).
   struct PadMove {
     Clock::time_point at;
@@ -240,7 +246,7 @@ double Density(const State& s) {
 class Listener : public rex::ui::WindowInputListener {
  public:
   void OnMouseMove(rex::ui::MouseEvent& e) override {
-    if ((e.dx() == 0.0f && e.dy() == 0.0f) || !MouseLook() || bf1943::GameMenuOpen()) return;
+    if ((e.dx() == 0.0f && e.dy() == 0.0f) || !MouseLook() || bf1943::GameMenuOpen() || bf1943::comms::Typing()) return;
     std::lock_guard lock(g.mutex);
     g.raw_dx += e.dx();
     g.raw_dy += e.dy();
@@ -250,7 +256,7 @@ class Listener : public rex::ui::WindowInputListener {
   }
   // Keyboard & mouse: the wheel toggles the weapon, a notch a press (WheelNotch).
   void OnMouseWheel(rex::ui::MouseEvent& e) override {
-    if (!e.scroll_y() || !MouseLook() || bf1943::GameMenuOpen()) return;
+    if (!e.scroll_y() || !MouseLook() || bf1943::GameMenuOpen() || bf1943::comms::Typing()) return;
     bf1943::WheelNotch();
   }
 };
@@ -363,6 +369,13 @@ bool TakeVehicleMouse(double& dx, double& dy, double& idle) {
   const double density = Density(g);
   dx = g.vehicle_dx / density, dy = g.vehicle_dy / density;
   g.vehicle_dx = g.vehicle_dy = 0;
+  // The mouse's movement while no seat's turning part took it (on foot, a driver's seat, a menu) is not the gun's:
+  // taken at a seat's first step it swung the gun as far as the mouse had moved since the last seat (12 Nov 2026,
+  // runs vmseat1 and vmboat1: a gun went to its stop as the seat was changed). Only what came since the last take,
+  // when that was a moment ago (the parts take it twice a tick).
+  const auto now = Clock::now();
+  if (now - g.vehicle_taken > std::chrono::milliseconds(250)) dx = dy = 0;
+  g.vehicle_taken = now;
   idle = g.vehicle_moved == Clock::time_point{} ? 1e9
                                                 : std::chrono::duration<double>(Clock::now() - g.vehicle_moved).count();
   return MouseLook();
@@ -389,6 +402,14 @@ void LookPad(uint8_t* gamepad) {
     }
   }
 #endif
+  // The right stick pushed by the player (not the runtime's mouse to stick, within a quarter second of a mouse
+  // movement): the controller aims (aim assist, AimAssistOn).
+  {
+    auto axis = [&](int at) { return float(int16_t(uint16_t(gamepad[at]) << 8 | gamepad[at + 1])) / 32767.0f; };
+    if (std::max(std::fabs(axis(8)), std::fabs(axis(10))) > 0.3f &&
+        std::chrono::duration<double>(now - g.vehicle_moved).count() > 0.25)
+      g.stick_moved = now;
+  }
   if (Alive(g, now) && REXCVAR_GET(bf_look)) return;
   // A vehicle's guns and turrets: the mouse aims them (vehicle_mouse.cpp), its wanted input given as the right stick.
   {
@@ -611,6 +632,50 @@ REX_HOOK_RAW(sub_822B0B18) {
 #endif
 }
 
+// Aim assist on or off (GitHub issue 4: "Aim assist toggle in Settings > Controls"), one setting for a controller and
+// one for the mouse. The game's aim assist is sub_822B0F40(aim, input, flag), called by sub_822B2680 in the soldier's
+// movement tick right after the aim update: it pulls the aim only with input+0x54 set (a byte of the entry input) and
+// the flag set; the flag is the game's own AimAssist option (GstGameplay AimAssist, read by name there each tick, 1
+// in every profile; its English pages never showed it). For the local soldier the flag is cleared when the setting of
+// the device that aimed last (the mouse moved after the right stick was pushed: the mouse) is off; the aim is then
+// the player's alone. Other soldiers (a server's) keep the game's.
+REXCVAR_DEFINE_BOOL(bf_aim_assist, true, "BF1943/Controls", "Aim assist with a controller (the game's own)");
+REXCVAR_DEFINE_BOOL(bf_aim_assist_mouse, true, "BF1943/Controls",
+                    "Aim assist with the mouse (Keyboard & mouse): the game's own, made for controllers");
+namespace {
+struct AssistStats {
+  uint64_t calls = 0, armed = 0, cleared = 0;  // the local soldier's calls, with input+0x54 set, and the flag cleared
+  Clock::time_point since = Clock::now();
+} g_assist;
+}  // namespace
+REX_EXTERN(__imp__sub_822B0F40);
+REX_HOOK_RAW(sub_822B0F40) {
+  const uint32_t aim = ctx.r3.u32, input = ctx.r4.u32;
+  bool mine = false, mouse = false;
+  {
+    std::lock_guard lock(g.mutex);
+    mine = aim && aim == g.aim && uint32_t(ctx.lr) == 0x822B290C;  // sub_822B2680's call, the local soldier's aim
+    mouse = mine && MouseLook() && g.vehicle_moved != Clock::time_point{} && g.vehicle_moved > g.stick_moved;
+    if (mine) {
+      ++g_assist.calls;
+      if (input && base[input + 0x54]) ++g_assist.armed;
+      const bool on = mouse ? REXCVAR_GET(bf_aim_assist_mouse) : REXCVAR_GET(bf_aim_assist);
+      if (!on && (ctx.r5.u32 & 0xFF)) ctx.r5.u64 = 0, ++g_assist.cleared;
+      // A line a minute while it acts or is turned off: how often the game would have pulled the aim.
+      const auto now = Clock::now();
+      if (now - g_assist.since > std::chrono::seconds(60)) {
+        if (g_assist.armed || g_assist.cleared)
+          REXLOG_INFO("BF aim assist: {} ticks in the last minute, {} with the game's assist armed, {} turned off by "
+                      "the settings (aiming with the {}; controller {}, mouse {})",
+                      g_assist.calls, g_assist.armed, g_assist.cleared, mouse ? "mouse" : "controller",
+                      REXCVAR_GET(bf_aim_assist) ? "on" : "off", REXCVAR_GET(bf_aim_assist_mouse) ? "on" : "off");
+        g_assist = AssistStats{};
+      }
+    }
+  }
+  __imp__sub_822B0F40(ctx, base);
+}
+
 namespace {
 // A getter's answer for the local soldier: its value plus the turn not yet handed over. `field` is the soldier's own
 // copy (+12 yaw, +16 pitch); `bits` the getter's answer.
@@ -654,6 +719,7 @@ struct Motion {
   double phase = 0;
   Clock::time_point last_now{};
   uint64_t last_frame = ~0ull;
+  uint64_t ticks_seen = 0;  // the client's tick count at the last frame (bf1943::ClientTicks)
 } g_motion;
 
 constexpr double kTick = 1.0 / 30.0;
@@ -670,19 +736,33 @@ void CarryMotion(uint8_t* base, uint32_t entity, Clock::time_point now, uint64_t
   Motion& m = g_motion;
   const uint32_t pos = entity + 688 + 48;
   float cur[3] = {LoadF(base, pos), LoadF(base, pos + 4), LoadF(base, pos + 8)};
-  if (m.entity != entity) m = Motion{}, m.entity = entity;
+  if (m.entity != entity) m = Motion{}, m.entity = entity, m.ticks_seen = bf1943::ClientTicks();
   if (frame != m.last_frame) {  // once a frame (the camera transform is asked for twice)
     if (m.last_now != Clock::time_point{}) m.phase += std::chrono::duration<double>(now - m.last_now).count();
     m.last_now = now;
     m.last_frame = frame;
-  }
-  const bool ours = m.wrote && cur[0] == m.written[0] && cur[1] == m.written[1] && cur[2] == m.written[2];
-  if (!ours && (!m.have_tick || cur[0] != m.tick[0] || cur[1] != m.tick[1] || cur[2] != m.tick[2])) {
-    // The game wrote the aim matrix (a tick): the new starting point, the last one the movement's.
-    if (m.have_tick) std::memcpy(m.prev, m.tick, sizeof(m.prev)), m.have_prev = true;
-    std::memcpy(m.tick, cur, sizeof(m.tick));
-    m.have_tick = true;
-    m.phase = m.phase > 2 * kTick ? 0.0 : std::max(0.0, m.phase - kTick);  // a hitch: start again
+    // The game's ticks since the last frame, counted (below 30 FPS a frame holds two at times: taking one tick off for
+    // each new position seen let the phase run up to two ticks and start again, a jump back every fifth frame at 24
+    // FPS, run walkslow2). The game's own remainder after them is under a tick, so ours is never more.
+    const uint64_t ticks = bf1943::ClientTicks();
+    const uint64_t n = std::min<uint64_t>(ticks - m.ticks_seen, 8);
+    m.ticks_seen = ticks;
+    if (n > 0) {
+      m.phase = std::max(0.0, m.phase - double(n) * kTick);
+      const bool ours = m.wrote && cur[0] == m.written[0] && cur[1] == m.written[1] && cur[2] == m.written[2];
+      if (ours) {
+        // The ticks left the position as it was: no movement to carry.
+        std::memcpy(cur, m.have_tick ? m.tick : cur, sizeof(cur));
+        if (m.have_tick) std::memcpy(m.prev, m.tick, sizeof(m.prev)), m.have_prev = true;
+      } else if (m.have_tick) {
+        // The last tick's own step: the movement since the last frame's tick over the ticks in it.
+        for (int k = 0; k < 3; ++k) m.prev[k] = float(cur[k] - (cur[k] - m.tick[k]) / double(n));
+        m.have_prev = true;
+      }
+      std::memcpy(m.tick, cur, sizeof(m.tick));
+      m.have_tick = true;
+    }
+    if (m.phase > kTick * 0.98) m.phase = kTick * 0.98;
   }
   m.wrote = false;
   if (!m.have_prev || !REXCVAR_GET(bf_look_motion)) return;
@@ -690,8 +770,7 @@ void CarryMotion(uint8_t* base, uint32_t entity, Clock::time_point now, uint64_t
   const double step = std::sqrt(dx * dx + dy * dy + dz * dz);
   if (step > kMaxTickStep || step == 0) return;
   const double f = std::clamp(m.phase / kTick, 0.0, 1.0);
-  if (f >= 1) return;
-  // From the previous tick's position toward the last one's (f 0 just after a tick, 1 at the next).
+  // From the previous tick's position toward the last one's (f 0 just after a tick, near 1 before the next).
   m.written[0] = float(m.prev[0] + dx * f);
   m.written[1] = float(m.prev[1] + dy * f);
   m.written[2] = float(m.prev[2] + dz * f);
@@ -927,6 +1006,31 @@ REX_HOOK_RAW(sub_82201188) {
       frame = g.frame_id;
     }
     DevCameraTour(base, out, frame);
+    // BF_DEV_CAMERA_AT=<x>,<y>,<z>[,<back m>[,<up m>]] (tests, D163's lamps): the local camera kept that far back from a
+    // point of the level along the way it looks, that far up (default 12 and 1.7): the point, a lamppost's foot say,
+    // ahead whatever the soldier faces. Turning is the match script's (rsr held). The soldier stays where it is.
+    static const std::vector<float> at = [] {
+      std::vector<float> v;
+      if (const char* s = std::getenv("BF_DEV_CAMERA_AT"); s && *s) {
+        for (const char* p = s; *p;) {
+          char* end = nullptr;
+          const float f = std::strtof(p, &end);
+          if (end == p) break;
+          v.push_back(f);
+          p = *end == ',' ? end + 1 : end;
+        }
+      }
+      return v;
+    }();
+    if (at.size() >= 3) {
+      const float back = at.size() > 3 ? at[3] : 12.0f, up = at.size() > 4 ? at[4] : 1.7f;
+      float fx = LoadF(base, out + 32), fz = LoadF(base, out + 40);
+      const float n = std::sqrt(fx * fx + fz * fz);
+      if (n > 1e-3f) fx /= n, fz /= n;
+      StoreF(base, out + 48, at[0] - fx * back);
+      StoreF(base, out + 52, at[1] + up);
+      StoreF(base, out + 56, at[2] - fz * back);
+    }
   }
 #endif
 }

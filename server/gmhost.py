@@ -29,6 +29,7 @@ RESEND_SECONDS = 0.3
 
 
 PING, PROBE, PONG = b'BF43PING', b'BF43PRBE', b'BF43PONG'
+COMMS = b'BF43COMM'  # our voice and text chat (Comms below), from the game's own comms socket, never a game packet
 
 
 def dev_net_delay():
@@ -148,6 +149,160 @@ def player_blob(pid, slot, name, xuid, address, port, stamp):
 class Player:
     def __init__(self, pid, name, xuid, address, ticket):
         self.pid, self.name, self.xuid, self.address, self.ticket = pid, name, xuid, address, ticket
+
+
+# ---- voice and text chat (bf/src/comms.cpp is the other end; docs/COMMS-PLAN.md)
+# Every packet: COMMS, a type byte, then big endian fields. A client's comms socket is its own (not the game's
+# tunnel), so its address differs from the game's; it is let in only as a player joined to this server, from the
+# same IP. Client to host: HELLO, STATE (every half second: team, squad, in the world, where), CHAT, VOICE, BYE.
+# Host to client: WELCOME (its id), REFUSED, CHAT_RELAY, ROSTER (every 5 s), VOICE_RELAY (a VOICE's body as sent).
+C_HELLO, C_WELCOME, C_STATE, C_CHAT_RELAY, C_CHAT, C_ROSTER, C_VOICE, C_VOICE_RELAY, C_BYE, C_REFUSED = range(1, 11)
+COMMS_PROTOCOL = 1
+CHAT_ALL, CHAT_TEAM, CHAT_SQUAD = 0, 1, 2
+# metres: a listener further from the speaker gets nothing (the client fades out sooner). BF_DEV_VOICE_RANGE (tests
+# only): another range, so two test players far apart on the map still hear each other.
+VOICE_RANGE = float(os.environ.get('BF_DEV_VOICE_RANGE') or 80.0)
+CHAT_MAX = 200          # bytes of text
+VOICE_MAX = 400         # bytes of voice in one packet
+
+
+class CommsClient:
+    def __init__(self, cid, addr, name):
+        self.id, self.addr, self.name = cid, addr, name
+        self.team = self.squad = self.flags = 0
+        self.pos = None
+        self.last_heard = time.monotonic()
+        self.chat_times = []
+        self.chat_seen = []  # the last message numbers: each message comes twice (UDP may lose one)
+        self.voice_second, self.voice_count = 0, 0
+
+
+class Comms:
+    """The relay for one server's voice and text chat."""
+
+    def __init__(self, host):
+        self.host = host
+        self.clients = {}    # addr -> CommsClient
+        self.ids = {}        # name -> id, kept for the server's life so a rejoin keeps its id
+        self.next_id = 1
+        self.roster_at = 0.0
+
+    def send(self, kind, body, addr):
+        self.host.transport.sendto(COMMS + bytes([kind]) + body, addr)
+
+    def joined_player(self, name, addr):
+        return any(p.state == 'joined' and p.player and p.player.name == name and p.addr[0] == addr[0]
+                   for p in self.host.peers.values())
+
+    def receive(self, data, addr):
+        try:
+            self.handle(data, addr)
+        except (struct.error, IndexError, UnicodeDecodeError, ValueError):
+            pass  # a malformed packet: dropped
+
+    def handle(self, data, addr):
+        kind, body = data[0], data[1:]
+        now = time.monotonic()
+        client = self.clients.get(addr)
+        if kind == C_HELLO:
+            proto, team, squad, n = struct.unpack_from('>BBBB', body)
+            name = body[4:4 + n].decode('utf-8')
+            if proto != COMMS_PROTOCOL:
+                self.send(C_REFUSED, bytes([2]) + short_text('this server speaks comms version %d' % COMMS_PROTOCOL),
+                          addr)
+                return
+            if not self.joined_player(name, addr):
+                self.send(C_REFUSED, bytes([1]) + short_text('not in the game on this server yet'), addr)
+                return
+            if not client:
+                for other_addr, other in list(self.clients.items()):
+                    if other.name == name:
+                        del self.clients[other_addr]  # the same player from a new socket
+                cid = self.ids.get(name)
+                if cid is None:
+                    cid = self.ids[name] = self.next_id
+                    self.next_id = self.next_id % 65535 + 1
+                client = self.clients[addr] = CommsClient(cid, addr, name)
+                self.host.note('comms: %s in (id %d)' % (name, cid))
+                self.roster_at = 0  # everyone gets the new roster at the next tick
+            client.team, client.squad, client.last_heard = team, squad, now
+            self.send(C_WELCOME, struct.pack('>HB', client.id, COMMS_PROTOCOL), addr)
+            return
+        if not client:
+            self.send(C_REFUSED, bytes([3]) + short_text('say hello first'), addr)
+            return
+        client.last_heard = now
+        if kind == C_STATE:
+            cid, client.team, client.squad, client.flags, x, y, z = struct.unpack_from('>HBBBfff', body)
+            client.pos = (x, y, z) if client.flags & 1 and all(abs(v) < 1e6 for v in (x, y, z)) else None
+        elif kind == C_CHAT:
+            cid, msg, channel, n = struct.unpack_from('>HHBB', body)
+            text_ = body[6:6 + min(n, CHAT_MAX)].decode('utf-8', 'replace').strip()
+            if msg in client.chat_seen:
+                return  # the second copy: sent on already
+            client.chat_seen = client.chat_seen[-31:] + [msg]
+            client.chat_times = [t for t in client.chat_times if now - t < 5] + [now]
+            if not text_ or len(client.chat_times) > 5 or channel not in (CHAT_ALL, CHAT_TEAM, CHAT_SQUAD):
+                return  # empty, more than 5 in 5 s, or no such channel
+            if (channel == CHAT_TEAM and not client.team) or (channel == CHAT_SQUAD and not client.squad):
+                return  # its team or squad not known (the client says so itself): never to the other team
+            name = client.name.encode('utf-8')[:64]
+            raw = text_.encode('utf-8')[:CHAT_MAX]
+            relay = struct.pack('>HHBBB', client.id, msg, channel, client.team, len(name)) + name + bytes([len(raw)]) + raw
+            for other in self.clients.values():
+                if channel == CHAT_TEAM and other.team != client.team:
+                    continue
+                if channel == CHAT_SQUAD and (other.team != client.team or other.squad != client.squad or
+                                              not client.squad):
+                    continue
+                for _ in range(2):  # twice: a lost datagram still leaves one (the client keeps the first)
+                    self.send(C_CHAT_RELAY, relay, other.addr)
+            self.host.note('comms chat %s %s: %s' % (('all', 'team', 'squad')[channel], client.name, text_[:80]))
+        elif kind == C_VOICE:
+            cid, seq, x, y, z, codec, n = struct.unpack_from('>HHfffBH', body)
+            if n > VOICE_MAX or len(body) < 19 + n:
+                return
+            second = int(now)
+            if second != client.voice_second:
+                client.voice_second, client.voice_count = second, 0
+            client.voice_count += 1
+            if client.voice_count > 60:  # 50 a second is a full 20 ms stream
+                return
+            relay = struct.pack('>H', client.id) + body[2:19 + n]
+            for other in self.clients.values():
+                if other is client:
+                    continue
+                if other.pos is not None:
+                    d2 = (other.pos[0] - x) ** 2 + (other.pos[1] - y) ** 2 + (other.pos[2] - z) ** 2
+                    if d2 > VOICE_RANGE * VOICE_RANGE:
+                        continue
+                self.send(C_VOICE_RELAY, relay, other.addr)
+        elif kind == C_BYE:
+            self.host.note('comms: %s out' % client.name)
+            del self.clients[addr]
+            self.roster_at = 0
+
+    def tick(self, now):
+        for addr, client in list(self.clients.items()):
+            if now - client.last_heard > 10 or not self.joined_player(client.name, addr):
+                self.host.note('comms: %s out (%s)' % (client.name, 'silent' if now - client.last_heard > 10
+                                                        else 'not in the game'))
+                del self.clients[addr]
+                self.roster_at = 0
+        if self.clients and now - self.roster_at > 5:
+            self.roster_at = now
+            entries = b''
+            for c in list(self.clients.values())[:64]:
+                name = c.name.encode('utf-8')[:64]
+                entries += struct.pack('>HBBB', c.id, c.team, c.squad, len(name)) + name
+            body = bytes([min(len(self.clients), 64)]) + entries
+            for c in self.clients.values():
+                self.send(C_ROSTER, body, c.addr)
+
+
+def short_text(s):
+    b = s.encode('utf-8')[:255]
+    return bytes([len(b)]) + b
 
 
 class Rejoin(Exception):
@@ -414,6 +569,7 @@ class GameHost(asyncio.DatagramProtocol):
         self.log = log
         self.players = {}  # ticket -> Player, from the backend's EGAM
         self.peers = {}
+        self.comms = Comms(self)
         self.transport = None
         self.error_noted = 0  # monotonic time of the last socket error written to the log
 
@@ -448,6 +604,10 @@ class GameHost(asyncio.DatagramProtocol):
         # at once, never a game packet (those start with a flag byte, 0 or 1).
         if data[:8] in (PING, PROBE):
             self.transport.sendto(PONG + data[8:40], addr)
+            return
+        # Voice and text chat: from a client's comms socket, never the game's tunnel address.
+        if data[:8] == COMMS and addr not in self.peers and len(data) > 8:
+            self.comms.receive(data[8:], addr)
             return
         peer = self.peers.get(addr)
         if not peer:
@@ -490,6 +650,7 @@ class GameHost(asyncio.DatagramProtocol):
                 if now - peer.last_heard > 30:
                     peer.note('silent for 30 s, dropped')
                     self.drop(addr)
+            self.comms.tick(now)
             # A join the backend announced whose client never linked (its game failed to connect): forgotten after
             # 5 minutes, so a server that runs for weeks keeps no list of them.
             if now - pruned_at > 10:
@@ -527,7 +688,7 @@ async def serve(args):
         # --public only when given (older packages and tests).
         reg = {'op': 'register', 'name': args.name, 'port': public[1], 'map': args.map,
                'max_players': args.max_players, 'mode': args.mode, 'description': args.description[:200],
-               'maps': [m for m in args.maps.split(',') if m], 'listed': not args.unlisted}
+               'maps': [m for m in args.maps.split(',') if m], 'listed': not args.unlisted, 'night': args.night}
         # A host on one address of its own (tests: 127.0.0.2) says where; one on every address (the packages: 0.0.0.0)
         # is found by the backend.
         if args.public or listen[0] not in ('0.0.0.0', '::'):
@@ -644,6 +805,9 @@ def main():
     # unfair): what the server plays, shown in the server list; players' games take it from there.
     ap.add_argument('--mode', choices=['classic', 'modern'], default='classic',
                     help='the movement and aiming the server plays')
+    # Night Ops (TekRantGaming, 11 Nov 2026): the maps at night, shown in the server list; players' games draw it so
+    # (NativeXRenderer D162) while they play there.
+    ap.add_argument('--night', action='store_true', help='a night server: players see its maps at night')
     ap.add_argument('--map-file', default='', help="the server's current_map.txt (its map rotation)")
     ap.add_argument('--maps', default='', help='the rotation, map titles separated by commas (for the next map)')
     ap.add_argument('--description', default='', help='shown in the server browser (200 characters)')

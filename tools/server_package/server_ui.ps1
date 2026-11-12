@@ -219,6 +219,15 @@ $delay = New-Field (New-Object System.Windows.Forms.ComboBox) 470 264 358 28
 $delay.DropDownStyle = 'DropDownList'
 $delays = @(30, 45, 60, 90)
 foreach ($d in $delays) { [void]$delay.Items.Add("$d seconds") }
+# Night Ops (TekRantGaming, 11 Nov 2026): the maps at night in players' games (0.2.4 and newer).
+$night = New-Object System.Windows.Forms.CheckBox
+$night.Text = 'Night Ops: players see the maps at night'
+$night.Location = New-Object System.Drawing.Point(470, 304)
+$night.Size = New-Object System.Drawing.Size(358, 28)
+$night.ForeColor = $cream
+$night.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+$night.Visible = (Test-NightOpsPackage)  # test packages only until Night Ops is released (server_config.ps1)
+$right.Controls.Add($night)
 
 $box = New-Object System.Windows.Forms.Panel
 $box.Location = New-Object System.Drawing.Point(28, 346)
@@ -279,6 +288,7 @@ function Show-Server {
     $d = [Array]::IndexOf($delays, [int]$s.round_end_delay)
     $delay.SelectedIndex = $(if ($d -ge 0) { $d } else { 1 })
     $listed.Checked = [bool]$s.listed
+    $night.Checked = [bool]$s.night
     $script:loading = $false
     Update-StatusLine
 }
@@ -297,6 +307,7 @@ function Read-Editor {
     $s.movement = $(if ($movement.SelectedIndex -eq 1) { 'modern' } else { 'classic' })
     $s.round_end_delay = $delays[[Math]::Max(0, $delay.SelectedIndex)]
     $s.listed = $listed.Checked
+    $s.night = $night.Checked
     $script:config.upnp = $upnp.Checked
     Save-ServerConfig $script:config
     $list.Invalidate()
@@ -304,7 +315,7 @@ function Read-Editor {
 foreach ($c in @($name, $desc)) { $c.Add_TextChanged({ Read-Editor }) }
 $maps.Add_ItemCheck({ if (-not $script:loading -and $form.IsHandleCreated) { $form.BeginInvoke([Action] { Read-Editor }) | Out-Null } })
 foreach ($c in @($movement, $delay)) { $c.Add_SelectedIndexChanged({ Read-Editor }) }
-foreach ($c in @($listed, $upnp)) { $c.Add_CheckedChanged({ Read-Editor }) }
+foreach ($c in @($listed, $upnp, $night)) { $c.Add_CheckedChanged({ Read-Editor }) }
 function Move-Map([int]$by) {
     $j = $maps.SelectedIndex
     $k = $j + $by

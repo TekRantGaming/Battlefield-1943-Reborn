@@ -9,6 +9,7 @@
 // with error 0 and DirtySock closed the FESL connection while a level loaded (run ded2). On Linux errno is mapped to
 // the Winsock codes, which are the same on the console.
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
@@ -19,7 +20,9 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
@@ -28,6 +31,11 @@
 
 #include "dev_guest_memory.h"
 #include "private_match.h"
+
+REXCVAR_DEFINE_BOOL(bf_net_only_from_server, true, "BF1943",
+                    "The game's network packets accepted only from addresses it sent to (the server it plays on); "
+                    "off: from anyone, as before 0.2.3");
+REXCVAR_DECLARE(bool, server);  // server_mode.cpp
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -229,6 +237,56 @@ uint16_t GuestSourcePort(uint32_t ip, uint16_t port) {
   return LoopbackIp(ip) ? GuestOwnPort(port) : port;
 #endif
 }
+
+// Packets only from where the game sent (TekRantGaming, 11 Nov 2026): a packet reaches the game only from an address
+// and port it sent to in the last 10 minutes (the server it plays on: players always speak first), and any other is
+// dropped before the game sees it (socket_overlapped.cpp's WSARecvFrom, recvfrom below).
+// Players only: a dedicated server answers whoever reaches it. Addresses and ports in network order, the host's.
+namespace {
+struct SentTo {
+  std::mutex mutex;
+  std::map<uint64_t, std::chrono::steady_clock::time_point> when;
+  uint64_t dropped = 0;
+  std::chrono::steady_clock::time_point logged{};
+};
+SentTo& sent_to() {
+  static SentTo s;
+  return s;
+}
+uint64_t AddressKey(uint32_t ip, uint16_t port) { return uint64_t(ip) << 16 | port; }
+constexpr auto kAnswerWindow = std::chrono::minutes(10);
+}  // namespace
+
+void NoteSent(uint32_t ip, uint16_t port) {
+  SentTo& s = sent_to();
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard lock(s.mutex);
+  s.when[AddressKey(ip, port)] = now;
+  if (s.when.size() > 4096) {
+    for (auto it = s.when.begin(); it != s.when.end();) it = now - it->second > kAnswerWindow ? s.when.erase(it) : ++it;
+  }
+}
+
+bool SenderAllowed(uint32_t ip, uint16_t port) {
+  static const bool server = REXCVAR_GET(server);
+  if (server || !REXCVAR_GET(bf_net_only_from_server)) return true;
+  SentTo& s = sent_to();
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard lock(s.mutex);
+  const auto it = s.when.find(AddressKey(ip, port));
+  if (it != s.when.end() && now - it->second < kAnswerWindow) return true;
+  ++s.dropped;
+  // The first one at once, then at most a line every 10 s while more come.
+  if (s.dropped == 1 || now - s.logged > std::chrono::seconds(10)) {
+    s.logged = now;
+    const uint8_t* a = reinterpret_cast<const uint8_t*>(&ip);
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&port);
+    REXLOG_INFO("BF NET dropped {} packet(s) so far from addresses this game never sent to (this one from "
+                "{}.{}.{}.{}:{})",
+                s.dropped, a[0], a[1], a[2], a[3], p[0] << 8 | p[1]);
+  }
+  return false;
+}
 }  // namespace bf1943
 
 // The game's VDP sends (the dedicated server's and the client's game traffic): the runtime's own, with a match this
@@ -247,6 +305,7 @@ extern "C" REX_FUNC(__imp__NetDll_WSASendTo) {
     if (bf1943::SelfHostedSend(ip, port)) std::memcpy(base + to + 4, &ip, 4), changed = true;
     const uint16_t host_port = bf1943::HostSendPort(ip, port);  // Linux: a moved port on this machine
     if (host_port != port) std::memcpy(base + to + 2, &host_port, 2), changed = true;
+    bf1943::NoteSent(ip, host_port);  // it may answer (SenderAllowed)
   }
   const uint32_t handle = ctx.r4.u32;
   original(ctx, base);
@@ -280,6 +339,7 @@ extern "C" REX_FUNC(__imp__NetDll_sendto) {
     uint32_t ip = host.sin_addr.s_addr;  // a match this PC hosts: through 127.0.0.1 (private_match.h)
     if (bf1943::SelfHostedSend(ip, host.sin_port)) host.sin_addr.s_addr = ip;
     host.sin_port = bf1943::HostSendPort(host.sin_addr.s_addr, host.sin_port);  // Linux: a moved port here
+    bf1943::NoteSent(host.sin_addr.s_addr, host.sin_port);  // it may answer (SenderAllowed)
   }
   const int result = ::sendto(native, reinterpret_cast<const char*>(base + buf), static_cast<int>(length),
                               static_cast<int>(ctx.r7.u32), to ? reinterpret_cast<sockaddr*>(&host) : nullptr,
@@ -313,14 +373,32 @@ extern "C" REX_FUNC(__imp__NetDll_recvfrom) {
     return;
   }
   sockaddr_in host{};
-  socklen_t size = sizeof(host);
-  const int result = ::recvfrom(native, reinterpret_cast<char*>(base + buf), static_cast<int>(length),
-                                static_cast<int>(ctx.r7.u32), reinterpret_cast<sockaddr*>(&host), &size);
+  // Into a buffer of our own first: a packet from an address this game never sent to is dropped unseen
+  // (bf1943::SenderAllowed) and the next one read; on the game's non-blocking sockets that ends in WSAEWOULDBLOCK
+  // when only such packets were waiting. A peek (MSG_PEEK, 2) takes a dropped packet off the queue first.
+  thread_local std::vector<uint8_t> data;
+  data.resize(std::max<size_t>(length, 1));
+  const int flags = static_cast<int>(ctx.r7.u32);
+  int result = -1;
+  for (;;) {
+    host = {};
+    socklen_t size = sizeof(host);
+    result = ::recvfrom(native, reinterpret_cast<char*>(data.data()), static_cast<int>(length), flags,
+                        reinterpret_cast<sockaddr*>(&host), &size);
+    if (result < 0 || bf1943::SenderAllowed(host.sin_addr.s_addr, host.sin_port)) break;
+    if (flags & 2) {
+      sockaddr_in junk{};
+      socklen_t junk_size = sizeof(junk);
+      ::recvfrom(native, reinterpret_cast<char*>(data.data()), static_cast<int>(length), flags & ~2,
+                 reinterpret_cast<sockaddr*>(&junk), &junk_size);
+    }
+  }
   uint32_t error = 0;
   if (result < 0) {
     error = HostSocketError();
     rex::system::XThread::SetLastError(error);
   } else {
+    if (result > 0) std::memcpy(base + buf, data.data(), static_cast<size_t>(result));
     host.sin_port = bf1943::GuestSourcePort(host.sin_addr.s_addr, host.sin_port);  // Linux: a moved port here
     uint32_t ip = host.sin_addr.s_addr;  // a match this PC hosts: its replies read as from its public address
     if (bf1943::SelfHostedReceive(ip, host.sin_port)) host.sin_addr.s_addr = ip;

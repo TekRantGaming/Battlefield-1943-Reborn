@@ -25,6 +25,10 @@ if (Test-Path $out) { throw "release folder exists: $out" }
 # skips a bf-files.txt of another version. 0.1.x shipped 0.1.33 inside 0.1.33-preview.
 $built = (Select-String -Path (Join-Path $build "CMakeCache.txt") -Pattern '^BF_VERSION:STRING=(.*)$').Matches.Groups[1].Value
 if ($built -ne $Version) { throw "the build is version '$built', not ${Version}: build it with that version first (cmake -DBF_VERSION=$Version)" }
+# Night Ops (bf/src/night_ops.h) is not in releases until TekRantGaming says it is ready (12 Nov 2026): only a test
+# build (a version with -test) may have it.
+$nightOps = (Select-String -Path (Join-Path $build "CMakeCache.txt") -Pattern '^BF_NIGHT_OPS:BOOL=(ON|TRUE|1)$' -Quiet)
+if ($nightOps -and $Version -notmatch '-test') { throw "the build has Night Ops (BF_NIGHT_OPS ON): not for a release; build it with -DBF_NIGHT_OPS=OFF" }
 New-Item -ItemType Directory -Force $out | Out-Null
 
 # Only our binaries: the game exe, its runtime and renderer, and the two vendor libraries it loads. Not the Xenos
@@ -142,7 +146,12 @@ function New-ServerPackage([string]$sname, [bool]$official) {
                 servers = @([ordered]@{ name = "Battlefield 1943 Reborn"; description = ""; maps = @("wake", "guadalcanal", "iwo", "coral")
                                         movement = "classic"; round_end_delay = 45; listed = $true }) } |
         ConvertTo-Json -Depth 5 | Set-Content (Join-Path $s "server.default.json") -Encoding ascii
-    if ($official) { '{"official": true}' | Set-Content (Join-Path $s "package.json") -Encoding ascii }
+    # package.json: the official package (TekRantGaming only), and a game with Night Ops (test builds): the window's Night Ops
+    # box and the hosts' --night only then (server_config.ps1).
+    $pkg = [ordered]@{}
+    if ($official) { $pkg.official = $true }
+    if ($nightOps) { $pkg.night_ops = $true }
+    if ($pkg.Count) { $pkg | ConvertTo-Json -Compress | Set-Content (Join-Path $s "package.json") -Encoding ascii }
     Set-Content (Join-Path $s "BF1943 Server.bat") -Encoding ascii -Value "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"%~dp0server_ui.ps1`""
     Set-Content (Join-Path $s "Start servers (no window).bat") -Encoding ascii -Value "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0start_servers.ps1`""
     Set-Content (Join-Path $s "Stop servers.bat") -Encoding ascii -Value "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0stop_servers.ps1`""

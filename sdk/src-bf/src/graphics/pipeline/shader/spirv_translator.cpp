@@ -3210,7 +3210,22 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
             builder_->createAccessChain(spv::StorageClassInput, input_fragment_coordinates_,
                                         id_vector_temp_),
             spv::NoPrecision));
-    if (shader_resolution_scale_x_ > 1.0f) {
+    if (modification.pixel.param_gen_texel_centre) {
+      // (floor(x) + 0.5) / scale - 1, at least 0 (the magnitude only: the sign bit holds a flag).
+      param_gen_x = builder_->createNoContractionBinOp(
+          spv::OpFAdd, type_float_,
+          builder_->createNoContractionBinOp(
+              spv::OpFMul, type_float_,
+              builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, param_gen_x,
+                                                 builder_->makeFloatConstant(0.5f)),
+              builder_->makeFloatConstant(1.0f / shader_resolution_scale_x_)),
+          builder_->makeFloatConstant(-1.0f));
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(param_gen_x);
+      id_vector_temp_.push_back(const_float_0_);
+      param_gen_x = builder_->createBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450FMax,
+                                                id_vector_temp_);
+    } else if (shader_resolution_scale_x_ > 1.0f) {
       param_gen_x = builder_->createNoContractionBinOp(
           spv::OpFMul, type_float_, param_gen_x,
           builder_->makeFloatConstant(1.0f / shader_resolution_scale_x_));
@@ -3246,7 +3261,21 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
             builder_->createAccessChain(spv::StorageClassInput, input_fragment_coordinates_,
                                         id_vector_temp_),
             spv::NoPrecision));
-    if (shader_resolution_scale_y_ > 1.0f) {
+    if (modification.pixel.param_gen_texel_centre) {
+      param_gen_y = builder_->createNoContractionBinOp(
+          spv::OpFAdd, type_float_,
+          builder_->createNoContractionBinOp(
+              spv::OpFMul, type_float_,
+              builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, param_gen_y,
+                                                 builder_->makeFloatConstant(0.5f)),
+              builder_->makeFloatConstant(1.0f / shader_resolution_scale_y_)),
+          builder_->makeFloatConstant(-1.0f));
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(param_gen_y);
+      id_vector_temp_.push_back(const_float_0_);
+      param_gen_y = builder_->createBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450FMax,
+                                                id_vector_temp_);
+    } else if (shader_resolution_scale_y_ > 1.0f) {
       param_gen_y = builder_->createNoContractionBinOp(
           spv::OpFMul, type_float_, param_gen_y,
           builder_->makeFloatConstant(1.0f / shader_resolution_scale_y_));

@@ -140,6 +140,10 @@ void GpuBenchmarkStart() {
 bool GpuBenchmarkResult(double* ms) { return g_renderer && renderer::GpuBenchmarkResult(ms); }
 bool NisSupport(bool* runs, std::string* gpu) { return g_renderer && renderer::NisSupport(runs, gpu); }
 
+// D163: kept whether the renderer runs yet or not (the level is read on a worker).
+void NightLamps(const NightLamp* lamps, uint32_t count) { renderer::NightLamps(lamps, count); }
+void NightModels(const NightModelLamps* models, uint32_t count) { renderer::NightModels(models, count); }
+
 void SetGameAspectBox(bool on) {
   if (g_renderer) renderer::SetGameAspectBox(on);
 }

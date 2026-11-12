@@ -52,6 +52,10 @@ ImFont* MenuFont(int which);                           // game_menu.cpp: 0 bold,
 size_t RecentFrameTimes(float* out, size_t max);       // frame_stats.cpp: oldest first, ms
 bool FrameRateNow(double* fps, double* frame_time_ms);  // frame_stats.cpp: the last second
 
+// Where the metrics box ends as last drawn (pixels from the top), 0 when it is not shown: the chat goes below it.
+std::atomic<float> g_perf_bottom{0.0f};
+float PerfOverlayBottom() { return g_perf_bottom.load(std::memory_order_relaxed); }
+
 namespace {
 
 // ---------------------------------------------------------------- the level (perf_overlay_logic.h)
@@ -344,6 +348,7 @@ class PerfOverlay final : public rex::ui::ImGuiDialog {
   void OnDraw(ImGuiIO& io) override {
     const Level level = CurrentLevel();
     sampler_.Want(level == Level::kFull);
+    g_perf_bottom.store(0.0f, std::memory_order_relaxed);
     if (level == Level::kOff || GameMenuOpen()) return;  // not over our menus
     double fps = 0, frame_ms = 0;
     if (!FrameRateNow(&fps, &frame_ms)) return;  // nothing to show yet
@@ -382,6 +387,7 @@ class PerfOverlay final : public rex::ui::ImGuiDialog {
       const float w = label_w + col_w * 2 + gap;
       dl->AddRectFilled(origin, ImVec2(origin.x + w + pad * 2, origin.y + line + pad * 2 - 4 * s), kBox, 4 * s);
       row(origin.x + pad, origin.y + pad - 2 * s, label_w, "FPS", fps_color, {{fps_text, ""}, {ms_text, "ms"}});
+      g_perf_bottom.store(origin.y + line + pad * 2 - 4 * s, std::memory_order_relaxed);
       return;
     }
     const SystemSample m = sampler_.Get();
@@ -390,6 +396,7 @@ class PerfOverlay final : public rex::ui::ImGuiDialog {
     const char* api = UsingVulkan() ? "VULKAN" : "D3D12";
     const float h = line * 5 + 4 * s + graph_h;
     dl->AddRectFilled(origin, ImVec2(origin.x + w + pad * 2, origin.y + h + pad * 2), kBox, 4 * s);
+    g_perf_bottom.store(origin.y + h + pad * 2, std::memory_order_relaxed);
     const float x0 = origin.x + pad;
     float y = origin.y + pad - 2 * s;
     auto note = [&](float x, float y_row, const char* t) {

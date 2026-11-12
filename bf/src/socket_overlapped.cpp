@@ -37,6 +37,10 @@
 
 #include "private_match.h"  // a match this PC hosts, reached through 127.0.0.1
 
+namespace bf1943 {
+bool SenderAllowed(uint32_t ip, uint16_t port);  // socket_fixes.cpp: a packet only from where the game sent
+}  // namespace bf1943
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -121,6 +125,9 @@ int ReceiveNow(Receive& r, uint8_t* base, uint32_t* error) {
       if (*error == 10054) continue;
       return -1;
     }
+    // From an address this game never sent to: dropped before the game sees it, the next packet read
+    // (socket_fixes.cpp SenderAllowed; a non-blocking socket ends in WSAEWOULDBLOCK).
+    if (!bf1943::SenderAllowed(host.sin_addr.s_addr, host.sin_port)) continue;
     size_t at = 0;
     for (auto& b : r.buffers) {
       const size_t part = std::min<size_t>(b.second, static_cast<size_t>(n) - at);
