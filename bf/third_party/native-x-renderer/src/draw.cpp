@@ -1586,8 +1586,10 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   float scale_x = target_scale.x, scale_y = target_scale.y, offset_x = 0.0f, offset_y = 0.0f;
   HudPlace place;
   place.align = aspect_align_;
-  if (aspect_box_ && hud_classify_ && target_scale.x != target_scale.y)
-    place = ClassifyHudDraw(copies, vertex_program.hash);
+  const bool hud_scaling = hud_scale_ != 1.0f || minimap_scale_ != 1.0f;
+  bool hud_placed = false;
+  if (hud_classify_ && ((aspect_box_ && target_scale.x != target_scale.y) || hud_scaling))
+    place = ClassifyHudDraw(copies, vertex_program.hash), hud_placed = true;
   if (aspect_box_ && place.mode != HudMode::kStretch && target_scale.x != target_scale.y) {
     float uniform = std::min(target_scale.x, target_scale.y);
     const float gw = float(sized->guest_width), gh = float(sized->guest_height);
@@ -1623,6 +1625,24 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           offset_x = inner - g_lo * scale_x;
         }
       }
+    }
+  }
+  // The HUD's scale (draw.h SetHudScale): about the screen's point the draw's part of the HUD hangs on. A world
+  // marker about its own centre (it stays on what it marks). Not a menu's frames, nor what is stretched or reaches
+  // to an edge.
+  if (hud_placed && hud_scaling && !hud_menu_ && (place.mode == HudMode::kBox || place.mode == HudMode::kPoint)) {
+    const float gw = float(sized->guest_width), gh = float(sized->guest_height);
+    const bool minimap = place.mode == HudMode::kBox && place.align == 0.0f && place.anchor_y == 1.0f;
+    const float k = minimap ? minimap_scale_ : hud_scale_;
+    if (k != 1.0f && k > 0.1f) {
+      float ax = place.align * gw, ay = place.anchor_y * gh;
+      if (place.mode == HudMode::kPoint) {
+        ax = float(place.point_x >= 0 ? place.point_x / 1280.0 * gw : ((place.lo + place.hi) * 0.5 + 1.0) * 0.5 * gw);
+        ay = float((1.0 - (place.y_lo + place.y_hi) * 0.5) * 0.5 * gh);
+      }
+      offset_x += ax * scale_x * (1.0f - k);
+      offset_y += ay * scale_y * (1.0f - k);
+      scale_x *= k, scale_y *= k;
     }
   }
   // As RenderScale::HostX/HostY outside a box.
@@ -2847,6 +2867,11 @@ DrawPath::HudPlace DrawPath::ClassifyHudDraw(std::span<const Copy> copies, uint6
     ++t.middle;
   }
   if (how != How::kNone) {
+    // The height it is scaled about (HudPlace::anchor_y), unless it took its place from a panel or the last draw.
+    if (const std::string_view r = result; r != "in a panel" && r != "as the last" && r != "unknown, as the last") {
+      const double yc = (y_lo + y_hi) * 0.5;
+      place.anchor_y = yc > 0.34 ? 0.0f : yc < -0.34 ? 1.0f : 0.5f;
+    }
     if (lo <= -0.99 && hi >= 0.99 && y_lo <= -0.99 && y_hi >= 0.99 && hi <= 1.01 && lo >= -1.01) hud_backdrop_ = true;
     place.lo = lo, place.hi = hi, place.y_lo = y_lo, place.y_hi = y_hi;
     prev = {true, vertex_shader, lo, hi, y_lo, y_hi, place};

@@ -141,6 +141,12 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_aspect, 0.0, "NativeXRenderer",
 REXCVAR_DEFINE_STRING(native_x_renderer_hud_layout, "edges", "NativeXRenderer",
                       "With Profile::box_2d_after_composite on a wider output: edges = the HUD's left and right thirds "
                       "at the screen's edges, the rest in the middle; centered = all of it in a 16:9 box in the middle");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_hud_scale, 100.0, "NativeXRenderer",
+                      "With Profile::box_2d_after_composite: the HUD's size in percent of the game's (50 to 100), each "
+                      "part scaled about the screen's corner, edge or centre it hangs on; read while the game runs");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_minimap_scale, 100.0, "NativeXRenderer",
+                      "The HUD's bottom left group (Battlefield 1943's minimap) in percent of the game's size (75, 100 "
+                      "or 125), apart from native_x_renderer_hud_scale; read while the game runs");
 REXCVAR_DEFINE_BOOL(native_x_renderer_debug_hud, false, "NativeXRenderer",
                     "Log the 2D layer's draws after the composite every 10 s (Profile::box_2d_after_composite)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_raise_priority, false, "NativeXRenderer",
@@ -780,12 +786,18 @@ void ExecuteDraw(const Command& c) {
   bool box = g_aspect_box;
   float align = 0.5f;
   bool composite = false, hud = false;
-  if (g_profile->box_2d_after_composite && g_aspect_factor != 1.0 && targets[0] &&
+  // (13 Nov 2026: with a HUD scale the HUD's draws are told apart on a 16:9 output too, without the box.)
+  const float hud_scale = float(std::clamp(REXCVAR_GET(native_x_renderer_hud_scale), 50.0, 100.0) / 100.0);
+  const float minimap_scale = float(std::clamp(REXCVAR_GET(native_x_renderer_minimap_scale), 50.0, 150.0) / 100.0);
+  const bool hud_scaled = hud_scale != 1.0f || minimap_scale != 1.0f;
+  if (g_profile->box_2d_after_composite && (g_aspect_factor != 1.0 || hud_scaled) && targets[0] &&
       targets[0]->guest_width == g_profile->output_width && targets[0]->guest_height == g_profile->output_height) {
+    const bool wide = g_aspect_factor != 1.0;
     if (g_hud_phase == 1) composite = true;
-    else if (g_hud_phase == 2) box = hud = true;
-    else if (!g_scene_copied_this_frame && !g_scene_copied_last_frame) box = hud = true;
+    else if (g_hud_phase == 2) box = box || wide, hud = true;
+    else if (!g_scene_copied_this_frame && !g_scene_copied_last_frame) box = box || wide, hud = true;
   }
+  g_draw->SetHudScale(hud_scale, minimap_scale);
   g_draw->SetAspectBox(box, align);
   // The HUD's draws are placed one by one from their vertex shader's constants (DrawPath::SetHudClassify).
   g_draw->SetHudClassify(hud, REXCVAR_GET(native_x_renderer_hud_layout) == "edges",

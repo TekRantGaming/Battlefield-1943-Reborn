@@ -126,6 +126,10 @@ class DrawPath {
   // one's place on screen is worked out from the quad and the constants: one across the whole width is stretched, and
   // with `edges` one in the left or right third is boxed against that edge. debug: a log of the decisions.
   void SetHudClassify(bool on, bool edges, bool debug) { hud_classify_ = on, hud_edges_ = edges, hud_debug_ = debug; }
+  // The HUD's scale (native_x_renderer_hud_scale, native_x_renderer_minimap_scale; 1 is the game's): each boxed HUD
+  // draw is scaled about the screen's point its part of the HUD hangs on (a corner, an edge's middle, the centre), so
+  // a group of draws keeps its shape; the bottom left group (the minimap) by its own factor. Not a menu's frames.
+  void SetHudScale(float hud, float minimap) { hud_scale_ = hud, minimap_scale_ = minimap; }
   // The decisions' tallies and a sample, for the renderer's periodic log; cleared.
   std::string TakeHudLog();
   // At the frame's end: whether it was a menu (its boxed area), and the frame's run state cleared.
@@ -291,6 +295,7 @@ class DrawPath {
   bool aspect_box_ = false;  // D43
   float aspect_align_ = 0.5f;
   bool hud_classify_ = false, hud_edges_ = false, hud_debug_ = false;
+  float hud_scale_ = 1.0f, minimap_scale_ = 1.0f;
   struct HudTally {
     uint64_t draws = 0, stretched = 0, left = 0, right = 0, middle = 0, unknown = 0, markers = 0, menu_frames = 0;
     std::string samples;
@@ -305,6 +310,10 @@ class DrawPath {
     double lo = 0, hi = 0;  // its x extent in clip space, when known
     double point_x = -1;    // kPoint: the marker's own x (canvas pixels, 1280 wide), below 0 when not known
     double y_lo = 0, y_hi = 0;  // and its y extent (up is +1)
+    // 13 Nov 2026 (the HUD's scale): the height it is scaled about, 0 the canvas's top, 0.5 its middle, 1 its
+    // bottom, from the third of the height its centre is in; a panel's contents and a line's next glyphs take
+    // their first's, like the alignment.
+    float anchor_y = 0.5f;
   };
   HudPlace ClassifyHudDraw(std::span<const Copy> copies, uint64_t vertex_shader);
   // Within a frame: the last placed draw (a line of text's glyphs follow their first), and the frame's covered area.

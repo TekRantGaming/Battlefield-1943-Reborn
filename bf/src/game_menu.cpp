@@ -3526,6 +3526,15 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "Messages top left in a match: T to everyone, Y to your team, U to your squad (Keyboard "
                           "bindings). Off hides them and the chat box.",
                           "bf_text_chat"));
+    // 13 Nov 2026: the HUD's size (the soldier's and the vehicles' HUD and the crosshair; NativeXRenderer scales each
+    // part about the screen's corner, edge or centre it hangs on) and, apart from it, the minimap's.
+    rows.push_back(Slider("HUD", "HUD scale",
+                          "The size of the HUD and the crosshair on foot and in vehicles. 100% is the game's own. The "
+                          "minimap has its own size below. Applies at once.",
+                          "native_x_renderer_hud_scale", 50, 100, 5, Percent));
+    rows.push_back(Choice("HUD", "Minimap size", "The minimap's size, apart from the HUD scale. Applies at once.",
+                          "native_x_renderer_minimap_scale",
+                          {{"Small", "75.000000"}, {"Medium", "100.000000"}, {"Large", "125.000000"}}));
     rows.push_back(Choice("Overlay", "Performance metrics",
                           "Readings in the top left corner while you play. F2 switches between them.",
                           "bf_performance_metrics", {{"Off", "off"}, {"FPS only", "fps"}, {"Full", "full"}}));
