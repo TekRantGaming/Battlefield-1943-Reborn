@@ -2503,6 +2503,22 @@
                     off ? IM_COL32(120, 116, 100, 150) : dim, shown, st(1.5f));
       }
       y += h;
+      // An experimental tick rate: the warning right under the row, in red (13 Nov 2026: "Place the warning
+      // disclaimer under the Tick Rate segment").
+      if (i == kPmTick && pm_tick_ > 60) {
+        const std::string warning = "Weapons, vehicles and timers may behave oddly, your PC and every player's "
+                                    "connection work harder, and players on older versions cannot join. Use 60 Hz "
+                                    "for a normal match.";
+        const float wx = ra.x + st(52), wrap = rb.x - st(18) - wx, size = st(10);
+        const ImU32 red = IM_COL32(236, 92, 76, 255);  // a red that reads on the dark rail
+        const float wh = st(6) + st(14) + kit::WrappedHeight(f.ui, size, warning, wrap) + st(10);
+        d->AddRectFilled(ImVec2(ra.x, y), ImVec2(ra.x + st(5), y + wh), kit::kStamp);
+        kit::Spaced(d, f.ui_bold, st(9), ImVec2(wx, y + st(6)), red, fmt::format("WARNING: {} HZ IS EXPERIMENTAL", pm_tick_),
+                    st(1.5f));
+        kit::Wrapped(d, f.ui, size, ImVec2(wx, y + st(6) + st(14)), red, warning, wrap);
+        d->AddRectFilled(ImVec2(ra.x, y + wh - 1), ImVec2(rb.x, y + wh), IM_COL32(241, 234, 211, 20));
+        y += wh;
+      }
     }
     // ---- the band: the chosen row's help, the green button
     {
@@ -2531,22 +2547,6 @@
       kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error ? kit::kRed : kit::kInkFaint,
                    error ? pm_error_ : std::string(kAbout[pm_row_]), q0.x - band.x - st(40));
       if (GreenButton(d, st, q0, q1, kit::Button::kA, "HOST THE MATCH")) clicked = kPmHost;
-      // An experimental tick rate chosen: said in a red strip over the picture's foot, whatever row is chosen (13 Nov
-      // 2026: "a warning disclaimer ... when Tick Rate is changed to 75 or 100").
-      if (pm_tick_ > 60) {
-        // Red words on the page's own paper (the first strip was red with pale words; the words alone in red read
-        // better, and "Not tested." went: the same day).
-        const ImVec2 w0(band.x, band.y - st(44)), w1(hb.x, band.y);
-        d->AddRectFilled(w0, w1, IM_COL32(241, 234, 211, 244));
-        d->AddRectFilled(w0, ImVec2(w0.x + st(5), w1.y), kit::kStamp);
-        const ImU32 red = IM_COL32(168, 30, 22, 255);
-        kit::Spaced(d, f.ui_bold, st(9), ImVec2(w0.x + st(20), w0.y + st(7)), red,
-                    fmt::format("WARNING \xC2\xB7 {} HZ IS EXPERIMENTAL", pm_tick_), st(1.5f));
-        kit::Wrapped(d, f.ui_bold, st(10.5f), ImVec2(w0.x + st(20), w0.y + st(21)), red,
-                     "Weapons, vehicles and timers may behave oddly, your PC and every player's connection work harder, "
-                     "and players on older versions cannot join. Use 60 Hz for a normal match.",
-                     w1.x - w0.x - st(40));
-      }
     }
     if (in.accept) clicked = pm_row_;
     if (clicked >= 0) {

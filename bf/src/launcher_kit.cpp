@@ -92,7 +92,17 @@ float TextWidth(ImFont* f, float size, const std::string& t) {
   return f->CalcTextSizeA(size, FLT_MAX, 0, t.c_str()).x;
 }
 
+// 13 Nov 2026 ("increase size of that small font scale across all menu so it's more readable"): the typed font's
+// small sizes (captions, values, eyebrows: up to 10 of the 720 line stage's units) are drawn a quarter larger,
+// everywhere it is measured or drawn through these functions, so what is laid out by its width still fits it.
+float TypedScale(ImFont* f, float size) {
+  if (!f || f != g_fonts.typed) return 1.0f;
+  const float unit = std::max(1.0f, ImGui::GetIO().DisplaySize.y / 720.0f);
+  return size / unit <= 10.0f ? 1.25f : 1.0f;
+}
+
 float SpacedWidth(ImFont* f, float size, const std::string& t, float track) {
+  if (const float k = TypedScale(f, size); k != 1.0f) size *= k, track *= k;
   if (track == 0) return TextWidth(f, size, t) * (f == g_fonts.stencil ? g_fonts.stencil_squeeze : 1.0f);
   float w = 0;
   for (size_t i = 0; i < t.size();) {
@@ -106,6 +116,10 @@ float SpacedWidth(ImFont* f, float size, const std::string& t, float track) {
 
 float Spaced(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const std::string& t, float track) {
   if (!f || t.empty()) return 0;
+  if (const float k = TypedScale(f, size); k != 1.0f) {
+    at.y -= size * (k - 1.0f) * 0.6f;  // about the line it was set on
+    size *= k, track *= k;
+  }
   const int start = d->VtxBuffer.Size;
   float x = at.x;
   if (track == 0) {
@@ -148,12 +162,14 @@ float Heading(ImDrawList* d, float size, ImVec2 at, ImU32 col, const std::string
 
 float WrappedHeight(ImFont* f, float size, const std::string& t, float wrap) {
   if (!f) return 0;
+  size *= TypedScale(f, size);
   return f->CalcTextSizeA(size, FLT_MAX, wrap, t.c_str()).y;
 }
 
 float Wrapped(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const std::string& t, float wrap) {
   if (!f) return 0;
-  d->AddText(f, size, at, col, t.c_str(), nullptr, wrap);
+  const float k = TypedScale(f, size);
+  d->AddText(f, size * k, at, col, t.c_str(), nullptr, wrap);
   return WrappedHeight(f, size, t, wrap);
 }
 
