@@ -23,6 +23,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -2498,11 +2499,55 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
 
   // A runtime setting as the menu sees it: the saved value, else the runtime's own.
+  // 13 Nov 2026 ("create buttons in the Graphics submenu on the bottom for Apply settings, and Restore defaults, that
+  // way changes in Graphics are only made if applied"): while the Settings page shows Graphics (defer_graphics_), a
+  // row's change is kept aside (gfx_pending_) and the rows read it back, so the page shows what Apply would set;
+  // Apply makes the changes, leaving the page without it drops them. gfx_cvars_: every setting the Graphics rows
+  // read, for Restore defaults.
+  bool defer_graphics_ = false;
+  std::map<std::string, std::string> gfx_pending_;
+  std::set<std::string> gfx_cvars_;
+  // The Settings page draws Keybinds and Remap gamepad as buttons over the Controls rows (the same day): the two
+  // rows that opened them are left out of the list there.
+  bool controls_buttons_ = false;
   std::string Cvar(const std::string& name) {
+    if (defer_graphics_) {
+      gfx_cvars_.insert(name);
+      if (auto it = gfx_pending_.find(name); it != gfx_pending_.end()) return it->second;
+    }
     const std::string saved = settings_.Get("cvar." + name, "");
     return saved.empty() ? rex::cvar::GetFlagByName(name) : saved;
   }
+  void ApplyGraphicsPending() {
+    const std::map<std::string, std::string> changes = std::move(gfx_pending_);
+    gfx_pending_.clear();
+    const bool was = defer_graphics_;
+    defer_graphics_ = false;
+    for (const auto& [name, value] : changes) {
+      REXLOG_INFO("BF settings: GRAPHICS applied {} = {}", name, value);
+      SetCvar(name, value);
+    }
+    defer_graphics_ = was;
+  }
+  // Every Graphics setting back to the game's own default, kept aside like any change: Apply makes it so.
+  void RestoreGraphicsDefaults() {
+    for (const std::string& name : gfx_cvars_) {
+      const auto* info = rex::cvar::GetFlagInfo(name);
+      if (!info) continue;
+      const std::string saved = settings_.Get("cvar." + name, "");
+      const std::string now = saved.empty() ? rex::cvar::GetFlagByName(name) : saved;
+      if (now != info->default_value) gfx_pending_[name] = info->default_value;
+      else gfx_pending_.erase(name);
+    }
+    REXLOG_INFO("BF settings: GRAPHICS defaults shown ({} settings differ), waiting for Apply", gfx_pending_.size());
+  }
   void SetCvar(const std::string& name, const std::string& value) {
+    if (defer_graphics_) {
+      const std::string saved = settings_.Get("cvar." + name, "");
+      if (value == (saved.empty() ? rex::cvar::GetFlagByName(name) : saved)) gfx_pending_.erase(name);
+      else gfx_pending_[name] = value;
+      return;
+    }
     settings_.values["cvar." + name] = value;
     settings_.Save();
     rex::cvar::SetFlagByName(name, value);
@@ -2911,7 +2956,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // one becomes FXAA: ApplyStartupDisplaySettings); frame generation went with them (it needs DLSS or FSR 3.1).
     // 13 Nov 2026 (this fork): SMAA is offered again beside FXAA, at the reference implementation's four presets
     // (NativeXRenderer has had SMAA 1x since D41; the row offered only FXAA since 9 Nov).
-    const bool temporal = TemporalUpscalerOn();
+    const std::string temporal_now = Cvar("bf_temporal");  // (through Cvar: a change waiting for Apply shows)
+    const bool temporal = temporal_now == "fsr4" || temporal_now == "fsr" || temporal_now == "dlss" ||
+                          temporal_now == "xess" || temporal_now == "taa";
     SettingRow aa_row = Choice("Image", "Antialiasing",
                           "Smooths jagged edges. FXAA is the lightest and softens the whole picture a little. SMAA "
                           "finds the edges and smooths only those, so textures and text stay sharp: Low and Medium "
@@ -3322,12 +3369,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     SettingRow remap{"Mapping", "Button remapping", "Choose what each controller button does in the game."};
     remap.value = ">";
     remap.activate = [this] { sub_ = kSubRemap, row_ = 0; };
-    rows.push_back(remap);
+    if (!controls_buttons_) rows.push_back(remap);
     SettingRow keys{"Mapping", "Keyboard bindings",
                     "The keys and mouse buttons for each of the game's actions, when Keyboard & mouse is on."};
     keys.value = ">";
     keys.activate = [this] { sub_ = kSubKeys, row_ = 0; };
-    rows.push_back(keys);
+    if (!controls_buttons_) rows.push_back(keys);
     SettingRow metrics_key{"Keys while playing", "Performance metrics", "F2 switches the performance metrics while you play."};
     metrics_key.value = "F2";
     rows.push_back(metrics_key);

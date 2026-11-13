@@ -353,12 +353,29 @@
     }
     tab_ = std::clamp(tab_, 0, int(kTabCount) - 1);
     const bool graphics = tab_ == kTabGraphics && sub_ == kSubNone;
+    const bool controls = tab_ == kTabControls && sub_ == kSubNone;
+    // Graphics changes wait for Apply on this page, and Controls has its two pages as buttons (game_menu.cpp, at
+    // Cvar): both only while this page draws.
+    struct PageFlags {
+      bool& defer;
+      bool& buttons;
+      ~PageFlags() { defer = false, buttons = false; }
+    } page_flags{defer_graphics_, controls_buttons_};
+    defer_graphics_ = graphics, controls_buttons_ = true;
+    if (!graphics && !gfx_pending_.empty()) {
+      REXLOG_INFO("BF settings: GRAPHICS left with {} changes not applied: dropped", gfx_pending_.size());
+      gfx_pending_.clear();
+    }
     const std::string last_preset = settings_.Get("graphics_preset", "");
+    const bool preset_back = graphics && CurrentGraphicsPreset() < 0 && !last_preset.empty();
     // ---- the prompts (first: a click on one is that button's press for the rest of the frame)
     std::vector<Cue> cues = {{kit::Button::kA, graphics && on_preset_strip_ ? "USE THIS PRESET" : "CHANGE"},
                              {kit::Button::kLB, "SECTION"},
                              {kit::Button::kRB, "SECTION"}};
-    if (graphics && CurrentGraphicsPreset() < 0 && !last_preset.empty()) cues.push_back({kit::Button::kX, "BACK TO " + Upper(last_preset)});
+    if (preset_back) cues.push_back({kit::Button::kX, "BACK TO " + Upper(last_preset)});
+    if (graphics) cues.push_back({kit::Button::kY, "APPLY"});
+    if (graphics && !preset_back) cues.push_back({kit::Button::kX, "RESTORE DEFAULTS"});
+    if (controls) cues.push_back({kit::Button::kX, "KEYBINDS"}), cues.push_back({kit::Button::kY, "REMAP GAMEPAD"});
     if (restart) cues.push_back({kit::Button::kStart, "RESTART TO APPLY", "P", true});
     cues.push_back({kit::Button::kB, "BACK"});
     Prompts(d, st, st.P(48, 662), cues, in, 15);
@@ -417,10 +434,40 @@
                                : "Not known");
       pc_row(py + st(72), "Preset chosen for you", chosen);
     }
-    // ---- the rows and the help card
-    SettingsBody(d, io, st, in, st.P(288, 167), st.P(907, 640), st.P(928, 167), st.P(1232, 640));
+    // ---- the rows and the help card, with the page's own buttons: dark, as the prompts under the page
+    ImVec2 pa = st.P(288, 167), pb = st.P(907, 640);
+    auto dark_button = [&](ImVec2 a, ImVec2 b, const std::string& label, bool lit) {
+      const bool over = ImGui::IsMouseHoveringRect(a, b);
+      d->AddRectFilled(a, b, over ? IM_COL32(34, 38, 28, 240) : IM_COL32(13, 15, 11, 230));
+      d->AddRect(a, b, lit ? kit::kStamp : IM_COL32(241, 234, 211, over ? 110 : 50), 0, 0, lit ? st(1.5f) : 1.0f);
+      const float size = st(10), w = kit::SpacedWidth(f.ui_bold, size, label, st(1.5f));
+      kit::Spaced(d, f.ui_bold, size, ImVec2((a.x + b.x - w) * 0.5f, a.y + (b.y - a.y - size * 1.45f) * 0.5f),
+                  lit || over ? kit::kCream : kit::kKhaki, label, st(1.5f));
+      return over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && capture_.empty();
+    };
+    bool open_keys = false, open_remap = false, apply = false, defaults = false;
+    if (controls) {  // Keybinds and Remap gamepad over the rows
+      const float h = st(30), gap = st(8), w = (pb.x - pa.x - gap) * 0.5f;
+      open_keys = dark_button(pa, ImVec2(pa.x + w, pa.y + h), "KEYBINDS", false);
+      open_remap = dark_button(ImVec2(pa.x + w + gap, pa.y), ImVec2(pb.x, pa.y + h), "REMAP GAMEPAD", false);
+      pa.y += h + st(8);
+    }
+    if (graphics) {  // Apply settings and Restore defaults under the rows
+      const float h = st(30), gap = st(8), w = (pb.x - pa.x - gap) * 0.5f;
+      pb.y -= h + st(8);
+      const size_t waiting = gfx_pending_.size();
+      apply = dark_button(ImVec2(pa.x, pb.y + st(8)), ImVec2(pa.x + w, pb.y + st(8) + h),
+                          waiting ? fmt::format("APPLY SETTINGS ({})", waiting) : std::string("APPLY SETTINGS"), waiting > 0);
+      defaults = dark_button(ImVec2(pa.x + w + gap, pb.y + st(8)), ImVec2(pb.x, pb.y + st(8) + h), "RESTORE DEFAULTS", false);
+    }
+    SettingsBody(d, io, st, in, pa, pb, st.P(928, 167), st.P(1232, 640));
     // ---- the actions
     if (edit || in.view) return BeginAccount(false);
-    if (in.x) PresetBack();
+    if (controls && (open_keys || in.x)) sub_ = kSubKeys, row_ = 0, scroll_ = 0;
+    else if (controls && (open_remap || in.y)) sub_ = kSubRemap, row_ = 0, scroll_ = 0;
+    if (graphics && (apply || in.y)) ApplyGraphicsPending();
+    else if (graphics && (defaults || (in.x && !preset_back))) RestoreGraphicsDefaults();
+    else if (in.x && preset_back) PresetBack();
+
     if (in.back && !SubPageBack()) BackFromSettings();
   }
