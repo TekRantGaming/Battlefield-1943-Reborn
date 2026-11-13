@@ -2191,7 +2191,9 @@
   static constexpr const char* kPmMapKeys[] = {"wake", "guadalcanal", "iwo", "coral"};
   static constexpr const char* kPmMapNames[] = {"WAKE ISLAND", "GUADALCANAL", "IWO JIMA", "CORAL SEA", "ALL FOUR IN TURN"};
   static constexpr const char* kPmMapTitles[] = {"Wake Island", "Guadalcanal", "Iwo Jima", "Coral Sea"};
-  static constexpr int kPmMap = 0, kPmPort = 1, kPmHost = 2, kPmRows = 3;
+  // 13 Nov 2026: Network type (Online, or LAN: the match's own backend, this network's players, no internet).
+  static constexpr int kPmMap = 0, kPmNet = 1, kPmPort = 2, kPmHost = 3, kPmRows = 4;
+  bool pm_lan_ = false;
   int pm_row_ = 0, pm_map_ = 0;
   bool pm_upnp_ = true;
   bool pm_hosting_ = false;  // our server runs for this game
@@ -2204,10 +2206,12 @@
   void LoadPrivateMatchChoices() {
     pm_map_ = std::clamp(std::atoi(settings_.Get("private_match_map", "0").c_str()), 0, 4);
     pm_upnp_ = settings_.Get("private_match_upnp", "1") != "0";
+    pm_lan_ = settings_.Get("private_match_lan", "0") == "1";
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
     settings_.values["private_match_upnp"] = pm_upnp_ ? "1" : "0";
+    settings_.values["private_match_lan"] = pm_lan_ ? "1" : "0";
     settings_.Save();
   }
 
@@ -2216,6 +2220,17 @@
     if (pm_map_ < 4) o.maps = {kPmMapKeys[pm_map_]};
     else o.maps = {"wake", "guadalcanal", "iwo", "coral"};
     o.upnp = pm_upnp_;
+    o.lan = pm_lan_;
+    if (pm_lan_) {
+      // The game signs in to the match's own backend, which it can only choose before it starts (once it runs it is
+      // signed in to the main one).
+      if (!pre_game_ && own_backend_ != "127.0.0.1") {
+        pm_error_ = "A LAN match is started from here before the game itself runs: close the game, start it again and "
+                    "host the LAN match first.";
+        return;
+      }
+      UseOwnBackend("127.0.0.1");
+    }
     const std::string me = settings_.Get("player_name", "");
     o.name = me.empty() ? "Private match" : me + "'s match";
     pm_error_.clear();
@@ -2238,7 +2253,11 @@
   // The address friends give Direct connect: the one the backend saw our server register from, and its port.
   void CopyPrivateAddress() {
     if (pm_status_.address.empty()) return;
-    ImGui::SetClipboardText(pm_status_.address.c_str());
+    // A LAN match: this PC's address on its network (the match's own reads 127.0.0.1 here).
+    std::string address = pm_status_.address;
+    if (pm_lan_)
+      if (const std::string lan = bf1943::LanAddress(); !lan.empty()) address = lan;
+    ImGui::SetClipboardText(address.c_str());
     pm_copied_at_ = ImGui::GetTime();
     REXLOG_INFO("BF private match: the address copied for friends");
   }
@@ -2319,13 +2338,14 @@
     if (in.down) pm_row_ = (pm_row_ + 1) % kPmRows;
     auto change = [&](int row, int step) {
       if (row == kPmMap) pm_map_ = (pm_map_ + 5 + step) % 5;
-      if (row == kPmPort) pm_upnp_ = !pm_upnp_;
+      if (row == kPmNet) pm_lan_ = !pm_lan_;
+      if (row == kPmPort && !pm_lan_) pm_upnp_ = !pm_upnp_;
       SavePrivateMatchChoices();
     };
     if (in.left && pm_row_ != kPmHost) change(pm_row_, -1);
     if (in.right && pm_row_ != kPmHost) change(pm_row_, 1);
     // ---- the rows, as the main menu's
-    static constexpr const char* kTitles[] = {"MAP", "ROUTER PORT", "HOST THE MATCH"};
+    static constexpr const char* kTitles[] = {"MAP", "NETWORK TYPE", "ROUTER PORT", "HOST THE MATCH"};
     int clicked = -1;
     float y = rows_y;
     for (int i = 0; i < kPmRows; ++i) {
@@ -2349,8 +2369,10 @@
       if (i == kPmHost) {
         if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(r1.x - st(18) - st(20), r0.y + h * 0.5f), st(20));
       } else {  // its value, typed at the right (between arrows on the chosen row)
-        std::string value = i == kPmMap ? std::string(kPmMapNames[pm_map_])
-                                        : std::string(pm_upnp_ ? "OPEN IT FOR ME" : "I OPEN IT MYSELF");
+        std::string value = i == kPmMap   ? std::string(kPmMapNames[pm_map_])
+                            : i == kPmNet ? std::string(pm_lan_ ? "LAN" : "ONLINE")
+                            : pm_lan_     ? std::string("NOT NEEDED")
+                                          : std::string(pm_upnp_ ? "OPEN IT FOR ME" : "I OPEN IT MYSELF");
         if (sel) value = "<  " + value + "  >";
         const float vw = kit::SpacedWidth(f.typed, st(7.5f), value, st(1.5f));
         kit::Spaced(d, f.typed, st(7.5f), ImVec2(r1.x - st(18) - vw, r0.y + h * 0.5f - st(5)),
@@ -2362,6 +2384,9 @@
     {
       static constexpr const char* kAbout[] = {
           "The map your match plays. All four in turn: the next map after each round, as on the official servers.",
+          "Online: friends anywhere join through the main servers. LAN: for the PCs of your own network, with no "
+          "internet needed; your PC answers the sign-in and the match list itself. Friends type your PC's network "
+          "address in Direct connect (the pause copies it).",
           "Friends outside your home reach your match on UDP 18300. Open it for me asks your router (UPnP); if the "
           "router says no, open that port on it yourself.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "

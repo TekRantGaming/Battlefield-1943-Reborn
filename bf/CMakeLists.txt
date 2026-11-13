@@ -43,6 +43,7 @@ set(BF1943_SOURCES
     src/native_input.cpp
     src/tick_rate.cpp
     src/flash_mouse.cpp
+    src/lan_backend.cpp
     src/bf_font.cpp
     src/bf_list_shot.cpp
     src/display_modes.cpp

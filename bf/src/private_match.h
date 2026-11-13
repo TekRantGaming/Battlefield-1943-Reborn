@@ -14,6 +14,9 @@ struct PrivateMatchOptions {
   std::vector<std::string> maps;  // in turn, by key: wake, guadalcanal, iwo, coral
   bool upnp = true;               // ask the router to forward the match's port (UPnP)
   std::string name;               // its name in the backend's list
+  // 13 Nov 2026, Network type LAN: the match's server answers the sign-in and matchmaking itself (lan_backend.cpp),
+  // for this network's players, with no internet: nothing is registered with the main backend, no router is asked.
+  bool lan = false;
 };
 
 struct PrivateMatchStatus {
@@ -31,6 +34,9 @@ void NotePrivateMatchPaths(const std::filesystem::path& game, const std::filesys
 bool StartPrivateMatch(const PrivateMatchOptions& options, std::string* why);
 void StopPrivateMatch();
 PrivateMatchStatus ReadPrivateMatchStatus();
+
+// This PC's address on its network (the one other PCs of the network reach it at), or empty when it has none.
+std::string LanAddress();
 
 // A match this PC hosts: the backend gives joiners the address it saw the host register from, this PC's own public
 // one, and many home routers do not loop a PC's packets to its own public address back in. Our socket calls

@@ -965,6 +965,7 @@ void Serve() {
 }  // namespace
 
 namespace bf1943 {
+bool StartLanBackend();  // lan_backend.cpp: a LAN match's own backend (bf_lan_backend), before this host registers
 // From the dedicated server's tick (server_rotation.cpp): our GameManager host starts once the server runs its level,
 // when bf_gm_backend is set.
 void GmHostStart() {
@@ -978,6 +979,7 @@ void GmHostStart() {
 #endif
     REXLOG_INFO("BF GM host: starting (backend {}, players reach {}, {})", REXCVAR_GET(bf_gm_backend),
                 REXCVAR_GET(bf_gm_listen), REXCVAR_GET(bf_gm_listed) ? "listed" : "not listed");
+    StartLanBackend();
     std::thread(Serve).detach();
   });
 }
