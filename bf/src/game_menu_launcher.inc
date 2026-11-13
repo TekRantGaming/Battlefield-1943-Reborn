@@ -2320,6 +2320,10 @@
     sv.address = pm_status_.address;
     sv.map = pm_map_ < 4 ? kPmMapTitles[pm_map_] : "Wake Island";
     sv.max_players = 24;
+    // Its tick rate is the one it was started at. (Left unsaid, Join took it for a 30 Hz server and set this game to
+    // 30 against a 60 Hz match: 13 Nov 2026, "I cannot walk at 60Hz anymore, and player partially falls through
+    // carrier".)
+    sv.tick_hz = pm_tick_;
     pm_joining_ = true;
     REXLOG_INFO("BF private match: registered as game {}; joining it", sv.gid);
     Join(sv);
