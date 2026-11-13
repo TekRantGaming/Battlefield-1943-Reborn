@@ -13,11 +13,28 @@
 // other players are not affected (the camera manager is the client's). The first person weapon has a projection of its
 // own (RenderFov, 30 degrees), which this leaves alone.
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+#include <string>
+#include <fmt/format.h>
+#include <rex/logging.h>
+#include <set>
+#include <vector>
+#include <mutex>
+#include <map>
 #include <atomic>
 #include <chrono>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include <rex/cvar.h>
@@ -206,11 +223,320 @@ REX_HOOK_RAW(sub_8241B598) {
 // vehicle seat's view. Mapped the same way as the world's camera after the original, so the hands and the weapon
 // widen with it and keep their place in the picture; not through a scope (WeaponMapWeight).
 REX_EXTERN(__imp__sub_821FAAF0);
+REX_EXTERN(sub_821EE7F0);  // (soldier, 0): the weapon in its hands
+REX_EXTERN(sub_825835B0);  // (weapon): its aiming state
+REX_EXTERN(sub_821F9318);  // (that): how far the zoom is in, 0 to 1
+// 0.4.2 ("a toggle-able option ... for SMG ADS being either Zoom In or Iron Sight ... use the SMG model's own sights
+// when zooming like the Rifles and Pistols do"): the game's zoom with an SMG only pulls the gun in (its own zoom
+// animation). With bf_smg_sights the first person weapon's picture is moved in the view while the zoom is in, by the
+// zoom's own blend, so the gun's sights come to the middle of the view: a move in the view's space the renderer
+// applies to the weapon's draws (NativeXRenderer SetWeaponLayerMove). The view only: the aim, the spread and the
+// server see nothing of it. The move is in metres and degrees, x right, y up, z forward.
+REXCVAR_DEFINE_BOOL(bf_smg_sights, false, "BF1943", "SMG zoom: the gun's own sights brought to the eye (Iron Sight) instead of the game's zoom in");
+// Each SMG's own move: "x,y,z,yaw,pitch,roll" (metres right, up, forward; degrees). The player lines them up with
+// bf_smg_sight_tune ("If you have a way to give me either slider or transpose control, I could line it up manually
+// faster"): while aiming with an SMG, the arrow keys move the gun left, right, up and down, Page Up and Page Down
+// forward and back, the number pad's 4 6 turn it left and right, 8 2 up and down, 7 9 roll it, and 0 puts the built in
+// values back; Shift makes the steps five times larger, Ctrl five times smaller. The values show on the screen
+// (game_menu.cpp draws SmgSightTuneText) and are saved for that gun.
+REXCVAR_DEFINE_STRING(bf_smg_sight_us, "-0.0725,0.0185,0.15,0,0,0", "BF1943", "Iron Sight: the Thompson's move, x,y,z,yaw,pitch,roll");
+REXCVAR_DEFINE_STRING(bf_smg_sight_jp, "-0.0725,0.0185,0.15,0,0,0", "BF1943", "Iron Sight: the Type 100's move, x,y,z,yaw,pitch,roll");
+REXCVAR_DEFINE_BOOL(bf_smg_sight_tune, false, "BF1943", "Iron Sight: line the SMG's sights up with the keyboard while aiming (arrows, Page Up/Down, number pad)");
+namespace {
+std::mutex g_tune_mutex;
+std::string g_tune_text;          // what the screen shows while tuning (empty: nothing)
+std::string g_tune_save_name, g_tune_save_value;  // a changed setting to save
+std::chrono::steady_clock::time_point g_tune_text_at{};
+}  // namespace
+namespace bf1943 {
+// game_menu.cpp, each frame: the tuning's line for the screen, and a changed setting to save (true once).
+std::string SmgSightTuneText() {
+  std::lock_guard lock(g_tune_mutex);
+  if (std::chrono::steady_clock::now() - g_tune_text_at > std::chrono::milliseconds(300)) return "";
+  return g_tune_text;
+}
+bool SmgSightTakeSave(std::string& name, std::string& value) {
+  std::lock_guard lock(g_tune_mutex);
+  if (g_tune_save_name.empty()) return false;
+  name = std::move(g_tune_save_name), value = std::move(g_tune_save_value);
+  g_tune_save_name.clear();
+  return true;
+}
+}  // namespace bf1943
+namespace {
+// The held weapon's name (SoldierWeaponData: its name's first and last characters at +0x0C and +0x10).
+std::string WeaponName(const uint8_t* base, uint32_t data) {
+  auto word = [&](uint32_t at) { return uint32_t(base[at]) << 24 | base[at + 1] << 16 | base[at + 2] << 8 | base[at + 3]; };
+  const uint32_t a = word(data + 0x0C), b = word(data + 0x10);
+  if (!a || b <= a || b - a > 48) return "";
+  return std::string(reinterpret_cast<const char*>(base + a), b - a);
+}
+// The zoom's blur ("Need to remove the zoom blur when using Iron sight"): a zoom level's ForegroundBlurFilter (its data
+// + 0x30: 0 none, 2 a 5 pixel Gaussian over what is near, the gun) is none while the SMG's sights are in use, and the
+// game's own again when the setting is off. The levels: the weapon data's aiming data (+0xE4), its array at +0x58,
+// its count at +0x50.
+std::mutex g_blur_mutex;
+std::map<uint32_t, uint32_t> g_blur_own;  // a level's filter word's address -> the game's own value
+void ZoomBlur(uint8_t* base, uint32_t data, bool off) {
+  auto word = [&](uint32_t at) { return uint32_t(base[at]) << 24 | base[at + 1] << 16 | base[at + 2] << 8 | base[at + 3]; };
+  auto store = [&](uint32_t at, uint32_t v) {
+    base[at] = uint8_t(v >> 24), base[at + 1] = uint8_t(v >> 16), base[at + 2] = uint8_t(v >> 8), base[at + 3] = uint8_t(v);
+  };
+  std::lock_guard lock(g_blur_mutex);
+  if (!off) {
+    for (const auto& [at, own] : g_blur_own) store(at, own);
+    g_blur_own.clear();
+    return;
+  }
+  const uint32_t aiming = data ? word(data + 0xE4) : 0;
+  if (aiming < 0x10000000 || aiming > 0xF0000000) return;
+  const uint32_t count = word(aiming + 0x50), array = word(aiming + 0x58);
+  if (count > 4 || array < 0x10000000 || array > 0xF0000000) return;
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t level = word(array + i * 4);
+    if (level < 0x10000000 || level > 0xF0000000) continue;
+    const uint32_t filter = word(level + 0x30);
+    if (filter == 0 || filter > 8) continue;  // none already, or not a filter
+    g_blur_own.emplace(level + 0x30, filter);
+    store(level + 0x30, 0);
+    REXLOG_INFO("BF SMG sights: zoom level {}'s foreground blur (filter {}) off while the sights are used", i, filter);
+  }
+}
+void SmgSights(PPCContext& ctx, uint8_t* base, uint32_t soldier, double fov_degrees) {
+  if (!REXCVAR_GET(bf_smg_sights)) {
+    if (!g_blur_own.empty()) ZoomBlur(base, 0, false);
+    return;
+  }
+  if (!soldier) return;
+  PPCContext c = ctx;
+  c.r3.u64 = soldier, c.r4.s64 = 0;
+  sub_821EE7F0(c, base);
+  const uint32_t weapon = c.r3.u32;
+  if (!weapon) return;
+  const uint32_t data = uint32_t(base[weapon + 4]) << 24 | base[weapon + 5] << 16 | base[weapon + 6] << 8 | base[weapon + 7];
+  if (!data) return;
+  sub_825835B0(c, base);
+  sub_821F9318(c, base);
+  const double blend = std::clamp(c.f1.f64, 0.0, 1.0);
+  static uint32_t last_data = 0;
+  static bool smg = false;
+  if (data != last_data) {
+    last_data = data;
+    std::string name = WeaponName(base, data);
+    std::string lower = name;
+    for (char& ch : lower) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+    smg = lower.find("thompson") != std::string::npos || lower.find("100") != std::string::npos;
+    REXLOG_INFO("BF SMG sights: holding {} ({})", name.empty() ? "a weapon without a name" : name, smg ? "an SMG" : "not an SMG");
+  }
+  if (smg && g_blur_own.empty()) ZoomBlur(base, data, true);
+  {
+    static double said = -1;
+    if (std::abs(blend - said) > 0.4) {
+      said = blend;
+      REXLOG_INFO("BF SMG sights: zoom blend {:.2f} ({})", blend, smg ? "moving the gun" : "not an SMG");
+    }
+  }
+  if (!smg) return;
+  static bool japanese = false;
+  static uint32_t pose_data = 0;
+  if (pose_data != data) {
+    pose_data = data;
+    std::string lower = WeaponName(base, data);
+    for (char& ch : lower) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+    japanese = lower.find("thompson") == std::string::npos;
+  }
+  const char* cvar_name = japanese ? "bf_smg_sight_jp" : "bf_smg_sight_us";
+  double v[6] = {0, 0, 0, 0, 0, 0};
+  {
+    const std::string text = japanese ? REXCVAR_GET(bf_smg_sight_jp) : REXCVAR_GET(bf_smg_sight_us);
+    std::sscanf(text.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+  }
+#if defined(_WIN32)
+  if (REXCVAR_GET(bf_smg_sight_tune) && blend > 0.5) {
+    // One step at a press, then repeated while the key is held (from 0.35 s, every 40 ms).
+    static std::map<int, std::chrono::steady_clock::time_point> next;
+    const auto now = std::chrono::steady_clock::now();
+    auto pressed = [&](int vk) {
+      if (!(GetAsyncKeyState(vk) & 0x8000)) {
+        next.erase(vk);
+        return false;
+      }
+      auto it = next.find(vk);
+      if (it == next.end()) {
+        next[vk] = now + std::chrono::milliseconds(350);
+        return true;
+      }
+      if (now < it->second) return false;
+      it->second = now + std::chrono::milliseconds(40);
+      return true;
+    };
+    const double scale = (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 5.0 : (GetAsyncKeyState(VK_CONTROL) & 0x8000) ? 0.2 : 1.0;
+    const double step = 0.001 * scale, turn = 0.25 * scale;
+    bool changed = false;
+    struct Key {
+      int vk, index;
+      double by;
+    };
+    const Key keys[] = {{VK_LEFT, 0, -step},   {VK_RIGHT, 0, step},   {VK_UP, 1, step},      {VK_DOWN, 1, -step},
+                        {VK_PRIOR, 2, step},   {VK_NEXT, 2, -step},   {VK_NUMPAD4, 3, -turn}, {VK_NUMPAD6, 3, turn},
+                        {VK_NUMPAD8, 4, turn}, {VK_NUMPAD2, 4, -turn}, {VK_NUMPAD7, 5, -turn}, {VK_NUMPAD9, 5, turn}};
+    for (const Key& key : keys)
+      if (pressed(key.vk)) v[key.index] += key.by, changed = true;
+    if (pressed(VK_NUMPAD0)) {
+      if (const auto* info = rex::cvar::GetFlagInfo(cvar_name))
+        std::sscanf(info->default_value.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+      changed = true;
+    }
+    const std::string value = fmt::format("{:.4f},{:.4f},{:.4f},{:.2f},{:.2f},{:.2f}", v[0], v[1], v[2], v[3], v[4], v[5]);
+    if (changed) rex::cvar::SetFlagByName(cvar_name, value);
+    std::lock_guard lock(g_tune_mutex);
+    g_tune_text = fmt::format("SIGHT TUNING  {}   right {:+.4f}  up {:+.4f}  forward {:+.4f} m   turn {:+.2f}  tilt {:+.2f}  roll {:+.2f} deg\n"
+                              "Arrows: left/right/up/down   PgUp/PgDn: forward/back   Numpad 4 6: turn   8 2: tilt   7 9: roll   0: reset   Shift x5, Ctrl /5",
+                              japanese ? "Type 100" : "Thompson", v[0], v[1], v[2], v[3], v[4], v[5]);
+    g_tune_text_at = now;
+    if (changed) g_tune_save_name = cvar_name, g_tune_save_value = value;
+  }
+#endif
+  if (blend <= 0.001) return;
+  const double k = blend * blend * (3.0 - 2.0 * blend);  // eased
+  const double deg = 3.14159265358979 / 180.0;
+  const double yaw = v[3] * deg * k, pitch = v[4] * deg * k, roll = v[5] * deg * k;
+  const double cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch), cr = std::cos(roll), sr = std::sin(roll);
+  // roll (about z) x pitch (about x) x yaw (about y), then the shift
+  const double ry[9] = {cy, 0, sy, 0, 1, 0, -sy, 0, cy};
+  const double rx[9] = {1, 0, 0, 0, cp, -sp, 0, sp, cp};
+  const double rz[9] = {cr, -sr, 0, sr, cr, 0, 0, 0, 1};
+  auto mul3 = [](const double* l, const double* r, double* o) {
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 3; ++j) o[i * 3 + j] = l[i * 3] * r[j] + l[i * 3 + 1] * r[3 + j] + l[i * 3 + 2] * r[6 + j];
+  };
+  double t[9], rot[9];
+  mul3(rx, ry, t), mul3(rz, t, rot);
+  const float move[16] = {float(rot[0]), float(rot[1]), float(rot[2]), float(v[0] * k),
+                          float(rot[3]), float(rot[4]), float(rot[5]), float(v[1] * k),
+                          float(rot[6]), float(rot[7]), float(rot[8]), float(v[2] * k),
+                          0, 0, 0, 1};
+  native_x_renderer::SetWeaponLayerMove(move, float(fov_degrees));
+}
+}  // namespace
 REX_HOOK_RAW(sub_821FAAF0) {
+  const uint32_t soldier = ctx.r3.u32;
   __imp__sub_821FAAF0(ctx, base);
+  const bool first_person_weapon = ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0;
+#if defined(BF_DEV_TOOLS)
+  // BF_DEV_WEAPON=1 (the SMG's iron sights, 0.4.2): the held weapon's data (SoldierWeaponData, *(weapon + 4)) logged
+  // once for each weapon, as words and floats; BF_DEV_WEAPON_POKE=<byte offset>:<add> adds to one float of it while
+  // the zoom is in (times the zoom's blend), to find the fields that place the first person mesh.
+  if (ctx.f1.f64 > 0.0 && soldier) {
+    static const bool on = std::getenv("BF_DEV_WEAPON") != nullptr;
+    if (on) {
+      const double answer = ctx.f1.f64;
+      PPCContext c = ctx;
+      c.r3.u64 = soldier, c.r4.s64 = 0;
+      sub_821EE7F0(c, base);
+      const uint32_t weapon = c.r3.u32;
+      const uint32_t data = weapon ? uint32_t(base[weapon + 4]) << 24 | base[weapon + 5] << 16 | base[weapon + 6] << 8 | base[weapon + 7] : 0;
+      double blend = 0;
+      if (weapon) {
+        sub_825835B0(c, base);
+        sub_821F9318(c, base);
+        blend = c.f1.f64;
+      }
+      auto word = [&](uint32_t at) { return uint32_t(base[at]) << 24 | base[at + 1] << 16 | base[at + 2] << 8 | base[at + 3]; };
+      static std::mutex m;
+      static std::set<uint32_t> seen;
+      static std::map<uint32_t, std::pair<uint32_t, uint32_t>> poked;  // address -> its own bits
+      std::lock_guard lock(m);
+      if (data && seen.insert(data).second) {
+        std::string line;
+        for (uint32_t o = 0; o < 0x180; o += 4) {
+          const uint32_t w = word(data + o);
+          float fl;
+          std::memcpy(&fl, &w, 4);
+          line += fmt::format(" +{:03X}:{:08X}", o, w);
+          if (std::abs(fl) > 1e-4f && std::abs(fl) < 1e4f) line += fmt::format("({:.4g})", fl);
+        }
+        REXLOG_INFO("BF dev weapon: weapon {:08X} data {:08X}:{}", weapon, data, line);
+        // What its pointers lead to (the zoom levels among them): each block of up to 0x120 bytes.
+        for (const uint32_t o : {0x38u, 0x64u, 0x68u, 0xCCu, 0xDCu, 0xE0u, 0xE4u, 0xECu, 0xF8u, 0xFCu}) {
+          const uint32_t at = word(data + o);
+          if (at < 0x10000000 || at > 0xF0000000) continue;
+          std::string block;
+          for (uint32_t k = 0; k < 0x120; k += 4) {
+            const uint32_t w = word(at + k);
+            float fl;
+            std::memcpy(&fl, &w, 4);
+            block += fmt::format(" +{:03X}:{:08X}", k, w);
+            if (std::abs(fl) > 1e-4f && std::abs(fl) < 1e4f) block += fmt::format("({:.4g})", fl);
+          }
+          REXLOG_INFO("BF dev weapon: data+{:03X} -> {:08X}:{}", o, at, block);
+        }
+        // The aiming data's zoom levels (data + 0xE4, its array at +0x58 with its count at +0x50): each level's data.
+        if (const uint32_t aiming = word(data + 0xE4); aiming > 0x10000000 && aiming < 0xF0000000) {
+          const uint32_t count = word(aiming + 0x50), array = word(aiming + 0x58);
+          for (uint32_t i = 0; i < count && i < 4 && array > 0x10000000 && array < 0xF0000000; ++i) {
+            const uint32_t level = word(array + i * 4);
+            if (level < 0x10000000 || level > 0xF0000000) continue;
+            std::string block;
+            for (uint32_t k = 0; k < 0xA0; k += 4) {
+              const uint32_t w = word(level + k);
+              float fl;
+              std::memcpy(&fl, &w, 4);
+              block += fmt::format(" +{:03X}:{:08X}", k, w);
+              if (std::abs(fl) > 1e-4f && std::abs(fl) < 1e4f) block += fmt::format("({:.4g})", fl);
+            }
+            REXLOG_INFO("BF dev weapon: zoom level {} at {:08X}:{}", i, level, block);
+          }
+        }
+      }
+      static double said = -1;
+      if (std::abs(blend - said) > 0.25) { said = blend; REXLOG_INFO("BF dev weapon: data {:08X} zoom blend {:.2f}", data, blend); }
+      // BF_DEV_WEAPON_POKE=<byte offset>:<add>,<byte offset>:<add>...: one after another, 8 s each from the first
+      // zoom, each added to its float while the zoom is in; the others are as the game has them.
+      if (const char* v = std::getenv("BF_DEV_WEAPON_POKE"); v && *v && data) {
+        static std::vector<std::pair<uint32_t, float>> list;
+        static std::chrono::steady_clock::time_point began{};
+        static int active = -2;
+        if (list.empty())
+          for (const char* c = v; *c;) {
+            const uint32_t off = uint32_t(std::strtoul(c, nullptr, 0));
+            const char* colon = std::strchr(c, ':');
+            list.push_back({off, colon ? float(std::atof(colon + 1)) : 0.0f});
+            while (*c && *c != ',') ++c;
+            if (*c) ++c;
+          }
+        if (blend > 0.5 && !began.time_since_epoch().count()) began = std::chrono::steady_clock::now();
+        const int now_at = began.time_since_epoch().count()
+                               ? int(std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count() / 8.0)
+                               : -1;
+        if (now_at != active) {
+          active = now_at;
+          if (active >= 0 && active < int(list.size()))
+            REXLOG_INFO("BF dev weapon: poke {} of {}: +{:03X} by {}", active + 1, list.size(), list[size_t(active)].first, list[size_t(active)].second);
+        }
+        for (int i = 0; i < int(list.size()); ++i) {
+          const uint32_t at = data + list[size_t(i)].first;
+          if (!poked.count(at)) poked[at] = {word(at), 0};
+          float own;
+          std::memcpy(&own, &poked[at].first, 4);
+          const float now = own + (i == active ? list[size_t(i)].second * float(blend) : 0.0f);
+          uint32_t bits;
+          std::memcpy(&bits, &now, 4);
+          base[at] = uint8_t(bits >> 24), base[at + 1] = uint8_t(bits >> 16), base[at + 2] = uint8_t(bits >> 8), base[at + 3] = uint8_t(bits);
+        }
+      }
+      ctx.f1.f64 = answer;
+    }
+  }
+#endif
   // Its answer also says whether the view is a first person one (tick_blend.cpp's free look: a first person view
   // turns in place, an outside one goes round the vehicle).
   bf1943::g_first_person.store(ctx.f1.f64 > 0.0 ? 1 : 0, std::memory_order_relaxed);
   bf1943::g_first_person_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
   if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) ctx.f1.f64 = MappedDegrees(ctx.f1.f64, WeaponMapWeight());
+  if (first_person_weapon) {  // with the field of view the weapon's view gets this frame
+    const double answer = ctx.f1.f64;
+    SmgSights(ctx, base, soldier, answer);
+    ctx.f1.f64 = answer;
+  }
 }

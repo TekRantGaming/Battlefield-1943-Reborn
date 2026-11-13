@@ -418,6 +418,7 @@ class DrawPath {
   uint64_t tick_blended_ = 0, tick_blended_frame_ = 0;  // draws blended since the last log, this frame
   // D154: a draw of a model placed from another camera moved onto the frame's (in the mapped constants).
   void MoveAttached(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, uint8_t* mapped);
+  void MoveWeaponLayer(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, uint8_t* mapped);
   uint64_t attached_moved_ = 0, attached_seen_ = 0;  // since the last log
   Blitter* blit_ = nullptr;  // D155
   double tick_why_[8] = {};

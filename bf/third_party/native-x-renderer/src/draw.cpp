@@ -2,6 +2,7 @@
 
 #include "draw.h"
 
+#include <set>
 #include <native_x_renderer/native_x_renderer.h>
 
 #include "blit.h"
@@ -1397,6 +1398,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     }
     // D154: a model placed from another camera than the frame's, moved onto it (SetAttachedCameraMove).
     if (!stage) MoveAttached(reinterpret_cast<const uint32_t*>(&regs[0]), first, constants.float_bitmap, mapped_start);
+    if (!stage) MoveWeaponLayer(reinterpret_cast<const uint32_t*>(&regs[0]), first, constants.float_bitmap, mapped_start);
     // NXR_NEAR_DUMP=<seconds>,<frames> (a diagnosis aid): from that many seconds after the first draw, on that many
     // frames, every draw whose vertex shader's first perspective block is a near projection (near plane under half a
     // metre: first person models and the nearest scenery): its shader, the block's register and every float constant
@@ -2215,6 +2217,114 @@ void RecordAttachedCameraMove(const float* position, const float* move, const fl
   for (int i = 0; i < 16; ++i) m.move[i] = move[i];
   m.at = std::chrono::steady_clock::now();
   g_attached_any.store(true, std::memory_order_relaxed);
+}
+
+// The first person weapon's picture moved in the view (SetWeaponLayerMove): the move, and until when it holds (the
+// game sets it each frame it applies; a quarter second without one ends it).
+namespace {
+std::mutex g_weapon_move_mutex;
+double g_weapon_move[16];
+std::atomic<float> g_weapon_move_py{0.0f};  // 1 / tan(half the weapon view's vertical field of view)
+std::chrono::steady_clock::time_point g_weapon_move_until{};
+std::atomic<bool> g_weapon_move_on{false};
+}  // namespace
+void RecordWeaponLayerMove(const float* move, float fov_degrees) {
+  std::lock_guard lock(g_weapon_move_mutex);
+  if (!move) {
+    g_weapon_move_on.store(false, std::memory_order_relaxed);
+    return;
+  }
+  for (int i = 0; i < 16; ++i) g_weapon_move[i] = move[i];
+  g_weapon_move_py.store(1.0f / std::tan(std::clamp(fov_degrees, 1.0f, 170.0f) * 0.5f * 3.14159265f / 180.0f), std::memory_order_relaxed);
+  g_weapon_move_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+  g_weapon_move_on.store(true, std::memory_order_relaxed);
+}
+void DrawPath::MoveWeaponLayer(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, uint8_t* mapped) {
+  if (!g_weapon_move_on.load(std::memory_order_relaxed)) return;
+  static std::atomic<uint32_t> s_calls{0}, s_few{0}, s_nomatrix{0}, s_noproj{0};
+  {
+    static auto at = std::chrono::steady_clock::now();
+    if (std::chrono::steady_clock::now() - at > std::chrono::seconds(3)) {
+      at = std::chrono::steady_clock::now();
+      REXLOG_INFO("[native_x_renderer] weapon layer: {} draws looked at, {} with under 4 constants, {} without a perspective matrix, {} not a projection",
+                  s_calls.exchange(0), s_few.exchange(0), s_nomatrix.exchange(0), s_noproj.exchange(0));
+    }
+  }
+  ++s_calls;
+  uint8_t numbers[256];
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < 4; ++i) {
+    uint64_t bits = float_bitmap[i];
+    while (bits) {
+      numbers[n++] = uint8_t((i << 6) + uint32_t(std::countr_zero(bits)));
+      bits &= bits - 1;
+    }
+  }
+  if (n < 4) {
+    ++s_few;
+    return;
+  }
+  std::array<uint8_t, 256 * 16> values;
+  for (uint32_t k = 0; k < n; ++k) std::memcpy(values.data() + k * 16, &regs[first + (uint32_t(numbers[k]) << 2)], 16);
+  uint32_t index = 0;
+  bool transposed = false;
+  if (!CameraVote::FindMatrix(values.data(), numbers, n, index, transposed)) {
+    ++s_nomatrix;
+    return;
+  }
+  const Mat4d w = CameraVote::MatrixAt(values.data(), index, transposed);
+  GtaoProjection p;
+  if (!GtaoProjection::FromMatrix(w, p)) {
+    ++s_noproj;
+    return;
+  }
+  const float near_plane = p.near_plane(), far_plane = p.far_plane();
+  // The weapon's view by its field of view (the world's camera reads near 0.1 and far 7.5 here too: its depth is
+  // mapped into a sliver of the range, so the planes do not tell them apart).
+  const float want_py = g_weapon_move_py.load(std::memory_order_relaxed);
+  if (!(std::abs(p.py - want_py) <= 0.01f * want_py) || !(near_plane > 0.0f && near_plane < 1.0f) || std::abs(p.b) < 1e-9f) {
+    static std::mutex said_mutex;
+    static std::set<int> said;  // each field of view once
+    std::lock_guard lock(said_mutex);
+    if (said.size() < 60 && said.insert(int(p.py * 40.0f) * 1000 + int(std::min(near_plane, 99.0f) * 10.0f)).second)
+      REXLOG_INFO("[native_x_renderer] weapon layer: not the weapon's (py {:.3f}, the weapon's {:.3f}; near {:.4f}, far {:.2f}, px {:.3f})",
+                  p.py, want_py, near_plane, far_plane, p.px);
+    return;
+  }
+  Mat4d move;
+  {
+    std::lock_guard lock(g_weapon_move_mutex);
+    if (std::chrono::steady_clock::now() > g_weapon_move_until) {
+      g_weapon_move_on.store(false, std::memory_order_relaxed);
+      return;
+    }
+    for (int i = 0; i < 16; ++i) move[i] = g_weapon_move[i];
+  }
+  // clip = P x view, with clip w = view z: P and its inverse from the projection's terms; the draw's matrix becomes
+  // P x move x P^-1 x itself (the move happens in the view's space, between the view and the projection).
+  const double px = p.px, py = p.py, cx = p.cx, cy = p.cy, a = p.a, b = p.b;
+  const Mat4d proj = {px, 0, cx, 0, 0, py, cy, 0, 0, 0, a, b, 0, 0, 1, 0};
+  const Mat4d inv = {1 / px, 0, 0, -cx / px, 0, 1 / py, 0, -cy / py, 0, 0, 0, 1, 0, 0, 1 / b, -a / b};
+  auto mul = [](const Mat4d& l, const Mat4d& r) {
+    Mat4d o{};
+    for (int i = 0; i < 4; ++i)
+      for (int j = 0; j < 4; ++j)
+        for (int k = 0; k < 4; ++k) o[i * 4 + j] += l[i * 4 + k] * r[k * 4 + j];
+    return o;
+  };
+  const Mat4d moved = mul(mul(mul(proj, move), inv), w);
+  float out[16];
+  for (int r = 0; r < 4; ++r)
+    for (int c = 0; c < 4; ++c) out[transposed ? c * 4 + r : r * 4 + c] = float(moved[r * 4 + c]);
+  std::memcpy(mapped + size_t(index) * 16, out, sizeof(out));
+  {
+    static auto at = std::chrono::steady_clock::now() - std::chrono::seconds(60);
+    if (std::chrono::steady_clock::now() - at > std::chrono::seconds(10)) {
+      at = std::chrono::steady_clock::now();
+      REXLOG_INFO("[native_x_renderer] weapon layer: a draw moved (near {:.3f}, far {:.2f}, px {:.3f}, py {:.3f}, block c{}{})",
+                  near_plane, far_plane, p.px, p.py, numbers[index], transposed ? ", columns" : "");
+    }
+  }
 }
 
 void DrawPath::MoveAttached(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, uint8_t* mapped) {

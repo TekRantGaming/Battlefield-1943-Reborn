@@ -203,6 +203,8 @@ void EndViewGeometry() {
 }
 
 void RecordAttachedCameraMove(const float* position, const float* move, const float* placed);  // draw.cpp
+void RecordWeaponLayerMove(const float* move, float fov_degrees);  // draw.cpp
+void SetWeaponLayerMove(const float* move, float fov_degrees) { RecordWeaponLayerMove(move, fov_degrees); }
 void SetAttachedCameraMove(const float* position, const float* move, const float* placed) {
   RecordAttachedCameraMove(position, move, placed);
 }
