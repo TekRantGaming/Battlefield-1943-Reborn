@@ -3273,6 +3273,14 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "blends them instead: no sparkle, a little softer, and thin leaves can look more see-through. "
                           "Applies at the next start.",
                           "native_x_renderer_alpha_to_coverage", {{"Original", "auto"}, {"Smooth", "blend"}}));
+    // 0.4.2 ("can we interpolate animations to the client's frame rate"): tick_blend.cpp's bone blending, which is
+    // not finished (the first person weapon and hands still step), offered as an experiment.
+    rows.push_back(Toggle("Image", "Animation smoothing",
+                          "Experimental. Soldiers, turrets and other animated parts are blended between the game's "
+                          "ticks, so their animations move on every frame you draw instead of in the game's steps. "
+                          "Your own weapon and hands in first person are not smoothed yet and can still step. "
+                          "Animated things are drawn one tick behind. Off is the game's own animation.",
+                          "bf_smooth_bones"));
     rows.push_back(Choice("Image", "Texture filtering", "Keeps the ground and distant textures sharp at steep angles.",
                           "anisotropic_override",
                           {{"Game", "-1"}, {"Off", "0"}, {"2\xC3\x97", "2"}, {"4\xC3\x97", "3"}, {"8\xC3\x97", "4"},
