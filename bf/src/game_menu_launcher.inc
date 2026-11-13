@@ -2226,8 +2226,11 @@
   // A password for the match (13 Nov 2026): a switch under the name, and its field while it is on.
   bool pm_pass_on_ = false;
   std::string pm_pass_;
-  // The match's tick rate: 30 by default (the console's), 60, 75 and 100 experimental.
-  static constexpr int kPmTicks[] = {30, 60, 75, 100};
+  // The match's tick rate: 30 by default (the console's), 60 experimental. 0.4.2 ("remove 75Hz and 100Hz from the
+  // Client, but keep it for dedicated server"): a match hosted from here is 30 or 60; a dedicated server can still run
+  // 75 or 100 (server/manager.py, --bf_tick_rate), and the game still joins one at its rate.
+  static constexpr int kPmTicks[] = {30, 60};
+  static constexpr int kPmTickCount = int(std::size(kPmTicks));
   int pm_tick_ = 30;
   bool pm_lan_ = false, pm_listed_ = false;
   std::string pm_name_, pm_port_text_ = "18300";
@@ -2465,10 +2468,10 @@
     auto change = [&](int row, int step) {
       if (row == kPmMap) pm_map_ = (pm_map_ + 5 + step) % 5;
       if (row == kPmTick) {
-        int at = 1;
-        for (int k = 0; k < 4; ++k)
+        int at = 0;
+        for (int k = 0; k < kPmTickCount; ++k)
           if (kPmTicks[k] == pm_tick_) at = k;
-        pm_tick_ = kPmTicks[(at + 4 + step) % 4];
+        pm_tick_ = kPmTicks[(at + kPmTickCount + step) % kPmTickCount];
       }
       if (row == kPmNet) pm_lan_ = !pm_lan_;
       if (row == kPmPass) pm_pass_on_ = !pm_pass_on_;
@@ -2615,8 +2618,8 @@
           "you want another. For an Online match, open it on your router for friends outside your home.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
           "server browser: the pause copies the address for you. The match ends when you leave it.",
-          "How many times a second the match is simulated. 30, the original game's, is the default. 60, 75 and 100 "
-          "are experimental: physics and timing may break, and they ask more of your PC and of every player's "
+          "How many times a second the match is simulated. 30, the original game's, is the default. 60 is "
+          "experimental: physics and timing may break, and it asks more of your PC and of every player's "
           "connection. A player's game takes the match's rate when it joins.",
           "On, only players who type the match's password can join; the server browser shows a padlock by its name. "
           "Off, anybody who sees the match can join.",
