@@ -257,9 +257,16 @@ void StorageProgress(uint32_t* queued, uint32_t* done, uint32_t* loading, uint32
 // it is): after RepatchTextures, each texture it took is offered again with `again` true, its guest data unchanged
 // since it was last offered (a texture whose data changed is offered at its load, `again` false), before the next draw
 // that follows.
+// 13 Nov 2026 (HD packs): when the HD pack has an uncompressed picture for a texture `fn` filled, `fn` is called once
+// more with `scale` above 1 and `hd_base`, the pack's picture (R, G, B, A rows, width * scale by height * scale), and
+// fills `rgba` at that size (in the byte order it uses at scale 1): the HD picture with the game's own pictures drawn
+// at its size, which is then what draws sample. `scale` is 1 and `hd_base` null in every other call.
 using TexturePatchFn = bool (*)(uint32_t width, uint32_t height, const uint8_t* guest_data, std::vector<uint8_t>& rgba,
-                                bool again);
+                                bool again, uint32_t scale, const uint8_t* hd_base);
 void SetTexturePatcher(TexturePatchFn fn);
+// Compiles the antialiasing passes' compute shaders (CMAA 2) without a device and logs the result: how many of them
+// failed (a developer's check that needs no window; NXR_SHADER_TEST=1 in Battlefield 1943 Reborn).
+int TestUtilityShaders();
 // D160: the textures the patcher took are offered to it again before the next draw, for pictures that follow the
 // game's state (Battlefield 1943's keyboard prompts: the keys of a vehicle's seat differ from a soldier's on foot).
 // From any thread.
@@ -282,7 +289,15 @@ void SetGameAspectBox(bool on);
 // the widened 3D view shows that point, not in the 16:9 box. Any thread; kept 0.2 s.
 void NoteHudMarker(float x, float y);
 // Whether a HUD marker was noted within `radius` pixels of (x, y) in the last 0.2 s.
-bool NearHudMarker(double x, double y, double radius);
+// marker_x, when given, gets the nearest marker's x (canvas pixels).
+bool NearHudMarker(double x, double y, double radius, double* marker_x = nullptr);
+// D168: the picture in picture sniper scope (Battlefield 1943 Reborn: Settings > Enhancements, experimental). Each
+// frame from the game's camera: whether it is on, the camera's right, up and back in the world, the tangent of half its
+// own (unzoomed) vertical field of view as rendered, and how far it is zoomed now (the tangent of half the field of
+// view now over that of the camera's own: 1 not zoomed, a sight about 0.7, a sniper scope far less). Any thread.
+void NoteScopeView(bool on, const float right[3], const float up[3], const float back[3], float tan_half_v_own, float zoom);
+// For the renderer: the last noted, if it is on and was noted in the last 0.25 s.
+bool ScopeView(float right[3], float up[3], float back[3], float& tan_half_v_own, float& zoom);
 // One of the game's own menu screens is up now (its UI says so about once a second): the 2D layer is a menu, kept
 // together in the middle, not anchored to the edges. Any thread.
 void NoteGameMenu();

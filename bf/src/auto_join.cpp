@@ -65,10 +65,13 @@ void NoteLevelChange();                                          // modern_mode.
 extern std::atomic<float> g_dev_camera[3];                       // look.cpp: the local camera's position
 extern std::atomic<float> g_dev_view_pos[3];                     // dev_matscan.cpp: the rendered camera's
 void DevTeamScan(const uint8_t* base, bool in_world);              // dev_team_scan.cpp: BF_DEV_TEAMSCAN
+void DevPlayerScan(const uint8_t* base, bool in_world);            // dev_player_scan.cpp: BF_DEV_PLAYERSCAN
 #endif
 bool TickBlendNearestTree(uint32_t parts, const float from[3], float out[3], double* dist);  // tick_blend.cpp
 // game_menu.cpp
 bool GameMenuOpen();
+void SpawnMousePad(uint8_t* gamepad, bool allowed, bool out_of_world);  // flash_mouse.cpp: the deploy screen's pointer
+bool SpawnMouseCommand(const char* name, const char* args);    // flash_mouse.cpp: true, not to be passed on
 bool GameMenuEnabled();
 void GameMenuPad(uint16_t buttons, int16_t lx, int16_t ly);
 void ShowGameMenu();
@@ -554,6 +557,7 @@ REX_EXTERN(sub_8297DD10);  // dev probe: look a path up
 REX_EXTERN(sub_8295C470);  // dev probe: release an APT string
 REX_EXTERN(sub_82954348);  // the Flash player's loadMovie(player, url, target)
 REX_EXTERN(sub_824253A0);  // resolve a call (ui, text, &flag, &target): marks the message valid
+REX_EXTERN(sub_82986450);  // call a script function (name, &result, scope: `this`, argc, argv)
 
 // The game's calls into its Flash menu by function name (sub_8243BB70(ui, name)), e.g. presenceConnected. Our own
 // calls (hideContent) go out right after one of the game's, on the same thread with the same UI object.
@@ -588,6 +592,9 @@ REX_HOOK_RAW(sub_826B6628) {
     if (!noisy.count(name) && lines.fetch_add(1) < 3000)
       REXLOG_INFO("BF menu command {} ({}) lr {:08X}", name, args, uint32_t(ctx.lr));
   }
+  if (bf1943::SpawnMouseCommand(ctx.r3.u32 ? reinterpret_cast<const char*>(base + ctx.r3.u32) : nullptr,
+                                ctx.r4.u32 ? reinterpret_cast<const char*>(base + ctx.r4.u32) : nullptr))
+    return;
   __imp__sub_826B6628(ctx, base);
 }
 
@@ -815,6 +822,71 @@ void FlashCalls(PPCContext& ctx, uint8_t* base) {
     store(0x82D135EC, was_ec);
     return;
   }
+  if (path.rfind("method:", 0) == 0) {
+    // A method of one of the menu's objects, run on that object ("method:<object path>|<function>", no arguments).
+    // The queued call below runs a function with `this` the movie's root (sub_82986450 hands its scope to the call as
+    // `this`, and the queue gives it none), which is right for a function that only uses names in scope and wrong for
+    // one compiled to use `this`: the deploy screen's onSpawnDown played its sound and changed nothing (13 Nov 05:00).
+    // So here the object is looked up first (as the probe above does) and given as the scope: sub_82986450(function
+    // name, no result, the object, 0 arguments).
+    const std::string body = path.substr(7);
+    const size_t bar = body.find('|');
+    if (bar == std::string::npos) return;
+    const std::string object = body.substr(0, bar), function = body.substr(bar + 1);
+    auto load = [&](uint32_t a) { return uint32_t(base[a]) << 24 | base[a + 1] << 16 | base[a + 2] << 8 | base[a + 3]; };
+    auto store = [&](uint32_t a, uint32_t v) { for (int i = 0; i < 4; ++i) base[a + i] = uint8_t(v >> (24 - 8 * i)); };
+    const uint32_t holder = load(ui + 0x14);
+    if (!holder) return;
+    std::memset(base + scratch, 0, 128);
+    std::memcpy(base + scratch + 16, object.c_str(), std::min<size_t>(object.size(), 60));
+    std::memcpy(base + scratch + 80, function.c_str(), std::min<size_t>(function.size(), 40));
+    const uint32_t player = load(holder + 4), was_e8 = load(0x82D135E8), was_ec = load(0x82D135EC);
+    store(0x82D135E8, player);
+    store(0x82D135EC, player);
+    call.r3.u64 = scratch;  // the APT string of the object's path
+    call.r4.u64 = scratch + 16;
+    sub_82958C20(call, base);
+    call = ctx;
+    call.r3.u64 = 0;
+    sub_82986340(call, base);
+    const uint32_t root = call.r3.u32;
+    call = ctx;
+    call.r3.u64 = 0x82D13BB8;
+    call.r4.u64 = root;
+    call.r5.u64 = 0;
+    call.r6.u64 = scratch;
+    call.r7.u64 = 1;
+    call.r8.u64 = 1;
+    call.r9.u64 = 0;
+    sub_8297DD10(call, base);
+    const uint32_t found = call.r3.u32;
+    call = ctx;
+    call.r3.u64 = load(scratch);
+    sub_8295C470(call, base);
+    // Only a movie clip is taken as a scope: an object of the root's own class, or of the class the deploy screen's
+    // clips have (0x820BEDB0: the probe of _root.contentMC.loader1.spawnmap, 13 Nov).
+    const bool ok = root >= 0x10000 && found >= 0x10000 && found < 0xF0000000 &&
+                    (load(found) == load(root) || load(found) == 0x820BEDB0u);
+    if (ok) {
+      call = ctx;
+      call.r3.u64 = scratch + 80;  // the function's name
+      call.r4.u64 = 0;
+      call.r5.u64 = found;
+      call.r6.u64 = 0;
+      call.r7.u64 = 0;
+      sub_82986450(call, base);
+    }
+    static int logged = 0;
+    if (!ok || logged < 4) {
+      ++logged;
+      REXLOG_INFO("BF menu driver: method {} on {} ({:08X}, class {:08X}; the root {:08X}, class {:08X}): {}", function,
+                  object, found, found >= 0x10000 && found < 0xF0000000 ? load(found) : 0, root,
+                  root >= 0x10000 ? load(root) : 0, ok ? "called" : "not called, not a clip of the root's kind");
+    }
+    store(0x82D135E8, was_e8);
+    store(0x82D135EC, was_ec);
+    return;
+  }
   if (path.rfind("cmd:", 0) == 0) {
     // A command as the game's own menu sends it ("cmd:<name>|<args>"): sub_826B6628(name, args), on the game's thread.
     const std::string body = path.substr(4);
@@ -893,7 +965,7 @@ void DevTypesTick(const uint8_t* base);  // dev_types.cpp: BF_DEV_TYPES
 void ModernModeTick(uint8_t* base);  // modern_mode.cpp
 uint16_t PulsedButtons();             // input_settings.cpp: our presses on the player's pad
 bool TakeEscapePress();               // game_menu.cpp: the keyboard's Esc with our menu closed
-void WheelNotch();                    // look.cpp: a notch of the mouse wheel
+void WheelNotch(int direction);                    // look.cpp: a notch of the mouse wheel
 void PressEscapeForTest();            // game_menu.cpp: the keyboard's Esc, for the match script
 #if defined(BF_DEV_TOOLS) && defined(_WIN32)
 void TriggerRenderDocCapture();       // dev_renderdoc.cpp: the match script's "rdoc"
@@ -1209,13 +1281,18 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   bf1943::comms::NoteInWorld(seated || bf1943::LocalOnFoot());  // voice goes out only from the world
   bf1943::comms::ReadTeam(base, bf1943::LevelLoaded());  // team and squad chat (comms.cpp), the deploy screen too
   bf1943::CapturePointsTick(base, bf1943::LevelLoaded());  // the flags' letters and the pause menu's map
+  bf1943::MapPlayersTick(base, bf1943::LevelLoaded());  // the pause menu's map: team mates and seen enemies
 #if defined(BF_DEV_TOOLS)
   bf1943::DevTeamScan(base, seated || bf1943::LocalOnFoot());  // BF_DEV_TEAMSCAN (dev_team_scan.cpp)
+  bf1943::DevPlayerScan(base, seated || bf1943::LocalOnFoot());  // BF_DEV_PLAYERSCAN (dev_player_scan.cpp)
 #endif
   if (!input_off)  // Settings > Controls
     bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, seated);
   bf1943::HudGlyphsTick(seated);  // hud_glyphs.cpp: the keyboard prompts follow the seat's keys
   if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4, seated);
+  // The deploy screen's pointer (flash_mouse.cpp): a level is loaded and the player is in no seat and not on foot.
+  bf1943::SpawnMousePad(p + 4, bf1943::LevelLoaded() && !menu && !hidden && !bf1943::g_walking,
+                        !seated && !bf1943::LocalOnFoot());
   if (press & 0x0C00) {  // the driver's left stick (BF_SPAWN_PRESSES lsr, lsl)
     const int v = press & 0x0400 ? 32767 : -32768;
     p[8] = uint8_t(uint16_t(v) >> 8), p[9] = uint8_t(v);
@@ -1678,7 +1755,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
         static std::vector<double> turned;
         if (std::find(turned.begin(), turned.end(), in.at) == turned.end()) {
           turned.push_back(in.at);
-          bf1943::WheelNotch();
+          bf1943::WheelNotch(1);
           REXLOG_INFO("BF match script: wheel notch");
         }
         continue;

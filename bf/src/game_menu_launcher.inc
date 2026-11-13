@@ -1193,15 +1193,22 @@
       "Sergeant Major",   "Warrant Officer",     "Chief Warrant Officer", "Second Lieutenant", "First Lieutenant",
       "Captain",          "Major",               "Lieutenant Colonel",   "Colonel",            "Brigadier General",
       "Major General",    "Lieutenant General",  "General"};
-  int Rank() {
+  int Rank(const Settings& record, double seconds) {
+    const std::string value = record.Get("rank", "");
+    const char* end = value.data() + value.size();
+    int requested = 0;
+    const auto parsed = std::from_chars(value.data(), end, requested);
+    if (parsed.ec == std::errc{} && parsed.ptr == end && requested >= 1 && requested <= int(std::size(kRanks)))
+      return requested;
     static constexpr int kMinutes[] = {0,   10,  25,  45,  70,   100,  140,  190,  250,  320,  400, 500,
                                        620, 760, 920, 1100, 1300, 1550, 1850, 2200, 2600, 3100, 3700};
-    const double minutes = std::atof(settings_.Get("match_seconds", "0").c_str()) / 60.0;
+    const double minutes = seconds / 60.0;
     int rank = 1;
     for (int i = 0; i < int(std::size(kMinutes)); ++i)
       if (minutes >= kMinutes[i]) rank = i + 1;
     return rank;
   }
+  int Rank() { return Rank(settings_, std::atof(settings_.Get("match_seconds", "0").c_str())); }
   std::string RankLine() {
     const int r = Rank();
     return "Rank " + std::to_string(r) + ", " + kRanks[r - 1];
@@ -1212,15 +1219,7 @@
   // True when B leaves it. `tabs`: Home's Settings (LB and RB switch the tab); else one setup page.
   bool FrSettings(ImDrawList* d, ImGuiIO& io, const Stage& st, float top, Input& in, bool tabs) {
     const kit::Fonts& f = kit::GetFonts();
-    if (!capture_.empty()) {  // Keyboard bindings: the next key goes to the row being bound
-      if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-        capture_.clear();
-      } else if (const std::string key = CapturedKey(); !key.empty()) {
-        SetCvar(capture_, key);
-        capture_.clear();
-      }
-      in = {};
-    }
+    if (CaptureBind()) in = {};  // the bindings: the next key or mouse button goes to the slot that waits
     if (tabs && sub_ == kSubNone) {
       if (in.prev_tab) tab_ = (tab_ + kTabCount - 1) % kTabCount, row_ = 0, scroll_ = 0;
       if (in.next_tab) tab_ = (tab_ + 1) % kTabCount, row_ = 0, scroll_ = 0;
@@ -1579,6 +1578,7 @@
       const bool up = list_.reachable();
       const std::string t = up ? fmt::format("{} PLAYERS  /  {} {}", list_.players_online(), servers.size(),
                                              servers.size() == 1 ? "SERVER ONLINE" : "SERVERS ONLINE")
+                        : !list_.asked() ? "CONNECTING"
                                : "SERVERS NOT REACHABLE";
       const float tw = kit::SpacedWidth(f.typed, st(13), t, st(2));
       const float tx = st.P(1240, 0).x - tw, ty = st.P(0, 96).y;  // under the soldier's card
@@ -1706,6 +1706,18 @@
   // Stats & Awards, ours (in place of the game's screen, docs/MENUS-PLAN.md): the soldier's rank and time in matches,
   // and every kind of score event the player has had (auto_join.cpp counts them from the game's own HUD events; the
   // settings file keeps them as stat.<label> = events,points).
+  Settings test_profile_;
+  bool test_profile_active_ = false;
+
+  // Dev builds only (the review of pull request 16): a player's game never shows a made up rank or awards.
+  void LoadTestProfile() {
+#if defined(BF_DEV_TOOLS)
+    test_profile_ = Settings{settings_.path.parent_path() / "bf1943-test-profile.txt", {}};
+    test_profile_.Load();
+    test_profile_active_ = test_profile_.Get("enabled", "false") == "true";
+#endif
+  }
+
   void StatsPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
     const ImVec2 sz = io.DisplaySize;
     const Stage st = StageOf(io);
@@ -1715,16 +1727,20 @@
     const float cx0 = st.P(40, 0).x, cx1 = cx0 + st(400);
     d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(15, 17, 13, 226));
     d->AddRectFilled(ImVec2(cx1, 0), ImVec2(cx1 + st(1.4f), sz.y), IM_COL32(201, 183, 122, 110));
-    kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim, "STATS & AWARDS", st(3));
+    kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim,
+                test_profile_active_ ? "STATS & AWARDS / TEST PROFILE" : "STATS & AWARDS", st(3));
     Text(d, f.stencil, st(40), ImVec2(cx0 - st(2), st.P(0, 66).y), kit::kCream, "SERVICE RECORD");
     d->AddRectFilled(st.P(40, 120), st.P(80, 124), kit::kStamp);
     // The soldier.
     const std::string name = settings_.Get("player_name", "Soldier");
-    RankBadge(d, st, st.P(62, 172), Rank());
+    const Settings& record = test_profile_active_ ? test_profile_ : settings_;
+    const double raw_seconds = std::atof(record.Get("match_seconds", "0").c_str());
+    const double seconds = std::isfinite(raw_seconds) ? std::clamp(raw_seconds, 0.0, 2147483647.0) : 0.0;
+    const int rank_number = Rank(record, seconds);
+    RankBadge(d, st, st.P(62, 172), rank_number);
     d->AddText(f.ui_bold, st(26), st.P(96, 150), kit::kCream, name.c_str());
-    const std::string rank = "RANK " + std::to_string(Rank()) + " \xC2\xB7 " + Upper(kRanks[Rank() - 1]);
+    const std::string rank = "RANK " + std::to_string(rank_number) + " \xC2\xB7 " + Upper(kRanks[rank_number - 1]);
     d->AddText(f.typed, st(14), st.P(96, 184), kit::kKhakiText, rank.c_str());
-    const double seconds = std::atof(settings_.Get("match_seconds", "0").c_str());
     // The totals, from the stat.<label> lines.
     struct Line {
       std::string label;
@@ -1733,10 +1749,16 @@
     };
     std::vector<Line> lines;
     double total = 0;
-    for (const auto& [key, value] : settings_.values) {
+    for (const auto& [key, value] : record.values) {
       if (key.rfind("stat.", 0) != 0) continue;
       const size_t comma = value.find(',');
-      const Line l{key.substr(5), std::atoi(value.c_str()), comma == std::string::npos ? 0 : std::atof(value.c_str() + comma + 1)};
+      const char* count_end = value.data() + std::min(comma, value.size());
+      int events = 0;
+      const auto count = std::from_chars(value.data(), count_end, events);
+      if (count.ec != std::errc{} || count.ptr != count_end || events < 0) continue;
+      const double points = comma == std::string::npos ? 0 : std::atof(value.c_str() + comma + 1);
+      if (!std::isfinite(points)) continue;
+      const Line l{key.substr(5), events, points};
       total += l.points;
       lines.push_back(l);
     }
@@ -1794,14 +1816,25 @@
     d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 186));
     std::vector<rex::system::AchievementInfo> list;
     int unlocked = 0, score = 0, total = 0;
-    if (auto* k = REX_KERNEL_STATE()) {
+    auto* k = REX_KERNEL_STATE();
+    const std::string default_state = test_profile_.Get("achievements", "actual");
+    auto is_unlocked = [&](uint32_t id) {
+      if (test_profile_active_) {
+        const std::string state = test_profile_.Get("achievement." + std::to_string(id), default_state);
+        if (state == "unlocked") return true;
+        if (state == "locked") return false;
+      }
+      return k && k->achievements().IsUnlocked(id);
+    };
+    if (k) {
       list = k->achievements().ListAchievements();
       for (const auto& a : list) {
         total += int(a.gamerscore);
-        if (k->achievements().IsUnlocked(a.id)) ++unlocked, score += int(a.gamerscore);
+        if (is_unlocked(a.id)) ++unlocked, score += int(a.gamerscore);
       }
     }
-    kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim, "BATTLEFIELD 1943", st(3));
+    kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim,
+                test_profile_active_ ? "BATTLEFIELD 1943 / TEST PROFILE" : "BATTLEFIELD 1943", st(3));
     Text(d, f.stencil, st(40), ImVec2(st.P(40, 0).x - st(2), st.P(0, 66).y), kit::kCream, "ACHIEVEMENTS");
     d->AddRectFilled(st.P(40, 120), st.P(80, 124), kit::kStamp);
     const std::string head = fmt::format("{} OF {} UNLOCKED  /  {} OF {} POINTS", unlocked, list.size(), score, total);
@@ -1819,8 +1852,7 @@
                    "The game's achievements are not loaded in this session.", x1 - x0);
     for (int i = ach_scroll_ * per; i < int(list.size()) && i < (ach_scroll_ + 1) * per; ++i) {
       const auto& a = list[size_t(i)];
-      auto* k = REX_KERNEL_STATE();
-      const bool got = k && k->achievements().IsUnlocked(a.id);
+      const bool got = is_unlocked(a.id);
       const ImVec2 ra(x0, y), rb(x1, y + st(62));
       d->AddRectFilled(ra, rb, IM_COL32(15, 17, 13, got ? 226 : 180));
       d->AddRectFilled(ra, ImVec2(ra.x + st(4), rb.y), got ? kit::kStamp : IM_COL32(201, 183, 122, 60));
@@ -1828,7 +1860,9 @@
                  a.label.c_str());
       const std::string& desc = got || a.unachieved_description.empty() ? a.description : a.unachieved_description;
       d->AddText(f.typed, st(13), ImVec2(ra.x + st(24), ra.y + st(36)), got ? kit::kKhakiText : kit::kKhakiDim, desc.c_str());
-      const std::string pts = fmt::format("{}{}", a.gamerscore, got ? "  UNLOCKED" : "");
+      const std::string pts = test_profile_active_
+          ? fmt::format("ID {}  /  {}{}", a.id, a.gamerscore, got ? "  UNLOCKED" : "")
+          : fmt::format("{}{}", a.gamerscore, got ? "  UNLOCKED" : "");
       d->AddText(f.typed, st(14), ImVec2(rb.x - st(24) - kit::TextWidth(f.typed, st(14), pts), ra.y + st(22)),
                  got ? kit::kGreenBright : kit::kKhakiDim, pts.c_str());
       y += st(68);
@@ -1858,7 +1892,11 @@
   std::atomic<bool> lb_busy_{false};
   bool lb_from_pause_ = false;  // opened from the pause: B goes back there
 
-  void SendLeaderboard() {
+  // Posted at the start (the totals saved in the profile, which before went out only with the next score event in a
+  // match) and after each save of new score events. Tried up to four times (now, then 5, 15 and 30 s later) and each
+  // outcome logged, as nothing showed whether a post had arrived.
+  bool stats_sent_at_start_ = false;
+  void SendLeaderboard(const char* why = "new score events") {
     double total = 0;
     int captures = 0;
     for (const auto& [key, value] : settings_.values) {
@@ -1871,12 +1909,46 @@
     for (char c : settings_.Get("player_name", ""))
       if (std::isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_') name += c;
     if (name.empty()) return;
-    const std::string req = fmt::format(
-        "{{\"op\": \"stats_put\", \"name\": \"{}\", \"score\": {:.0f}, \"seconds\": {:.0f}, \"captures\": {}}}", name,
+    const bool test = settings_.Get("test_progression", "") == "1";
+    std::string req = fmt::format(
+        "{{\"op\": \"stats_put\", \"name\": \"{}\", \"score\": {:.0f}, \"seconds\": {:.0f}, \"captures\": {}", name,
         total, std::atof(settings_.Get("match_seconds", "0").c_str()), captures);
-    std::thread([req] {
-      std::string reply;
-      RegistryRequest(req, reply);
+    if (test) {
+      req += fmt::format(", \"rank\": {}, \"achievements\": [", Rank());
+      bool first = true;
+      if (auto* k = REX_KERNEL_STATE()) {
+        for (const auto& a : k->achievements().ListAchievements()) {
+          if (!k->achievements().IsUnlocked(a.id)) continue;
+          req += (first ? "" : ",") + std::to_string(a.id);
+          first = false;
+        }
+      }
+      req += "]";
+    }
+    req += "}";
+    const double seconds = std::atof(settings_.Get("match_seconds", "0").c_str());
+    std::thread([req, test, name, total, seconds, why] {
+      static constexpr int kWait[] = {0, 5, 15, 30};
+      for (int attempt = 0; attempt < int(std::size(kWait)); ++attempt) {
+        if (kWait[attempt]) std::this_thread::sleep_for(std::chrono::seconds(kWait[attempt]));
+        std::string reply;
+        // A test profile's made-up rank and awards go to a backend on this PC only.
+        const bool local = std::string(REXCVAR_GET(bf_backend_registry)).rfind("127.", 0) == 0;
+        const bool answered = (!test || local) && RegistryRequest(req, reply);
+        const bool ok = answered && reply.find("\"ok\": true") != std::string::npos;
+        if (ok) {
+          REXLOG_INFO("BF leaderboard: stats posted for {} ({}: score {:.0f}, {:.0f} s played{})", name, why, total,
+                      seconds, test ? ", test profile, local backend only" : "");
+          return;
+        }
+        if (answered) {  // the backend refused it: sending the same again will not help
+          REXLOG_WARN("BF leaderboard: stats for {} refused by the backend ({}): {}", name, why,
+                      reply.substr(0, 200));
+          return;
+        }
+        REXLOG_WARN("BF leaderboard: no answer from the backend posting stats for {} ({}), try {} of {}", name, why,
+                    attempt + 1, std::size(kWait));
+      }
     }).detach();
   }
 
@@ -2123,7 +2195,19 @@
   static constexpr const char* kPmMapKeys[] = {"wake", "guadalcanal", "iwo", "coral"};
   static constexpr const char* kPmMapNames[] = {"WAKE ISLAND", "GUADALCANAL", "IWO JIMA", "CORAL SEA", "ALL FOUR IN TURN"};
   static constexpr const char* kPmMapTitles[] = {"Wake Island", "Guadalcanal", "Iwo Jima", "Coral Sea"};
-  static constexpr int kPmMap = 0, kPmPort = 1, kPmHost = 2, kPmRows = 3;
+  // 13 Nov 2026: Network type (Online, or LAN: the match's own backend, this network's players, no internet).
+  // Later that day: the match's name, whether the server browser shows it, and the router port as a box to tick
+  // (UPnP) with the port typed when it is not ticked.
+  static constexpr int kPmMap = 0, kPmName = 1, kPmNet = 2, kPmListed = 3, kPmUpnp = 4, kPmPort = 5, kPmHost = 6, kPmTick = 7,
+                       kPmRows = 8;
+  // The match's tick rate: 30 by default (the console's), 60, 75 and 100 experimental.
+  static constexpr int kPmTicks[] = {30, 60, 75, 100};
+  int pm_tick_ = 30;
+  bool pm_lan_ = false, pm_listed_ = false;
+  std::string pm_name_, pm_port_text_ = "18300";
+  // The row takes typing now: the name, or the port when it is the player's to choose.
+  bool PmPortTyped() const { return pm_lan_ || !pm_upnp_; }
+  bool PmTyping() const { return !pm_hosting_ && (pm_row_ == kPmName || (pm_row_ == kPmPort && PmPortTyped())); }
   int pm_row_ = 0, pm_map_ = 0;
   bool pm_upnp_ = true;
   bool pm_hosting_ = false;  // our server runs for this game
@@ -2136,10 +2220,21 @@
   void LoadPrivateMatchChoices() {
     pm_map_ = std::clamp(std::atoi(settings_.Get("private_match_map", "0").c_str()), 0, 4);
     pm_upnp_ = settings_.Get("private_match_upnp", "1") != "0";
+    pm_lan_ = settings_.Get("private_match_lan", "0") == "1";
+    pm_listed_ = settings_.Get("private_match_listed", "0") == "1";
+    pm_name_ = settings_.Get("private_match_name", "");
+    pm_port_text_ = settings_.Get("private_match_port", "18300");
+    pm_tick_ = std::atoi(settings_.Get("private_match_tick", "30").c_str());
+    if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 30;
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
     settings_.values["private_match_upnp"] = pm_upnp_ ? "1" : "0";
+    settings_.values["private_match_lan"] = pm_lan_ ? "1" : "0";
+    settings_.values["private_match_listed"] = pm_listed_ ? "1" : "0";
+    settings_.values["private_match_name"] = pm_name_;
+    settings_.values["private_match_port"] = pm_port_text_;
+    settings_.values["private_match_tick"] = std::to_string(pm_tick_);
     settings_.Save();
   }
 
@@ -2148,8 +2243,41 @@
     if (pm_map_ < 4) o.maps = {kPmMapKeys[pm_map_]};
     else o.maps = {"wake", "guadalcanal", "iwo", "coral"};
     o.upnp = pm_upnp_;
+    o.lan = pm_lan_;
+    if (pm_lan_) {
+      // The game signs in to the match's own backend, which it can only choose before it starts (once it runs it is
+      // signed in to the main one).
+      if (!pre_game_ && own_backend_ != "127.0.0.1") {
+        pm_error_ = "A LAN match is started from here before the game itself runs: close the game, start it again and "
+                    "host the LAN match first.";
+        return;
+      }
+      UseOwnBackend("127.0.0.1");
+    }
     const std::string me = settings_.Get("player_name", "");
-    o.name = me.empty() ? "Private match" : me + "'s match";
+    // Through our profanity filter (text_filter.h): a listed match's name is everybody's to read.
+    o.name = text_filter::Censor(!pm_name_.empty() ? pm_name_ : me.empty() ? "Custom match" : me + "'s match");
+    o.tick = pm_tick_;
+    // The host's own game runs at the match's rate, set before its timers are made. Once a match was played at
+    // another, this run cannot change: the server would start, and the host's join would have to start the game again,
+    // which ends the server with it (the review of pull request 16). Said instead.
+    if (!SetTickRate(pm_tick_)) {
+      pm_error_ = fmt::format("This run plays at {} Hz. To host at {} Hz, start the game again first.", TickRate(), pm_tick_);
+      return;
+    }
+    // In everybody's browser only when Show in browser is on (as before 0.4.1: a custom match is joined by its address
+    // unless its host says otherwise; the review of pull request 16 found it always listed, the row never shown). A
+    // LAN match is on its network's LAN tab.
+    o.listed = !pm_lan_ && pm_listed_;
+    if (PmPortTyped()) {
+      const int port = std::atoi(pm_port_text_.c_str());
+      if (port < 1024 || port > 65535) {
+        pm_error_ = "The port is a number from 1024 to 65535 (18300 is the usual one).";
+        return;
+      }
+      o.port = uint16_t(port);
+    }
+    SavePrivateMatchChoices();
     pm_error_.clear();
     std::string why;
     if (!bf1943::StartPrivateMatch(o, &why)) {
@@ -2170,7 +2298,11 @@
   // The address friends give Direct connect: the one the backend saw our server register from, and its port.
   void CopyPrivateAddress() {
     if (pm_status_.address.empty()) return;
-    ImGui::SetClipboardText(pm_status_.address.c_str());
+    // A LAN match: this PC's address on its network (the match's own reads 127.0.0.1 here).
+    std::string address = pm_status_.address;
+    if (pm_lan_)
+      if (const std::string lan = bf1943::LanAddress(); !lan.empty()) address = lan;
+    ImGui::SetClipboardText(address.c_str());
     pm_copied_at_ = ImGui::GetTime();
     REXLOG_INFO("BF private match: the address copied for friends");
   }
@@ -2195,149 +2327,301 @@
     ServerInfo sv;
     sv.gid = pm_status_.gid;
     const std::string me = settings_.Get("player_name", "");
-    sv.name = me.empty() ? "Private match" : me + "'s match";
+    sv.name = me.empty() ? "Custom match" : me + "'s match";
     sv.address = pm_status_.address;
     sv.map = pm_map_ < 4 ? kPmMapTitles[pm_map_] : "Wake Island";
     sv.max_players = 24;
+    // Its tick rate is the one it was started at. (Left unsaid, Join took it for a 30 Hz server and set this game to
+    // 30 against a 60 Hz match: 13 Nov 2026, "I cannot walk at 60Hz anymore, and player partially falls through
+    // carrier".)
+    sv.tick_hz = pm_tick_;
     pm_joining_ = true;
+    exp_accepted_address_ = sv.address;  // its rate chosen on the Custom Match page, with that page's warning
     REXLOG_INFO("BF private match: registered as game {}; joining it", sv.gid);
     Join(sv);
   }
 
-  void PrivateMatchPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
+  // Create Private Match as the main menu is drawn (13 Nov 2026: "look more like the main menu theming, with the
+  // options on the left side panel in the same font"): the menu's backdrop and chrome, the dark rail at the left with
+  // the rows in the game's own lettering (the chosen one on paper with the red tab and its glyph, its value typed at
+  // the right), and at the right the chosen map's picture over a paper band with the chosen row's help and the green
+  // button, where the main menu has its Quick Play card. Sizes are the Stage's (720 lines).
+  void PrivateMatchPage(ImDrawList* d, ImGuiIO& io, Input in) {
     NotePage("private match");
-    const ImVec2 sz = io.DisplaySize;
+    const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    const float u = sz.y / 1080.0f;
-    MainBackdrop(d, sz, pm_map_ < 4 ? pm_map_ : -1);  // the chosen map from the air (all four in turn: each)
-    const float cx0 = sz.x * 0.05f, cx1 = cx0 + 680 * u;
-    d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(15, 17, 13, 226));
-    d->AddRectFilled(ImVec2(cx1, 0), ImVec2(cx1 + 2 * u, sz.y), IM_COL32(201, 183, 122, 110));
-    kit::Brand(d, ImVec2(cx0, 58 * u), u * 0.9f);
-    const float hy = 150 * u;
-    kit::Spaced(d, f.typed, 20 * u, ImVec2(cx0, hy), kit::kKhakiDim, "HOSTED ON THIS PC", 4 * u);
-    Text(d, f.stencil, 78 * u, ImVec2(cx0 - 4 * u, hy + 24 * u), kit::kCream, "PRIVATE MATCH");
-    d->AddRectFilled(ImVec2(cx0, hy + 120 * u), ImVec2(cx0 + 64 * u, hy + 126 * u), kit::kStamp);
-    const float ry = hy + 166 * u;
+    MenuBackdrop(d, io.DisplaySize, st);
+    bool online_ok = false;
+    const std::string status = OnlineStatus(online_ok);
+    MenuChrome(d, io, st, status, online_ok);
+    MenuFoot(d, st);
+    // ---- the rail and its heading
+    const ImVec2 ra = st.P(48, 93), rb = st.P(400, 620);
+    d->AddRectFilled(ra, rb, IM_COL32(13, 15, 11, 204));
+    d->AddRect(ra, rb, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
+    kit::Spaced(d, f.typed, st(8), ImVec2(ra.x + st(24), ra.y + st(18)), kit::kKhakiDim, "HOSTED ON THIS PC", st(2));
+    kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(ra.x + st(24), ra.y + st(32)), kit::kCream, "CUSTOM MATCH");
+    d->AddRectFilled(ImVec2(ra.x, ra.y + st(76)), ImVec2(rb.x, ra.y + st(77)), IM_COL32(241, 234, 211, 30));
+    const float rows_y = ra.y + st(77);
+    // ---- the picture card at the right: the chosen map from the air, the paper band under it
+    // (13 Nov 2026: down to the rail's foot, "getting a cleaner full view of the map"; it ended at 380.)
+    const ImVec2 ha = st.P(427, 93), hb = st.P(1232, 620);
+    const ImVec2 band(ha.x, hb.y - st(110));
+    d->PushClipRect(ha, hb, true);
+    MapPicture(d, st.u * 1.5f, ha, ImVec2(hb.x, band.y), pm_map_ < 4 ? kPmMapTitles[pm_map_] : "Wake Island");
+    d->PopClipRect();
+    {  // the chip
+      const std::string chip = pm_lan_ ? "YOUR OWN SERVER \xC2\xB7 ON YOUR NETWORK'S LAN TAB"
+                                       : "YOUR OWN SERVER \xC2\xB7 ON THE COMMUNITY TAB";
+      const float cw = kit::SpacedWidth(f.ui_bold, st(9), chip, st(1));
+      const ImVec2 c0(ha.x + st(20), ha.y + st(20)), c1(c0.x + cw + st(22), c0.y + st(22));
+      d->AddRectFilled(c0, c1, kit::kStrip);
+      kit::Spaced(d, f.ui_bold, st(9), ImVec2(c0.x + st(11), c0.y + st(4)), kit::kStripText, chip, st(1));
+    }
+    kit::PaperArt(d, band, hb);
     if (pm_hosting_) {
-      PrivateMatchStarting(d, io, in, cx0, cx1, ry);
+      PrivateMatchStarting(d, st, in, ImVec2(ra.x, rows_y), rb, band, hb);
       return;
     }
-    if (in.up) pm_row_ = (pm_row_ + kPmRows - 1) % kPmRows;
-    if (in.down) pm_row_ = (pm_row_ + 1) % kPmRows;
+    // The prompts first: a click on one is that button's press for the rest of the frame.
+    std::vector<Cue> cues = {{kit::Button::kA, pm_row_ == kPmHost ? "HOST" : "CHANGE"}, {kit::Button::kB, "BACK"}};
+    Prompts(d, st, st.P(48, 662), cues, in, 15);
+    // The rows in the panel's order (13 Nov 2026, after the first look at it: the name first with its field under it,
+    // UPnP and the port as a smaller pair under Network type, and no UPnP at all for a LAN match).
+    std::vector<int> order = {kPmName, kPmMap, kPmTick, kPmNet};
+    if (!pm_lan_) order.push_back(kPmListed);
+    if (!pm_lan_) order.push_back(kPmUpnp);
+    order.insert(order.end(), {kPmPort, kPmHost});
+    {
+      int at = 0;
+      for (int k = 0; k < int(order.size()); ++k)
+        if (order[size_t(k)] == pm_row_) at = k;
+      if (std::find(order.begin(), order.end(), pm_row_) == order.end()) pm_row_ = kPmNet, at = 3;  // UPnP went with LAN
+      const int n = int(order.size());
+      if (in.up) pm_row_ = order[size_t((at + n - 1) % n)];
+      if (in.down) pm_row_ = order[size_t((at + 1) % n)];
+    }
+    if (PmTyping()) {  // the keyboard types straight into the row (as the browser's address)
+      ImGuiContext& g = *ImGui::GetCurrentContext();
+      g.PlatformImeData.WantTextInput = true;
+      g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
+      std::string& text = pm_row_ == kPmName ? pm_name_ : pm_port_text_;
+      const size_t most = pm_row_ == kPmName ? 32 : 5;
+      for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
+        const ImWchar c = io.InputQueueCharacters[i];
+        const bool ok = pm_row_ == kPmName ? (c >= 32 && c < 127 && c != '"' && c != '\\') : (c >= '0' && c <= '9');
+        if (ok && text.size() < most) text += char(c);
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !text.empty()) text.pop_back();
+      in.left = in.right = false;
+    }
     auto change = [&](int row, int step) {
       if (row == kPmMap) pm_map_ = (pm_map_ + 5 + step) % 5;
-      if (row == kPmPort) pm_upnp_ = !pm_upnp_;
+      if (row == kPmTick) {
+        int at = 1;
+        for (int k = 0; k < 4; ++k)
+          if (kPmTicks[k] == pm_tick_) at = k;
+        pm_tick_ = kPmTicks[(at + 4 + step) % 4];
+      }
+      if (row == kPmNet) pm_lan_ = !pm_lan_;
+      if (row == kPmListed && !pm_lan_) pm_listed_ = !pm_listed_;
+      if (row == kPmUpnp && !pm_lan_) pm_upnp_ = !pm_upnp_;
       SavePrivateMatchChoices();
     };
     if (in.left && pm_row_ != kPmHost) change(pm_row_, -1);
     if (in.right && pm_row_ != kPmHost) change(pm_row_, 1);
-    const float rh = 66 * u;
+    // ---- the rows, as the main menu's. By the row's own number (kPm...): its title, and its help in the band.
+    static constexpr const char* kTitles[] = {"MAP",  "SERVER NAME", "NETWORK TYPE",  "SHOW IN BROWSER",
+                                              "UPNP", "PORT",        "HOST THE MATCH", "TICK RATE"};
     int clicked = -1;
-    static constexpr const char* kLabels[] = {"MAP", "ROUTER PORT", "HOST THE MATCH"};
-    for (int i = 0; i < kPmRows; ++i) {
-      const ImVec2 a(cx0 - 28 * u, ry + rh * i), b(cx1, ry + rh * (i + 1));
-      const bool sel = i == pm_row_;
-      const bool hover = ImGui::IsMouseHoveringRect(a, b);
-      if (hover && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) pm_row_ = i;
+    float y = rows_y;
+    int number = 0;
+    const std::string me = settings_.Get("player_name", "");
+    for (const int i : order) {
+      const bool sub = i == kPmUpnp || i == kPmPort;  // the smaller pair under Network type
+      if (i == kPmHost) y += st(12);                  // a rule's worth of air before the action
+      const float h = i == kPmName ? st(74) : sub ? st(29) : st(41);
+      const float title_h = i == kPmName ? st(38) : h;
+      const ImVec2 r0(ra.x, y), r1(rb.x, y + h);
+      const bool hover = ImGui::IsMouseHoveringRect(r0, r1);
+      if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) pm_row_ = i;
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
+      const bool sel = i == pm_row_;
       if (sel) {
-        d->AddRectFilled(a, b, IM_COL32(201, 183, 122, 26));
-        d->AddRectFilled(a, ImVec2(a.x + 8 * u, b.y), kit::kStamp);
+        kit::PaperArt(d, r0, r1);
+        d->AddRectFilled(r0, ImVec2(r0.x + st(5), r1.y), kit::kStamp);
       }
-      d->AddRectFilled(ImVec2(cx0, b.y - 1 * u), ImVec2(cx1 - 40 * u, b.y), IM_COL32(201, 183, 122, 30));
-      kit::Spaced(d, f.typed, 15 * u, ImVec2(cx0, a.y + 25 * u), sel ? kit::kStamp : kit::kKhakiDim,
-                  fmt::format("{:02d}", i + 1), 2 * u);
-      kit::Spaced(d, f.ui_bold, i == kPmHost ? 33 * u : 29 * u, ImVec2(cx0 + 52 * u, a.y + (i == kPmHost ? 14 : 17) * u),
-                  sel ? kit::kCream : kit::kKhakiText, kLabels[i], 3 * u);
-      if (i == kPmHost) continue;
-      const std::string value = i == kPmMap ? kPmMapNames[pm_map_] : (pm_upnp_ ? "OPEN IT FOR ME" : "I OPEN IT MYSELF");
-      const float vw = kit::SpacedWidth(f.typed, 17 * u, value, 2 * u);
-      const float vx = cx1 - 70 * u - vw;
-      kit::Spaced(d, f.typed, 17 * u, ImVec2(vx, a.y + 24 * u), sel ? kit::kCream : kit::kKhakiText, value, 2 * u);
-      if (sel) {  // the arrows either side of the value
-        const float my = a.y + rh * 0.5f;
-        d->AddTriangleFilled(ImVec2(vx - 26 * u, my), ImVec2(vx - 16 * u, my - 7 * u), ImVec2(vx - 16 * u, my + 7 * u),
-                             kit::kStamp);
-        d->AddTriangleFilled(ImVec2(cx1 - 46 * u, my), ImVec2(cx1 - 56 * u, my - 7 * u), ImVec2(cx1 - 56 * u, my + 7 * u),
-                             kit::kStamp);
+      // No rule between Network type and its pair, nor inside the pair: they read as one block.
+      const bool block = i == kPmNet || (i == kPmUpnp);
+      if (!block) d->AddRectFilled(ImVec2(r0.x, r1.y - 1), ImVec2(r1.x, r1.y), IM_COL32(241, 234, 211, 20));
+      const ImU32 dim = sel ? kit::kInkSection : kit::kKhakiDim;
+      if (!sub)
+        kit::Spaced(d, f.typed, st(8), ImVec2(r0.x + st(24), r0.y + title_h * 0.5f - st(5)), dim,
+                    fmt::format("{:02d}", ++number), st(1.5f));
+      if (sub) {
+        // A short tick joins the pair to Network type above it.
+        d->AddRectFilled(ImVec2(r0.x + st(58), r0.y - st(2)), ImVec2(r0.x + st(59), r0.y + h * 0.5f), IM_COL32(241, 234, 211, sel ? 0 : 60));
+        d->AddRectFilled(ImVec2(r0.x + st(58), r0.y + h * 0.5f - 1), ImVec2(r0.x + st(68), r0.y + h * 0.5f), IM_COL32(241, 234, 211, sel ? 0 : 60));
+        kit::Spaced(d, f.typed, st(8.5f), ImVec2(r0.x + st(76), r0.y + h * 0.5f - st(5.5f)), sel ? kit::kInk : kit::kKhaki,
+                    kTitles[i], st(2));
+      } else {
+        const float cap = st(19);
+        kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(r0.x + st(52), r0.y + (title_h - cap) * 0.5f),
+                      sel ? kit::kInk : kit::kKhaki, kTitles[i]);
+      }
+      const float right = r1.x - st(18), mid = r0.y + title_h * 0.5f;
+      auto value_text = [&](std::string value, bool arrows, bool off) {
+        if (arrows && sel && !off) value = "<  " + value + "  >";
+        const float vw = kit::SpacedWidth(f.typed, st(7.5f), value, st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2(right - vw, mid - st(5)), off ? IM_COL32(120, 116, 100, 150) : dim, value, st(1.5f));
+      };
+      const std::string caret = std::fmod(ImGui::GetTime(), 1.0) < 0.5 ? "_" : " ";
+      if (i == kPmHost) {
+        if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(right - st(20), mid), st(20));
+      } else if (i == kPmName) {
+        // The name's field: a box the row's width, under the title.
+        const ImVec2 f0(r0.x + st(52), r0.y + st(40)), f1(r1.x - st(18), r1.y - st(9));
+        d->AddRectFilled(f0, f1, sel ? IM_COL32(34, 36, 27, 22) : IM_COL32(0, 0, 0, 70));
+        d->AddRect(f0, f1, sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
+        const bool empty = pm_name_.empty();
+        const std::string shown = !empty ? pm_name_ + (sel ? caret : "") : sel ? caret : me.empty() ? "Custom match" : me + "'s match";
+        d->PushClipRect(f0, f1, true);
+        d->AddText(f.ui_bold, st(11), ImVec2(f0.x + st(9), f0.y + (f1.y - f0.y - st(11) * 1.45f) * 0.5f),
+                   empty && !sel ? IM_COL32(241, 234, 211, 110) : sel ? kit::kInk : kit::kKhaki, shown.c_str());
+        d->PopClipRect();
+      } else if (i == kPmMap) {
+        value_text(kPmMapNames[pm_map_], true, false);
+      } else if (i == kPmTick) {
+        value_text(std::to_string(pm_tick_) + (pm_tick_ == 30 ? "Hz - Default" : "Hz - Experimental"), true, false);
+      } else if (i == kPmNet) {
+        value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
+      } else if (i == kPmListed) {
+        value_text(pm_lan_ ? "ON YOUR NETWORK" : pm_listed_ ? "YES" : "NO", true, pm_lan_);
+      } else if (i == kPmUpnp) {
+        // An on/off switch: on, the router is asked to open the port.
+        const float sw = st(26), sh2 = st(13);
+        const ImVec2 s0(right - sw, mid - sh2 * 0.5f), s1(right, mid + sh2 * 0.5f);
+        const ImU32 track = pm_upnp_ ? kit::kGreen : IM_COL32(120, 116, 100, 140);
+        d->AddRectFilled(s0, s1, track, sh2 * 0.5f);
+        const float knob = sh2 * 0.5f - st(2);
+        d->AddCircleFilled(ImVec2(pm_upnp_ ? s1.x - sh2 * 0.5f : s0.x + sh2 * 0.5f, mid), knob, kit::kCream, 20);
+        const std::string said = pm_upnp_ ? "ON" : "OFF";
+        const float tw = kit::SpacedWidth(f.typed, st(7.5f), said, st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2(s0.x - st(8) - tw, mid - st(5)), dim, said, st(1.5f));
+      } else if (i == kPmPort) {
+        // The port's field: typed when it is the player's to choose, greyed (Automatic) while the router is asked.
+        const bool off = !PmPortTyped();
+        const ImVec2 f0(right - st(70), r0.y + st(5)), f1(right, r1.y - st(5));
+        d->AddRect(f0, f1, off ? IM_COL32(120, 116, 100, 90) : sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
+        const std::string shown = off ? "AUTOMATIC" : pm_port_text_ + (sel ? caret : "");
+        const float vw = kit::SpacedWidth(f.typed, st(7.5f), shown, st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2((f0.x + f1.x - vw) * 0.5f, mid - st(5)),
+                    off ? IM_COL32(120, 116, 100, 150) : dim, shown, st(1.5f));
+      }
+      y += h;
+      // An experimental tick rate (every one above 30: TekRantGaming, 13 Nov 2026): the warning right under the
+      // row, in red.
+      if (i == kPmTick && pm_tick_ != 30) {
+        const std::string warning = "Physics, weapons, vehicles and timers may behave oddly or break, your PC and every "
+                                    "player's connection work harder, and players on older versions cannot join. Use "
+                                    "30 Hz for a normal match.";
+        const float wx = ra.x + st(52), wrap = rb.x - st(18) - wx, size = st(10);
+        const ImU32 red = IM_COL32(236, 92, 76, 255);  // a red that reads on the dark rail
+        const float wh = st(6) + st(14) + kit::WrappedHeight(f.ui, size, warning, wrap) + st(10);
+        d->AddRectFilled(ImVec2(ra.x, y), ImVec2(ra.x + st(5), y + wh), kit::kStamp);
+        kit::Spaced(d, f.ui_bold, st(9), ImVec2(wx, y + st(6)), red, fmt::format("WARNING: {} HZ IS EXPERIMENTAL", pm_tick_),
+                    st(1.5f));
+        kit::Wrapped(d, f.ui, size, ImVec2(wx, y + st(6) + st(14)), red, warning, wrap);
+        d->AddRectFilled(ImVec2(ra.x, y + wh - 1), ImVec2(rb.x, y + wh), IM_COL32(241, 234, 211, 20));
+        y += wh;
       }
     }
-    if (!pm_error_.empty())
-      kit::Wrapped(d, f.typed, 19 * u, ImVec2(cx0, ry + rh * kPmRows + 26 * u), kit::kStamp, Upper(pm_error_),
-                   cx1 - cx0 - 40 * u);
-    // The selected row's card, at the right.
+    // ---- the band: the chosen row's help, the green button
     {
       static constexpr const char* kAbout[] = {
           "The map your match plays. All four in turn: the next map after each round, as on the official servers.",
-          "Friends outside your home reach your match on UDP 18300. Open it for me asks your router (UPnP); if the "
-          "router says no, open that port on it yourself.",
+          "The match's name in the server browser. Type it with the keyboard; left empty it is your name's match.",
+          "Online: your match is on everybody's server browser, on the Community tab. LAN: for the PCs of your own "
+          "network, with no internet needed; your PC answers the sign-in and the match list itself, and the match is "
+          "on their browser's LAN tab (or they type your PC's network address in Direct connect).",
+          "Yes: everybody sees your match on the server browser's Community tab and can join. No: only friends you "
+          "give the address to (Direct connect). A LAN match is always found by the PCs of your network.",
+          "On, your router is asked to open the match's port (UPnP) and the port is chosen for you. Off, you open "
+          "the port below on your router yourself.",
+          "The UDP port players reach your match on, when UPnP is off or the match is a LAN one: 18300 unless "
+          "you want another. For an Online match, open it on your router for friends outside your home.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
-          "server browser: the pause copies the address for you. The match ends when you leave it."};
-      const float w = 640 * u;
-      const ImVec2 ca(sz.x * 0.95f - w, sz.y * 0.58f), cb(sz.x * 0.95f, sz.y * 0.58f + 210 * u);
-      d->AddRectFilled(ca, cb, IM_COL32(15, 17, 13, 210));
-      d->AddRectFilled(ca, ImVec2(ca.x + 6 * u, cb.y), kit::kStamp);
-      kit::Spaced(d, f.ui_bold, 30 * u, ImVec2(ca.x + 30 * u, ca.y + 22 * u), kit::kCream, kLabels[pm_row_], 3 * u);
-      kit::Wrapped(d, f.typed, 20 * u, ImVec2(ca.x + 30 * u, ca.y + 74 * u), kit::kKhakiText, kAbout[pm_row_], w - 60 * u);
+          "server browser: the pause copies the address for you. The match ends when you leave it.",
+          "How many times a second the match is simulated. 30, the original game's, is the default. 60, 75 and 100 "
+          "are experimental: physics and timing may break, and they ask more of your PC and of every player's "
+          "connection. A player's game takes the match's rate when it joins."};
+      kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, kTitles[pm_row_], st(2));
+      kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
+                    kPmMapNames[pm_map_]);
+      const ImVec2 q0(hb.x - st(20) - st(190), band.y + st(18)), q1(q0.x + st(190), q0.y + st(40));
+      const bool error = !pm_error_.empty();
+      kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error ? kit::kRed : kit::kInkFaint,
+                   error ? pm_error_ : std::string(kAbout[pm_row_]), q0.x - band.x - st(40));
+      if (GreenButton(d, st, q0, q1, kit::Button::kA, "HOST THE MATCH")) clicked = kPmHost;
     }
-    // The prompts.
-    const float py = sz.y - 64 * u;
-    float x = cx0;
-    x += kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(x, py), 34 * u) + 10 * u;
-    x += kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(x, py - 14 * u), kit::kKhakiText, pm_row_ == kPmHost ? "HOST" : "CHANGE",
-                     3 * u) + 34 * u;
-    x += kit::Glyph(d, PromptStyle(), kit::Button::kB, "Esc", ImVec2(x, py), 34 * u) + 10 * u;
-    kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(x, py - 14 * u), kit::kKhakiText, "BACK", 3 * u);
     if (in.accept) clicked = pm_row_;
     if (clicked >= 0) {
       pm_row_ = clicked;
       if (clicked == kPmHost) HostPrivateMatch();
       else change(clicked, 1);
     }
-    if (in.back) BackToMenu(kRowPrivateMatch, MainRowOf("CREATE PRIVATE MATCH")), pm_error_.clear();  // back to the menu
+    if (in.back) BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
   }
 
-  // While our server starts: its steps, then the join (PrivateMatchTick); B ends it.
-  void PrivateMatchStarting(ImDrawList* d, ImGuiIO& io, const Input& in, float cx0, float cx1, float ry) {
-    const ImVec2 sz = io.DisplaySize;
+  // While our server starts: its steps in the rail (ra..rb under the heading), the wait on the band (band..hb), then
+  // the join (PrivateMatchTick); B ends it.
+  void PrivateMatchStarting(ImDrawList* d, const Stage& st, Input& in, ImVec2 ra, ImVec2 rb, ImVec2 band, ImVec2 hb) {
     const kit::Fonts& f = kit::GetFonts();
-    const float u = sz.y / 1080.0f;
-    const bf1943::PrivateMatchStatus& st = pm_status_;
+    const bf1943::PrivateMatchStatus& status = pm_status_;
     const double t = ImGui::GetTime() - pm_started_at_;
     std::string error;
-    if (!st.running && t > 3) error = "Your server stopped. Its log: user\\private_match\\server.log.";
-    else if (st.state == "no backend") error = "The main backend does not answer. Check your internet connection.";
-    else if (st.state == "port in use") error = fmt::format("UDP {} is in use on this PC: another server runs here.", st.port);
-    else if (st.state == "refused") error = "The main backend refused the match: " + st.why;
+    if (!status.running && t > 3) error = "Your server stopped. Its log: user\\private_match\\server.log.";
+    else if (status.state == "no backend" && pm_lan_)
+      error = "The LAN match could not start its own services: another program on this PC already uses TCP 18241, 18246 "
+              "or 18250 (another match, or a test backend: the test launcher runs one). Close it and host again.";
+    else if (status.state == "no backend") error = "The main backend does not answer. Check your internet connection.";
+    else if (status.state == "port in use")
+      error = fmt::format("UDP {} is in use on this PC: another server runs here.", status.port);
+    else if (status.state == "refused") error = "The main backend refused the match: " + status.why;
     else if (t > 150) error = "Your server did not come up in time. Its log: user\\private_match\\server.log.";
-    const bool registered = st.state == "registered";
-    const std::string steps[] = {"STARTING YOUR SERVER", "LOADING THE MAP AND REGISTERING IT", "JOINING YOUR MATCH"};
-    const int at = !st.running ? 0 : registered ? 2 : 1;
-    const float rh = 58 * u;
+    std::vector<Cue> cues = {{kit::Button::kB, error.empty() ? "CANCEL" : "BACK"}};
+    Prompts(d, st, st.P(48, 662), cues, in, 15);
+    const bool registered = status.state == "registered";
+    static constexpr const char* kSteps[] = {"STARTING YOUR SERVER", "LOADING THE MAP", "JOINING YOUR MATCH"};
+    const int at = !status.running ? 0 : registered ? 2 : 1;
+    const float h = st(41);
     for (int i = 0; i < 3; ++i) {
-      const float y = ry + rh * i;
+      const ImVec2 r0(ra.x, ra.y + h * i), r1(rb.x, ra.y + h * (i + 1));
       const bool done = i < at, now = i == at && error.empty();
-      const ImVec2 c(cx0 + 10 * u, y + rh * 0.5f);
-      if (done) d->AddCircleFilled(c, 8 * u, kit::kGreenBright);
-      else if (now) d->AddCircle(c, 8 * u, kit::kGold, 0, 2.5f * u);
-      else d->AddCircle(c, 8 * u, IM_COL32(169, 154, 104, 120), 0, 2 * u);
+      if (now) {
+        kit::PaperArt(d, r0, r1);
+        d->AddRectFilled(r0, ImVec2(r0.x + st(5), r1.y), kit::kStamp);
+      }
+      d->AddRectFilled(ImVec2(r0.x, r1.y - 1), ImVec2(r1.x, r1.y), IM_COL32(241, 234, 211, 20));
+      const ImVec2 c(r0.x + st(30), r0.y + h * 0.5f);
+      if (done) d->AddCircleFilled(c, st(5), kit::kGreenBright);
+      else d->AddCircle(c, st(5), now ? kit::kInk : kit::kKhakiDim, 0, st(1.5f));
       if (now) {  // a turning arc over the current step
         const float a0 = float(ImGui::GetTime()) * 5.0f;
-        d->PathArcTo(c, 14 * u, a0, a0 + 2.2f, 16);
-        d->PathStroke(kit::kStamp, 0, 3 * u);
+        d->PathArcTo(c, st(9), a0, a0 + 2.2f, 16);
+        d->PathStroke(kit::kStamp, 0, st(2));
       }
-      kit::Spaced(d, f.ui_bold, 26 * u, ImVec2(cx0 + 40 * u, y + 15 * u),
-                  done ? kit::kKhakiText : now ? kit::kCream : kit::kKhakiDim, steps[i], 3 * u);
+      const float cap = st(16);
+      kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(r0.x + st(52), r0.y + (h - cap) * 0.5f),
+                    now ? kit::kInk : done ? kit::kKhaki : kit::kKhakiDim, kSteps[i]);
     }
-    kit::Spaced(d, f.typed, 17 * u, ImVec2(cx0 + 40 * u, ry + rh * 3 + 14 * u), kit::kKhakiDim,
-                fmt::format("{} S  /  {}", int(t), kPmMapNames[pm_map_]), 2 * u);
-    if (!error.empty())
-      kit::Wrapped(d, f.typed, 19 * u, ImVec2(cx0, ry + rh * 3 + 60 * u), kit::kStamp, Upper(error), cx1 - cx0 - 40 * u);
-    const float py = sz.y - 64 * u;
-    float x = cx0;
-    x += kit::Glyph(d, PromptStyle(), kit::Button::kB, "Esc", ImVec2(x, py), 34 * u) + 10 * u;
-    kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(x, py - 14 * u), kit::kKhakiText, error.empty() ? "CANCEL" : "BACK", 3 * u);
+    kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection,
+                fmt::format("STARTING \xC2\xB7 {} S", int(t)), st(2));
+    kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
+                  kPmMapNames[pm_map_]);
+    kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error.empty() ? kit::kInkFaint : kit::kRed,
+                 error.empty() ? std::string("Your PC is starting the match's server. You join it as soon as it is up.") : error,
+                 hb.x - band.x - st(40));
     if (in.back) {
       REXLOG_INFO("BF private match: {} on the starting page", error.empty() ? "cancelled" : "back after: " + error);
       EndPrivateMatch();
@@ -2359,7 +2643,7 @@
     d->AddRectFilled(ca, ImVec2(ca.x + 6 * u, cb.y), kit::kStamp);
     kit::Spaced(d, f.typed, 16 * u, ImVec2(ca.x + 30 * u, ca.y + 22 * u), kit::kKhakiDim,
                 fmt::format("HOSTED ON THIS PC  /  {} {}", st.players, st.players == 1 ? "PLAYER" : "PLAYERS"), 3 * u);
-    kit::Spaced(d, f.ui_bold, 30 * u, ImVec2(ca.x + 30 * u, ca.y + 48 * u), kit::kCream, "YOUR PRIVATE MATCH", 3 * u);
+    kit::Spaced(d, f.ui_bold, 30 * u, ImVec2(ca.x + 30 * u, ca.y + 48 * u), kit::kCream, "YOUR CUSTOM MATCH", 3 * u);
     const std::string reach = st.reachable == "true"  ? "Friends outside your home can reach it."
                               : st.reachable == "false" ? fmt::format("Friends outside your home cannot reach it yet: "
                                                                       "open UDP {} on your router.", st.port)
@@ -2430,7 +2714,7 @@
     bool online_ok = false;
     const std::string status = OnlineStatus(online_ok);
     const bool edit = MenuChrome(d, io, st, status, online_ok);
-    kit::Spaced(d, f.typed, st(8.5f), st.P(48, 91), kit::kKhakiDim, "FIELD MANUAL \xC2\xB7 THE TUTORIAL, THE CONTROLS, THE CREDITS", st(2));
+    kit::Spaced(d, f.typed, st(10.5f), st.P(48, 91), kit::kKhakiDim, "FIELD MANUAL \xC2\xB7 THE TUTORIAL, THE CONTROLS, THE CREDITS", st(2));
     kit::GameText(d, kit::GameFont::kHeadline, st(40), st.P(48, 105), kit::kCream, "HELP");
     Prompts(d, st, st.P(48, 662), {{kit::Button::kA, "SELECT"}, {kit::Button::kB, "BACK"}}, in, 15);
     MenuFoot(d, st);
@@ -2463,24 +2747,24 @@
         d->AddRectFilled(a, ImVec2(a.x + st(5), b.y), kit::kStamp);
       }
       d->AddRectFilled(ImVec2(a.x, b.y - 1), ImVec2(b.x, b.y), IM_COL32(241, 234, 211, 20));
-      kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(24), a.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
+      kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(24), a.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
                   fmt::format("{:02d}", i + 1), st(1.5f));
       kit::GameText(d, kit::GameFont::kHeadlineMedium, st(19), ImVec2(a.x + st(52), a.y + (h - st(19)) * 0.5f),
                     sel ? kit::kInk : kit::kKhaki, kRows[i]);
       if (sel) {
         kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(b.x - st(18) - st(20), a.y + h * 0.5f), st(20));
       } else {
-        const float nw = kit::SpacedWidth(f.typed, st(7.5f), kNotes[i], st(1.5f));
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2(b.x - st(18) - nw, a.y + h * 0.5f - st(5)), kit::kKhakiDim, kNotes[i], st(1.5f));
+        const float nw = kit::SpacedWidth(f.typed, st(9.5f), kNotes[i], st(1.5f));
+        kit::Spaced(d, f.typed, st(9.5f), ImVec2(b.x - st(18) - nw, a.y + h * 0.5f - st(5)), kit::kKhakiDim, kNotes[i], st(1.5f));
       }
     }
     {  // the chosen row's card
       const ImVec2 a = st.P(427, 167), b = st.P(1232, 400);
       kit::PaperArt(d, a, b);
-      kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(24), a.y + st(22)), kit::kInkSection,
+      kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(24), a.y + st(22)), kit::kInkSection,
                   std::string("FIELD MANUAL \xC2\xB7 ") + kRows[help_row_], st(2));
       kit::GameText(d, kit::GameFont::kHeadline, st(28), ImVec2(a.x + st(24), a.y + st(40)), kit::kInk, kRows[help_row_]);
-      kit::Wrapped(d, f.ui, st(12.5f), ImVec2(a.x + st(24), a.y + st(86)), kit::kInk, kAbout[help_row_], b.x - a.x - st(48) - st(170));
+      kit::Wrapped(d, f.ui, st(14.25f), ImVec2(a.x + st(24), a.y + st(86)), kit::kInk, kAbout[help_row_], b.x - a.x - st(48) - st(170));
       if (GreenButton(d, st, ImVec2(a.x + st(24), b.y - st(64)), ImVec2(a.x + st(24) + st(230), b.y - st(24)), kit::Button::kA,
                       kButtons[help_row_]))
         clicked = help_row_;
@@ -3285,7 +3569,7 @@
       for (const ChangelogEntry& e : Changelog()) all.push_back(&e);
     const std::vector<const ChangelogEntry*>& entries = whats_new_all_ ? all : whats_new_shown_;
     const ChangelogEntry* first = entries.empty() ? nullptr : entries.front();
-    kit::Spaced(d, f.typed, st(8.5f), ImVec2(x0, a.y + st(26)), kit::kInkSection,
+    kit::Spaced(d, f.typed, st(10.5f), ImVec2(x0, a.y + st(26)), kit::kInkSection,
                 whats_new_all_ ? "BATTLEFIELD 1943 REBORN \xC2\xB7 THE CHANGELOG" : "BATTLEFIELD 1943 REBORN \xC2\xB7 UPDATED", st(2));
     kit::GameText(d, kit::GameFont::kHeadline, st(30), ImVec2(x0, a.y + st(42)), kit::kInk,
                   whats_new_all_ ? std::string("EVERY VERSION") : "WHAT'S NEW IN " + Upper(first ? first->version : std::string(BfVersion())));
@@ -3311,14 +3595,14 @@
         }
         const std::string about = Upper(e->date) + (e->title.empty() ? "" : " \xC2\xB7 " + Upper(e->title));
         if (!about.empty()) {
-          if (out) kit::Wrapped(out, f.typed, st(8), ImVec2(v0.x, y), kit::kInkSection, about, wrap);
-          y += kit::WrappedHeight(f.typed, st(8), about, wrap) + st(10);
+          if (out) kit::Wrapped(out, f.typed, st(10), ImVec2(v0.x, y), kit::kInkSection, about, wrap);
+          y += kit::WrappedHeight(f.typed, st(10), about, wrap) + st(10);
         }
         for (const ChangelogLine& l : ChangelogLines(e->body)) {
           if (l.kind == ChangelogLine::kHead) {
             y += st(6);
             if (out) {
-              kit::Spaced(out, f.ui_bold, st(10), ImVec2(v0.x, y), kit::kStamp, Upper(l.text), st(2));
+              kit::Spaced(out, f.ui_bold, st(11.5f), ImVec2(v0.x, y), kit::kStamp, Upper(l.text), st(2));
               out->AddRectFilled(ImVec2(v0.x, y + st(17)), ImVec2(v0.x + wrap, y + st(18)), kit::kRule);
             }
             y += st(26);
@@ -3345,7 +3629,7 @@
             {{kit::Button::kA, "CLOSE", "", true}, {kit::Button::kX, whats_new_all_ ? "THIS UPDATE" : "EVERY VERSION"}}, in, 14);
     if (total > view) {
       const std::string hint = "UP AND DOWN SCROLL";
-      kit::Spaced(d, f.typed, st(7.5f), ImVec2(x1 - kit::SpacedWidth(f.typed, st(7.5f), hint, st(1.5f)), b.y - st(34)), kit::kInkSection, hint, st(1.5f));
+      kit::Spaced(d, f.typed, st(9.5f), ImVec2(x1 - kit::SpacedWidth(f.typed, st(9.5f), hint, st(1.5f)), b.y - st(34)), kit::kInkSection, hint, st(1.5f));
     }
     // Up and down (held: the menu's own repeat), the bumpers a page, the wheel.
     if (in.up) whats_new_scroll_ -= st(70);

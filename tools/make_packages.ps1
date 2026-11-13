@@ -35,11 +35,18 @@ if ($built -ne $Version) { throw "the build is version '$built', not ${Version}:
 # build (a version with -test) may have it.
 $nightOps = (Select-String -Path (Join-Path $build "CMakeCache.txt") -Pattern '^BF_NIGHT_OPS:BOOL=(ON|TRUE|1)$' -Quiet)
 if ($nightOps -and $Version -notmatch '-test') { throw "the build has Night Ops (BF_NIGHT_OPS ON): not for a release; build it with -DBF_NIGHT_OPS=OFF" }
+# The picture in picture sniper scope (bf/src/scope_pip.h): taken out of 0.4.1 at TekRantGaming's word (13 Nov 2026);
+# only a test build may have it.
+$scopePip = (Select-String -Path (Join-Path $build "CMakeCache.txt") -Pattern '^BF_SCOPE_PIP:BOOL=(ON|TRUE|1)$' -Quiet)
+if ($scopePip -and $Version -notmatch '-test') { throw "the build has the picture in picture scope (BF_SCOPE_PIP ON): not for a release; build it with -DBF_SCOPE_PIP=OFF" }
 New-Item -ItemType Directory -Force $out | Out-Null
 
-# Only our binaries: the game exe, its runtime and renderer, and the two vendor libraries it loads. Not the Xenos
-# plugin (development only). The player download also gets data\shaders, our shader list (New-Bin -Shaders).
-$binFiles = @("bf1943.exe", "rexruntime.dll", "rexgpu-bfnative.dll", "nvngx_dlss.dll", "amd_fidelityfx_vk.dll")
+# Only our binaries: the game exe, its runtime and renderer, and the vendor libraries it loads: NVIDIA's DLSS, AMD's FSR
+# SDK 2.4.0 loader and upscaler, Intel's XeSS (0.4.1, pull request 16: NativeXRenderer D167). Not the Xenos plugin
+# (development only), nor AMD's FidelityFX SDK 1.1.4 library (frame generation's, not offered since 9 Nov 2026 and no
+# longer fetched). The player download also gets data\shaders, our shader list (New-Bin -Shaders).
+$binFiles = @("bf1943.exe", "rexruntime.dll", "rexgpu-bfnative.dll", "nvngx_dlss.dll", "amd_fidelityfx_loader_vk.dll",
+              "amd_fidelityfx_upscaler_vk.dll", "libxess.dll")
 
 function Copy-Licences([string]$dest) {
     $l = Join-Path $dest "licences"
@@ -49,6 +56,7 @@ function Copy-Licences([string]$dest) {
     foreach ($p in @(@("diligent-core\License.txt", "DiligentCore.txt"), @("diligent-core\ThirdParty\SPIRV-Cross\LICENSE", "SPIRV-Cross.txt"),
                      @("diligent-core\ThirdParty\volk\LICENSE.md", "volk.txt"), @("fsr1\LICENSE.txt", "AMD FSR 1.txt"),
                      @("cas\LICENSE.txt", "AMD CAS.txt"), @("ffx_api\LICENSE.txt", "AMD FidelityFX SDK.txt"),
+                     @("ffx_api2\LICENSE.txt", "AMD FSR SDK.txt"), @("xess\LICENSE.txt", "Intel XeSS.txt"),
                      @("nis\LICENSE.txt", "NVIDIA Image Scaling.txt"), @("smaa\LICENSE.txt", "SMAA.txt"),
                      @("king-kong-recompiled\LICENSE", "King Kong Recompiled.txt"))) {
         Copy-Item (Join-Path $nxr "thirdparty\$($p[0])") (Join-Path $l $p[1])
@@ -62,6 +70,9 @@ function Copy-Licences([string]$dest) {
     # The menu music's EA block layout follows vgmstream (bf\src\game_music.cpp; ISC licence).
     Copy-Item (Join-Path $root "bf\licences\vgmstream.txt") (Join-Path $l "vgmstream.txt")
     Copy-Item (Join-Path $root "bf\glyphs\LICENSE.txt") (Join-Path $l "Button prompts.txt")
+    # Intel's CMAA2 (Apache License 2.0, Copyright (c) 2018 Intel Corporation), ported into the renderer's shaders (pull
+    # request 16, src/cmaa_shaders.h): the licence's text, from the Vulkan headers' copy.
+    Copy-Item (Join-Path $sdk "thirdparty\vulkan-headers\LICENSES\Apache-2.0.txt") (Join-Path $l "CMAA2 (Apache License 2.0).txt")
     Copy-Item (Join-Path $sdk "LICENSE") (Join-Path $l "ReXGlue SDK.txt")
     # Everything the SDK builds into its runtime: each third party folder's licence.
     $sdkl = Join-Path $l "ReXGlue SDK third party"

@@ -9,7 +9,9 @@
 
   static constexpr const char* kTabSubs[kTabCount] = {"WINDOW, RESOLUTION, FRAME RATE", "PRESETS, UPSCALING, LIGHTING",
                                                       "VOLUME, VOICE CHAT", "MOUSE, KEYBOARD, CONTROLLER, AIM ASSIST",
-                                                      "NAME, LANGUAGE, CHAT"};
+                                                      "NAME, LANGUAGE, CHAT",
+                                                      // the sniper scope only in a build with it (scope_pip.h)
+                                                      kScopePip ? "LETTERED FLAGS, SNIPER SCOPE" : "LETTERED FLAGS"};
 
   // Back where the settings were opened from: the pause (a match running), else the menu (Home before the game runs).
   void BackFromSettings() {
@@ -34,14 +36,7 @@
 
   // Keyboard bindings: the next key goes to the row being bound (Esc leaves it); the page gets no input meanwhile.
   void CaptureKeyInto(Input& in) {
-    if (capture_.empty()) return;
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-      capture_.clear();
-    } else if (const std::string key = CapturedKey(); !key.empty()) {
-      SetCvar(capture_, key);
-      capture_.clear();
-    }
-    in = {};
+    if (CaptureBind()) in = {};
   }
 
   // The Graphics preset strip (TekRantGaming, 13 Nov 2026: "if you navigate them it changes the below settings can we
@@ -80,8 +75,8 @@
     row_ = std::clamp(row_, 0, count - 1);
     float top = pa.y + st(6);
     if (sub_ != kSubNone) {  // a page under Controls: its name over its rows
-      kit::Spaced(d, f.typed, st(8), ImVec2(pa.x + st(18), pa.y + st(14)), kit::kInkSection,
-                  sub_ == kSubRemap ? "CONTROLS \xC2\xB7 BUTTON REMAPPING" : "CONTROLS \xC2\xB7 KEYBOARD BINDINGS", st(2));
+      kit::Spaced(d, f.typed, st(10), ImVec2(pa.x + st(18), pa.y + st(14)), kit::kInkSection,
+                  sub_ == kSubRemap ? "CONTROLS \xC2\xB7 BUTTON REMAPPING" : "CONTROLS \xC2\xB7 KEYBOARD AND MOUSE BINDINGS", st(2));
       top = pa.y + st(32);
     }
     const float list_bottom = pb.y - st(6), rh = st(33), sh = st(28), strip_h = st(58);
@@ -113,8 +108,14 @@
       const float h = is_strip(it) ? strip_h : rh;
       if (it.section != section) {
         section = it.section;
-        kit::Spaced(d, f.typed, st(8), ImVec2(tx0, y - sh + st(9)), kit::kInkSection, Upper(section), st(2));
+        kit::Spaced(d, f.typed, st(10), ImVec2(tx0, y - sh + st(9)), kit::kInkSection, Upper(section), st(2));
         d->AddLine(ImVec2(tx0, y - st(3)), ImVec2(tx1, y - st(3)), kit::kRule, 1.0f);
+        if (!it.slots.empty()) {  // the bindings' columns: two keys, two mouse buttons
+          const float bw = st(82), gap = st(6), pair = st(14);
+          const float mouse_x = tx1 - 2 * bw - gap, keys_x = mouse_x - pair - 2 * bw - gap;
+          kit::Spaced(d, f.typed, st(8), ImVec2(keys_x, y - sh + st(9)), kit::kInkSection, "KEYBOARD", st(2));
+          kit::Spaced(d, f.typed, st(8), ImVec2(mouse_x, y - sh + st(9)), kit::kInkSection, "MOUSE", st(2));
+        }
       }
       if (y + h < top || y > list_bottom) continue;
       const ImVec2 r0(x0, y), r1(x1, y + h);
@@ -162,7 +163,7 @@
           d->AddRectFilled(b0, b1, on ? kit::kStrip : cur ? kit::kPaperLight : kit::kPaperDim);
           d->AddRect(b0, b1, cur ? kit::kStamp : on ? kit::kStrip : kit::kBorder, 0, 0, cur ? st(2.5f) : 1.0f);
           const std::string& label = it.options[size_t(o)];
-          const float lw = kit::TextWidth(f.ui_bold, st(12), label);
+          const float lw = kit::TextWidth(f.ui_bold, st(13.75f), label);
           // The prompt on the highlighted one while it is not the preset in use: A (Enter), then its name.
           const float gh = st(17);
           const float gw = cur && !on ? kit::Glyph(nullptr, PromptStyle(), kit::Button::kA, KeyFor(kit::Button::kA), ImVec2(0, 0), gh, false) +
@@ -170,7 +171,7 @@
                                       : 0.0f;
           const float lx = (b0.x + b1.x - lw - gw) * 0.5f;
           if (gw > 0) kit::Glyph(d, PromptStyle(), kit::Button::kA, KeyFor(kit::Button::kA), ImVec2(lx, (b0.y + b1.y) * 0.5f), gh);
-          d->AddText(f.ui_bold, st(12), ImVec2(lx + gw, b0.y + (b1.y - b0.y - st(12) * 1.45f) * 0.5f),
+          d->AddText(f.ui_bold, st(13.75f), ImVec2(lx + gw, b0.y + (b1.y - b0.y - st(12) * 1.45f) * 0.5f),
                      on ? kit::kStripText : kit::kInk, label.c_str());
           if (bh && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked_opt = o;
           bx += bw + gap;
@@ -194,6 +195,34 @@
       const ImU32 ink = sel ? kit::kCream : it.disabled ? kit::kInkFaint : kit::kInk;
       const float ty = y + (rh - size * 1.45f) * 0.5f;
       d->AddText(f.ui, size, ImVec2(tx0, ty), ink, it.name.c_str());
+      if (!it.slots.empty()) {
+        // A binding: its four slots as boxes (13 Nov 2026). A click on one, or A on the one left and right are on,
+        // makes it wait for a press; the waiting one is red.
+        const float bw = st(82), gap = st(6), pair = st(14);
+        const int n = int(it.slots.size());
+        for (int k = 0; k < n; ++k) {
+          const float right = tx1 - float(n - 1 - k) * (bw + gap) - (k < 2 ? pair : 0.0f);
+          const ImVec2 b0(right - bw, y + st(5)), b1(right, y + rh - st(5));
+          const bool over = hover && ImGui::IsMouseHoveringRect(b0, b1);
+          const bool waiting = it.slot_capture == k, cursor = sel && it.slot_cursor == k;
+          d->AddRectFilled(b0, b1, waiting ? kit::kStamp : cursor || over ? kit::kPaperLight : kit::kPaperDim);
+          d->AddRect(b0, b1, cursor ? kit::kStamp : kit::kBorder, 0, 0, cursor ? st(2.0f) : 1.0f);
+          const std::string label = waiting ? "PRESS..." : it.slots[size_t(k)].empty() ? "-" : it.slots[size_t(k)];
+          const float lw = kit::TextWidth(f.ui_bold, st(12), label);
+          d->AddText(f.ui_bold, st(12), ImVec2((b0.x + b1.x - lw) * 0.5f, b0.y + (b1.y - b0.y - st(12) * 1.45f) * 0.5f),
+                     waiting ? kit::kCream : it.slots[size_t(k)].empty() ? kit::kInkFaint : kit::kInk, label.c_str());
+          if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && it.slot_click && capture_.empty()) {
+            row_ = i;
+            REXLOG_INFO("BF settings: {} / {} slot {} waits for a press", kTabNames[tab_], it.name, k + 1);
+            it.slot_click(k);
+          }
+        }
+        if (sel && !it.disabled && capture_.empty()) {
+          if (it.nudge && (in.left || in.right)) it.nudge(in.left ? -1 : 1);
+          if (it.activate && in.accept) it.activate();
+        }
+        continue;
+      }
       std::string shown = it.slider ? (it.format ? it.format(it.val) : std::to_string(it.val))
                           : it.options.empty() ? it.value
                                                : it.options[size_t(std::clamp(it.index, 0, int(it.options.size()) - 1))];
@@ -202,8 +231,8 @@
       const float vw = kit::TextWidth(f.ui_bold, size, shown), vx = tx1 - vw;
       d->AddText(f.ui_bold, size, ImVec2(vx, ty), sel ? kit::kCream : changeable ? kit::kInk : kit::kInkFaint, shown.c_str());
       if (Pending(it)) {  // changed, taken at the next start
-        const float tw = kit::SpacedWidth(f.typed, st(7), "NEXT START", st(1.5f));
-        kit::Spaced(d, f.typed, st(7), ImVec2(vx - st(14) - tw, y + rh * 0.5f - st(4)), sel ? kit::kCream : kit::kStamp, "NEXT START",
+        const float tw = kit::SpacedWidth(f.typed, st(8.75f), "NEXT START", st(1.5f));
+        kit::Spaced(d, f.typed, st(8.75f), ImVec2(vx - st(14) - tw, y + rh * 0.5f - st(4)), sel ? kit::kCream : kit::kStamp, "NEXT START",
                     st(1.5f));
       }
       const float t0 = x0 + (x1 - x0) * 0.48f, tyc = y + rh * 0.5f;
@@ -258,21 +287,21 @@
       const SettingRow& it = rows[size_t(row_)];
       const float wrap = hb.x - ha.x - st(36);
       float y = ha.y + st(18);
-      kit::Spaced(d, f.typed, st(8), ImVec2(ha.x + st(18), y), kit::kInkSection, Upper(it.name), st(2));
+      kit::Spaced(d, f.typed, st(10), ImVec2(ha.x + st(18), y), kit::kInkSection, Upper(it.name), st(2));
       y += st(20);
-      y += kit::Wrapped(d, f.ui, st(11.5f), ImVec2(ha.x + st(18), y), kit::kInk, it.help, wrap) + st(14);
+      y += kit::Wrapped(d, f.ui, st(13.25f), ImVec2(ha.x + st(18), y), kit::kInk, it.help, wrap) + st(14);
       auto note_box = [&](const std::string& t) {  // a boxed note with the red tab
-        const float nh = kit::WrappedHeight(f.ui, st(10.5f), t, wrap - st(28)) + st(20);
+        const float nh = kit::WrappedHeight(f.ui, st(12), t, wrap - st(28)) + st(20);
         const ImVec2 n0(ha.x + st(18), y), n1(hb.x - st(18), y + nh);
         d->AddRectFilled(n0, n1, kit::kPaperDim);
         d->AddRectFilled(n0, ImVec2(n0.x + st(3), n1.y), kit::kStamp);
-        kit::Wrapped(d, f.ui, st(10.5f), ImVec2(n0.x + st(14), n0.y + st(10)), kit::kInk, t, wrap - st(28));
+        kit::Wrapped(d, f.ui, st(12), ImVec2(n0.x + st(14), n0.y + st(10)), kit::kInk, t, wrap - st(28));
         y = n1.y + st(12);
       };
       if (!it.note.empty()) note_box(it.note);
       if (graphics) {
         const auto& presets = GraphicsPresets();
-        kit::Spaced(d, f.typed, st(8), ImVec2(ha.x + st(18), y), kit::kInkSection,
+        kit::Spaced(d, f.typed, st(10), ImVec2(ha.x + st(18), y), kit::kInkSection,
                     preset >= 0 ? "PRESET: " + Upper(presets[size_t(preset)].name) : "PRESET: CUSTOM", st(2));
         y += st(20);
         if (preset < 0 && !last_preset.empty())
@@ -314,7 +343,7 @@
     const bool edit = MenuChrome(d, io, st, status, online_ok);
     CaptureKeyInto(in);
     const bool restart = RestartPending();
-    kit::Spaced(d, f.typed, st(8.5f), st.P(48, 91), restart ? kit::kStamp : kit::kKhakiDim,
+    kit::Spaced(d, f.typed, st(10.5f), st.P(48, 91), restart ? kit::kStamp : kit::kKhakiDim,
                 restart ? "SETTINGS MARKED NEXT START TAKE EFFECT WHEN THE GAME STARTS AGAIN"
                         : "EVERYTHING APPLIES IN GAME \xC2\xB7 SOME AT THE NEXT START",
                 st(2));
@@ -326,12 +355,29 @@
     }
     tab_ = std::clamp(tab_, 0, int(kTabCount) - 1);
     const bool graphics = tab_ == kTabGraphics && sub_ == kSubNone;
+    const bool controls = tab_ == kTabControls && sub_ == kSubNone;
+    // Graphics changes wait for Apply on this page, and Controls has its two pages as buttons (game_menu.cpp, at
+    // Cvar): both only while this page draws.
+    struct PageFlags {
+      bool& defer;
+      bool& buttons;
+      ~PageFlags() { defer = false, buttons = false; }
+    } page_flags{defer_graphics_, controls_buttons_};
+    defer_graphics_ = graphics, controls_buttons_ = true;
+    if (!graphics && !gfx_pending_.empty()) {
+      REXLOG_INFO("BF settings: GRAPHICS left with {} changes not applied: dropped", gfx_pending_.size());
+      gfx_pending_.clear();
+    }
     const std::string last_preset = settings_.Get("graphics_preset", "");
+    const bool preset_back = graphics && CurrentGraphicsPreset() < 0 && !last_preset.empty();
     // ---- the prompts (first: a click on one is that button's press for the rest of the frame)
     std::vector<Cue> cues = {{kit::Button::kA, graphics && on_preset_strip_ ? "USE THIS PRESET" : "CHANGE"},
                              {kit::Button::kLB, "SECTION"},
                              {kit::Button::kRB, "SECTION"}};
-    if (graphics && CurrentGraphicsPreset() < 0 && !last_preset.empty()) cues.push_back({kit::Button::kX, "BACK TO " + Upper(last_preset)});
+    if (preset_back) cues.push_back({kit::Button::kX, "BACK TO " + Upper(last_preset)});
+    // (No prompts for the page's own buttons, 13 Nov 2026: "Remove the extra buttons on the bottom bar". A
+    // controller's Y and X still press them: Apply and Restore defaults on Graphics, Remap gamepad and Keybinds on
+    // Controls.)
     if (restart) cues.push_back({kit::Button::kStart, "RESTART TO APPLY", "P", true});
     cues.push_back({kit::Button::kB, "BACK"});
     Prompts(d, st, st.P(48, 662), cues, in, 15);
@@ -357,7 +403,7 @@
         d->AddRectFilled(ImVec2(a.x, b.y - 1), ImVec2(b.x, b.y), IM_COL32(241, 234, 211, 20));
         kit::GameText(d, kit::GameFont::kHeadlineMedium, st(15), ImVec2(a.x + st(20), a.y + st(10)), sel ? kit::kInk : kit::kKhaki,
                       kTabNames[t]);
-        kit::Spaced(d, f.typed, st(6.5f), ImVec2(a.x + st(20), a.y + st(34)), sel ? kit::kInkSection : kit::kKhakiDim, kTabSubs[t],
+        kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(20), a.y + st(34)), sel ? kit::kInkSection : kit::kKhakiDim, kTabSubs[t],
                     st(1.2f));
         if (!sel && ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
           tab_ = t, row_ = 0, scroll_ = 0, sub_ = kSubNone;
@@ -366,7 +412,7 @@
       // The PC: its graphics card (as the renderer named it for the NIS check), its display, the preset the auto
       // detect chose (the GPU's tier once it is timed in the game; the fast tier's before).
       const float py = y + st(16);
-      kit::Spaced(d, f.typed, st(7.5f), ImVec2(ra.x + st(20), py), kit::kKhakiDim, "YOUR PC \xC2\xB7 AUTO DETECT", st(2));
+      kit::Spaced(d, f.typed, st(9.5f), ImVec2(ra.x + st(20), py), kit::kKhakiDim, "YOUR PC \xC2\xB7 AUTO DETECT", st(2));
       rex::ui::Window* window = window_ ? window_() : nullptr;
       const int monitor = std::atoi(settings_.Get("monitor", "0").c_str());
       const DisplayMode desktop = DesktopDisplayMode(monitor, window);
@@ -376,12 +422,12 @@
                                  : slowness > 0 ? std::string(kTierPresets[TierOf(slowness)])
                                                 : std::string(kTierPresets[2]) + " (not timed yet)";
       auto pc_row = [&](float yy, const char* k, const std::string& v) {
-        d->AddText(f.ui, st(10), ImVec2(ra.x + st(20), yy), kit::kKhakiText, k);
-        float size = st(10);
-        const float room = rb.x - ra.x - st(40) - kit::TextWidth(f.ui, st(10), k) - st(10);
+        d->AddText(f.ui, st(11.5f), ImVec2(ra.x + st(20), yy), kit::kKhakiText, k);
+        float size = st(11.5f);
+        const float room = rb.x - ra.x - st(40) - kit::TextWidth(f.ui, st(11.5f), k) - st(10);
         float vw = kit::TextWidth(f.ui_bold, size, v);
         if (vw > room && vw > 0) size *= std::max(0.7f, room / vw), vw = kit::TextWidth(f.ui_bold, size, v);
-        d->AddText(f.ui_bold, size, ImVec2(rb.x - st(20) - vw, yy + (st(10) - size) * 0.7f), kit::kKhaki, v.c_str());
+        d->AddText(f.ui_bold, size, ImVec2(rb.x - st(20) - vw, yy + (st(11.5f) - size) * 0.7f), kit::kKhaki, v.c_str());
         d->AddRectFilled(ImVec2(ra.x + st(20), yy + st(21)), ImVec2(rb.x - st(20), yy + st(22)), IM_COL32(241, 234, 211, 20));
       };
       pc_row(py + st(18), "Graphics card", gpu.empty() ? "Not known yet" : gpu);
@@ -390,10 +436,40 @@
                                : "Not known");
       pc_row(py + st(72), "Preset chosen for you", chosen);
     }
-    // ---- the rows and the help card
-    SettingsBody(d, io, st, in, st.P(288, 167), st.P(907, 640), st.P(928, 167), st.P(1232, 640));
+    // ---- the rows and the help card, with the page's own buttons: dark, as the prompts under the page
+    ImVec2 pa = st.P(288, 167), pb = st.P(907, 640);
+    auto dark_button = [&](ImVec2 a, ImVec2 b, const std::string& label, bool lit) {
+      const bool over = ImGui::IsMouseHoveringRect(a, b);
+      d->AddRectFilled(a, b, over ? IM_COL32(34, 38, 28, 240) : IM_COL32(13, 15, 11, 230));
+      d->AddRect(a, b, lit ? kit::kStamp : IM_COL32(241, 234, 211, over ? 110 : 50), 0, 0, lit ? st(1.5f) : 1.0f);
+      const float size = st(10), w = kit::SpacedWidth(f.ui_bold, size, label, st(1.5f));
+      kit::Spaced(d, f.ui_bold, size, ImVec2((a.x + b.x - w) * 0.5f, a.y + (b.y - a.y - size * 1.45f) * 0.5f),
+                  lit || over ? kit::kCream : kit::kKhaki, label, st(1.5f));
+      return over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && capture_.empty();
+    };
+    bool open_keys = false, open_remap = false, apply = false, defaults = false;
+    if (controls) {  // Keybinds and Remap gamepad over the rows
+      const float h = st(30), gap = st(8), w = (pb.x - pa.x - gap) * 0.5f;
+      open_keys = dark_button(pa, ImVec2(pa.x + w, pa.y + h), "KEYBINDS", false);
+      open_remap = dark_button(ImVec2(pa.x + w + gap, pa.y), ImVec2(pb.x, pa.y + h), "REMAP GAMEPAD", false);
+      pa.y += h + st(8);
+    }
+    if (graphics) {  // Apply settings and Restore defaults under the rows
+      const float h = st(30), gap = st(8), w = (pb.x - pa.x - gap) * 0.5f;
+      pb.y -= h + st(8);
+      const size_t waiting = gfx_pending_.size();
+      apply = dark_button(ImVec2(pa.x, pb.y + st(8)), ImVec2(pa.x + w, pb.y + st(8) + h),
+                          waiting ? fmt::format("APPLY SETTINGS ({})", waiting) : std::string("APPLY SETTINGS"), waiting > 0);
+      defaults = dark_button(ImVec2(pa.x + w + gap, pb.y + st(8)), ImVec2(pb.x, pb.y + st(8) + h), "RESTORE DEFAULTS", false);
+    }
+    SettingsBody(d, io, st, in, pa, pb, st.P(928, 167), st.P(1232, 640));
     // ---- the actions
     if (edit || in.view) return BeginAccount(false);
-    if (in.x) PresetBack();
+    if (controls && (open_keys || in.x)) sub_ = kSubKeys, row_ = 0, scroll_ = 0;
+    else if (controls && (open_remap || in.y)) sub_ = kSubRemap, row_ = 0, scroll_ = 0;
+    if (graphics && (apply || in.y)) ApplyGraphicsPending();
+    else if (graphics && (defaults || (in.x && !preset_back))) RestoreGraphicsDefaults();
+    else if (in.x && preset_back) PresetBack();
+
     if (in.back && !SubPageBack()) BackFromSettings();
   }

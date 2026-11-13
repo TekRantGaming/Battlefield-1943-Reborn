@@ -24,7 +24,8 @@ struct Region {
 inline constexpr Region kRegions[] = {
     {"us-east", "US East", "us"},      {"us-central", "US Central", "us"}, {"us-west", "US West", "us"},
     {"ca", "Canada", "ca"},            {"mx", "Mexico", "mx"},             {"br", "Brazil", "br"},
-    {"ar", "Argentina", "ar"},         {"cl", "Chile", "cl"},              {"gb", "United Kingdom", "gb"},
+    {"ar", "Argentina", "ar"},         {"cl", "Chile", "cl"},              {"eu-central", "EU Central", "eu"},
+    {"gb", "United Kingdom", "gb"},
     {"ie", "Ireland", "ie"},           {"fr", "France", "fr"},             {"de", "Germany", "de"},
     {"nl", "Netherlands", "nl"},       {"be", "Belgium", "be"},            {"es", "Spain", "es"},
     {"pt", "Portugal", "pt"},          {"it", "Italy", "it"},              {"ch", "Switzerland", "ch"},
@@ -102,6 +103,12 @@ inline void DrawFlag(ImDrawList* d, const std::string& country, ImVec2 a, ImVec2
     f.Rect(0, 0, 0.44f, 4.0f / 7, kBlue);
     for (int r = 0; r < 3; ++r)
       for (int s = 0; s < 4; ++s) f.Disc(0.07f + 0.10f * float(s), 0.11f + 0.18f * float(r), 0.035f, kWhite);
+  } else if (c == "eu") {  // the European Union's: twelve gold stars in a ring on blue (0.4.1, the official servers)
+    f.Rect(0, 0, 1, 1, IM_COL32(0, 51, 153, 255));
+    for (int i = 0; i < 12; ++i) {
+      const float ang = 6.2831853f * float(i) / 12;
+      f.Disc(0.5f + 0.33f * std::cos(ang) * f.H() / f.W(), 0.5f + 0.33f * std::sin(ang), 0.045f, IM_COL32(255, 204, 0, 255));
+    }
   } else if (c == "gb") {
     f.Union(0, 0, 1, 1);
   } else if (c == "ca") {

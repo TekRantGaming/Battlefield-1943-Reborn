@@ -14,6 +14,7 @@
 // own (RenderFov, 30 degrees), which this leaves alone.
 
 #include <atomic>
+#include <chrono>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -21,11 +22,17 @@
 
 #include <rex/cvar.h>
 #include <rex/hook.h>
+#include <rex/logging.h>
 
 #include <native_x_renderer/native_x_renderer.h>
 
 #include "comms.h"
+#include "scope_pip.h"
+#include "seat_info.h"
 
+REXCVAR_DEFINE_BOOL(bf_scope_pip, false, "BF1943",
+                    "Sniper scope (Settings > Enhancements, experimental): picture in picture, only the scope's lens "
+                    "zooms in and the world around it stays in view (NativeXRenderer D168)");
 REXCVAR_DEFINE_DOUBLE(bf_fov, 0.0, "BF1943",
                       "The camera's horizontal field of view at 16:9 in degrees (60 to 120); 0: the game's own, 85.6");
 // Vehicles' own slider (TekRantGaming, 12 Nov 2026): the camera while the local soldier sits in a vehicle.
@@ -42,6 +49,17 @@ std::atomic<float> g_game_fov{0.0f};
 // (sub_82294A58(mgr), whose r31 holds the manager when it calls setFovY; the controller is *(mgr + 0xE0)): look.cpp's
 // zoom is the view narrower than the camera's own.
 std::atomic<float> g_fov_now_deg{0.0f}, g_fov_own_deg{0.0f};
+// The game's last answer to "the first person weapon's field of view" (sub_821FAAF0: -1 when the view is not a first
+// person one) and when: 1 first person, 0 not, -1 not asked within a quarter second.
+std::atomic<int> g_first_person{0};
+std::atomic<int64_t> g_first_person_at{0};
+int FirstPersonView() {
+  const int64_t at = g_first_person_at.load(std::memory_order_relaxed);
+  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  if (!at || now - at > std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(250)).count())
+    return -1;
+  return g_first_person.load(std::memory_order_relaxed);
+}
 }  // namespace bf1943
 
 namespace {
@@ -62,16 +80,29 @@ constexpr uint32_t kSecondViewCaller = 0x822948E4;  // sub_82294818's call of su
 // The slider that applies now: the vehicle's while the soldier sits in one, else the camera's.
 double Chosen() { return bf1943::LocalSeatedNow() ? REXCVAR_GET(bf_fov_vehicle) : REXCVAR_GET(bf_fov); }
 
-double Mapped(double radians) {
+// `weight`: how much of the mapping applies (1 all of it, 0 none: the value as the game has it).
+double Mapped(double radians, double weight = 1.0) {
   const double chosen = Chosen();
   if (chosen <= 0.0 || !(radians > 0.0 && radians < kPi)) return radians;
   const double h = std::clamp(chosen, 60.0, 120.0) * kPi / 180.0;
   const double tan_v = std::tan(h * 0.5) * 9.0 / 16.0;  // the vertical half angle's tangent at 16:9
-  const double k = tan_v / std::tan(27.5 * kPi / 180.0);
+  const double k = 1.0 + (tan_v / std::tan(27.5 * kPi / 180.0) - 1.0) * std::clamp(weight, 0.0, 1.0);
   return 2.0 * std::atan(k * std::tan(radians * 0.5));
 }
 // The same mapping for a value in degrees (the first person weapon's own projection).
-double MappedDegrees(double degrees) { return Mapped(degrees * kPi / 180.0) * 180.0 / kPi; }
+double MappedDegrees(double degrees, double weight) { return Mapped(degrees * kPi / 180.0, weight) * 180.0 / kPi; }
+// How much of the mapping the first person weapon's projection takes: all of it unzoomed, none through a scope. A
+// scope's black mask is part of the weapon's picture, and widened with the camera it shrank on the screen (13 Nov
+// 2026: "player FOV should not affect the sniper's scope mesh. Right now at high FOV, it shrinks the scope mesh").
+// The zoom is the view's field of view now against the camera's own, in tangents (1 unzoomed): the mapping fades out
+// from 0.9 (the start of aiming) to 0.5 (a scope is well under that), so iron sights keep part of it.
+double WeaponMapWeight() {
+  const double now = bf1943::g_fov_now_deg.load(std::memory_order_relaxed);
+  const double own = bf1943::g_fov_own_deg.load(std::memory_order_relaxed);
+  if (!(now > 1.0 && own > 1.0 && now < 179.0 && own < 179.0)) return 1.0;
+  const double zoom = std::tan(now * kPi / 360.0) / std::tan(own * kPi / 360.0);
+  return std::clamp((zoom - 0.5) / (0.9 - 0.5), 0.0, 1.0);
+}
 }  // namespace
 
 REX_EXTERN(__imp__sub_82583248);
@@ -93,9 +124,11 @@ REX_HOOK_RAW(sub_82583248) {
   if (uint32_t(ctx.lr) == kCameraFovCaller) {
     // The rendered camera (its world matrix at +0x40: right, up, back, position rows): voice chat's listener and the
     // position a voice comes from (comms.cpp), on foot, in a vehicle or watching after a death alike.
+    float right[3] = {1, 0, 0}, up[3] = {0, 1, 0}, back[3] = {0, 0, 1};
     if (const uint32_t view = ctx.r3.u32) {
-      const float right[3] = {LoadF(base, view + 0x40), LoadF(base, view + 0x44), LoadF(base, view + 0x48)};
-      const float back[3] = {LoadF(base, view + 0x60), LoadF(base, view + 0x64), LoadF(base, view + 0x68)};
+      for (int i = 0; i < 3; ++i)
+        right[i] = LoadF(base, view + 0x40 + 4 * i), up[i] = LoadF(base, view + 0x50 + 4 * i),
+        back[i] = LoadF(base, view + 0x60 + 4 * i);
       const float pos[3] = {LoadF(base, view + 0x70), LoadF(base, view + 0x74), LoadF(base, view + 0x78)};
       bf1943::comms::NoteCamera(pos, right, back);
     }
@@ -105,6 +138,34 @@ REX_HOOK_RAW(sub_82583248) {
     if (controller) {
       bf1943::g_fov_now_deg.store(LoadF(base, controller + 0x30), std::memory_order_relaxed);
       bf1943::g_fov_own_deg.store(LoadF(base, controller + 0x28), std::memory_order_relaxed);
+    }
+    // The picture in picture scope (Enhancements, NativeXRenderer D168): how far the view is zoomed (the half angles'
+    // tangents, now over the camera's own: a sight's about 0.6 to 0.8, a sniper scope's much less; the renderer also
+    // waits for the game's scope mask). The world around the lens is drawn with the camera's own field of view as
+    // rendered (bf_fov's mapping included).
+    {
+      constexpr double kPi = 3.14159265358979323846;
+      const double now_deg = bf1943::g_fov_now_deg.load(std::memory_order_relaxed);
+      const double own_deg = bf1943::g_fov_own_deg.load(std::memory_order_relaxed);
+      const bool valid = now_deg > 1.0 && now_deg < 179.0 && own_deg > 1.0 && own_deg < 179.0;
+      const double zoom = valid ? std::tan(now_deg * kPi / 360.0) / std::tan(own_deg * kPi / 360.0) : 1.0;
+      const double own_rendered = valid ? Mapped(own_deg * kPi / 180.0) : 0.9;
+      // A step of the zoom logged (a tenth of the way), while the scope is on: the research of a sight's and a scope's.
+      static int logged_step = 10;
+      const int step = int(std::lround(std::clamp(zoom, 0.0, 1.0) * 10));
+      // Only in a build with the scope (scope_pip.h: not in 0.4.1), with the switch on.
+      const bool pip = kScopePip && REXCVAR_GET(bf_scope_pip);
+      if (step != logged_step && pip) {
+        logged_step = step;
+        REXLOG_INFO("BF scope: zoom {:.2f} (field of view {:.1f} of the camera's {:.1f} degrees)", zoom, now_deg, own_deg);
+      }
+      // On foot only (the soldier's seat, from the game's own input mapping): the game's composite, which the renderer
+      // follows, is the same with and without a scope (run v41scope26), so a vehicle's or the air raid bomber's zoomed
+      // view must never count as a scope's.
+      bf1943::SeatInfo seat;
+      const bool on_foot = pip && bf1943::LocalSeat(seat) && seat.kind == bf1943::SeatKind::kSoldier;
+      native_x_renderer::NoteScopeView(on_foot, right, up, back,
+                                       float(std::tan(std::clamp(own_rendered, 0.1, 3.0) * 0.5)), float(zoom));
     }
     ctx.f1.f64 = Mapped(ctx.f1.f64);
   }
@@ -179,9 +240,13 @@ REX_HOOK_RAW(sub_8241B598) {
 // field of view in degrees (SoldierWeaponData.RenderFov, 30, blended toward ZoomRenderFov while aiming; the study's
 // fov_study.md), or -1 when not in first person; its consumers write it into the player's render record and the
 // vehicle seat's view. Mapped the same way as the world's camera after the original, so the hands and the weapon
-// widen with it and keep their place in the picture.
+// widen with it and keep their place in the picture; not through a scope (WeaponMapWeight).
 REX_EXTERN(__imp__sub_821FAAF0);
 REX_HOOK_RAW(sub_821FAAF0) {
   __imp__sub_821FAAF0(ctx, base);
-  if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) ctx.f1.f64 = MappedDegrees(ctx.f1.f64);
+  // Its answer also says whether the view is a first person one (tick_blend.cpp's free look: a first person view
+  // turns in place, an outside one goes round the vehicle).
+  bf1943::g_first_person.store(ctx.f1.f64 > 0.0 ? 1 : 0, std::memory_order_relaxed);
+  bf1943::g_first_person_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
+  if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) ctx.f1.f64 = MappedDegrees(ctx.f1.f64, WeaponMapWeight());
 }

@@ -13,6 +13,8 @@
 
 #include "GraphicsAccessories.hpp"
 #include "fsr.h"
+#include "taa.h"
+#include "xess.h"
 #include "glsl.h"
 #include "motion.h"
 
@@ -184,15 +186,27 @@ Upscaler::Upscaler() = default;
 Upscaler::~Upscaler() = default;
 
 const char* Upscaler::ModeName(Provider provider, Mode mode) {
-  if (provider == Provider::kFsr) {
+  if (provider == Provider::kTaa) return "TAA";
+  if (provider == Provider::kXess) {
     switch (mode) {
-      case Mode::kDlaa: return "FSR 3.1 Native AA";
-      case Mode::kQuality: return "FSR 3.1 Quality";
-      case Mode::kBalanced: return "FSR 3.1 Balanced";
-      case Mode::kPerformance: return "FSR 3.1 Performance";
-      case Mode::kUltraPerformance: return "FSR 3.1 Ultra Performance";
+      case Mode::kDlaa: return "XeSS Native AA";
+      case Mode::kQuality: return "XeSS Quality";
+      case Mode::kBalanced: return "XeSS Balanced";
+      case Mode::kPerformance: return "XeSS Performance";
+      case Mode::kUltraPerformance: return "XeSS Ultra Performance";
     }
-    return "FSR 3.1";
+    return "XeSS";
+  }
+  if (provider == Provider::kFsr) {
+    const bool four = fsr_generation >= 4;
+    switch (mode) {
+      case Mode::kDlaa: return four ? "FSR 4 Native AA" : "FSR 3.1 Native AA";
+      case Mode::kQuality: return four ? "FSR 4 Quality" : "FSR 3.1 Quality";
+      case Mode::kBalanced: return four ? "FSR 4 Balanced" : "FSR 3.1 Balanced";
+      case Mode::kPerformance: return four ? "FSR 4 Performance" : "FSR 3.1 Performance";
+      case Mode::kUltraPerformance: return four ? "FSR 4 Ultra Performance" : "FSR 3.1 Ultra Performance";
+    }
+    return four ? "FSR 4" : "FSR 3.1";
   }
   switch (mode) {
     case Mode::kDlaa: return "DLAA";
@@ -211,7 +225,7 @@ bool Upscaler::Initialize(IRenderDevice* device, uint32_t output_width, uint32_t
   provider_ = provider;
   output_size_[0] = input_size_[0] = output_width;
   output_size_[1] = input_size_[1] = output_height;
-  if (!(provider_ == Provider::kFsr ? InitializeFsr(output_width, output_height)
+  if (!(provider_ != Provider::kDlss ? InitializeFsr(output_width, output_height)
                                     : InitializeDlss(output_width, output_height))) {
     return false;
   }
@@ -261,7 +275,7 @@ bool Upscaler::Initialize(IRenderDevice* device, uint32_t output_width, uint32_t
     REXLOG_ERROR("[native_x_renderer] {}: the motion vector pass could not be set up", Name());
     return false;
   }
-  if (provider_ == Provider::kFsr || frame_inputs_on_) {
+  if (provider_ != Provider::kDlss || frame_inputs_on_) {
     RefCntAutoPtr<IShader> depth_ps =
         CreateShader(device, SHADER_TYPE_PIXEL, kDepthCopyPS, "NativeXRenderer FSR depth copy PS");
     depth_pass(depth_copy_pso_, depth_copy_srb_, "NativeXRenderer FSR depth copy", depth_ps, TEX_FORMAT_R32_FLOAT);
@@ -276,8 +290,18 @@ bool Upscaler::Initialize(IRenderDevice* device, uint32_t output_width, uint32_t
 }
 
 bool Upscaler::InitializeFsr(uint32_t output_width, uint32_t output_height) {
-  fsr_ = std::make_unique<Fsr>();
-  if (!fsr_->Load(device_)) return false;
+  if (provider_ == Provider::kTaa) {
+    taa_ = std::make_unique<Taa>();
+    if (!taa_->Load(device_)) return false;
+    mode_ = Mode::kDlaa;  // at the render resolution only
+  } else if (provider_ == Provider::kXess) {
+    xess_ = std::make_unique<Xess>();
+    if (!xess_->Load(device_)) return false;
+  } else {
+    fsr_ = std::make_unique<Fsr>();
+    fsr_->SetGeneration(fsr_generation);
+    if (!fsr_->Load(device_)) return false;
+  }
   // AMD's quality modes are in Mode's order: native AA, quality, balanced, performance, ultra performance.
   static constexpr const char* kNames[] = {"native AA", "quality", "balanced", "performance", "ultra performance"};
   std::string modes;
@@ -291,7 +315,13 @@ bool Upscaler::InitializeFsr(uint32_t output_width, uint32_t output_height) {
       input_size_[1] = std::min(height, output_height);
     }
   }
-  REXLOG_INFO("[native_x_renderer] FSR 3.1 available; for a {}x{} output: {}", output_width, output_height, modes);
+  REXLOG_INFO("[native_x_renderer] {} available; for a {}x{} output: {}",
+              provider_ == Provider::kTaa    ? "TAA"
+              : provider_ == Provider::kXess ? "XeSS"
+              : fsr_generation >= 4          ? "FSR 4"
+                                             : "FSR 3.1",
+              output_width,
+              output_height, modes);
   // AMD's jitter phases for the ratio (8 for native AA).
   jitter_phases_ = Fsr::JitterPhases(input_size_[0], output_size_[0]);
   return true;
@@ -380,7 +410,7 @@ void Upscaler::NextFrame() {
 }
 
 bool Upscaler::EnsureResources(ITexture* color, ITexture* depth, ITexture* output) {
-  if (provider_ == Provider::kFsr) {
+  if (provider_ != Provider::kDlss) {
     const TextureDesc& color_desc = color->GetDesc();
     const TextureDesc& output_desc = output->GetDesc();
     if (motion_ && output_ && depth_copy_ && motion_->GetDesc().Width == color_desc.Width &&
@@ -394,7 +424,9 @@ bool Upscaler::EnsureResources(ITexture* color, ITexture* depth, ITexture* outpu
     depth_copy_ = CreateTexture(device_, "NativeXRenderer FSR depth", color_desc.Width, color_desc.Height,
                                 TEX_FORMAT_R32_FLOAT, BIND_SHADER_RESOURCE | BIND_RENDER_TARGET);
     output_ = CreateTexture(device_, "NativeXRenderer FSR output", output_desc.Width, output_desc.Height,
-                            output_desc.Format, BIND_SHADER_RESOURCE | BIND_UNORDERED_ACCESS);
+                            output_desc.Format,
+                            provider_ == Provider::kTaa ? BIND_SHADER_RESOURCE | BIND_RENDER_TARGET
+                                                        : BIND_SHADER_RESOURCE | BIND_UNORDERED_ACCESS);
     bool ok = motion_ && depth_copy_ && output_;
     if (ok) {
       REXLOG_INFO("[native_x_renderer] {}: {}x{} to {}x{}, color {}, depth {}", Name(), color_desc.Width,
@@ -501,8 +533,11 @@ bool Upscaler::ApplyFsr(IDeviceContext* context, ITexture* color, ITextureView* 
   in.jitter_x = jitter_[0];
   in.jitter_y = jitter_[1];
   in.reset = reset;
+  in.sharpness = sharpness;
   in.inverted_depth = false;  // the copy is 0 at the near plane, 1 at the far one
   CameraFromViewProjection(view_projection, in.camera_near, in.camera_far, in.fov_y);
+  if (provider_ == Provider::kTaa) return taa_->Dispatch(context, in);
+  if (provider_ == Provider::kXess) return xess_->Dispatch(context, in, int(mode_));
   return fsr_->Dispatch(context, in);
 }
 
@@ -593,7 +628,7 @@ bool Upscaler::Apply(IDeviceContext* context, ITexture* color, ITexture* depth, 
 
   bool ok = false;
   frame_inputs_ = {};
-  if (provider_ == Provider::kFsr) {
+  if (provider_ != Provider::kDlss) {
     ok = ApplyFsr(context, color, depth_srv, view_projection, reset);
   } else {
     if (frame_inputs_on_) CopyDepth(context, depth_srv);

@@ -45,6 +45,8 @@ struct ISuperResolution;
 namespace native_x_renderer {
 
 class Fsr;
+class Xess;
+class Taa;
 
 // The camera's near and far planes and vertical field of view (FSR 3.1's heuristics), from a view-projection matrix
 // (rows for a row vector: column c is m[c], m[4 + c], m[8 + c], m[12 + c]), or a world-view-projection (a world
@@ -62,7 +64,11 @@ class Upscaler {
   // DLAA, or DLSS from the input resolution NGX recommends for one of its quality modes (D49); with FSR 3.1, its
   // native AA and its quality modes (D116).
   enum class Mode { kDlaa, kQuality, kBalanced, kPerformance, kUltraPerformance };
-  enum class Provider { kDlss, kFsr };
+  enum class Provider { kDlss, kFsr, kXess, kTaa };
+  // FSR's generation, set before Initialize: 4 (FSR 4.1 where the GPU runs it, else AMD's newest) or 3 (FSR 3.1).
+  static inline int fsr_generation = 4;
+  // The upscaler's own sharpening after the upscale, 0 (off) to 1 (native_x_renderer_upscaler_sharpness).
+  static inline float sharpness = 0.0f;
   static const char* ModeName(Provider provider, Mode mode);
   const char* Name() const { return ModeName(provider_, mode_); }
 
@@ -141,6 +147,8 @@ class Upscaler {
   Mode mode_ = Mode::kDlaa;
   Provider provider_ = Provider::kDlss;
   std::unique_ptr<Fsr> fsr_;
+  std::unique_ptr<Taa> taa_;    // our own TAA (taa.h), on FSR's path too
+  std::unique_ptr<Xess> xess_;  // Intel XeSS: FSR's path (its depth copy, motion vectors and output), its own upscale
   // FSR 3.1 and frame generation: the depth copy pass, into depth_copy_ (R32_FLOAT at the input size).
   Diligent::RefCntAutoPtr<Diligent::IPipelineState> depth_copy_pso_;
   Diligent::RefCntAutoPtr<Diligent::IShaderResourceBinding> depth_copy_srb_;

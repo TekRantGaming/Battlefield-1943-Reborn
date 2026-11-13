@@ -95,9 +95,14 @@ bool DevClientUpdate(PPCContext& ctx, uint8_t* base);  // dev_call_rate.cpp: tru
 extern std::atomic<bool> g_in_client_tick;  // vehicle_camera.cpp
 }  // namespace bf1943
 
+namespace bf1943 {
+double TickSeconds();  // tick_rate.cpp
+}  // namespace bf1943
+
 namespace {
 using Clock = std::chrono::steady_clock;
-constexpr double kTick = 1.0 / 30.0;
+// One game tick (tick_rate.cpp: 1/30 or 1/60 s).
+double kTick() { return bf1943::TickSeconds(); }
 constexpr double kMaxStep = 25.0;  // metres in one tick (a plane at 150 m/s makes 5)
 constexpr double kMaxTurn = 0.6;   // radians in one tick
 constexpr uint32_t kSlots = 4096;  // root copies in our guest memory, used in turn (one a skeleton update)
@@ -1797,7 +1802,7 @@ void TickBlendFrame() {
   // at 24 FPS the reset at two ticks put frames back a tick every fifth frame).
   double phase = g_phase.load(std::memory_order_relaxed);
   g_ticked.exchange(false, std::memory_order_relaxed);
-  if (phase > kTick * 0.98) phase = kTick * 0.98;
+  if (phase > kTick() * 0.98) phase = kTick() * 0.98;
   if (g_frame_at != Clock::time_point{})
     phase += std::min(0.25, std::chrono::duration<double>(now - g_frame_at).count());
   g_phase.store(phase, std::memory_order_relaxed);
@@ -1853,12 +1858,12 @@ void TickBlendFrame() {
 // After each client tick (vehicle_camera.cpp's sub_82380600 hook).
 void TickBlendTick() {
   const double p = g_phase.load(std::memory_order_relaxed);
-  g_phase.store(std::max(0.0, p - kTick), std::memory_order_relaxed);  // TickBlendFrame caps what is left over
+  g_phase.store(std::max(0.0, p - kTick()), std::memory_order_relaxed);  // TickBlendFrame caps what is left over
   g_ticked.store(true, std::memory_order_relaxed);
 }
 
 // The game's time since its last tick as a part of a tick, 0 to 1.
-double TickBlendPhase() { return std::clamp(g_phase.load(std::memory_order_relaxed) / kTick, 0.0, 1.0); }
+double TickBlendPhase() { return std::clamp(g_phase.load(std::memory_order_relaxed) / kTick(), 0.0, 1.0); }
 // The phase everything in this frame is placed with: TickBlendPhase taken once, right after the client's update. The
 // live one moves at VdSwap on the render thread, in the middle of the main thread's frame at times, and the trees, the
 // skeletons on the worker threads and the camera must agree.
@@ -2311,7 +2316,9 @@ REX_HOOK_RAW(sub_826E2220) {
 }
 
 namespace bf1943 {
-bool VehicleFreeLook(double& yaw, double& pitch);  // look.cpp
+bool VehicleFreeLook(double& yaw, double& pitch);   // look.cpp
+int FirstPersonView();  // fov.cpp: 1 first person, 0 an outside view, -1 not known
+bool TurretViewOffset(double& yaw, double& pitch);  // vehicle_mouse.cpp
 }  // namespace bf1943
 
 namespace {
@@ -2336,21 +2343,33 @@ Xf FreeLookTurn(const Xf& in, double yaw, double pitch) {
     if (d2 < 30.0 * 30.0)
       for (int c = 0; c < 3; ++c) pivot[c] = g.seat.cur.m[3][c];
   }
-  // An outside view (the camera over 4 m from the seat): round the vehicle itself (12 Nov 2026: the jeep's and the
-  // boat's third person view turned about the driver's seat, not round the vehicle). Its tree's root, published each
-  // tick (PublishOwnVehicleLocked; g.mutex is held here, then g_own_mutex, the same order as there).
+  // An outside view: round the vehicle itself (12 Nov 2026: the jeep's and the boat's third person view turned about
+  // the driver's seat, not round the vehicle). Outside is the camera over 3 m from the vehicle's root, not from the
+  // seat: in the jeep and the boat the seat is not tracked, so the pivot above is still the camera, the distance to
+  // it nothing, and the view only looked about from where it stood (13 Nov: "still doesn't orbit the vehicle"). The
+  // root is published each tick (PublishOwnVehicleLocked; g.mutex is held here, then g_own_mutex, the same order as
+  // there).
   {
-    double cam_d2 = 0;
-    for (int c = 0; c < 3; ++c) cam_d2 += (rows[3][c] - pivot[c]) * (rows[3][c] - pivot[c]);
-    if (cam_d2 > 4.0 * 4.0) {
-      std::lock_guard lock(bf1943::g_own_mutex);
-      const auto& own = bf1943::g_own;
-      if (own.valid && bf1943::ClientTicks() - own.tick <= 2) {
-        double v2 = 0;
-        for (int c = 0; c < 3; ++c) v2 += (own.rows[3][c] - rows[3][c]) * (own.rows[3][c] - rows[3][c]);
-        if (v2 < 40.0 * 40.0)
-          for (int c = 0; c < 3; ++c) pivot[c] = own.rows[3][c];
+    std::lock_guard lock(bf1943::g_own_mutex);
+    const auto& own = bf1943::g_own;
+    if (own.valid && bf1943::ClientTicks() - own.tick <= 4) {
+      double v2 = 0;
+      for (int c = 0; c < 3; ++c) v2 += (own.rows[3][c] - rows[3][c]) * (own.rows[3][c] - rows[3][c]);
+      // Outside or not is the game's own word where it gives one (fov.cpp FirstPersonView: in the landing boat the
+      // driver sits well over 3 m from the boat's root, and the first person view went round the boat too, 13 Nov);
+      // else the camera over 3 m from the root.
+      const int first = bf1943::FirstPersonView();
+      static int logged = -2;
+      if (first != logged) {
+        logged = first;
+        REXLOG_INFO("BF free look: the view is {} (camera {:.1f} m from the vehicle's root)",
+                    first == 1 ? "first person: turns in place" : first == 0 ? "an outside one: goes round the vehicle"
+                                                                              : "not told by the game: by distance",
+                    std::sqrt(v2));
       }
+      const bool outside = first == 0 || (first < 0 && v2 > 3.0 * 3.0);
+      if (outside && v2 < 40.0 * 40.0)
+        for (int c = 0; c < 3; ++c) pivot[c] = own.rows[3][c];
     }
   }
   double rel[3] = {rows[3][0] - pivot[0], rows[3][1] - pivot[1], rows[3][2] - pivot[2]};

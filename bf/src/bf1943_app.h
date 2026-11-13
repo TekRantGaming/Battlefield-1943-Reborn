@@ -36,6 +36,7 @@ void RaiseTimerResolution();  // frame_rate.cpp
 void ExtractGameArt(const std::filesystem::path& game, const std::filesystem::path& out_dir);  // shader_prep.cpp
 void SetLevelGameRoot(const std::filesystem::path& game);  // shader_prep.cpp: the level's water height for the grass
 void HdExport(const std::filesystem::path& game);          // shader_prep.cpp: developer, the HD pack's source
+void HdExportUi(const std::filesystem::path& game);        // shader_prep.cpp: BF_HD_EXPORT_UI, the menus' and HUD's
 void PrepareShaders(const std::filesystem::path& data_dir, const std::filesystem::path& game,
                     const std::filesystem::path& cache);  // shader_prep.cpp
 std::filesystem::path ExecutableDir();                          // shader_prep.cpp
@@ -53,6 +54,7 @@ std::string StartupGpuPlugin(const std::filesystem::path& user_dir);      // gam
 void HideServerWindows();                                                // server_mode.cpp
 void CreatePerfOverlay(rex::ui::ImGuiDrawer* drawer);                    // perf_overlay.cpp
 void CreateCommsOverlay(rex::ui::ImGuiDrawer* drawer);                  // comms_ui.cpp
+void CreateSpawnMouseOverlay(rex::ui::ImGuiDrawer* drawer);             // flash_mouse.cpp
 void CreateGraphicsPanel(rex::ui::ImGuiDrawer* drawer, rex::ui::Window* window);  // f8_panel.cpp
 void InstallHudGlyphs();                                                     // hud_glyphs.cpp
 void InstallLook(rex::ui::Window* window);                               // look.cpp
@@ -267,6 +269,10 @@ class Bf1943App : public rex::ReXApp {
       // The level's water height for the grass, read when the game opens a level (shader_prep.cpp).
       bf1943::SetLevelGameRoot(p.game_data_root);
       bf1943::HdExport(p.game_data_root);  // developer: BF_DEV_HD_EXPORT, the HD pack's source pictures
+      bf1943::HdExportUi(p.game_data_root);  // BF_HD_EXPORT_UI: the menu and HUD pictures for the pack
+      // NXR_SHADER_TEST=1 (a developer's check): the renderer's CMAA shaders compiled, the count of failures the
+      // exit code, and no game.
+      if (const char* v = std::getenv("NXR_SHADER_TEST"); v && *v == '1') std::_Exit(native_x_renderer::TestUtilityShaders());
       // An imported HD texture pack (Settings > Graphics): the renderer reads it when HD textures are on (D149).
       {
         std::error_code ec;
@@ -325,6 +331,7 @@ class Bf1943App : public rex::ReXApp {
         [this] { return window(); }, [this] { return paths_.game_data_root; });
     if (!AbOff("overlay")) bf1943::CreatePerfOverlay(drawer);  // Settings > Gameplay > Performance metrics, F2
     if (!REXCVAR_GET(server)) bf1943::CreateCommsOverlay(drawer);  // text chat top left, voice chat (comms_ui.cpp)
+    if (!REXCVAR_GET(server)) bf1943::CreateSpawnMouseOverlay(drawer);  // the deploy screen's pointer
     if (!REXCVAR_GET(server)) bf1943::CreateGraphicsPanel(drawer, window());  // F8 (f8_panel.cpp)
     if (!REXCVAR_GET(server)) bf1943::InstallHudGlyphs();  // the game's prompts in the chosen style (hud_glyphs.cpp)
     bf1943::InstallLook(window());  // the camera and look system (look.cpp)

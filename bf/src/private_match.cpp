@@ -22,6 +22,9 @@
 
 REXCVAR_DECLARE(bool, server);
 REXCVAR_DECLARE(std::string, bf_backend_registry);
+namespace bf1943 {
+int TickRate();  // tick_rate.cpp
+}
 REXCVAR_DECLARE(std::string, bf_online_host);
 
 namespace bf1943 {
@@ -143,10 +146,11 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
   GetModuleFileNameW(nullptr, exe, DWORD(std::size(exe)));
   std::string registry = REXCVAR_GET(bf_backend_registry);
   if (registry.empty()) registry = REXCVAR_GET(bf_online_host) + ":18250";
+  if (o.lan) registry = "127.0.0.1:18250";  // the match's own backend, in its own process (lan_backend.cpp)
   std::string rotation;
   for (const auto& m : o.maps) rotation += (rotation.empty() ? "" : ",") + m;
   if (rotation.empty()) rotation = "wake";
-  g.port = FreePort();
+  g.port = o.port ? o.port : FreePort();
   const std::string first = o.maps.empty() ? "wake" : o.maps.front();
   const fs::path dir = MatchDir();
   std::ostringstream args;
@@ -157,10 +161,15 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
        << " --fullscreen=false --window_start=hidden --server"
        << " --cl=\"-dedicated -level " << LevelOf(first) << "\""
        << " --bf_map_rotation=" << rotation << " --bf_round_end_delay=45"
+       // At the rate this game runs at: its own game joins it without starting again.
+       << " --bf_tick_rate=" << (o.tick ? o.tick : TickRate())
        << " --bf_gm_backend=" << registry << " --bf_gm_listen=" << (LoopbackOnly() ? "127.0.0.1:" : "0.0.0.0:") << g.port
        << " --bf_gm_name=\"" << Clean(o.name.empty() ? std::string("Private match") : o.name) << "\""
        // Never in a test run: the router is the PC owner's (and a loopback host has nothing to forward).
-       << " --bf_gm_listed=false --bf_gm_upnp=" << (o.upnp && !LoopbackOnly() ? "true" : "false")
+       // Hosted from a player's game: said in the description's first words (server_list.h kPlayerHostTag).
+       << " --bf_gm_description=\"[player host]\""
+       << " --bf_gm_listed=" << (o.listed && !o.lan ? "true" : "false") << " --bf_gm_upnp=" << (o.upnp && !o.lan && !LoopbackOnly() ? "true" : "false")
+       << (o.lan ? " --bf_lan_backend=true" : "")
        << " --bf_gm_status_file=\"" << (dir / "status.json").string() << "\""
        << " --bf_gm_parent_pid=" << GetCurrentProcessId();
   std::wstring command = Wide(args.str());
@@ -181,7 +190,7 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
   CloseHandle(pi.hThread);
   g.process = pi.hProcess;
   REXLOG_INFO("BF private match: our server started (PID {}, maps {}, UDP {}{})", pi.dwProcessId, rotation, g.port,
-              o.upnp && !LoopbackOnly() ? ", router port asked" : "");
+              o.lan ? ", a LAN match with its own backend" : o.upnp && !LoopbackOnly() ? ", router port asked" : "");
   return true;
 #else
   if (why) *why = "Hosting a match needs Windows for now.";
@@ -245,6 +254,39 @@ bool SelfHostedReceive(uint32_t& ip, uint16_t port) {
   if (!self || uint16_t(self & 0xFFFF) != port || ip != htonl(INADDR_LOOPBACK)) return false;
   ip = uint32_t(self >> 16);
   return true;
+}
+
+// The address the network's other PCs reach this one at: the local address of a UDP socket pointed at a private
+// address (nothing is sent), which is the adapter the network's traffic leaves by.
+std::string LanAddress() {
+#if defined(_WIN32)
+  const SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (s == INVALID_SOCKET) return {};
+  std::string out;
+  for (const char* target : {"192.168.255.254", "10.255.255.254", "172.31.255.254", "8.8.8.8"}) {
+    sockaddr_in to{};
+    to.sin_family = AF_INET, to.sin_port = htons(9);
+    inet_pton(AF_INET, target, &to.sin_addr);
+    sockaddr_in own{};
+    int n = sizeof(own);
+    char text[32] = {};
+    if (connect(s, reinterpret_cast<sockaddr*>(&to), sizeof(to)) != 0 ||
+        getsockname(s, reinterpret_cast<sockaddr*>(&own), &n) != 0)
+      continue;
+    inet_ntop(AF_INET, &own.sin_addr, text, sizeof(text));
+    const std::string ip = text;
+    if (ip.empty() || ip.rfind("127.", 0) == 0 || ip == "0.0.0.0") continue;
+    // A private address first; a public one only when the PC has no other.
+    const bool is_private = ip.rfind("192.168.", 0) == 0 || ip.rfind("10.", 0) == 0 || ip.rfind("172.", 0) == 0 ||
+                            ip.rfind("169.254.", 0) == 0;
+    if (out.empty() || is_private) out = ip;
+    if (is_private) break;
+  }
+  closesocket(s);
+  return out;
+#else
+  return {};
+#endif
 }
 
 }  // namespace bf1943

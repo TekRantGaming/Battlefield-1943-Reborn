@@ -1,6 +1,7 @@
 // NativeXRenderer - see device.h.
 
 #include "device.h"
+#include "xess.h"
 
 #include "queries.h"
 
@@ -194,7 +195,22 @@ bool Device::Create(void* native_window, bool half_precision) {
   create_info.DynamicHeapSize = 256 << 20;
   create_info.DynamicHeapPageSize = 1 << 20;
   IDeviceContext* contexts[1] = {};
-  factory->CreateDeviceAndContextsVk(create_info, &device_, contexts);
+  // Intel XeSS as the antialiasing (xess_*): the device made with the extensions it needs (xess.h); made without
+  // them when that fails.
+  if (rex::cvar::GetFlagByName("native_x_renderer_antialiasing").rfind("xess", 0) == 0) {
+    const EngineVkCreateInfo plain = create_info;
+    if (Xess::PrepareDevice(create_info)) {
+      factory->CreateDeviceAndContextsVk(create_info, &device_, contexts);
+      if (!device_ || !contexts[0]) {
+        REXLOG_WARN("[native_x_renderer] XeSS: no Vulkan device with its extensions; made without them (no XeSS)");
+        Xess::DeviceFailed();
+        device_.Release();
+        contexts[0] = nullptr;
+        create_info = plain;
+      }
+    }
+  }
+  if (!device_) factory->CreateDeviceAndContextsVk(create_info, &device_, contexts);
   context_.Attach(contexts[0]);
   if (!device_ || !context_) {
     REXLOG_ERROR("[native_x_renderer] could not create the Vulkan device");

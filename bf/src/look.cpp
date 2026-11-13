@@ -10,8 +10,7 @@
 //
 // With bf_look on, the turn is worked out every frame instead:
 //   - the mouse: the window's raw motion while the pointer is locked, a fixed angle per count (0.066 degrees at
-//     sensitivity 1, King Kong's), at any speed and frame rate; the runtime's own mouse to right stick part is kept
-//     at its lowest (mnk_sensitivity 0.01, below the game's dead zone), as in King Kong;
+//     sensitivity 1, King Kong's), at any speed and frame rate; this path takes over mouse motion from the runtime;
 //   - the stick: the turn speed the game's own update gave on its last tick (its curve, acceleration and zoom
 //     included), times the camera sensitivity, for the time since that tick.
 // Each frame (at VdSwap) that turn is added up; the getters give the local soldier's yaw and pitch plus the turn not
@@ -40,6 +39,7 @@
 
 #include <native_x_renderer/native_x_renderer.h>
 #include <rex/cvar.h>
+#include "seat_info.h"
 #include <rex/hook.h>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/logging.h>
@@ -83,6 +83,7 @@ namespace bf1943 {
 bool GameMenuOpen();  // game_menu.cpp
 void NoteMatchDevice(bool keyboard);  // game_menu.cpp: the device used in the match, for the HUD's prompts
 uint64_t ClientTicks();  // vehicle_camera.cpp: the client ticks run so far
+bool SpawnMouseActive();   // flash_mouse.cpp: the deploy screen's free pointer
 void ResetVehicleMouse();  // vehicle_mouse.cpp
 void ResetPlaneMouse();    // plane_mouse.cpp
 bool PlaneMouse(uint8_t* gamepad, double dx, double dy);  // plane_mouse.cpp
@@ -91,8 +92,30 @@ bool LocalOnFoot();  // below
 // A notch of the mouse wheel: on foot, BF's Toggle Weapon (the right bumper; BF's own Help & Options > Controls, run
 // help3: Y is Draw Knife). In a vehicle the right bumper fires the second weapon or drops bombs (run helpveh1), so the
 // wheel does nothing there.
-void WheelNotch() {
-  if (LocalOnFoot()) PulseButton(0x0200, 120);
+// 13 Nov 2026 (the bindings' mouse columns): a notch up or down presses each button whose binding names it (WheelUp,
+// WheelDown, among the keys of a keybind_* setting: the keyboard driver itself does not know them). The right
+// bumper's only on foot, as before. Until the bindings page has put the wheel in the bindings (bf_wheel_bindable),
+// the wheel is what it was: Toggle Weapon on foot.
+void WheelNotch(int direction) {
+  static const std::pair<const char*, uint16_t> kBinds[] = {
+      {"keybind_a", 0x1000},          {"keybind_b", 0x2000},           {"keybind_x", 0x4000},
+      {"keybind_y", 0x8000},          {"keybind_left_shoulder", 0x0100}, {"keybind_right_shoulder", 0x0200},
+      {"keybind_lstick_press", 0x0040}, {"keybind_rstick_press", 0x0080}, {"keybind_back", 0x0020},
+      {"keybind_start", 0x0010},      {"keybind_dpad_up", 0x0001},     {"keybind_dpad_down", 0x0002},
+      {"keybind_dpad_left", 0x0004},  {"keybind_dpad_right", 0x0008}};
+  if (rex::cvar::GetFlagByName("bf_wheel_bindable") != "true") {
+    if (LocalOnFoot()) PulseButton(0x0200, 120);
+    return;
+  }
+  const std::string token = direction > 0 ? "WheelUp" : "WheelDown";
+  uint16_t press = 0;
+  for (const auto& [bind, bit] : kBinds) {
+    const std::string keys = "," + rex::cvar::GetFlagByName(bind) + ",";
+    if (keys.find("," + token + ",") == std::string::npos) continue;
+    if (bit == 0x0200 && !LocalOnFoot()) continue;  // in a vehicle the right bumper fires the second weapon
+    press |= bit;
+  }
+  if (press) PulseButton(press, 120);
 }
 extern std::atomic<float> g_game_fov;       // fov.cpp: the game's vertical field of view this frame (radians)
 extern std::atomic<float> g_fov_now_deg, g_fov_own_deg;  // fov.cpp: the field of view controller's now and own
@@ -101,6 +124,10 @@ namespace dev {
 void WatchHost(const void* address, double seconds, const char* label);  // dev_watch.cpp
 }
 #endif
+}  // namespace bf1943
+
+namespace bf1943 {
+double TickSeconds();  // tick_rate.cpp
 }  // namespace bf1943
 
 namespace {
@@ -117,7 +144,8 @@ constexpr double kMaxStep = 0.1;
 // In a vehicle the mouse pushes the right stick by its movement over the last game tick (1/30 s), not by what came
 // since the last pad read: the game reads the pad on every frame but its vehicles take the stick once a tick, so at
 // 110 FPS most of the movement went to reads the vehicle never used, and the turn speed changed with the frame rate.
-constexpr double kPadWindow = 1.0 / 30.0;
+// One game tick (tick_rate.cpp).
+double kPadWindow() { return bf1943::TickSeconds(); }
 // The aim update counts as running for this long after its last call (on foot; not in a vehicle, dead or a menu).
 constexpr double kAimAlive = 0.25;
 
@@ -258,10 +286,29 @@ double Density(const State& s) {
   return d > 0.25 ? d : 1.0;
 }
 
+#if defined(BF_DEV_TOOLS)
+// A scripted test run (BF_DEV_SCRIPTED=1, tools/run_game.ps1): the PC's own mouse is kept out of the match as it is
+// out of the launcher (game_menu.cpp). A test window at the back still gets the pointer's moves over any part of it
+// that shows, and with the developer mouse on (MouseLook) they turned a tank's and an AA gun's aim in the middle of
+// a test (runs v41tank1 and v41aa, 13 Nov 2026: the prompts changed to the keyboard's at the same moment).
+bool ScriptedRun() {
+  static const bool on = [] {
+    const char* v = std::getenv("BF_DEV_SCRIPTED");
+    return v && *v == '1';
+  }();
+  return on;
+}
+#endif
+
 class Listener : public rex::ui::WindowInputListener {
  public:
   void OnMouseMove(rex::ui::MouseEvent& e) override {
-    if ((e.dx() == 0.0f && e.dy() == 0.0f) || !MouseLook() || bf1943::GameMenuOpen() || bf1943::comms::Typing()) return;
+#if defined(BF_DEV_TOOLS)
+    if (ScriptedRun()) return;
+#endif
+    if ((e.dx() == 0.0f && e.dy() == 0.0f) || !MouseLook() || bf1943::GameMenuOpen() || bf1943::SpawnMouseActive() ||
+        bf1943::comms::Typing())
+      return;
     // A move of two counts or more is the player's (a hand resting on the mouse jitters by one): the HUD's prompts
     // show keys (game_menu.cpp NoteMatchDevice).
     if (std::fabs(e.dx()) + std::fabs(e.dy()) >= 2.0f) bf1943::NoteMatchDevice(true);
@@ -274,8 +321,11 @@ class Listener : public rex::ui::WindowInputListener {
   }
   // Keyboard & mouse: the wheel toggles the weapon, a notch a press (WheelNotch).
   void OnMouseWheel(rex::ui::MouseEvent& e) override {
+#if defined(BF_DEV_TOOLS)
+    if (ScriptedRun()) return;
+#endif
     if (!e.scroll_y() || !MouseLook() || bf1943::GameMenuOpen() || bf1943::comms::Typing()) return;
-    bf1943::WheelNotch();
+    bf1943::WheelNotch(e.scroll_y() > 0 ? 1 : -1);
   }
 };
 Listener g_listener;
@@ -321,7 +371,8 @@ void LookFrame() {
   g.frame_valid = true;
   g.frame_id++;
   // Our menu takes the mouse back from the game (the pointer is free to pick rows), and gives it back on closing.
-  const bool menu = GameMenuOpen();
+  // So does the deploy screen's pointer (flash_mouse.cpp).
+  const bool menu = GameMenuOpen() || SpawnMouseActive();
   if (menu != g.menu_mouse_off) {
     g.menu_mouse_off = menu;
     g.pad_moves.clear();
@@ -388,7 +439,7 @@ void LookFrame() {
 
 // For vehicle_mouse.cpp: the mouse's counts since the last call (not times the display density), and the seconds since
 // it last moved. False without mouse look.
-bool VehicleMouseStick(float real_x, float real_y, unsigned& axes, float& x, float& y);  // vehicle_mouse.cpp
+bool MouseStickSeat();  // plane_mouse.cpp: a plane, or a seat whose gun the mouse's stick turns
 bool VehicleMouseTurretSeat();                                                           // vehicle_mouse.cpp
 bool VehicleMouseInverted();  // vehicle_mouse.cpp: Mouse vertical in vehicles (same as on foot, normal, inverted)
 bool GameVerticalLookInverted();  // game_menu.cpp: the game's own Vertical look (it negates the stick's y in vehicles)
@@ -433,7 +484,7 @@ void LookPad(uint8_t* gamepad, bool seated) {
   std::lock_guard lock(g.mutex);
   const auto now = Clock::now();
   // A delayed vehicle tick can consume pending motion, but an input pause drops the old backlog.
-  const double max_age = seated ? 0.1 : kPadWindow;
+  const double max_age = seated ? 0.1 : kPadWindow();
   while (!g.pad_moves.empty() && std::chrono::duration<double>(now - g.pad_moves.front().at).count() > max_age)
     g.pad_moves.pop_front();
 #if defined(BF_DEV_TOOLS)
@@ -456,17 +507,21 @@ void LookPad(uint8_t* gamepad, bool seated) {
         std::chrono::duration<double>(now - g.vehicle_moved).count() > 0.25)
       g.stick_moved = now;
   }
-  const bool mouse_active = MouseLook() && !comms::Typing();
+  // Not in the air raid's bombers (13 Nov 2026): the mouse neither steers them nor turns their view, in the bomb
+  // sight or behind them; the keys and the controller steer.
+  const bool mouse_active = MouseLook() && !comms::Typing() && !BomberSeat();
   // A seat where the soldier's own aim update runs (a landing boat's gunner: its gun follows the soldier's look): the
   // mouse turns that aim itself on every frame, as on foot (LookFrame and the aim hook), so it is no vehicle seat for
   // the mouse here. (The pull request took every seat: LookFrame then handed the aim hook no turn, and the hook, which
   // replaces the game's own turn with the frames', held the aim still for the mouse and a controller alike; found in
   // its review, 13 Nov 2026.)
-  const bool own_aim = Alive(g, now) && REXCVAR_GET(bf_look);
-  // The new way needs both switches on: bf_native_input (the game's concepts written) and bf_mouse_vehicle_aim (guns
-  // aimed at a target angle). With either off the mouse in a vehicle is 0.3's: a gun's wanted input on the pad's
-  // right stick, else the mouse pushes that stick (below).
+  // The new way needs both switches on: bf_native_input (the game's concepts written) and bf_mouse_vehicle_aim (the
+  // mouse turns guns). With either off the mouse in a vehicle is 0.3's: it pushes the pad's right stick (below).
   const bool native = REXCVAR_GET(bf_native_input) && REXCVAR_GET(bf_mouse_vehicle_aim);
+  // A plane, or a seat whose gun has turning parts (0.4.1): the mouse's stick has it (plane_mouse.cpp), also where the
+  // soldier's own aim update runs too (a gunner's seat is a soldier's controllable, seat_info.h).
+  const bool stick_seat = seated && mouse_active && native && MouseStickSeat();
+  const bool own_aim = Alive(g, now) && REXCVAR_GET(bf_look) && !stick_seat;
   const bool vehicle_mouse = seated && mouse_active && !own_aim && native;
   if (vehicle_mouse != g.vehicle_pad_seated || !mouse_active) {
     g.pad_moves.clear();
@@ -478,9 +533,9 @@ void LookPad(uint8_t* gamepad, bool seated) {
     g.vehicle_pad_seated = vehicle_mouse;
   }
   if (!mouse_active || own_aim) return;
-  // In a vehicle (0.4.0, native mouse and keyboard): the mouse never pushes the pad. It steers a plane (plane_mouse.cpp),
-  // aims a seat's guns (vehicle_mouse.cpp), both written into the game's input concepts (native_input.cpp), or turns
-  // the view in a seat without a gun (free look, tick_blend.cpp). A controller's sticks are left as they are.
+  // In a vehicle (native mouse and keyboard): the mouse never pushes the pad. Its stick flies a plane and turns a
+  // seat's gun (plane_mouse.cpp), written into the game's input concepts (native_input.cpp), or it turns the view in a
+  // seat without a gun (free look, tick_blend.cpp). A controller's sticks are left as they are.
   if (vehicle_mouse) {
     double pdx = 0, pdy = 0;
     for (const auto& m : g.pad_moves) pdx += m.dx, pdy += m.dy;
@@ -489,16 +544,7 @@ void LookPad(uint8_t* gamepad, bool seated) {
     g.vehicle_pad_at = {};
     const double d = Density(g);
     if (PlaneMouse(gamepad, pdx / d, pdy / d)) return;
-    // A seat with a turning part: vehicle_mouse.cpp takes the mouse in the part's step (TakeVehicleMouse); it is only
-    // told whether a controller's right stick is pushed (the controller then aims).
-    // The counts also go to the seat's own look (native_input.cpp writes them only when no turret part took the
-    // tick: a seat whose gun follows the soldier's look, as a boat's or a jeep's).
-    if (VehicleMouseTurretSeat()) {
-      auto stick = [&](int at) { return float(int16_t(uint16_t(gamepad[at]) << 8 | gamepad[at + 1])) / 32767.0f; };
-      unsigned axes = 0;
-      float x = 0, y = 0;
-      VehicleMouseStick(stick(8), stick(10), axes, x, y);
-      NoteSeatLook(pdx / d, pdy / d);
+    if (VehicleMouseTurretSeat()) {  // a gun's seat between its parts' steps: nothing but the stick writes there
       g_free_at.store(0);
       return;
     }
@@ -518,7 +564,7 @@ void LookPad(uint8_t* gamepad, bool seated) {
       return;
     }
     const double k = kRadiansPerCount * std::clamp(REXCVAR_GET(bf_mouse_vehicle_sensitivity), 0.05, 10.0) / d;
-    const double iy = VehicleMouseInverted() ? -1.0 : 1.0;  // Mouse vertical in vehicles (vehicle_mouse.cpp)
+    const double iy = VehicleMouseInverted() ? -1.0 : 1.0;  // Invert vehicle (vehicle_mouse.cpp)
     double yaw = g_free_yaw.load(), pitch = g_free_pitch.load();
     if (std::isfinite(pdx)) yaw = std::remainder(yaw + pdx * k, kTwoPi);
     if (std::isfinite(pdy)) pitch = std::clamp(pitch - pdy * k * iy, -kFreePitch, kFreePitch);
@@ -527,27 +573,12 @@ void LookPad(uint8_t* gamepad, bool seated) {
     return;
   }
   g_free_at.store(0);
-  // In a seat the 0.3 way (a switch above is off): a vehicle's guns and turrets are aimed by vehicle_mouse.cpp, its
-  // wanted input given as the pad's right stick.
-  if (seated) {
-    auto axis = [&](int at) { return float(int16_t(uint16_t(gamepad[at]) << 8 | gamepad[at + 1])) / 32767.0f; };
-    unsigned axes = 0;
-    float x = 0, y = 0;
-    if (VehicleMouseStick(axis(8), axis(10), axes, x, y)) {
-      auto put = [](uint8_t* p, double a) {  // past the game's dead zone (0.15), as `add` below
-        const double send = a == 0 || !std::isfinite(a) ? 0.0 : std::copysign(0.15 + std::min(1.0, std::fabs(a)) * 0.85, a);
-        const int v = std::clamp(int(std::lround(send * 32767.0)), -32768, 32767);
-        p[0] = uint8_t(uint16_t(v) >> 8), p[1] = uint8_t(v);
-      };
-      // The game's own Vertical look (Inverted) negates the stick's y in land vehicles and boats before the gun's part
-      // reads it, which turned the aim loop round (the gun ran away from the mouse): given negated, it comes out as
-      // wanted. Which way the mouse aims is the vehicles' own setting (vehicle_mouse.cpp VehicleMouseInverted).
-      put(gamepad + 8, axes & 1 ? x : 0.0f), put(gamepad + 10, axes & 2 ? (GameVerticalLookInverted() ? -y : y) : 0.0f);
-      g.pad_moves.clear();
-      return;
-    }
+  // Not seated (dead, watching), or a seat without a gun the 0.3 way: the mouse to the right stick, as before. Not on
+  // the deploy screen with its pointer free (flash_mouse.cpp): there the mouse points and clicks.
+  if (SpawnMouseActive()) {
+    g.pad_moves.clear();
+    return;
   }
-  // Not seated (dead, watching), or a seat without a gun the 0.3 way: the mouse to the right stick, as before.
   double dx = 0, dy = 0;
   for (const auto& m : g.pad_moves) dx += m.dx, dy += m.dy;
   if (dx == 0 && dy == 0) return;
@@ -762,8 +793,13 @@ REX_HOOK_RAW(sub_822B0B18) {
 // the device that aimed last (the mouse moved after the right stick was pushed: the mouse) is off; the aim is then
 // the player's alone. Other soldiers (a server's) keep the game's.
 REXCVAR_DEFINE_BOOL(bf_aim_assist, true, "BF1943/Controls", "Aim assist with a controller (the game's own)");
-REXCVAR_DEFINE_BOOL(bf_aim_assist_mouse, true, "BF1943/Controls",
-                    "Aim assist with the mouse (Keyboard & mouse): the game's own, made for controllers");
+// 13 Nov 2026 ("disable aim-assist from mouse and keyboard controls, and slightly reduce the strength of aim-assist
+// for controllers"): the mouse never has it (this setting is no longer read; it stays so an old settings file loads),
+// and a controller's pull is scaled: the aim's turn by the game's assist in a tick, times bf_aim_assist_strength.
+REXCVAR_DEFINE_BOOL(bf_aim_assist_mouse, false, "BF1943/Controls",
+                    "Not used: the mouse has no aim assist (it was the game's own, made for controllers)");
+REXCVAR_DEFINE_DOUBLE(bf_aim_assist_strength, 75.0, "BF1943/Controls",
+                      "A controller's aim assist, 0 to 100 (% of the console's pull on the aim)");
 namespace {
 struct AssistStats {
   uint64_t calls = 0, armed = 0, cleared = 0;  // the local soldier's calls, with input+0x54 set, and the flag cleared
@@ -781,7 +817,7 @@ REX_HOOK_RAW(sub_822B0F40) {
     if (mine) {
       ++g_assist.calls;
       if (input && base[input + 0x54]) ++g_assist.armed;
-      const bool on = mouse ? REXCVAR_GET(bf_aim_assist_mouse) : REXCVAR_GET(bf_aim_assist);
+      const bool on = !mouse && REXCVAR_GET(bf_aim_assist);
       if (!on && (ctx.r5.u32 & 0xFF)) ctx.r5.u64 = 0, ++g_assist.cleared;
       // A line a minute while it acts or is turned off: how often the game would have pulled the aim.
       const auto now = Clock::now();
@@ -790,12 +826,24 @@ REX_HOOK_RAW(sub_822B0F40) {
           REXLOG_INFO("BF aim assist: {} ticks in the last minute, {} with the game's assist armed, {} turned off by "
                       "the settings (aiming with the {}; controller {}, mouse {})",
                       g_assist.calls, g_assist.armed, g_assist.cleared, mouse ? "mouse" : "controller",
-                      REXCVAR_GET(bf_aim_assist) ? "on" : "off", REXCVAR_GET(bf_aim_assist_mouse) ? "on" : "off");
+                      REXCVAR_GET(bf_aim_assist) ? "on" : "off", "never");
         g_assist = AssistStats{};
       }
     }
   }
+  // A controller's assist at less than the console's strength: what the call turned the aim by, scaled.
+  const double strength = std::clamp(REXCVAR_GET(bf_aim_assist_strength), 0.0, 100.0) / 100.0;
+  const bool scale = mine && !mouse && strength < 0.999 && (ctx.r5.u32 & 0xFF);
+  const float yaw0 = scale ? LoadF(base, aim + 8) : 0.0f, pitch0 = scale ? LoadF(base, aim + 0xC) : 0.0f;
   __imp__sub_822B0F40(ctx, base);
+  if (scale) {
+    const float yaw1 = LoadF(base, aim + 8), pitch1 = LoadF(base, aim + 0xC);
+    const double dyaw = std::remainder(double(yaw1) - yaw0, 6.283185307179586), dpitch = double(pitch1) - pitch0;
+    if (dyaw != 0.0 || dpitch != 0.0) {
+      StoreF(base, aim + 8, float(Wrap(yaw0 + dyaw * strength)));
+      StoreF(base, aim + 0xC, float(pitch0 + dpitch * strength));
+    }
+  }
 }
 
 namespace {
@@ -844,7 +892,7 @@ struct Motion {
   uint64_t ticks_seen = 0;  // the client's tick count at the last frame (bf1943::ClientTicks)
 } g_motion;
 
-constexpr double kTick = 1.0 / 30.0;
+double kTick() { return bf1943::TickSeconds(); }
 // A step longer than this in one tick is not walking (a respawn, a teleport, a vehicle): no motion carried.
 constexpr double kMaxTickStep = 0.6;
 // Blend, not extrapolation (TekRantGaming's ruling, 6 Nov: King Kong's rule allows no guessing ahead): each frame the position
@@ -870,7 +918,7 @@ void CarryMotion(uint8_t* base, uint32_t entity, Clock::time_point now, uint64_t
     const uint64_t n = std::min<uint64_t>(ticks - m.ticks_seen, 8);
     m.ticks_seen = ticks;
     if (n > 0) {
-      m.phase = std::max(0.0, m.phase - double(n) * kTick);
+      m.phase = std::max(0.0, m.phase - double(n) * kTick());
       const bool ours = m.wrote && cur[0] == m.written[0] && cur[1] == m.written[1] && cur[2] == m.written[2];
       if (ours) {
         // The ticks left the position as it was: no movement to carry.
@@ -884,14 +932,14 @@ void CarryMotion(uint8_t* base, uint32_t entity, Clock::time_point now, uint64_t
       std::memcpy(m.tick, cur, sizeof(m.tick));
       m.have_tick = true;
     }
-    if (m.phase > kTick * 0.98) m.phase = kTick * 0.98;
+    if (m.phase > kTick() * 0.98) m.phase = kTick() * 0.98;
   }
   m.wrote = false;
   if (!m.have_prev || !REXCVAR_GET(bf_look_motion)) return;
   const double dx = m.tick[0] - m.prev[0], dy = m.tick[1] - m.prev[1], dz = m.tick[2] - m.prev[2];
   const double step = std::sqrt(dx * dx + dy * dy + dz * dz);
   if (step > kMaxTickStep || step == 0) return;
-  const double f = std::clamp(m.phase / kTick, 0.0, 1.0);
+  const double f = std::clamp(m.phase / kTick(), 0.0, 1.0);
   // From the previous tick's position toward the last one's (f 0 just after a tick, near 1 before the next).
   m.written[0] = float(m.prev[0] + dx * f);
   m.written[1] = float(m.prev[1] + dy * f);

@@ -34,6 +34,8 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
+#include <set>
+#include <utility>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -45,6 +47,7 @@
 
 REXCVAR_DEFINE_INT32(native_x_renderer_draw_log, 0, "NativeXRenderer",
                      "Bring-up: log the first N draws NativeXRenderer processes (primitive, indices, shaders)");
+REXCVAR_DECLARE(int32_t, anisotropic_override);  // the SDK's: forced anisotropic filtering (textures.cpp)
 REXCVAR_DEFINE_STRING(native_x_renderer_alpha_to_coverage, "auto", "NativeXRenderer",
                       "Alpha to coverage on targets without MSAA (D69, D114): auto (blend on surfaces the game draws "
                       "with MSAA, dither on those it draws at 1x), blend (the color blended by its alpha, depth written "
@@ -662,6 +665,60 @@ void DrawPath::Draw(const StateTracker::Program& vertex_program, const StateTrac
   }
 }
 
+namespace {
+// D168: the game's scoped picture by its shaders (the guest programs' hashes; one game, so one set), Battlefield 1943's
+// with a sniper scope up: its composite of the zoomed view, which blacks out all but the round view (962547C8BB566F8B
+// with 8DD620FF8D8BB8FA: every steady scoped frame, run v41scope16, 13 Nov 2026; the reticle comes later with the HUD),
+// and the full screen pass of the scope's raise, after two at half size (589877255C25EA63: only while the scope comes
+// up, runs v41scope5 to v41scope12). The same vertex shader draws the luminance chain's small targets, so only a draw of
+// the output's size counts. NXR_SCOPE_MASK=<vs>:<ps>,... adds pairs (hex; research).
+bool IsScopeMask(uint64_t vs, uint64_t ps) {
+  struct Pair {
+    uint64_t vs, ps;
+  };
+  static const std::vector<Pair> pairs = [] {
+    std::vector<Pair> out = {{0x962547C8BB566F8Bull, 0x8DD620FF8D8BB8FAull}, {0x962547C8BB566F8Bull, 0x589877255C25EA63ull}};
+    if (const char* v = std::getenv("NXR_SCOPE_MASK"); v && *v) {
+      const std::string text = v;
+      for (size_t pos = 0; pos < text.size();) {
+        const size_t comma = std::min(text.find(',', pos), text.size());
+        const std::string item = text.substr(pos, comma - pos);
+        const size_t colon = item.find(':');
+        Pair p{std::strtoull(item.substr(0, colon).c_str(), nullptr, 16),
+               colon == std::string::npos ? 0 : std::strtoull(item.substr(colon + 1).c_str(), nullptr, 16)};
+        if (p.vs) out.push_back(p);
+        pos = comma + 1;
+      }
+      REXLOG_INFO("[native_x_renderer] scope: {} mask shader pairs with NXR_SCOPE_MASK's", out.size());
+    }
+    return out;
+  }();
+  for (const Pair& p : pairs)
+    if (p.vs == vs && (p.ps == 0 || p.ps == ps)) return true;
+  return false;
+}
+
+// The x and y extent of an inline draw's vertices (their first two floats, big-endian): lo x, hi x, lo y, hi y.
+bool InlineExtent(std::span<const DrawPath::Copy> copies, uint32_t count, float out[4]) {
+  if (!count || copies.size() != 1 || !copies[0].data || copies[0].size < count * 8) return false;
+  const uint32_t stride = copies[0].size / count;
+  out[0] = out[2] = 1e30f, out[1] = out[3] = -1e30f;
+  for (uint32_t v = 0; v < count; ++v) {
+    float xy[2];
+    for (int i = 0; i < 2; ++i) {
+      uint32_t word;
+      std::memcpy(&word, copies[0].data + size_t(v) * stride + i * 4, 4);
+      word = rex::byte_swap(word);
+      std::memcpy(&xy[i], &word, 4);
+    }
+    out[0] = std::min(out[0], xy[0]), out[1] = std::max(out[1], xy[0]);
+    out[2] = std::min(out[2], xy[1]), out[3] = std::max(out[3], xy[1]);
+  }
+  return out[0] <= out[1];
+}
+
+}  // namespace
+
 bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const StateTracker::Program& pixel_program,
                             std::span<const Copy> copies, const std::array<HostTarget*, 5>& targets) {
   const rg::RegisterFile& regs = *registers_;
@@ -711,6 +768,32 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       }
       if (!draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs)) pixel_shader = nullptr;
     }
+  }
+  // D168: while the picture in picture scope watches (SetScopeFrame), the game's own scope mask pass is noticed (the
+  // scope's pass follows it); with the research log, each draw after the composite is named.
+  if (scope_watch_ || scope_log_) {
+    const HostTarget* target = nullptr;
+    for (HostTarget* t : targets)
+      if (t) {
+        target = t;
+        break;
+      }
+    if (scope_log_ && ++scope_logged_ <= 400) {
+      float e[4];
+      const bool extent = InlineExtent(copies, regs[rg::XE_GPU_REG_VGT_DRAW_INITIATOR] >> 16, e);
+      REXLOG_INFO("[native_x_renderer] scope research, {}: vs {:016X} ps {:016X}, {} vertices{}, target {}x{} ({}), depth "
+                  "{}{}, blend {:08X}{}",
+                  scope_log_ == 2 ? "scoped" : scope_log_ == 3 ? "after the present" : "not scoped",
+                  vertex_program.hash, pixel_program.hash, regs[rg::XE_GPU_REG_VGT_DRAW_INITIATOR] >> 16,
+                  copies.empty() ? "" : " inline", target ? target->guest_width : 0, target ? target->guest_height : 0,
+                  fmt::ptr(target), regs.Get<reg::RB_DEPTHCONTROL>().z_enable ? "tested" : "off",
+                  regs.Get<reg::RB_DEPTHCONTROL>().z_write_enable ? " written" : "",
+                  regs[rg::XE_GPU_REG_RB_BLENDCONTROL0],
+                  extent ? fmt::format(", x {:.1f}..{:.1f} y {:.1f}..{:.1f}", e[0], e[1], e[2], e[3]) : "");
+    }
+    if (scope_watch_ && target && target->guest_width == jitter_size_[0] && target->guest_height == jitter_size_[1] &&
+        IsScopeMask(vertex_program.hash, pixel_program.hash))
+      scope_mask_drawn_ = true;
   }
   reg::RB_DEPTHCONTROL depth_control = draw_util::GetNormalizedDepthControl(regs);
   uint32_t param_gen_position = UINT32_MAX;
@@ -1142,6 +1225,16 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   bool guest_msaa = regs.Get<reg::RB_SURFACE_INFO>().msaa_samples != xenos::MsaaSamples::k1X;
   bool alpha_to_coverage_blended = (guest_msaa ? alpha_to_coverage_blend_.msaa : alpha_to_coverage_blend_.one) &&
                                    pixel_shader && regs.Get<reg::RB_COLORCONTROL>().alpha_to_mask_enable;
+  // How much of the game is drawn this way (13 Nov 2026, the rendering quirks: a dither that shimmers, or none at
+  // all?): its draws with alpha to coverage counted, said once after the first 2000 and how they are drawn.
+  if (pixel_shader && regs.Get<reg::RB_COLORCONTROL>().alpha_to_mask_enable) {
+    static uint64_t seen = 0, blended = 0, at_1x = 0;
+    ++seen, blended += alpha_to_coverage_blended, at_1x += !guest_msaa;
+    if (seen == 2000)
+      REXLOG_INFO("[native_x_renderer] alpha to coverage: the game's first 2000 such draws, {} on surfaces it draws at "
+                  "1x, {} blended by alpha and {} dithered (native_x_renderer_alpha_to_coverage)",
+                  at_1x, blended, seen - blended);
+  }
   if (alpha_to_coverage_blended) {
     for (uint32_t i = 0; i < render_target_count; ++i) {
       PipelineState::Target& target = state.targets[i];
@@ -1475,6 +1568,22 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   {
     MappedBuffer map(context, fetch_constants_buffer_);
     std::memcpy(map.data(), &regs[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], kFetchConstantsSize);
+    // 13 Nov 2026 ("set a clamp on texture bias with Anisotropic Filtering enabled"): with anisotropic filtering
+    // forced (anisotropic_override 2x and up), a texture's own negative LOD bias (its fetch constant's word 4, bits
+    // 12 to 21, in 1/32 of a level; the translated shaders scale their gradients by it) is taken as none. A game sets
+    // it to sharpen a trilinear picture at 720 lines; anisotropic filtering does that without the sparkle a sharper
+    // level than the screen can show gives in motion. Only the constants this draw's shaders sample as textures: the
+    // same registers hold vertex fetches.
+    if (const int32_t forced = REXCVAR_GET(anisotropic_override); forced >= 2 && forced < 6) {
+      auto* words = reinterpret_cast<uint32_t*>(map.data());
+      for (uint32_t mask = used_texture_mask; mask;) {
+        uint32_t index = 0;
+        while (!(mask & (1u << index))) ++index;
+        mask &= ~(1u << index);
+        uint32_t& word = words[index * 6 + 4];
+        if (word & (1u << 21)) word &= ~(0x3FFu << 12);  // the field's sign bit: a negative bias
+      }
+    }
   }
 
   // Textures and samplers. Drawn at the reduced scale (D49), the samplers take the mip bias for it: log2 of
@@ -1586,8 +1695,19 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   float scale_x = target_scale.x, scale_y = target_scale.y, offset_x = 0.0f, offset_y = 0.0f;
   HudPlace place;
   place.align = aspect_align_;
-  if (aspect_box_ && hud_classify_ && target_scale.x != target_scale.y)
-    place = ClassifyHudDraw(copies, vertex_program.hash);
+  const bool hud_scaling = hud_scale_ != 1.0f || minimap_scale_ != 1.0f;
+  bool hud_placed = false;
+  if (hud_classify_ && ((aspect_box_ && target_scale.x != target_scale.y) || hud_scaling)) {
+    hud_sheet_w_ = hud_sheet_h_ = hud_sheet_format_ = 0;
+    if (const uint32_t pixel_mask = pixel_shader ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0) {
+      uint32_t first = 0;
+      while (!(pixel_mask & (1u << first))) ++first;
+      const auto fetch = regs.GetTextureFetch(first);
+      hud_sheet_w_ = fetch.size_2d.width + 1, hud_sheet_h_ = fetch.size_2d.height + 1;
+      hud_sheet_format_ = uint32_t(fetch.format);
+    }
+    place = ClassifyHudDraw(copies, vertex_program.hash), hud_placed = true;
+  }
   if (aspect_box_ && place.mode != HudMode::kStretch && target_scale.x != target_scale.y) {
     float uniform = std::min(target_scale.x, target_scale.y);
     const float gw = float(sized->guest_width), gh = float(sized->guest_height);
@@ -1599,7 +1719,9 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       // across on a wider output, and down on a taller one (16:10, 4:3), where the box sits in the middle of the
       // height and a marker moved across only sat up to 5 percent of the height off its flag (the review of the
       // pull request, 13 Nov 2026).
-      const double g_cx = ((place.lo + place.hi) * 0.5 + 1.0) * 0.5 * gw;
+      // Every piece of one marker moves by the marker's own place when it is known (13 Nov: a plane's gunsight, drawn
+      // in several pieces around one projected point, came apart and shifted in flight).
+      const double g_cx = place.point_x >= 0 ? place.point_x / 1280.0 * gw : ((place.lo + place.hi) * 0.5 + 1.0) * 0.5 * gw;
       const double g_cy = (1.0 - (place.y_lo + place.y_hi) * 0.5) * 0.5 * gh;
       offset_x = float(g_cx * (target_scale.x - uniform));
       offset_y = float(g_cy * (target_scale.y - uniform));
@@ -1621,6 +1743,24 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           offset_x = inner - g_lo * scale_x;
         }
       }
+    }
+  }
+  // The HUD's scale (draw.h SetHudScale): about the screen's point the draw's part of the HUD hangs on. Not a world
+  // marker (13 Nov 2026: "do not change 3D Flag icons scaling": the flags' icons over the map keep the game's size),
+  // not a menu's frames, nor what is stretched or reaches to an edge.
+  if (hud_placed && hud_scaling && !hud_menu_ && place.mode == HudMode::kBox) {
+    const float gw = float(sized->guest_width), gh = float(sized->guest_height);
+    // With the HUD at the edges, a draw's side is its box's (align); with a centred HUD (every 16:9 screen) the box is
+    // in the middle, so its side is where it sits on the canvas (anchor_x): there the minimap slider found no minimap
+    // (the review of pull request 16).
+    const float side = hud_edges_ ? place.align : place.anchor_x;
+    const bool minimap = place.mode == HudMode::kBox && side == 0.0f && place.anchor_y == 1.0f;
+    const float k = minimap ? minimap_scale_ : hud_scale_;
+    if (k != 1.0f && k > 0.1f) {
+      const float ax = side * gw, ay = place.anchor_y * gh;
+      offset_x += ax * scale_x * (1.0f - k);
+      offset_y += ay * scale_y * (1.0f - k);
+      scale_x *= k, scale_y *= k;
     }
   }
   // As RenderScale::HostX/HostY outside a box.
@@ -1701,6 +1841,29 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
                              sxp(int64_t(scissor.offset[0]) + scissor.extent[0]),
                              syp(int64_t(scissor.offset[1]) + scissor.extent[1])};
     on_target(stretched_scissor);
+  }
+  // D168: the sniper reticle cut to the picture in picture lens's square while the lens is drawn (SetScopeClip): its
+  // pieces are the HUD sprite shaders' small quads stretched by their constants into lines across the screen (run
+  // v41scope20: the 104th 2D draw, a 50 x 33 quad, drew the level line through the lens), so a piece is told by its
+  // size in clip space: a quarter of the screen or more one way (2 is the screen's width). The HUD's pictures drawn
+  // with them (flags, icons, ammo) are far smaller.
+  if (scope_clip_.right > scope_clip_.left && output_sized && vertex_program.hash == 0xBCFA50F3EA22BAE7ull &&
+      pixel_program.hash == 0x90AC5F14E9463FB2ull) {
+    double e[4];
+    const bool placed = HudClipExtent(copies, regs[rg::XE_GPU_REG_VGT_DRAW_INITIATOR] >> 16, e);
+    const bool reticle = placed && std::max(e[1] - e[0], e[3] - e[2]) >= 0.5;
+    if (scope_log_ && scope_logged_ <= 400)
+      REXLOG_INFO("[native_x_renderer] scope research: a sprite quad{}{}",
+                  placed ? fmt::format(" at clip x {:.2f}..{:.2f} y {:.2f}..{:.2f}", e[0], e[1], e[2], e[3])
+                         : std::string(" not placed"),
+                  reticle ? ": the reticle, cut to the lens" : "");
+    if (reticle) {
+      for (Rect* r : {&scissor_rect, &stretched_scissor}) {
+        r->left = std::max(r->left, scope_clip_.left), r->top = std::max(r->top, scope_clip_.top);
+        r->right = std::max(r->left, std::min(r->right, scope_clip_.right));
+        r->bottom = std::max(r->top, std::min(r->bottom, scope_clip_.bottom));
+      }
+    }
   }
   // Set when they change (D81): DiligentCore records them on every call.
   if (!viewport_valid_ || std::memcmp(&viewport, &viewport_, sizeof(viewport))) {
@@ -2701,6 +2864,40 @@ void DrawPath::CaptureTerrain(const rg::RegisterFile& regs, const rg::SpirvShade
 // in turn: each pair of consecutive used registers as rows (x' = r.(x, y, 0, 1), y' = (r+1).(x, y, 0, 1)), then each
 // four as a column major matrix (x' = r.x x + (r+1).x y + (r+3).x). The first that puts every corner in clip space
 // (within 1.5) is the draw's place. Unknown: boxed in the middle.
+bool DrawPath::HudClipExtent(std::span<const Copy> copies, uint32_t count, double out[4]) const {
+  float e[4];
+  if (!InlineExtent(copies, count, e)) return false;
+  const float cx[4] = {e[0], e[1], e[0], e[1]}, cy[4] = {e[2], e[2], e[3], e[3]};
+  const size_t used = std::min(vertex_registers_.size(), vertex_constants_.size() / 16);
+  auto reg = [&](size_t i) { return reinterpret_cast<const float*>(vertex_constants_.data() + i * 16); };
+  auto place = [&](auto&& fx, auto&& fy) {
+    double l = 1e30, h = -1e30, yl = 1e30, yh = -1e30;
+    for (int k = 0; k < 4; ++k) {
+      const double x = fx(cx[k], cy[k]), y = fy(cx[k], cy[k]);
+      if (!std::isfinite(x) || !std::isfinite(y) || std::fabs(x) > 6.0 || std::fabs(y) > 6.0) return false;
+      l = std::min(l, x), h = std::max(h, x), yl = std::min(yl, y), yh = std::max(yh, y);
+    }
+    if (h - l < 1e-4 || yh - yl < 1e-4) return false;
+    out[0] = l, out[1] = h, out[2] = yl, out[3] = yh;
+    return true;
+  };
+  for (size_t i = 0; i + 1 < used; ++i) {
+    if (vertex_registers_[i + 1] != vertex_registers_[i] + 1) continue;
+    const float *a = reg(i), *b = reg(i + 1);
+    if (place([&](float x, float y) { return double(a[0]) * x + a[1] * y + a[3]; },
+              [&](float x, float y) { return double(b[0]) * x + b[1] * y + b[3]; }))
+      return true;
+  }
+  for (size_t i = 0; i + 3 < used; ++i) {
+    if (vertex_registers_[i + 3] != vertex_registers_[i] + 3) continue;
+    const float *a = reg(i), *b = reg(i + 1), *d = reg(i + 3);
+    if (place([&](float x, float y) { return double(a[0]) * x + b[0] * y + d[0]; },
+              [&](float x, float y) { return double(a[1]) * x + b[1] * y + d[1]; }))
+      return true;
+  }
+  return false;
+}
+
 DrawPath::HudPlace DrawPath::ClassifyHudDraw(std::span<const Copy> copies, uint64_t vertex_shader) {
   HudPlace place;
   HudTally& t = hud_tally_;
@@ -2810,11 +3007,32 @@ DrawPath::HudPlace DrawPath::ClassifyHudDraw(std::span<const Copy> copies, uint6
     // Inside a panel drawn before it: where the panel went.
     place = panel->place, result = "in a panel";
     ++(place.align == 0.0f ? t.left : place.align == 1.0f ? t.right : t.middle);
-  } else if (!hud_menu_ && NearHudMarker(((lo + hi) * 0.5 + 1.0) * 640.0, (1.0 - (y_lo + y_hi) * 0.5) * 360.0, 48.0)) {
+  } else if (double marker_x = -1;
+             !hud_menu_ &&
+             // 13 Nov 2026 ("separate world markers ... so they don't interfere with player HUD elements"): what a
+             // draw is drawn from tells them apart where its place cannot. The game's crosshairs, gunsights and scope
+             // marks are on a sheet of their own (Battlefield 1943: menu/hud_crosshair_textures, 256 x 256, 8_8_8_8),
+             // and nothing on it marks a place in the world: a draw from it is never a world marker, however near
+             // one it passes.
+             !(hud_sheet_format_ == 6 && hud_sheet_w_ == 256 && hud_sheet_h_ == 256) &&
+             // Only a draw the size and shape of a marker's icon or of a letter of its label (6 to 44 canvas pixels
+             // each way, not a line). The middle of the screen is where whatever the game projects as the aim moves
+             // passes, and a sight drawn there in pieces was taken apart piece by piece as each came within reach of
+             // such a point: a scope's crosshair and mil dots (13 Nov), then a plane's gunsight, whose ring is larger
+             // than any marker and whose bars are lines ("invisible when you first get in the plane ... glitchy").
+             [&] {
+               const double w = (hi - lo) * 640.0, h = (y_hi - y_lo) * 360.0;
+               return w >= 6.0 && w <= 44.0 && h >= 6.0 && h <= 44.0 && w <= h * 2.5 && h <= w * 2.5;
+             }() &&
+             NearHudMarker(((lo + hi) * 0.5 + 1.0) * 640.0, (1.0 - (y_lo + y_hi) * 0.5) * 360.0, 48.0, &marker_x)) {
     // A world marker (the game's projection noted it, NoteHudMarker): its centre where the 3D view shows that place,
-    // its size the HUD's.
+    // its size the HUD's. Every piece of one marker moves by the marker's own place, not by its own centre (13 Nov:
+    // a plane's gunsight, drawn in several pieces around one projected point, came apart and shifted in flight).
     ++t.middle, ++t.markers, result = "world marker";
     place.mode = HudMode::kPoint;
+    // Not through a scope: its crosshair and mil dots are drawn near the flags seen through it, and moved by a
+    // flag's place they came off the sight as the camera turned (13 Nov: "displacing the crosshair and mildots").
+    place.point_x = hud_scope_ ? -1 : marker_x;
   } else if (prev.valid && prev.place.mode == HudMode::kBox && prev.vertex_shader == vertex_shader &&
              y_lo <= prev.y_hi && y_hi >= prev.y_lo && lo >= prev.lo - 0.02 && lo <= prev.hi + 0.15) {
     // The next glyph of a line, the next part of a bar: where the first went.
@@ -2830,6 +3048,12 @@ DrawPath::HudPlace DrawPath::ClassifyHudDraw(std::span<const Copy> copies, uint6
     ++t.middle;
   }
   if (how != How::kNone) {
+    // The height it is scaled about (HudPlace::anchor_y), unless it took its place from a panel or the last draw.
+    if (const std::string_view r = result; r != "in a panel" && r != "as the last" && r != "unknown, as the last") {
+      const double yc = (y_lo + y_hi) * 0.5, xc = (lo + hi) * 0.5;
+      place.anchor_y = yc > 0.34 ? 0.0f : yc < -0.34 ? 1.0f : 0.5f;
+      place.anchor_x = xc < -0.34 ? 0.0f : xc > 0.34 ? 1.0f : 0.5f;
+    }
     if (lo <= -0.99 && hi >= 0.99 && y_lo <= -0.99 && y_hi >= 0.99 && hi <= 1.01 && lo >= -1.01) hud_backdrop_ = true;
     place.lo = lo, place.hi = hi, place.y_lo = y_lo, place.y_hi = y_hi;
     prev = {true, vertex_shader, lo, hi, y_lo, y_hi, place};
@@ -2856,6 +3080,16 @@ DrawPath::HudPlace DrawPath::ClassifyHudDraw(std::span<const Copy> copies, uint6
       }
     }
     if (hud_seen_.size() < 4096) hud_seen_.push_back(seen);
+  }
+  // The scope research (Battlefield 1943 Reborn 0.4.1, the picture in picture scope): with the HUD debug on, each kind
+  // of 2D draw once (its vertex shader, how it was placed, its extent), so the sniper scope's mask can be told apart.
+  if (hud_debug_) {
+    static std::set<std::pair<uint64_t, std::string>> seen_kinds;
+    if (seen_kinds.size() < 400 && seen_kinds.insert({vertex_shader, result}).second)
+      REXLOG_INFO("[native_x_renderer] HUD kind: vs {:016X} -> {} (quad {} x {:.2f}..{:.2f} y {:.2f}..{:.2f}, clip x {:.2f}..{:.2f} "
+                  "y {:.2f}..{:.2f}, {} registers, phase {})",
+                  vertex_shader, result, have_quad ? count : 0, cx[0], cx[1], cy[0], cy[2], lo, hi, y_lo, y_hi, used,
+                  hud_menu_ ? "menu" : "game");
   }
   if (hud_debug_ && t.sampled < 12) {
     ++t.sampled;

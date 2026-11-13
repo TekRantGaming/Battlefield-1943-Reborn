@@ -554,6 +554,20 @@ void ImGuiDrawer::OnMouseDown(MouseEvent& e) {
       button = 1;
       break;
     }
+    // The middle and side buttons too (ImGui's 2, 3 and 4): a key bindings page that waits for a click saw only the
+    // left and right before (Battlefield 1943 Reborn, issue 14, 13 Nov 2026).
+    case rex::ui::MouseEvent::Button::kMiddle: {
+      button = 2;
+      break;
+    }
+    case rex::ui::MouseEvent::Button::kX1: {
+      button = 3;
+      break;
+    }
+    case rex::ui::MouseEvent::Button::kX2: {
+      button = 4;
+      break;
+    }
     default: {
       // Ignored.
       break;
@@ -584,6 +598,20 @@ void ImGuiDrawer::OnMouseUp(MouseEvent& e) {
     }
     case rex::ui::MouseEvent::Button::kRight: {
       button = 1;
+      break;
+    }
+    // The middle and side buttons too (ImGui's 2, 3 and 4): a key bindings page that waits for a click saw only the
+    // left and right before (Battlefield 1943 Reborn, issue 14, 13 Nov 2026).
+    case rex::ui::MouseEvent::Button::kMiddle: {
+      button = 2;
+      break;
+    }
+    case rex::ui::MouseEvent::Button::kX1: {
+      button = 3;
+      break;
+    }
+    case rex::ui::MouseEvent::Button::kX2: {
+      button = 4;
       break;
     }
     default: {

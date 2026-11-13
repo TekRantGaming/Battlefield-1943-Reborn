@@ -14,7 +14,7 @@
   // (TekRantGaming, 12 Nov 2026 18:10: "drop join friends and replace it with the unlockables button".)
   // Create Private Match is back (TekRantGaming, 13 Nov 2026, on pull request 11: "merge all of it"; it had left
   // the menu on 11 Nov): our own server on this PC, joined at once, friends by Direct connect (PrivateMatchPage).
-  static constexpr MenuRow kMenuRows[] = {{"QUICK PLAY", false},  {"SERVER BROWSER", false}, {"CREATE PRIVATE MATCH", false},
+  static constexpr MenuRow kMenuRows[] = {{"QUICK PLAY", false},  {"SERVER BROWSER", false}, {"CUSTOM MATCH", false},
                                           {"UNLOCKABLES", false},
                                           {"STATS & AWARDS", false}, {"LEADERBOARDS", false}, {"ACHIEVEMENTS", false},
                                           {"SETTINGS", false},    {"HELP", false},           {"UPDATE", true},
@@ -69,8 +69,8 @@
     // The player's card.
     const std::string name = settings_.Get("player_name", "Soldier");
     const std::string rank = "RANK " + std::to_string(Rank()) + " \xC2\xB7 " + Upper(kRanks[Rank() - 1]);
-    const float nw = std::max(kit::TextWidth(f.ui_bold, st(14), name), kit::SpacedWidth(f.typed, st(8), rank, st(1.5f)));
-    const float ew = kit::SpacedWidth(f.ui_bold, st(9), "EDIT", st(1.5f));
+    const float nw = std::max(kit::TextWidth(f.ui_bold, st(14), name), kit::SpacedWidth(f.typed, st(10), rank, st(1.5f)));
+    const float ew = kit::SpacedWidth(f.ui_bold, st(10.25f), "EDIT", st(1.5f));
     const float w = st(10) + st(30) + st(12) + nw + st(14) + ew + st(14);
     const ImVec2 a(st.P(1232, 0).x - w, st.P(0, 22).y), b(st.P(1232, 0).x, st.P(0, 70).y);
     const bool hover = ImGui::IsMouseHoveringRect(a, b);
@@ -78,14 +78,14 @@
     d->AddRect(a, b, kit::kBorder, 0, 0, 1.0f);
     RankInsignia(d, st, ImVec2(a.x + st(10) + st(15), (a.y + b.y) * 0.5f), st(30), Rank());
     d->AddText(f.ui_bold, st(14), ImVec2(a.x + st(52), a.y + st(7)), kit::kInk, name.c_str());
-    kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(52), a.y + st(29)), kit::kInkSection, rank, st(1.5f));
+    kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(52), a.y + st(29)), kit::kInkSection, rank, st(1.5f));
     d->AddRectFilled(ImVec2(b.x - ew - st(24), a.y + st(10)), ImVec2(b.x - ew - st(23), b.y - st(10)), kit::kRule);
-    kit::Spaced(d, f.ui_bold, st(9), ImVec2(b.x - ew - st(12), a.y + st(18)), hover ? kit::kStamp : kit::kInkSection, "EDIT",
+    kit::Spaced(d, f.ui_bold, st(10.25f), ImVec2(b.x - ew - st(12), a.y + st(18)), hover ? kit::kStamp : kit::kInkSection, "EDIT",
                 st(1.5f));
     // The line under it: players and servers online, or a match running.
-    const float sw = kit::SpacedWidth(f.typed, st(9), status, st(2));
+    const float sw = kit::SpacedWidth(f.typed, st(11.25f), status, st(2));
     d->AddCircleFilled(ImVec2(b.x - sw - st(11), st.P(0, 84).y), st(3), status_ok ? kit::kGreenBright : kit::kStamp);
-    kit::Spaced(d, f.typed, st(9), ImVec2(b.x - sw, st.P(0, 79).y), kit::kKhakiText, status, st(2));
+    kit::Spaced(d, f.typed, st(11.25f), ImVec2(b.x - sw, st.P(0, 79).y), kit::kKhakiText, status, st(2));
     return hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
   }
 
@@ -93,8 +93,8 @@
   void MenuFoot(ImDrawList* d, const Stage& st) {
     const kit::Fonts& f = kit::GetFonts();
     const std::string v = Upper(UpdateNote());  // "UP TO DATE · 0.3.0", "DOWNLOADING 40%"...
-    const float vw = kit::SpacedWidth(f.typed, st(8), v, st(2));
-    kit::Spaced(d, f.typed, st(8), ImVec2(st.P(1232 - 300, 0).x - vw, st.P(0, 720 - 24 - 34 + 14).y), kit::kKhakiDim, v, st(2));
+    const float vw = kit::SpacedWidth(f.typed, st(10), v, st(2));
+    kit::Spaced(d, f.typed, st(10), ImVec2(st.P(1232 - 300, 0).x - vw, st.P(0, 720 - 24 - 34 + 14).y), kit::kKhakiDim, v, st(2));
     if (kit::WatermarkOn()) kit::Stamp(d, st.P(1240 - 118, 720 - 26 - 30), st.u, -4, 0.92f);
   }
 
@@ -104,6 +104,10 @@
     ok = list_.reachable();
     // On a server's own backend (Direct connect to a LAN only server): said, since its list is not the main one.
     const std::string where = own_backend_.empty() ? std::string() : "BACKEND " + Upper(own_backend_) + " \xC2\xB7 ";
+    if (!list_.asked()) {  // nothing has been asked of the servers yet (server_list.h Want)
+      ok = true;
+      return where + "CONNECTING TO THE SERVERS";
+    }
     if (!ok) return where + "SERVERS NOT REACHABLE";
     return where + fmt::format("{} {} ONLINE \xC2\xB7 {} {}", list_.players_online(), list_.players_online() == 1 ? "PLAYER" : "PLAYERS",
                                servers.size(), servers.size() == 1 ? "SERVER" : "SERVERS");
@@ -139,7 +143,8 @@
     keep = list_.servers();
     const ServerInfo* best = nullptr;
     for (const auto& sv : keep)
-      if (sv.players < sv.max_players && (!best || sv.players > best->players)) best = &sv;
+      // As Quick Play chooses (QuickJoin): never an experimental tick rate.
+      if (sv.Tick() == 30 && sv.players < sv.max_players && (!best || sv.players > best->players)) best = &sv;
     return best;
   }
 
@@ -151,6 +156,12 @@
 
   void QuickPlay() {
     REXLOG_INFO("BF menu: Quick Play");
+    if (!list_.asked() || list_.servers().empty()) {  // the list first: the join follows its answer (OnDraw)
+      quick_asked_at_ = list_.answers(), quick_waiting_ = ImGui::GetTime() + 8.0;
+      list_.RefreshNow();
+      menu_error_ = "Looking for a server...", menu_error_at_ = ImGui::GetTime();
+      return;
+    }
     if (QuickJoin()) return;
     menu_error_ = "No server has room right now. Try again in a moment, or open the server browser.";
     menu_error_at_ = ImGui::GetTime();
@@ -190,9 +201,9 @@
     if (glyph != kit::Button::kKey)
       kit::Glyph(d, PromptStyle(), glyph, KeyFor(glyph), ImVec2(b.x - st(16) - st(20), a.y + st(14) + st(10)), st(20));
     // (Under the icon, which ends 59 units down: at 56 the eyebrow sat behind it, TekRantGaming, 12 Nov 2026.)
-    kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(18), a.y + st(70)), kit::kInkSection, eyebrow, st(2));
+    kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(18), a.y + st(70)), kit::kInkSection, eyebrow, st(2));
     d->AddText(f.ui_bold, st(15), ImVec2(a.x + st(18), a.y + st(84)), kit::kInk, heading.c_str());
-    kit::Wrapped(d, f.ui, st(11), ImVec2(a.x + st(18), a.y + st(108)), kit::kInkFaint, text, b.x - a.x - st(36));
+    kit::Wrapped(d, f.ui, st(12.75f), ImVec2(a.x + st(18), a.y + st(108)), kit::kInkFaint, text, b.x - a.x - st(36));
     return hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
   }
 
@@ -241,7 +252,7 @@
       }
       d->AddRectFilled(ImVec2(a.x, b.y - 1), ImVec2(b.x, b.y), IM_COL32(241, 234, 211, 20));
       const bool locked = i == kRowUnlockables;
-      kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(24), a.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
+      kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(24), a.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
                   fmt::format("{:02d}", i + 1), st(1.5f));
       const float cap = row.compact ? st(13) : st(19);
       kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(a.x + st(52), a.y + (h - cap) * 0.5f),
@@ -256,8 +267,8 @@
         if (!note.empty() && i != kRowUnlockables && i != kRowUpdate) note.clear();  // the glyph has the room
       }
       if (!note.empty()) {
-        const float nw = kit::SpacedWidth(f.typed, st(7.5f), note, st(1.5f));
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2(b.x - st(18) - (sel ? st(28) : 0) - nw, a.y + h * 0.5f - st(5)), note_col, note,
+        const float nw = kit::SpacedWidth(f.typed, st(9.5f), note, st(1.5f));
+        kit::Spaced(d, f.typed, st(9.5f), ImVec2(b.x - st(18) - (sel ? st(28) : 0) - nw, a.y + h * 0.5f - st(5)), note_col, note,
                     st(1.5f));
       }
       y += h;
@@ -274,10 +285,10 @@
       d->PopClipRect();
       {  // the chip
         const std::string chip = "QUICK PLAY \xC2\xB7 THE BUSIEST SERVER WITH ROOM";
-        const float cw = kit::SpacedWidth(f.ui_bold, st(9), chip, st(1));
+        const float cw = kit::SpacedWidth(f.ui_bold, st(10.25f), chip, st(1));
         const ImVec2 c0(ha.x + st(20), ha.y + st(20)), c1(c0.x + cw + st(22), c0.y + st(22));
         d->AddRectFilled(c0, c1, kit::kStrip);
-        kit::Spaced(d, f.ui_bold, st(9), ImVec2(c0.x + st(11), c0.y + st(4)), kit::kStripText, chip, st(1));
+        kit::Spaced(d, f.ui_bold, st(10.25f), ImVec2(c0.x + st(11), c0.y + st(4)), kit::kStripText, chip, st(1));
       }
       kit::PaperArt(d, band, hb);
       const std::string eyebrow = !online_ok ? "THE SERVER LIST IS NOT REACHABLE RIGHT NOW"
@@ -285,17 +296,17 @@
                                                : fmt::format("{} \xC2\xB7 {} / {} PLAYERS{}", best->official ? "OFFICIAL" : "COMMUNITY",
                                                              best->players, best->max_players,
                                                              best->ping_ms >= 0 ? fmt::format(" \xC2\xB7 {} MS", best->ping_ms) : "");
-      kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, eyebrow, st(2));
+      kit::Spaced(d, f.typed, st(11.25f), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, eyebrow, st(2));
       kit::GameText(d, kit::GameFont::kHeadline, st(32), ImVec2(band.x + st(20), band.y + st(31)), kit::kInk,
                     Upper(best ? (best->map.empty() ? "Wake Island" : best->map) : "Wake Island"));
       const std::string sub = best ? best->name + (best->next_map.empty() ? "" : " \xC2\xB7 next map " + best->next_map)
                                    : "Quick Play joins the busiest server with room.";
-      d->AddText(f.ui, st(12), ImVec2(band.x + st(20), band.y + st(74)), kit::kInkFaint, sub.c_str());
+      d->AddText(f.ui, st(13.75f), ImVec2(band.x + st(20), band.y + st(74)), kit::kInkFaint, sub.c_str());
       // Quick Play at the right.
       const ImVec2 q0(hb.x - st(20) - st(170), band.y + st(18)), q1(q0.x + st(170), q0.y + st(40));
       if (GreenButton(d, st, q0, q1, kit::Button::kA, "QUICK PLAY")) clicked = kRowQuick;
       if (!menu_error_.empty() && ImGui::GetTime() - menu_error_at_ < 8.0) {
-        d->AddText(f.ui, st(11), ImVec2(band.x + st(20), band.y + st(92)), kit::kRed, menu_error_.c_str());
+        d->AddText(f.ui, st(12.75f), ImVec2(band.x + st(20), band.y + st(92)), kit::kRed, menu_error_.c_str());
       }
     }
     // ---- the playtest notice, a strip
@@ -306,13 +317,13 @@
       float x = a.x + st(16);
       const float pw = kit::ArtAt(d, "corsair", ImVec2(x, (a.y + b.y) * 0.5f), st(30));
       x += (pw > 0 ? pw : 0) + st(14);
-      kit::Spaced(d, f.typed, st(8.5f), ImVec2(x, a.y + st(16)), kit::kStamp, "PLAYTEST NOTICE", st(2));
-      x += kit::SpacedWidth(f.typed, st(8.5f), "PLAYTEST NOTICE", st(2)) + st(18);
+      kit::Spaced(d, f.typed, st(10.5f), ImVec2(x, a.y + st(16)), kit::kStamp, "PLAYTEST NOTICE", st(2));
+      x += kit::SpacedWidth(f.typed, st(10.5f), "PLAYTEST NOTICE", st(2)) + st(18);
       // (Until 13 Nov 2026 it told players to avoid flying with mouse and keyboard; pull request 11's mouse flying
       // is in, on TekRantGaming's word.)
       const std::string t = "New: planes fly with the mouse. Left and right roll, back and forward pitch, A and D the rudder. "
                             "Tell us how it feels.";
-      kit::Wrapped(d, f.ui, st(11.5f), ImVec2(x, a.y + st(12)), kit::kInk, t, b.x - x - st(14));
+      kit::Wrapped(d, f.ui, st(13.25f), ImVec2(x, a.y + st(12)), kit::kInk, t, b.x - x - st(14));
     }
     // ---- the service record, Discord and Steam
     {
@@ -323,22 +334,22 @@
       d->PopClipRect();
       RankInsignia(d, st, ImVec2(b.x - st(16) - st(32), a.y + st(16) + st(32)), st(64), Rank());
       const float tx = a.x + st(131);
-      kit::Spaced(d, f.typed, st(8), ImVec2(tx, a.y + st(18)), kit::kInkSection, "SERVICE RECORD", st(2));
+      kit::Spaced(d, f.typed, st(10), ImVec2(tx, a.y + st(18)), kit::kInkSection, "SERVICE RECORD", st(2));
       const std::string name = settings_.Get("player_name", "Soldier");
       d->AddText(f.ui_bold, st(15), ImVec2(tx, a.y + st(32)), kit::kInk, name.c_str());
       const double seconds = std::atof(settings_.Get("match_seconds", "0").c_str());
       const std::string l1 = fmt::format("{} \xC2\xB7 rank {} \xC2\xB7 Rifleman", kRanks[Rank() - 1], Rank());
       const std::string l2 = fmt::format("{:.0f} score \xC2\xB7 {} h {:02d} min in the field", ScoreTotal(), int(seconds / 3600),
                                          int(seconds / 60) % 60);
-      d->AddText(f.ui, st(11), ImVec2(tx, a.y + st(56)), kit::kInkFaint, l1.c_str());
-      d->AddText(f.ui, st(11), ImVec2(tx, a.y + st(72)), kit::kInkFaint, l2.c_str());
+      d->AddText(f.ui, st(12.75f), ImVec2(tx, a.y + st(56)), kit::kInkFaint, l1.c_str());
+      d->AddText(f.ui, st(12.75f), ImVec2(tx, a.y + st(72)), kit::kInkFaint, l2.c_str());
       int left = 0;
       const float progress = RankProgress(left);
       const ImVec2 p0(tx, a.y + st(96)), p1(b.x - st(118), a.y + st(102));
       d->AddRectFilled(p0, p1, IM_COL32(34, 36, 27, 30));
       d->AddRectFilled(p0, ImVec2(p0.x + (p1.x - p0.x) * progress, p1.y), kit::kGreen);
       const std::string next = Rank() < int(std::size(kRanks)) ? fmt::format("{} MIN TO {}", left, Upper(kRanks[Rank()])) : "THE TOP RANK";
-      kit::Spaced(d, f.typed, st(7), ImVec2(tx, a.y + st(108)), kit::kInkSection, next, st(1.5f));
+      kit::Spaced(d, f.typed, st(8.75f), ImVec2(tx, a.y + st(108)), kit::kInkSection, next, st(1.5f));
     }
     int card = -1;
     if (InfoCard(d, st, st.P(795, 453), st.P(1005, 643), 0, kit::Button::kX, "COMMUNITY", "Join our Discord",

@@ -164,7 +164,7 @@ def update_notice(mode):
                            'choose Update on the main menu. It updates itself.' % need}
 
 
-def leaderboard_put(m):
+def leaderboard_put(m, test_progression=False):
     """A player's totals from their game (our Stats & Awards): kept by name, the newest wins, at most 5,000 names."""
     name = ''.join(c for c in str(m.get('name', '')) if c.isalnum() or c in ' _')[:15].strip()
     if not name:
@@ -172,8 +172,15 @@ def leaderboard_put(m):
     try:
         entry = {'name': name, 'score': int(float(m.get('score', 0))), 'seconds': int(float(m.get('seconds', 0))),
                  'captures': int(float(m.get('captures', 0))), 'at': int(time.time())}
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
+    if test_progression and ('rank' in m or 'achievements' in m):
+        rank, achievements = m.get('rank'), m.get('achievements')
+        if (type(rank) is not int or not 1 <= rank <= 23 or not isinstance(achievements, list)
+                or len(achievements) > 256
+                or any(type(i) is not int or not 0 < i <= 0xffffffff for i in achievements)):
+            return False
+        entry.update(rank=rank, achievements=sorted(set(achievements)))
     if len(LEADERBOARD) >= 5000 and name.lower() not in LEADERBOARD:
         return False
     LEADERBOARD[name.lower()] = entry
@@ -662,6 +669,7 @@ class Registry:
         self.log = log
         self.public = getattr(args, 'theater_host', '127.0.0.1') if args else '127.0.0.1'
         self.args = args
+        self.test_progression = getattr(args, 'test_progression', False)
         self.key = None
         if args and getattr(args, 'official_key_file', ''):
             self.key = gmhost.read_key(args.official_key_file)
@@ -844,7 +852,9 @@ class Registry:
                     rows.sort(key=lambda e: (-e['score'], e['name'].lower()))
                     writer.write((json.dumps({'op': 'scoreboard', 'rows': rows[:64]}) + '\n').encode())
                 elif op == 'stats_put':
-                    ok = leaderboard_put(m)
+                    local_test = (self.test_progression and
+                                  writer.get_extra_info('peername')[0].startswith('127.'))
+                    ok = leaderboard_put(m, test_progression=local_test)
                     writer.write((json.dumps({'op': 'stats_put', 'ok': ok}) + '\n').encode())
                 elif op == 'leaderboard':
                     rows, total = leaderboard_top()
@@ -1036,8 +1046,14 @@ async def main():
                     help='the version gate: players need this version (in place of --version-feed)')
     ap.add_argument('--log', default='runs/plasma.log')
     ap.add_argument('--leaderboard', default='', help="a file keeping the players' totals (our Leaderboards)")
+    ap.add_argument('--test-progression', action='store_true',
+                    help='store rank and achievement IDs submitted by local test clients')
     ap.add_argument('--seconds', type=int, default=0, help='stop after this many seconds (0: run until stopped)')
+    ap.add_argument('--stop-on-stdin-eof', action='store_true', help='stop when the launcher closes its input pipe')
     args = ap.parse_args()
+    if args.test_progression and (args.host != '127.0.0.1' or
+                                  args.registry_host not in ('', '127.0.0.1')):
+        ap.error('--test-progression requires a loopback backend and registry')
     global LEADERBOARD_FILE
     LEADERBOARD_FILE = args.leaderboard or None
     if LEADERBOARD_FILE and os.path.exists(LEADERBOARD_FILE):
@@ -1094,6 +1110,8 @@ async def main():
             gate_note('version gate: off (no --version-feed, no --required-version)')
         if args.seconds:
             await asyncio.sleep(args.seconds)
+        elif args.stop_on_stdin_eof:
+            await asyncio.to_thread(sys.stdin.buffer.read)
         else:
             await asyncio.gather(*(srv.serve_forever() for srv in servers))
         if feed_task:

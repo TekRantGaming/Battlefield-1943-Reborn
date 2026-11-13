@@ -60,6 +60,10 @@ inline std::string ClientFields() {
   return std::string("\"version\": \"") + BfVersion() + "\", \"platform\": \"" + platform + "\"";
 }
 
+int TickRate();  // tick_rate.cpp: this game's simulation rate (bf_tick_rate: 30, or 60)
+bool SetTickRate(int rate);  // the rate of the server about to be joined; false when this run cannot change to it
+bool TickRateFixed();        // the game's timers are made: the rate is this run's
+
 struct ServerInfo {
   std::string gid, name, address, map;
   // A server of an older version that plays the retired Modern movement and aiming (modern_mode.cpp): never listed
@@ -71,8 +75,19 @@ struct ServerInfo {
   bool night = false;  // a Night Ops server: its maps drawn at night (NativeXRenderer D162) while playing there
   std::string region;  // where it is, a region code (regions.h); empty: not said (an older server)
   int tick_hz = 0;     // its tick rate; 0: not said
+  // 0.4.1: a server is only listed, found and joined by a game simulating at its rate (a server that says none runs
+  // the game's own 30): a 30 Hz game on a 60 Hz server, or the other way round, is pulled about by every correction.
+  // (13 Nov 2026, later: every server is listed whatever its rate; the game takes the server's when it joins.)
+  bool OurTick() const { return (tick_hz > 0 ? tick_hz : 30) == TickRate(); }
+  // The rate it runs at: 30, 60, or the experimental 75 or 100 (one that says none, or another, runs 30).
+  int Tick() const { return tick_hz == 60 || tick_hz == 75 || tick_hz == 100 ? tick_hz : 30; }
   int ping_ms = -1;  // -1: not measured (an older server does not answer)
+  // 13 Nov 2026: hosted from a player's own game (Create Private Match), not a dedicated server: its description
+  // begins with kPlayerHostTag (the backend passes descriptions through as they are), taken off here. The browser
+  // draws a person before its name, a server rack before the others.
+  bool player_hosted = false;
 };
+inline constexpr const char* kPlayerHostTag = "[player host]";
 
 // The end of the JSON object or array that starts at `at` (strings and nesting respected), or npos.
 inline size_t JsonEnd(const std::string& s, size_t at) {
@@ -219,9 +234,17 @@ class ServerList {
     return required_version_;
   }
 
+  // 13 Nov 2026 ("The Game shouldn't try to connect to the master server unless they go to the server browser or
+  // click Quick Play"): the list is asked for only while something wants it, and for 12 s after: the server browser,
+  // Quick Play, the friends page, a match being played. Until then nothing is sent to the backend from here, and
+  // asked() is false (the menus say so instead of "not reachable"). A test that joins by itself (BF_AUTO_JOIN) always
+  // wants it.
+  void Want() { wanted_until_ = Now() + 12.0; }
+  bool asked() const { return answers_.load() > 0; }
+  uint64_t answers() const { return answers_.load(); }  // the list's answers so far (a count)
   // The browser is open: ping the servers (until 3 s after it closes); RefreshNow fetches the list again now.
-  void WantPings() { want_pings_until_ = Now() + 3.0; }
-  void RefreshNow() { refresh_now_ = true; }
+  void WantPings() { want_pings_until_ = Now() + 3.0, Want(); }
+  void RefreshNow() { Want(), refresh_now_ = true; }
 
   // Direct connect: the server at host:port (a name is looked up first) if the backend knows it: the game's own
   // backend, or the one whose registry is `registry` (host:port; a server on a backend of its own).
@@ -272,10 +295,15 @@ class ServerList {
 
  private:
   void Run() {
+    // (For an hour on 13 Nov 2026 the list was asked for only while a page wanted it. Taken back the same day: "if
+    // the master server is reachable, it should connect like before"; what must not need it is hosting a LAN match,
+    // which has a backend of its own. Want() and asked() stay: the menus say Connecting until the first answer, and
+    // Quick Play waits for it.)
     while (!stop_) {
       std::string reply;
       std::vector<ServerInfo> found;
       reachable_ = RegistryRequest("{\"op\": \"list\", " + ClientFields() + "}", reply);
+      answers_.fetch_add(1);
       for (size_t at = reply.find("{\"gid\""); at != std::string::npos;) {
         const size_t end = JsonEnd(reply, at);
         if (end == std::string::npos) break;
@@ -309,6 +337,8 @@ class ServerList {
     }
   }
 
+  std::atomic<double> wanted_until_{0.0};
+  std::atomic<uint64_t> answers_{0};
   static double Now() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   }
@@ -323,6 +353,11 @@ class ServerList {
     s.players = std::atoi(JsonField(obj, "players").c_str());
     s.max_players = std::atoi(JsonField(obj, "max_players").c_str());
     s.description = JsonField(obj, "description");
+    if (s.description.rfind(kPlayerHostTag, 0) == 0) {
+      s.player_hosted = true;
+      s.description.erase(0, std::strlen(kPlayerHostTag));
+      while (!s.description.empty() && s.description.front() == ' ') s.description.erase(s.description.begin());
+    }
     s.next_map = JsonField(obj, "next_map");
     s.official = JsonField(obj, "official") == "true";
     s.night = kNightOps && JsonField(obj, "night") == "true";  // night_ops.h: none without Night Ops

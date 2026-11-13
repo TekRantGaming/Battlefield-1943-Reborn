@@ -232,6 +232,7 @@ REX_EXTERN(__imp__sub_824123F0);
 namespace bf1943 {
 void ModernModeTick(uint8_t* base);  // modern_mode.cpp: the movement and aiming values for this server's mode
 void GmHostStart();  // gm_host.cpp: our GameManager host, once (bf_gm_backend)
+void InstallNullPageGuardOnce();  // crash_report.cpp: a server draws no frame, so the guard comes with its first tick
 #if defined(BF_DEV_TOOLS)
 void RunGameFixTest(PPCContext& ctx, uint8_t* base);  // game_fixes.cpp: the empty slot guard, tested once
 #endif
@@ -240,6 +241,7 @@ void RunGameFixTest(PPCContext& ctx, uint8_t* base);  // game_fixes.cpp: the emp
 // between two and the tick's own time, so a server on a slow machine shows in its log (TekRantGaming's 7 Nov 2026 play test:
 // the frame rate fell on the larger maps of the official server, a Hetzner machine, and not on Wake Island).
 static void NoteServerTick(double work_ms) {
+  bf1943::InstallNullPageGuardOnce();
   static Clock::time_point window{}, last{};
   static uint32_t ticks = 0;
   static double longest_gap = 0, work_total = 0, work_longest = 0;

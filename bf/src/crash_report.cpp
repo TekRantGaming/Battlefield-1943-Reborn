@@ -386,11 +386,18 @@ void InstallNullPageGuard() {
 }
 }  // namespace
 
+// The null page guard, once: at the first game frame, or at a dedicated server's first tick (a server draws no
+// frame, so until 13 Nov 2026 it never had the guard: official server 8 crashed on a read of guest 0x8C in
+// sub_822A90D8, a vehicle's physics, 30 s after a player joined).
+void InstallNullPageGuardOnce() {
+  static const bool guard = (InstallNullPageGuard(), true);
+  (void)guard;
+}
+
 // Each game frame (VdSwap): the hang watchdog's clock.
 void NoteGuestFrame() {
   g_last_frame_ms = NowMs();
-  static const bool guard = (InstallNullPageGuard(), true);
-  (void)guard;
+  InstallNullPageGuardOnce();
   // The overlays once more at the first game frame, beside the renderer's first present (where a hook's crash comes).
   static const bool overlays = (LogOverlays(" at the first game frame", false), true);
   (void)overlays;
@@ -439,6 +446,7 @@ void NoteGuestFrame() {
 namespace bf1943 {
 void InstallCrashReports(const std::filesystem::path&) {}
 void NoteGuestFrame() {}
+void InstallNullPageGuardOnce() {}
 }  // namespace bf1943
 
 #endif

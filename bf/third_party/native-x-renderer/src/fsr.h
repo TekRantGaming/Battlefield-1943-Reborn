@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <string>
 
 #include "DeviceContext.h"
 #include "RenderDevice.h"
@@ -38,6 +39,7 @@ class Fsr {
     Diligent::ITexture* output = nullptr;  // the output size, an unordered access texture
     float jitter_x = 0.0f, jitter_y = 0.0f;  // input pixels, the picture's shift (x right, y down)
     bool reset = false;
+    float sharpness = 0.0f;  // AMD's sharpening pass after the upscale, 0 (off) to 1
     bool inverted_depth = false;  // 1 at the near plane, 0 at the far one
     float camera_near = 0.1f, camera_far = 1000.0f, fov_y = 1.0f;
   };
@@ -45,13 +47,19 @@ class Fsr {
   // and again when the sizes, the color's range or the depth's direction change. False when it failed (logged).
   bool Dispatch(Diligent::IDeviceContext* context, const Inputs& in);
 
+  // The generation asked for: 4 (FSR 4.1, machine learning; where the GPU and driver run it) or 3 (FSR 3.1). Before
+  // the first Dispatch.
+  void SetGeneration(int generation) { generation_ = generation; }
+  // The version that runs ("FSR 4.1.2" or the like), empty before the first Dispatch.
+  const std::string& version() const { return version_; }
+
  private:
   bool CreateContext(uint32_t render_width, uint32_t render_height, uint32_t output_width, uint32_t output_height,
                      uint32_t flags);
   void DestroyContext();
 
   Diligent::IRenderDevice* device_ = nullptr;
-  void* module_ = nullptr;  // amd_fidelityfx_vk.dll (never unloaded)
+  void* module_ = nullptr;  // amd_fidelityfx_loader_vk.dll (never unloaded)
   void* create_context_ = nullptr;
   void* destroy_context_ = nullptr;
   void* dispatch_ = nullptr;
@@ -61,6 +69,8 @@ class Fsr {
   uint32_t context_flags_ = 0;
   std::chrono::steady_clock::time_point last_dispatch_{};
   bool logged_version_ = false;
+  int generation_ = 4;
+  std::string version_;
 };
 
 }  // namespace native_x_renderer

@@ -169,6 +169,33 @@ void NoteHudMarker(float x, float y) {
   if (g_hud_markers.size() < 1024) g_hud_markers.push_back({x, y, now});
 }
 
+namespace {
+struct ScopeNote {
+  bool on = false;
+  float right[3] = {}, up[3] = {}, back[3] = {}, tan_half_v = 0.5f, zoom = 1.0f;
+  std::chrono::steady_clock::time_point at{};
+};
+std::mutex g_scope_mutex;
+ScopeNote g_scope_note;
+}  // namespace
+
+void NoteScopeView(bool on, const float right[3], const float up[3], const float back[3], float tan_half_v_own, float zoom) {
+  std::lock_guard lock(g_scope_mutex);
+  ScopeNote& n = g_scope_note;
+  n.on = on, n.zoom = std::isfinite(zoom) ? std::clamp(zoom, 0.0f, 2.0f) : 1.0f, n.at = std::chrono::steady_clock::now();
+  for (int i = 0; i < 3; ++i) n.right[i] = right[i], n.up[i] = up[i], n.back[i] = back[i];
+  n.tan_half_v = std::isfinite(tan_half_v_own) ? std::clamp(tan_half_v_own, 0.05f, 4.0f) : 0.5f;
+}
+
+bool ScopeView(float right[3], float up[3], float back[3], float& tan_half_v_own, float& zoom) {
+  std::lock_guard lock(g_scope_mutex);
+  const ScopeNote& n = g_scope_note;
+  if (!n.on || std::chrono::steady_clock::now() - n.at > std::chrono::milliseconds(250)) return false;
+  for (int i = 0; i < 3; ++i) right[i] = n.right[i], up[i] = n.up[i], back[i] = n.back[i];
+  tan_half_v_own = n.tan_half_v, zoom = n.zoom;
+  return true;
+}
+
 std::atomic<int64_t> g_game_menu_at{0};
 void NoteGameMenu() {
   g_game_menu_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
@@ -179,15 +206,19 @@ bool GameMenuRecently() {
                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(1500)).count();
 }
 
-bool NearHudMarker(double x, double y, double radius) {
+bool NearHudMarker(double x, double y, double radius, double* marker_x) {
   const auto now = std::chrono::steady_clock::now();
   std::lock_guard lock(g_hud_markers_mutex);
+  double best = radius * radius;
+  bool found = false;
   for (const HudMarker& m : g_hud_markers) {
     if (now - m.at > std::chrono::milliseconds(200)) continue;
     const double dx = m.x - x, dy = m.y - y;
-    if (dx * dx + dy * dy <= radius * radius) return true;
+    if (dx * dx + dy * dy > best) continue;
+    best = dx * dx + dy * dy, found = true;
+    if (marker_x) *marker_x = m.x;
   }
-  return false;
+  return found;
 }
 
 void BeginView(const float* scene_view_projection) {
