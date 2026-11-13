@@ -3105,9 +3105,20 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "guns and turrets included. The game's own is 86\xC2\xB0. Applies at once.",
                           "bf_fov_vehicle", 60, 120, 1,
                           [](float v) { return std::to_string(int(std::lround(v))) + "\xC2\xB0"; }, 86));
-    rows.push_back(Toggle("Camera", "Motion blur",
-                          "The game's screen blur: from nearby explosions, bullets and low health, and its camera "
-                          "blur. Off turns all of it off. Applies at once.",
+    // 0.4.2: the renderer's own motion blur (NativeXRenderer motion_blur.h) in place of the game's camera blur.
+    rows.push_back(Choice("Camera", "Motion blur",
+                          "Blurs the picture along the camera's movement. Low, Medium and High are its quality "
+                          "(how many samples each pixel takes): higher is smoother and costs more. Applies at once.",
+                          "native_x_renderer_motion_blur", {{"Off", "off"}, {"Low", "low"}, {"Medium", "medium"}, {"High", "high"}}));
+    rows.push_back(Slider("Camera", "Motion blur strength",
+                          "How long the blur's streaks are. It is the same at every frame rate. Applies at once.",
+                          "native_x_renderer_motion_blur_strength", 0, 100, 5, Percent, 50));
+    rows.push_back(Toggle("Camera", "Object motion blur",
+                          "With Motion blur on: soldiers, vehicles and other moving things blur by their own "
+                          "movement too, not only the camera's. Applies at once.",
+                          "native_x_renderer_motion_blur_objects"));
+    rows.push_back(Toggle("Camera", "Hit and explosion blur",
+                          "The game's screen blur from nearby explosions, bullets and low health. Applies at once.",
                           "bf_motion_blur"));
     rows.push_back(Toggle("Camera", "Camera shake", "The camera shaking from explosions and gunfire. Applies at once.",
                                  "bf_camera_shake"));

@@ -1897,6 +1897,12 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         CameraVote::FindMatrix(vertex_constants_.data(), vertex_registers_.data(), count, matrix, transposed)) {
       reprojection = camera_vote_.Offer(CameraVote::MatrixAt(vertex_constants_.data(), matrix, transposed),
                                         CameraVote::MatrixAt(matched, matrix, transposed));
+      // The world's depth range (the motion blur's): of a draw far enough to be the world's (not the weapon's view).
+      GtaoProjection offered;
+      if (GtaoProjection::FromMatrix(CameraVote::MatrixAt(vertex_constants_.data(), matrix, transposed), offered) &&
+          offered.far_plane() > 20.0f) {
+        vote_z_[0] = viewport_info.z_min, vote_z_[1] = viewport_info.z_max;
+      }
     }
     if (object_motion_on_ && previous && vertex_shader->GetTextureBindingsAfterTranslation().empty()) {
       // D120: a draw that moved with the camera only (each object's own world-view-projection changes with the camera:

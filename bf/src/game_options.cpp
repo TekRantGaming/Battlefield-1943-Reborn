@@ -108,8 +108,8 @@ REX_HOOK_RAW(sub_825A38D8) {
 #if defined(BF_DEV_TOOLS)
   ++g_motion_passes, Max(g_motion_max, float(ctx.f1.f64));
 #endif
-  if (!REXCVAR_GET(bf_motion_blur)) return;
-  __imp__sub_825A38D8(ctx, base);
+  // 0.4.2: never run (the renderer's motion blur takes its place, native_x_renderer_motion_blur).
+  (void)base;
 }
 // The view effects for the renderer (sub_8228C070(manager, camera)): the manager's own blur (+0x100) wins over the
 // camera's when above 0; with the setting off it is 0 for that call and put back after.
@@ -119,7 +119,10 @@ REX_HOOK_RAW(sub_8228C070) {
 #if defined(BF_DEV_TOOLS)
   if (manager) Max(g_manager_blur_max, LoadF(base, manager + 0x100));
 #endif
-  const bool off = manager && !REXCVAR_GET(bf_motion_blur);
+  // 0.4.2 ("remove 1943's current implementation of motion blur"): the camera manager's own blur is always 0 for
+  // this call; the renderer's motion blur takes its place. bf_motion_blur is now only the screen blur from
+  // explosions, bullets and low health (sub_82282A80 above).
+  const bool off = manager != 0;
   const float saved = off ? LoadF(base, manager + 0x100) : 0.0f;
   if (off) StoreF(base, manager + 0x100, 0.0f);
   __imp__sub_8228C070(ctx, base);
