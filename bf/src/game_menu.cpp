@@ -2854,10 +2854,15 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // Antialiasing (TekRantGaming, 9 Nov 2026, after testing them all: "FXAA works the best, so we're only going to offer
     // that, and it should be on by default"): Off or FXAA. DLAA, DLSS, FSR 3.1 and SMAA are no longer offered (a saved
     // one becomes FXAA: ApplyStartupDisplaySettings); frame generation went with them (it needs DLSS or FSR 3.1).
+    // 13 Nov 2026 (this fork): SMAA is offered again beside FXAA, at the reference implementation's four presets
+    // (NativeXRenderer has had SMAA 1x since D41; the row offered only FXAA since 9 Nov).
     rows.push_back(Choice("Image", "Antialiasing",
-                          "Smooths jagged edges. FXAA is light and works on the whole picture. Applies at the next "
-                          "start.",
-                          "native_x_renderer_antialiasing", {{"Off", "off"}, {"FXAA", "fxaa"}}));
+                          "Smooths jagged edges. FXAA is the lightest and softens the whole picture a little. SMAA "
+                          "finds the edges and smooths only those, so textures and text stay sharp: Low and Medium "
+                          "are faster, High and Ultra search further along each edge. Applies at the next start.",
+                          "native_x_renderer_antialiasing",
+                          {{"Off", "off"}, {"FXAA", "fxaa"}, {"SMAA Low", "smaa_low"}, {"SMAA Medium", "smaa_medium"},
+                           {"SMAA High", "smaa_high"}, {"SMAA Ultra", "smaa_ultra"}}));
     // Upscaling: King Kong's Upscaler and Upscaler mode rows and their words (TekRantGaming, 11 Nov 2026, v0.2.1: AMD FSR 1 and
     // NVIDIA NIS, "copy exactly that"). NativeXRenderer scales the drawn picture up to the screen with them (D115, on
     // Vulkan, so NIS can run on Linux too: King Kong's NIS is in its Direct3D 12 presenter, Windows only). Off draws the
@@ -2907,17 +2912,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         if (!same.empty()) help += " Same as " + same + " here.";
       }
       rows.push_back(Choice("Image", "Upscaler mode", help, "bf_upscaler_mode", options));
-    }
-    {
-      // Render resolution: the display's at 100%, less for speed, more for a cleaner picture (supersampling). With an
-      // upscaler its mode says how much is drawn, so the row is its then.
-      SettingRow r = Slider("Image", "Render resolution",
-                            "How large the game is drawn before it is fitted to your screen. 100% is your screen's own "
-                            "resolution. Lower is faster and softer; higher is slower and cleaner, with smoother edges "
-                            "(never below 720 lines). Applies at the next start.",
-                            "bf_render_scale", 50, 150, 5, Percent, 100);
-      if (upscaler) r.disabled = true, r.note = "The Upscaler mode sets the render resolution while an upscaler is on.";
-      rows.push_back(r);
     }
     rows.push_back(Choice("Image", "Shadow quality",
                           "The shadow maps' detail. Original draws them at the render resolution. Applies at the next "
@@ -4650,7 +4644,8 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   // (SMAA, DLAA, DLSS, FSR 3.1); no frame generation (it needed those).
   if (!REXCVAR_GET(server)) {
     const std::string aa = rex::cvar::GetFlagByName("native_x_renderer_antialiasing");
-    if (aa != "off" && aa != "fxaa") rex::cvar::SetFlagByName("native_x_renderer_antialiasing", "fxaa");
+    if (aa != "off" && aa != "fxaa" && aa.rfind("smaa", 0) != 0)
+      rex::cvar::SetFlagByName("native_x_renderer_antialiasing", "fxaa");
     rex::cvar::SetFlagByName("native_x_renderer_frame_generation", "false");
   }
   // The Upscaler (ApplyUpscaler): the sharpness as the settings and the command line give it is the one for Off.

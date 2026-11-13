@@ -36,8 +36,13 @@ layout(set = 0, binding = 0) uniform AAConstants {
 };
 )";
 
+// The reference implementation's preset (SMAA_PRESET_LOW, MEDIUM, HIGH or ULTRA: the edge threshold and how far
+// the searches go), from the mode's name (ParseMode: smaa_low, smaa_medium, smaa or smaa_high, smaa_ultra).
+const char* g_smaa_preset = "HIGH";
+
 std::string SmaaShader(bool vertex, const char* body) {
-  std::string source = "#version 450\n#define SMAA_GLSL_4\n#define SMAA_PRESET_HIGH\n#define SMAA_RT_METRICS rt_metrics\n";
+  std::string source = std::string("#version 450\n#define SMAA_GLSL_4\n#define SMAA_PRESET_") + g_smaa_preset +
+                       "\n#define SMAA_RT_METRICS rt_metrics\n";
   source += vertex ? "#define SMAA_INCLUDE_PS 0\n" : "#define SMAA_INCLUDE_VS 0\n";
   source += kConstants;
   source += kSmaaSource;
@@ -211,7 +216,12 @@ RefCntAutoPtr<ITexture> CreateLookupTexture(IRenderDevice* device, const char* n
 Antialiasing::Mode Antialiasing::ParseMode(std::string_view name) {
   if (name == "off") return Mode::kOff;
   if (name == "fxaa") return Mode::kFxaa;
-  if (name != "smaa") REXLOG_WARN("[native_x_renderer] antialiasing \"{}\" unknown: SMAA", name);
+  if (name == "smaa_low") g_smaa_preset = "LOW";
+  else if (name == "smaa_medium") g_smaa_preset = "MEDIUM";
+  else if (name == "smaa_ultra") g_smaa_preset = "ULTRA";
+  else g_smaa_preset = "HIGH";
+  if (name != "smaa" && name != "smaa_low" && name != "smaa_medium" && name != "smaa_high" && name != "smaa_ultra")
+    REXLOG_WARN("[native_x_renderer] antialiasing \"{}\" unknown: SMAA", name);
   return Mode::kSmaa;
 }
 
