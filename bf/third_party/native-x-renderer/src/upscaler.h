@@ -63,6 +63,10 @@ class Upscaler {
   // native AA and its quality modes (D116).
   enum class Mode { kDlaa, kQuality, kBalanced, kPerformance, kUltraPerformance };
   enum class Provider { kDlss, kFsr };
+  // FSR's generation, set before Initialize: 4 (FSR 4.1 where the GPU runs it, else AMD's newest) or 3 (FSR 3.1).
+  static inline int fsr_generation = 4;
+  // The upscaler's own sharpening after the upscale, 0 (off) to 1 (native_x_renderer_upscaler_sharpness).
+  static inline float sharpness = 0.0f;
   static const char* ModeName(Provider provider, Mode mode);
   const char* Name() const { return ModeName(provider_, mode_); }
 

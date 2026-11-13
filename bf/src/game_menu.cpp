@@ -84,6 +84,18 @@ REXCVAR_DEFINE_DOUBLE(bf_render_scale, 100.0, "BF1943",
                       "Render resolution in percent of the display's (50 to 150), with the Upscaler off: under 100 the "
                       "picture is drawn smaller and scaled up, over 100 larger and scaled down (supersampling). Never "
                       "below 720 lines");
+// The Upscaling section (13 Nov 2026: "FSR, DLSS, XeSS, TAA should have their own section for Upscaling, and if
+// enabled, they follow their own sharpness slider and disable other anti-aliasing options"): the temporal upscaler
+// and its mode, and the antialiasing of the finished picture for when there is none. ApplyUpscaler makes the
+// renderer's one setting (native_x_renderer_antialiasing) of them.
+REXCVAR_DEFINE_STRING(bf_temporal, "off", "BF1943",
+                      "The temporal upscaler: off, fsr4 (AMD FSR 4.1), fsr (AMD FSR 3.1) or dlss (NVIDIA DLSS)");
+REXCVAR_DEFINE_STRING(bf_temporal_mode, "native", "BF1943",
+                      "The temporal upscaler's mode: native (antialiasing at the display's resolution), quality, "
+                      "balanced, performance or ultra_performance");
+REXCVAR_DEFINE_STRING(bf_post_aa, "", "BF1943",
+                      "Antialiasing without a temporal upscaler: off, fxaa, smaa_low to smaa_ultra, cmaa or cmaa_ultra "
+                      "(empty: the renderer's own setting as the start found it)");
 REXCVAR_DEFINE_STRING(bf_upscaler_mode, "quality", "BF1943",
                       "With AMD FSR 1 or NVIDIA NIS (native_x_renderer_scaling): native, quality, balanced or "
                       "performance, the game drawn at the screen's size divided by 1, 1.5, 1.7 or 2 (never below 720p); "
@@ -149,20 +161,20 @@ struct GraphicsPreset {
 const std::vector<GraphicsPreset>& GraphicsPresets() {
   static const std::vector<GraphicsPreset> kPresets = {
       {"Potato",
-       {{"native_x_renderer_antialiasing", "off"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "performance"},
+       {{"bf_post_aa", "off"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "performance"},
         {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "0"}, {"native_ao_mode", "0"},
         {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"}}},
       {"Low",
-       {{"native_x_renderer_antialiasing", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "performance"},
+       {{"bf_post_aa", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "performance"},
         {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "2"}, {"native_ao_mode", "0"},
         {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"}}},
       {"Medium",
-       {{"native_x_renderer_antialiasing", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
+       {{"bf_post_aa", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "4"}, {"native_ao_mode", "1"},
         {"native_ao_samples", "1"}, {"native_gi_mode", "1"}, {"native_gi_quality", "1"}, {"native_gi_distance", "1"},
         {"native_grass_radius", "180.000000"}}},
       {"High",
-       {{"native_x_renderer_antialiasing", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
+       {{"bf_post_aa", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "2.000000"}, {"anisotropic_override", "5"}, {"native_ao_mode", "1"},
         {"native_ao_samples", "2"}, {"native_gi_mode", "1"}, {"native_gi_quality", "2"}, {"native_gi_distance", "2"},
         {"native_grass_radius", "1440.000000"}}},
@@ -194,7 +206,34 @@ std::string g_plain_sharpness = "-1";
 // upscaler sharpens as AMD and NVIDIA made it (RCAS at 0.2 stops, NIS at 0.5: King Kong offers no sharpness for them).
 // NIS where this GPU was found not to run it (`nis_support` "0", the settings' last answer, D158) is FSR 1. Called at
 // the start (ApplyStartupDisplaySettings) and when the menu's rows change before the game runs (Play takes them).
+// 13 Nov 2026: with a temporal upscaler (bf_temporal) the renderer's antialiasing is that upscaler in its mode, the
+// spatial upscaler is off and so is the sharpening at presenting (the temporal one has its own:
+// native_x_renderer_upscaler_sharpness); without one, the antialiasing is the finished picture's (bf_post_aa).
+bool TemporalUpscalerOn() {
+  const std::string t = rex::cvar::GetFlagByName("bf_temporal");
+  return t == "fsr4" || t == "fsr" || t == "dlss";
+}
 void ApplyUpscaler(bool log, const std::string& nis_support) {
+  const bool temporal = TemporalUpscalerOn();
+  if (temporal) {
+    const std::string t = rex::cvar::GetFlagByName("bf_temporal");
+    std::string mode = rex::cvar::GetFlagByName("bf_temporal_mode");
+    if (mode != "quality" && mode != "balanced" && mode != "performance" && mode != "ultra_performance") mode = "native";
+    const std::string name = t == "dlss" ? (mode == "native" ? std::string("dlaa") : "dlss_" + mode) : t + "_" + mode;
+    rex::cvar::SetFlagByName("native_x_renderer_antialiasing", name);
+    rex::cvar::SetFlagByName("native_x_renderer_scaling", "bilinear");
+    if (log) REXLOG_INFO("BF upscaler: temporal, {} (its own sharpening; no other antialiasing)", name);
+  } else {
+    std::string aa = rex::cvar::GetFlagByName("bf_post_aa");
+    if (aa != "off" && aa != "fxaa" && aa.rfind("smaa", 0) != 0 && aa.rfind("cmaa", 0) != 0) aa = "fxaa";
+    rex::cvar::SetFlagByName("native_x_renderer_antialiasing", aa);
+  }
+  struct AfterAll {  // the temporal upscaler sharpens: none at presenting, whatever the rows below set
+    bool temporal;
+    ~AfterAll() {
+      if (temporal) rex::cvar::SetFlagByName("native_x_renderer_sharpness", "0");
+    }
+  } after{temporal};
   std::string scaling = rex::cvar::GetFlagByName("native_x_renderer_scaling");
   if (!REXCVAR_GET(server)) rex::cvar::SetFlagByName("native_x_renderer_check_nis", "true");  // D158, for the menu
   rex::cvar::SetFlagByName("native_x_renderer_resolution_scale", "0");  // the display's resolution
@@ -2399,7 +2438,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // values as this run started: a changed one shows NEXT START on its row, and the setup restarts the game at its end
   // (TekRantGaming, 8 Nov: the setup's DLAA and Ultra shadows only arrived at the second start, which then ran much slower
   // than the first match).
-  static constexpr const char* kStartCvars[] = {"native_x_renderer_frame_generation",
+  static constexpr const char* kStartCvars[] = {"bf_temporal", "bf_temporal_mode", "native_x_renderer_frame_generation",
                                                 "native_x_renderer_shadow_scale", "native_x_renderer_sharpness",
                                                 "native_x_renderer_scaling", "bf_upscaler_mode", "user_language",
                                                 "native_x_renderer_fill_screen", "bf_render_scale"};
@@ -2455,7 +2494,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // takes them; once it runs, they wait for the next start, as the rows say).
     if (name == "native_x_renderer_sharpness") g_plain_sharpness = value;
     if (name == "native_x_renderer_scaling" || name == "bf_upscaler_mode" || name == "native_x_renderer_sharpness" ||
-        name == "bf_render_scale")
+        name == "bf_render_scale" || name == "bf_temporal" || name == "bf_temporal_mode" || name == "bf_post_aa")
       ApplyUpscaler(false, settings_.Get("nis_support", ""));
   }
   static bool Truthy(const std::string& v) { return v == "true" || v == "1" || v == "on"; }
@@ -2856,16 +2895,50 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // one becomes FXAA: ApplyStartupDisplaySettings); frame generation went with them (it needs DLSS or FSR 3.1).
     // 13 Nov 2026 (this fork): SMAA is offered again beside FXAA, at the reference implementation's four presets
     // (NativeXRenderer has had SMAA 1x since D41; the row offered only FXAA since 9 Nov).
-    rows.push_back(Choice("Image", "Antialiasing",
+    const bool temporal = TemporalUpscalerOn();
+    SettingRow aa_row = Choice("Image", "Antialiasing",
                           "Smooths jagged edges. FXAA is the lightest and softens the whole picture a little. SMAA "
                           "finds the edges and smooths only those, so textures and text stay sharp: Low and Medium "
                           "are faster, High and Ultra search further along each edge. CMAA 2 (Intel's) smooths "
                           "edges and long slanted lines while leaving everything else untouched, the sharpest of the "
                           "three; Ultra catches fainter edges.",
-                          "native_x_renderer_antialiasing",
+                          "bf_post_aa",
                           {{"Off", "off"}, {"FXAA", "fxaa"}, {"SMAA Low", "smaa_low"}, {"SMAA Medium", "smaa_medium"},
                            {"SMAA High", "smaa_high"}, {"SMAA Ultra", "smaa_ultra"}, {"CMAA 2", "cmaa"},
-                           {"CMAA 2 Ultra", "cmaa_ultra"}}));
+                           {"CMAA 2 Ultra", "cmaa_ultra"}});
+    if (temporal) aa_row.disabled = true, aa_row.note = "The upscaler below antialiases the picture itself.";
+    rows.push_back(aa_row);
+    // The Upscaling section (13 Nov 2026): the temporal upscalers, their mode and their own sharpness. They work on
+    // the 3D view before the game's post-processing, with the picture's motion, so they also steady shimmer that the
+    // antialiasing above cannot.
+    rows.push_back(Choice("Upscaling", "Upscaler",
+                          "Antialiases, and in the modes below Native upscales, with what the last frames showed: the "
+                          "steadiest picture. AMD FSR 4 is AMD's newest (Radeon RX 6000 and later with a current "
+                          "driver; elsewhere AMD's library picks what the card runs). AMD FSR 3.1 runs on any card. "
+                          "NVIDIA DLSS needs a GeForce RTX. Replaces Antialiasing and the spatial upscaler. Applies at "
+                          "the next start.",
+                          "bf_temporal",
+                          {{"Off", "off"}, {"AMD FSR 4", "fsr4"}, {"AMD FSR 3.1", "fsr"}, {"NVIDIA DLSS", "dlss"}}));
+    {
+      SettingRow mode = Choice("Upscaling", "Upscaler mode",
+                               "Native AA draws the game at your display's resolution and only antialiases. The others "
+                               "draw fewer pixels and upscale: faster, a little softer. Applies at the next start.",
+                               "bf_temporal_mode",
+                               {{"Native AA", "native"}, {"Quality", "quality"}, {"Balanced", "balanced"},
+                                {"Performance", "performance"}, {"Ultra Performance", "ultra_performance"}});
+      SettingRow sharp = Choice("Upscaling", "Upscaler sharpness",
+                                "The upscaler's own sharpening of its result (AMD FSR). Applies at once.",
+                                "native_x_renderer_upscaler_sharpness",
+                                {{"Off", "0.000000"}, {"Low", "0.250000"}, {"Medium", "0.500000"}, {"High", "0.800000"}});
+      if (!temporal) {
+        mode.disabled = sharp.disabled = true;
+        mode.note = sharp.note = "Choose an upscaler first.";
+      } else if (Cvar("bf_temporal") == "dlss") {
+        sharp.disabled = true, sharp.note = "NVIDIA DLSS has no sharpening of its own here.";
+      }
+      rows.push_back(mode);
+      rows.push_back(sharp);
+    }
     // Upscaling: King Kong's Upscaler and Upscaler mode rows and their words (TekRantGaming, 11 Nov 2026, v0.2.1: AMD FSR 1 and
     // NVIDIA NIS, "copy exactly that"). NativeXRenderer scales the drawn picture up to the screen with them (D115, on
     // Vulkan, so NIS can run on Linux too: King Kong's NIS is in its Direct3D 12 presenter, Windows only). Off draws the
@@ -2882,7 +2955,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     {
       std::vector<std::pair<std::string, std::string>> choices = {{"Off", "bilinear"}, {"AMD FSR 1", "fsr"}};
       if (nis_offered) choices.push_back({"NVIDIA NIS", "nis"});
-      SettingRow r = Choice("Image", "Upscaler",
+      SettingRow r = Choice("Upscaling", "Spatial upscaler",
                             std::string("Scales the picture up to your screen and sharpens it, for a clearer image when "
                                         "the game draws fewer pixels than your screen has. ") +
                                 (nis_offered ? "AMD FSR 1 and NVIDIA Image Scaling (NIS) work on any graphics card. "
@@ -2890,6 +2963,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                                 "Off draws the game at your display's resolution. Applies at the next start.",
                             "native_x_renderer_scaling", choices);
       if (Cvar("native_x_renderer_scaling") == "nis" && !nis_offered) r.index = 1;  // runs as FSR 1 here
+      if (temporal) r.disabled = true, r.note = "The upscaler above does this.";
       rows.push_back(r);
     }
     if (upscaler) {
@@ -2914,7 +2988,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
             same += std::string(same.empty() ? "" : " and ") + o.label;
         if (!same.empty()) help += " Same as " + same + " here.";
       }
-      rows.push_back(Choice("Image", "Upscaler mode", help, "bf_upscaler_mode", options));
+      rows.push_back(Choice("Upscaling", "Spatial upscaler mode", help, "bf_upscaler_mode", options));
     }
     rows.push_back(Choice("Image", "Shadow quality",
                           "The shadow maps' detail. Original draws them at the render resolution. Applies at the next "
@@ -2927,7 +3001,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       SettingRow sharp = Choice("Image", "Sharpness", "Makes fine detail crisper. Applies at the next start.",
                                 "native_x_renderer_sharpness",
                                 {{"Off", "0.000000"}, {"Low", "0.250000"}, {"Medium", "0.500000"}, {"High", "0.800000"}});
-      if (upscaler) sharp.disabled = true, sharp.note = "The upscaler sharpens the picture itself.";
+      if (upscaler || temporal) sharp.disabled = true, sharp.note = "The upscaler sharpens the picture itself.";
       rows.push_back(sharp);
     }
     rows.push_back(Choice("Image", "Texture filtering", "Keeps the ground and distant textures sharp at steep angles.",
@@ -4647,8 +4721,13 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   // (SMAA, DLAA, DLSS, FSR 3.1); no frame generation (it needed those).
   if (!REXCVAR_GET(server)) {
     const std::string aa = rex::cvar::GetFlagByName("native_x_renderer_antialiasing");
-    if (aa != "off" && aa != "fxaa" && aa.rfind("smaa", 0) != 0 && aa.rfind("cmaa", 0) != 0)
-      rex::cvar::SetFlagByName("native_x_renderer_antialiasing", "fxaa");
+    // 13 Nov 2026: the finished picture's antialiasing is bf_post_aa (the renderer's setting when that was never
+    // chosen); ApplyUpscaler below writes the renderer's setting from it or from the temporal upscaler.
+    if (rex::cvar::GetFlagByName("bf_post_aa").empty())
+      rex::cvar::SetFlagByName("bf_post_aa", aa == "off" || aa == "fxaa" || aa.rfind("smaa", 0) == 0 ||
+                                                     aa.rfind("cmaa", 0) == 0
+                                                 ? aa
+                                                 : "fxaa");
     rex::cvar::SetFlagByName("native_x_renderer_frame_generation", "false");
   }
   // The Upscaler (ApplyUpscaler): the sharpness as the settings and the command line give it is the one for Off.

@@ -207,27 +207,41 @@ endif()
 # (Linux).
 target_include_directories(native_x_renderer PRIVATE
                            "${NATIVE_X_RENDERER_DILIGENT_DIR}/Graphics/SuperResolution/interface")
-# AMD FidelityFX Super Resolution 3.1 (src/fsr.cpp, D116): the FidelityFX API's headers (thirdparty/ffx_api, MIT) and
-# AMD's signed amd_fidelityfx_vk.dll from the FidelityFX SDK 1.1.4 (MIT), fetched when configuring and checked by its
-# hash, then copied next to the game's executable (native_x_renderer_copy_runtime); loaded at run time.
-target_include_directories(native_x_renderer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ffx_api")
-set(_nxr_ffx_dll "${CMAKE_BINARY_DIR}/_deps/fidelityfx/amd_fidelityfx_vk.dll")
-if(WIN32 AND NOT EXISTS "${_nxr_ffx_dll}")
-  file(DOWNLOAD
-       "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v1.1.4/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
-       "${_nxr_ffx_dll}.part" STATUS _nxr_ffx_status
-       EXPECTED_HASH SHA256=A1624CC4238FEF046F30C4D80CE3F47BE63FC5F5373F49E3EE9EDB9960F54C78)
-  list(GET _nxr_ffx_status 0 _nxr_ffx_code)
-  if(_nxr_ffx_code EQUAL 0)
-    file(RENAME "${_nxr_ffx_dll}.part" "${_nxr_ffx_dll}")
-  else()
-    file(REMOVE "${_nxr_ffx_dll}.part")
-    message(WARNING "NativeXRenderer: AMD FidelityFX could not be downloaded (${_nxr_ffx_status}): no FSR 3.1")
+# AMD FSR 4.1 and FSR 3.1 (src/fsr.cpp, D116; 13 Nov 2026: AMD FSR SDK 2.4.0, the first with FSR 4 on Vulkan): the
+# SDK's headers (thirdparty/ffx_api2, MIT) and AMD's signed amd_fidelityfx_loader_vk.dll and
+# amd_fidelityfx_upscaler_vk.dll, fetched when configuring and checked by their hashes, then copied next to the game's
+# executable (native_x_renderer_copy_runtime); the loader is loaded at run time and finds the upscaler beside it.
+# thirdparty/ffx_api (SDK 1.1.4's headers) stays for frame generation's code (src/framegen.cpp), whose library
+# (amd_fidelityfx_vk.dll) is no longer fetched: frame generation reports itself unavailable.
+target_include_directories(native_x_renderer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ffx_api"
+                           "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty")
+set(_nxr_ffx_dir "${CMAKE_BINARY_DIR}/_deps/fidelityfx")
+set(_nxr_ffx_base "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/raw/v2.4.0/Kits/FidelityFX/signedbin")
+set(_nxr_ffx_ok TRUE)
+foreach(_nxr_ffx "amd_fidelityfx_loader_vk.dll=38A56A01FB3565C0757D9F5C1E4E69DE4B65E5F2E5769B323B200DC1F142BAB9"
+                 "amd_fidelityfx_upscaler_vk.dll=4A7E895AF6E0B615D40A84D59EB8C2B1054AD91CDD0C739567940270D51BDAB7")
+  string(REPLACE "=" ";" _nxr_ffx_pair "${_nxr_ffx}")
+  list(GET _nxr_ffx_pair 0 _nxr_ffx_name)
+  list(GET _nxr_ffx_pair 1 _nxr_ffx_hash)
+  if(WIN32 AND NOT EXISTS "${_nxr_ffx_dir}/${_nxr_ffx_name}")
+    file(DOWNLOAD "${_nxr_ffx_base}/${_nxr_ffx_name}" "${_nxr_ffx_dir}/${_nxr_ffx_name}.part" STATUS _nxr_ffx_status
+         EXPECTED_HASH SHA256=${_nxr_ffx_hash})
+    list(GET _nxr_ffx_status 0 _nxr_ffx_code)
+    if(_nxr_ffx_code EQUAL 0)
+      file(RENAME "${_nxr_ffx_dir}/${_nxr_ffx_name}.part" "${_nxr_ffx_dir}/${_nxr_ffx_name}")
+    else()
+      file(REMOVE "${_nxr_ffx_dir}/${_nxr_ffx_name}.part")
+      message(WARNING "NativeXRenderer: AMD's ${_nxr_ffx_name} could not be downloaded (${_nxr_ffx_status}): no FSR")
+    endif()
   endif()
-endif()
-if(EXISTS "${_nxr_ffx_dll}")
+  if(NOT EXISTS "${_nxr_ffx_dir}/${_nxr_ffx_name}")
+    set(_nxr_ffx_ok FALSE)
+  endif()
+endforeach()
+if(_nxr_ffx_ok)
   target_compile_definitions(native_x_renderer PRIVATE NATIVE_X_RENDERER_FSR=1)
-  set(NATIVE_X_RENDERER_FFX_DLL "${_nxr_ffx_dll}" CACHE INTERNAL "AMD FidelityFX's Vulkan library (FSR 3.1)")
+  set(NATIVE_X_RENDERER_FFX_DLL "${_nxr_ffx_dir}/amd_fidelityfx_loader_vk.dll;${_nxr_ffx_dir}/amd_fidelityfx_upscaler_vk.dll"
+      CACHE INTERNAL "AMD's FSR libraries for Vulkan (FSR 4.1 and 3.1)")
 else()
   unset(NATIVE_X_RENDERER_FFX_DLL CACHE)
 endif()
@@ -242,8 +256,8 @@ function(native_x_renderer_copy_runtime target)
   endif()
   if(NATIVE_X_RENDERER_FFX_DLL)
     add_custom_command(TARGET ${target} POST_BUILD
-                       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NATIVE_X_RENDERER_FFX_DLL}"
+                       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NATIVE_X_RENDERER_FFX_DLL}
                                "$<TARGET_FILE_DIR:${target}>"
-                       COMMENT "Copying amd_fidelityfx_vk.dll for ${target}")
+                       COMMENT "Copying AMD's FSR libraries for ${target}")
   endif()
 endfunction()

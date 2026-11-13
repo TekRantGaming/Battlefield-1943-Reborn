@@ -185,14 +185,15 @@ Upscaler::~Upscaler() = default;
 
 const char* Upscaler::ModeName(Provider provider, Mode mode) {
   if (provider == Provider::kFsr) {
+    const bool four = fsr_generation >= 4;
     switch (mode) {
-      case Mode::kDlaa: return "FSR 3.1 Native AA";
-      case Mode::kQuality: return "FSR 3.1 Quality";
-      case Mode::kBalanced: return "FSR 3.1 Balanced";
-      case Mode::kPerformance: return "FSR 3.1 Performance";
-      case Mode::kUltraPerformance: return "FSR 3.1 Ultra Performance";
+      case Mode::kDlaa: return four ? "FSR 4 Native AA" : "FSR 3.1 Native AA";
+      case Mode::kQuality: return four ? "FSR 4 Quality" : "FSR 3.1 Quality";
+      case Mode::kBalanced: return four ? "FSR 4 Balanced" : "FSR 3.1 Balanced";
+      case Mode::kPerformance: return four ? "FSR 4 Performance" : "FSR 3.1 Performance";
+      case Mode::kUltraPerformance: return four ? "FSR 4 Ultra Performance" : "FSR 3.1 Ultra Performance";
     }
-    return "FSR 3.1";
+    return four ? "FSR 4" : "FSR 3.1";
   }
   switch (mode) {
     case Mode::kDlaa: return "DLAA";
@@ -277,6 +278,7 @@ bool Upscaler::Initialize(IRenderDevice* device, uint32_t output_width, uint32_t
 
 bool Upscaler::InitializeFsr(uint32_t output_width, uint32_t output_height) {
   fsr_ = std::make_unique<Fsr>();
+  fsr_->SetGeneration(fsr_generation);
   if (!fsr_->Load(device_)) return false;
   // AMD's quality modes are in Mode's order: native AA, quality, balanced, performance, ultra performance.
   static constexpr const char* kNames[] = {"native AA", "quality", "balanced", "performance", "ultra performance"};
@@ -501,6 +503,7 @@ bool Upscaler::ApplyFsr(IDeviceContext* context, ITexture* color, ITextureView* 
   in.jitter_x = jitter_[0];
   in.jitter_y = jitter_[1];
   in.reset = reset;
+  in.sharpness = sharpness;
   in.inverted_depth = false;  // the copy is 0 at the near plane, 1 at the far one
   CameraFromViewProjection(view_projection, in.camera_near, in.camera_far, in.fov_y);
   return fsr_->Dispatch(context, in);

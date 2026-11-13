@@ -163,6 +163,9 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_sharpness, -1.0, "NativeXRenderer",
                       "Sharpening when presenting, 0 to 1 (read at startup, D115): with bilinear AMD CAS, with fsr "
                       "FSR 1's RCAS, with nis NIS's own; 0 none; negative, the filter's default (bilinear none, fsr "
                       "RCAS at 0.2 stops, nis 0.5)");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_upscaler_sharpness, 0.0, "NativeXRenderer",
+                      "With AMD FSR 4 or FSR 3.1 as the antialiasing (fsr4_*, fsr_*): AMD's own sharpening pass after "
+                      "the upscale, 0 (off) to 1; read while the game runs");
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_resolution_scale, 0.0, "NativeXRenderer",
                       "Render scale, host pixels per guest pixel (read at startup). 0: from the screen, the largest "
                       "at which the game's image fits the monitor or the window (at least 1)");
@@ -1642,6 +1645,8 @@ void ExecuteResolve(const Command& c) {
   }
   // The copy of the finished scene (the profile's scene_resolve_caller): antialiased in place (D41).
   // It is of the game's output size (D65).
+  if (g_temporal && c.scene_caller && slice == 0)
+    Upscaler::sharpness = float(REXCVAR_GET(native_x_renderer_upscaler_sharpness));
   if (g_aa_live && c.scene_caller && slice == 0) {  // the method changed in the settings: taken here, at once
     std::string name = REXCVAR_GET(native_x_renderer_antialiasing);
     if (name != g_aa_name) {
@@ -2777,6 +2782,13 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
                           {"dlss_balanced", Upscaler::Mode::kBalanced, Provider::kDlss},
                           {"dlss_performance", Upscaler::Mode::kPerformance, Provider::kDlss},
                           {"dlss_ultra_performance", Upscaler::Mode::kUltraPerformance, Provider::kDlss},
+                          // 13 Nov 2026: AMD FSR 4.1 (FSR SDK 2.4.0, the first with Vulkan); fsr_* stays FSR 3.1,
+                          // from the same SDK.
+                          {"fsr4_native", Upscaler::Mode::kDlaa, Provider::kFsr},
+                          {"fsr4_quality", Upscaler::Mode::kQuality, Provider::kFsr},
+                          {"fsr4_balanced", Upscaler::Mode::kBalanced, Provider::kFsr},
+                          {"fsr4_performance", Upscaler::Mode::kPerformance, Provider::kFsr},
+                          {"fsr4_ultra_performance", Upscaler::Mode::kUltraPerformance, Provider::kFsr},
                           {"fsr_native", Upscaler::Mode::kDlaa, Provider::kFsr},
                           {"fsr_quality", Upscaler::Mode::kQuality, Provider::kFsr},
                           {"fsr_balanced", Upscaler::Mode::kBalanced, Provider::kFsr},
@@ -2787,8 +2799,10 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
       uint32_t guest_width = std::max(profile.output_width, 1u), guest_height = std::max(profile.output_height, 1u);
       uint32_t width = g_scale.HostWidth(guest_width), height = g_scale.HostHeight(guest_height);
       g_upscaler.SetFrameGenerationInputs(REXCVAR_GET(native_x_renderer_frame_generation));
+      Upscaler::fsr_generation = name.rfind("fsr4", 0) == 0 ? 4 : 3;
+      Upscaler::sharpness = float(REXCVAR_GET(native_x_renderer_upscaler_sharpness));
       g_temporal = g_upscaler.Initialize(device->device(), width, height, entry.mode, entry.provider);
-      const char* provider = entry.provider == Provider::kFsr ? "FSR 3.1" : "DLSS";
+      const char* provider = entry.provider != Provider::kFsr ? "DLSS" : Upscaler::fsr_generation >= 4 ? "FSR 4" : "FSR 3.1";
       name = g_temporal ? "off" : "smaa";
       g_object_motion = g_temporal && REXCVAR_GET(native_x_renderer_object_motion);
       g_camera_vote = g_temporal && REXCVAR_GET(native_x_renderer_camera_vote);
@@ -2821,7 +2835,7 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
                                                    g_upscaler.input_height(), g_reduced_scale.x, g_reduced_scale.y,
                                                    width, height, provider)
                          : entry.provider == Provider::kFsr
-                             ? std::string("FSR 3.1 Native AA (AMD FSR 3.1 at the render resolution)")
+                             ? fmt::format("{0} Native AA (AMD {0} at the render resolution)", provider)
                              : std::string("DLAA (NVIDIA DLSS at the render resolution)");
       REXLOG_INFO("[native_x_renderer] antialiasing: {}{}{}", what,
                   g_temporal ? (g_object_motion ? ", with the motion of objects that move on their own"

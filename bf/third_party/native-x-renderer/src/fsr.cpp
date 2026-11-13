@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <string>
+#include <vector>
 
 #if NATIVE_X_RENDERER_FSR
 #ifndef NOMINMAX
@@ -24,9 +25,11 @@
 #include "TextureVk.h"
 
 #if NATIVE_X_RENDERER_FSR
-#include "ffx_api.h"
-#include "ffx_upscale.h"
-#include "vk/ffx_api_vk.h"
+// AMD FSR SDK 2.4.0's headers (thirdparty/ffx_api2, MIT). The older ones beside them (thirdparty/ffx_api, SDK 1.1.4)
+// are frame generation's (framegen.cpp).
+#include "ffx_api2/api/include/ffx_api.h"
+#include "ffx_api2/api/include/vk/ffx_api_vk.h"
+#include "ffx_api2/upscalers/include/ffx_upscale.h"
 #endif
 
 namespace native_x_renderer {
@@ -62,9 +65,9 @@ void Message(uint32_t type, const wchar_t* message) {
   std::string text;
   for (const wchar_t* c = message; c && *c; ++c) text += *c < 128 ? char(*c) : '?';
   if (type == FFX_API_MESSAGE_TYPE_ERROR) {
-    REXLOG_ERROR("[native_x_renderer] FSR 3.1: {}", text);
+    REXLOG_ERROR("[native_x_renderer] FSR: {}", text);
   } else {
-    REXLOG_WARN("[native_x_renderer] FSR 3.1: {}", text);
+    REXLOG_WARN("[native_x_renderer] FSR: {}", text);
   }
 }
 
@@ -133,9 +136,11 @@ bool Fsr::Load(IRenderDevice* device) {
   DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
   std::wstring folder(path, length);
   folder.resize(folder.find_last_of(L"\\/") + 1);
-  HMODULE module = LoadLibraryW((folder + L"amd_fidelityfx_vk.dll").c_str());
+  // 13 Nov 2026: AMD FSR SDK 2.4.0's loader (the first SDK with FSR 4 on Vulkan). It finds
+  // amd_fidelityfx_upscaler_vk.dll beside the executable, which holds FSR 4.1 and FSR 3.1.
+  HMODULE module = LoadLibraryW((folder + L"amd_fidelityfx_loader_vk.dll").c_str());
   if (!module) {
-    REXLOG_WARN("[native_x_renderer] FSR 3.1: amd_fidelityfx_vk.dll is not next to the game's executable");
+    REXLOG_WARN("[native_x_renderer] FSR: amd_fidelityfx_loader_vk.dll is not next to the game's executable");
     return false;
   }
   HMODULE vulkan = GetModuleHandleW(L"vulkan-1.dll");
@@ -147,14 +152,14 @@ bool Fsr::Load(IRenderDevice* device) {
   dispatch_ = reinterpret_cast<void*>(GetProcAddress(module, "ffxDispatch"));
   query_ = reinterpret_cast<void*>(GetProcAddress(module, "ffxQuery"));
   if (!create_context_ || !destroy_context_ || !dispatch_ || !query_ || !g_get_device_proc_addr) {
-    REXLOG_WARN("[native_x_renderer] FSR 3.1: amd_fidelityfx_vk.dll or the Vulkan loader lacks an entry point");
+    REXLOG_WARN("[native_x_renderer] FSR: amd_fidelityfx_loader_vk.dll or the Vulkan loader lacks an entry point");
     FreeLibrary(module);
     return false;
   }
   module_ = module;
   return true;
 #else
-  REXLOG_INFO("[native_x_renderer] FSR 3.1: not in this build");
+  REXLOG_INFO("[native_x_renderer] FSR: not in this build");
   return false;
 #endif
 }
@@ -167,12 +172,47 @@ bool Fsr::CreateContext(uint32_t render_width, uint32_t render_height, uint32_t 
   if (!device) return false;
   ffxCreateBackendVKDesc backend{};
   backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
-  backend.vkDevice = device->GetVkDevice();
-  backend.vkPhysicalDevice = device->GetVkPhysicalDevice();
-  backend.vkDeviceProcAddr = DeviceProcAddr;
+  backend.deviceContext.vkDevice = device->GetVkDevice();
+  backend.deviceContext.vkPhysicalDevice = device->GetVkPhysicalDevice();
+  backend.deviceContext.vkDeviceProcAddr = DeviceProcAddr;
+  // The versions this GPU and driver can run, newest first as AMD lists them; the one of the generation asked for
+  // (FSR 4, or FSR 3) is named to the context. Without one of that generation AMD's own choice stands (its newest).
+  ffxOverrideVersion pick{};
+  pick.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
+  {
+    VkDeviceContext vk = backend.deviceContext;
+    uint64_t count = 0;
+    ffxQueryDescGetVersions versions{};
+    versions.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
+    versions.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+    versions.device = &vk;
+    versions.outputCount = &count;
+    reinterpret_cast<PfnFfxQuery>(query_)(nullptr, &versions.header);
+    std::vector<uint64_t> ids(size_t(std::min<uint64_t>(count, 64)));
+    std::vector<const char*> names(ids.size(), nullptr);
+    count = ids.size();
+    versions.versionIds = ids.data();
+    versions.versionNames = names.data();
+    if (!ids.empty()) reinterpret_cast<PfnFfxQuery>(query_)(nullptr, &versions.header);
+    std::string list;
+    for (size_t i = 0; i < ids.size() && i < count; ++i) {
+      const std::string name = names[i] ? names[i] : "";
+      list += (list.empty() ? "" : ", ") + name;
+      const size_t digit = name.find_first_of("0123456789");
+      if (!pick.versionId && digit != std::string::npos && name[digit] - '0' == generation_) pick.versionId = ids[i];
+    }
+    if (!logged_version_)
+      REXLOG_INFO("[native_x_renderer] FSR: AMD's upscalers here: {}; FSR {} asked for{}", list.empty() ? "none" : list,
+                  generation_, pick.versionId ? "" : ", not among them: AMD's own choice");
+  }
+  ffxCreateContextDescUpscaleVersion api{};
+  api.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE_VERSION;
+  api.version = FFX_UPSCALER_VERSION;
+  api.header.pNext = &backend.header;
+  if (pick.versionId) backend.header.pNext = &pick.header;
   ffxCreateContextDescUpscale desc{};
   desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-  desc.header.pNext = &backend.header;
+  desc.header.pNext = &api.header;
   desc.flags = flags;
   desc.maxRenderSize = {render_width, render_height};
   desc.maxUpscaleSize = {output_width, output_height};
@@ -180,7 +220,7 @@ bool Fsr::CreateContext(uint32_t render_width, uint32_t render_height, uint32_t 
   ffxContext context = nullptr;
   ffxReturnCode_t result = reinterpret_cast<PfnFfxCreateContext>(create_context_)(&context, &desc.header, nullptr);
   if (result != FFX_API_RETURN_OK || !context) {
-    REXLOG_ERROR("[native_x_renderer] FSR 3.1: the context could not be created (FidelityFX error {})", result);
+    REXLOG_ERROR("[native_x_renderer] FSR: the context could not be created (FidelityFX error {})", result);
     return false;
   }
   context_ = context;
@@ -195,8 +235,9 @@ bool Fsr::CreateContext(uint32_t render_width, uint32_t render_height, uint32_t 
     ffxQueryGetProviderVersion version{};
     version.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
     reinterpret_cast<PfnFfxQuery>(query_)(&context_, &version.header);
-    REXLOG_INFO("[native_x_renderer] FSR 3.1: AMD's {} upscaler, {}x{} to {}x{}{}{}",
-                version.versionName ? version.versionName : "?", render_width, render_height, output_width,
+    version_ = version.versionName ? version.versionName : "?";
+    REXLOG_INFO("[native_x_renderer] FSR: AMD's {} upscaler runs, {}x{} to {}x{}{}{}", version_, render_width,
+                render_height, output_width,
                 output_height, (flags & FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE) ? ", HDR" : ", LDR",
                 (flags & FFX_UPSCALE_ENABLE_DEPTH_INVERTED) ? ", inverted depth" : "");
   }
@@ -229,7 +270,7 @@ bool Fsr::Dispatch(IDeviceContext* context, const Inputs& in) {
   const TextureDesc& output = in.output->GetDesc();
   if (SurfaceFormat(color.Format) == FFX_API_SURFACE_FORMAT_UNKNOWN ||
       SurfaceFormat(output.Format) == FFX_API_SURFACE_FORMAT_UNKNOWN) {
-    REXLOG_ERROR("[native_x_renderer] FSR 3.1: a format it does not take (color {}, output {})", int(color.Format),
+    REXLOG_ERROR("[native_x_renderer] FSR: a format it does not take (color {}, output {})", int(color.Format),
                  int(output.Format));
     return false;
   }
@@ -275,8 +316,8 @@ bool Fsr::Dispatch(IDeviceContext* context, const Inputs& in) {
   dispatch.motionVectorScale = {1.0f, 1.0f};
   dispatch.renderSize = {color.Width, color.Height};
   dispatch.upscaleSize = {output.Width, output.Height};
-  dispatch.enableSharpening = false;
-  dispatch.sharpness = 0.0f;
+  dispatch.enableSharpening = in.sharpness > 0.0f;  // AMD's own sharpening pass (RCAS)
+  dispatch.sharpness = std::clamp(in.sharpness, 0.0f, 1.0f);
   dispatch.frameTimeDelta = std::clamp(frame_ms, 1.0f, 100.0f);
   dispatch.preExposure = 1.0f;
   dispatch.reset = reset;
@@ -288,7 +329,7 @@ bool Fsr::Dispatch(IDeviceContext* context, const Inputs& in) {
   ffxContext ffx = context_;
   ffxReturnCode_t result = reinterpret_cast<PfnFfxDispatch>(dispatch_)(&ffx, &dispatch.header);
   if (result != FFX_API_RETURN_OK) {
-    REXLOG_ERROR("[native_x_renderer] FSR 3.1: the upscale failed (FidelityFX error {})", result);
+    REXLOG_ERROR("[native_x_renderer] FSR: the upscale failed (FidelityFX error {})", result);
     return false;
   }
   return true;
