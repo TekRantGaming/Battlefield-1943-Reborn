@@ -1578,7 +1578,7 @@
       const bool up = list_.reachable();
       const std::string t = up ? fmt::format("{} PLAYERS  /  {} {}", list_.players_online(), servers.size(),
                                              servers.size() == 1 ? "SERVER ONLINE" : "SERVERS ONLINE")
-                        : !list_.asked() ? "NOT CONNECTED"
+                        : !list_.asked() ? "CONNECTING"
                                : "SERVERS NOT REACHABLE";
       const float tw = kit::SpacedWidth(f.typed, st(13), t, st(2));
       const float tx = st.P(1240, 0).x - tw, ty = st.P(0, 96).y;  // under the soldier's card

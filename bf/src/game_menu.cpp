@@ -1853,7 +1853,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const auto servers = list_.servers();
     int players = 0;
     for (const auto& sv : servers) players += sv.players;
-    const std::string online = !list_.asked()       ? "NOT CONNECTED"
+    const std::string online = !list_.asked()       ? "CONNECTING"
                                : !list_.reachable() ? "SERVERS NOT REACHABLE"
                                : fmt::format("{} {}  /  {} {}", servers.size(), servers.size() == 1 ? "SERVER" : "SERVERS",
                                              players, players == 1 ? "PLAYER" : "PLAYERS");
@@ -4522,9 +4522,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       stats_sent_at_start_ = true;
       bool any = std::atof(settings_.Get("match_seconds", "0").c_str()) > 0;
       for (const auto& [key, value] : settings_.values) any = any || key.rfind("stat.", 0) == 0;
-      // (Not at the start any more, 13 Nov 2026: nothing goes to the backend until the player goes online. The
-      // totals are sent with the next score, in a match.)
-      (void)any;
+      if (any) SendLeaderboard("saved totals at the start");
     }
     if (ImGui::GetTime() - stats_taken_at_ > 10) {
       stats_taken_at_ = ImGui::GetTime();

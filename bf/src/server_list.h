@@ -290,12 +290,11 @@ class ServerList {
 
  private:
   void Run() {
-    const char* always = std::getenv("BF_AUTO_JOIN");
+    // (For an hour on 13 Nov 2026 the list was asked for only while a page wanted it. Taken back the same day: "if
+    // the master server is reachable, it should connect like before"; what must not need it is hosting a LAN match,
+    // which has a backend of its own. Want() and asked() stay: the menus say Connecting until the first answer, and
+    // Quick Play waits for it.)
     while (!stop_) {
-      if (!(always && *always == '1') && Now() >= wanted_until_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        continue;
-      }
       std::string reply;
       std::vector<ServerInfo> found;
       reachable_ = RegistryRequest("{\"op\": \"list\", " + ClientFields() + "}", reply);

@@ -106,7 +106,7 @@
     const std::string where = own_backend_.empty() ? std::string() : "BACKEND " + Upper(own_backend_) + " \xC2\xB7 ";
     if (!list_.asked()) {  // nothing has been asked of the servers yet (server_list.h Want)
       ok = true;
-      return where + "NOT CONNECTED \xC2\xB7 QUICK PLAY OR THE SERVER BROWSER GOES ONLINE";
+      return where + "CONNECTING TO THE SERVERS";
     }
     if (!ok) return where + "SERVERS NOT REACHABLE";
     return where + fmt::format("{} {} ONLINE \xC2\xB7 {} {}", list_.players_online(), list_.players_online() == 1 ? "PLAYER" : "PLAYERS",
