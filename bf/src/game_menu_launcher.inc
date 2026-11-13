@@ -2475,7 +2475,7 @@
       } else if (i == kPmMap) {
         value_text(kPmMapNames[pm_map_], true, false);
       } else if (i == kPmTick) {
-        value_text(std::to_string(pm_tick_) + " HZ " + "Â·" + (pm_tick_ > 60 ? " EXPERIMENTAL" : pm_tick_ == 30 ? " ORIGINAL" : " DEFAULT"),
+        value_text(std::to_string(pm_tick_) + " HZ \xC2\xB7" + (pm_tick_ > 60 ? " EXPERIMENTAL" : pm_tick_ == 30 ? " ORIGINAL" : " DEFAULT"),
                    true, false);
       } else if (i == kPmNet) {
         value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
