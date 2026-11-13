@@ -170,6 +170,7 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
        << " --bf_gm_description=\"[player host]\""
        << " --bf_gm_listed=" << (o.listed && !o.lan ? "true" : "false") << " --bf_gm_upnp=" << (o.upnp && !o.lan && !LoopbackOnly() ? "true" : "false")
        << (o.lan ? " --bf_lan_backend=true" : "")
+       << (o.password.empty() ? std::string() : " --bf_gm_password=\"" + Clean(o.password) + "\"")
        << " --bf_gm_status_file=\"" << (dir / "status.json").string() << "\""
        << " --bf_gm_parent_pid=" << GetCurrentProcessId();
   std::wstring command = Wide(args.str());

@@ -674,6 +674,21 @@ float ArtAt(ImDrawList* d, const char* name, ImVec2 at, float h, ImU32 tint, boo
   return w;
 }
 
+void FolderTab(ImDrawList* d, ImVec2 a, ImVec2 b, float u, bool front, bool over) {
+  const float slant = 7 * u, r = 5 * u;
+  const ImU32 fill = front ? kPaper : over ? IM_COL32(214, 202, 164, 255) : IM_COL32(190, 175, 131, 255);
+  auto path = [&](float dx, float dy) {
+    d->PathLineTo(ImVec2(a.x + dx, b.y + dy));
+    d->PathArcTo(ImVec2(a.x + slant + r + dx, a.y + r + dy), r, 3.4f, 4.712389f, 6);
+    d->PathArcTo(ImVec2(b.x - slant - r + dx, a.y + r + dy), r, 4.712389f, 6.02f, 6);
+    d->PathLineTo(ImVec2(b.x + dx, b.y + dy));
+  };
+  path(1.5f * u, 0), d->PathFillConvex(IM_COL32(0, 0, 0, 70));  // the tab behind's shadow side
+  path(0, 0), d->PathFillConvex(fill);
+  path(0, 0), d->PathStroke(IM_COL32(34, 36, 27, front ? 150 : 110), 0, 1.0f);
+  if (!front) d->AddRectFilled(ImVec2(a.x, b.y - 2 * u), b, IM_COL32(34, 36, 27, 46));  // tucked behind the sheet
+  else d->AddLine(ImVec2(a.x + slant + r, a.y + 1.5f * u), ImVec2(b.x - slant - r, a.y + 1.5f * u), IM_COL32(255, 255, 255, 90), 1.0f);
+}
 void PaperArt(ImDrawList* d, ImVec2 a, ImVec2 b) {
   if (!Art(d, "paper", a, b, true)) d->AddRectFilled(a, b, kPaper);
 }

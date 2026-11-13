@@ -1017,7 +1017,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // typed. Not in a scripted test (BF_DEV_SCRIPTED above).
     const bool typing = page_ == Page::kName || !capture_.empty() ||
                         (page_ == Page::kServers && (browser_typing_ || browser_tab_ == kTabDirect)) ||  // its search, an address
-                        (page_ == Page::kPrivateMatch && PmTyping());  // the match's name, its port
+                        (page_ == Page::kPrivateMatch && PmTyping()) ||  // the match's name, its port, its password
+                        pw_popup_;  // a match's password
     if (!scripted) {
       key.up |= ImGui::IsKeyPressed(ImGuiKey_UpArrow);
       key.down |= ImGui::IsKeyPressed(ImGuiKey_DownArrow);
@@ -1068,7 +1069,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // A pop-up over whatever page is up (the version gate's UPDATE NEEDED, AskToUpdate; What's new after an update,
     // WhatsNewTick): that page is drawn without the buttons, the mouse's button, its movement and its wheel, which
     // are the pop-up's (ImGui's IsMouseClicked asks MouseDown first).
-    const bool over_popup = update_popup_ || whats_new_open_ || own_popup_ || tick_popup_;
+    const bool over_popup = update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_;
     const Input popup_in = in;
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
@@ -1109,6 +1110,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (update_popup_) UpdatePopup(d, io, popup_in);
       else if (own_popup_) OwnBackendPopup(d, io, popup_in);
       else if (tick_popup_) TickPopup(d, io, popup_in);
+      else if (pw_popup_) PasswordPopup(d, io, popup_in);
       else if (whats_new_open_) WhatsNewPopup(d, io, popup_in);
     }
     // The stamp on BF's own menus too: its main menu (and our pages over it) and the pause; never over a match.
@@ -2010,7 +2012,63 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   ServerInfo tick_popup_server_;
   std::string tick_join_address_;  // after such a restart: the server to join, by its address
   double tick_join_until_ = 0;
+  // A match with a password (13 Nov 2026): the password is asked for (PasswordPopup) and shown to the match's host
+  // (server_list.h KnockMatch) before the join; pw_passed_ is the match whose host has let this game in.
+  bool pw_popup_ = false;
+  ServerInfo pw_server_;
+  std::string pw_text_, pw_error_, pw_passed_;
+  void PasswordPopup(ImDrawList* d, ImGuiIO& io, Input in) {
+    const Stage st = StageOf(io);
+    const kit::Fonts& f = kit::GetFonts();
+    d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 170));
+    const ImVec2 a = st.P(390, 240), b = st.P(890, 460);
+    kit::Paper(d, a, b, st.u);
+    kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(28), a.y + st(24)), kit::kInkSection, "THIS MATCH HAS A PASSWORD", st(2));
+    kit::GameText(d, kit::GameFont::kHeadline, st(24), ImVec2(a.x + st(28), a.y + st(40)), kit::kInk, pw_server_.name);
+    // the field: the keyboard types straight in
+    {
+      ImGuiContext& gctx = *ImGui::GetCurrentContext();
+      gctx.PlatformImeData.WantTextInput = true;
+      gctx.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
+    }
+    for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
+      const ImWchar c = io.InputQueueCharacters[i];
+      if (c > 32 && c < 127 && c != '"' && c != '\\' && pw_text_.size() < 24) pw_text_ += char(c), pw_error_.clear();
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !pw_text_.empty()) pw_text_.pop_back();
+    const ImVec2 f0(a.x + st(28), a.y + st(86)), f1(b.x - st(28), a.y + st(122));
+    d->AddRectFilled(f0, f1, IM_COL32(34, 36, 27, 22));
+    d->AddRect(f0, f1, kit::kInk, 0, 0, 1.0f);
+    const std::string shown = std::string(pw_text_.size(), '*') + (std::fmod(ImGui::GetTime(), 1.0) < 0.5 ? "_" : "");
+    d->AddText(f.ui_bold, st(14), ImVec2(f0.x + st(10), f0.y + (f1.y - f0.y - st(14) * 1.45f) * 0.5f), kit::kInk, shown.c_str());
+    kit::Wrapped(d, f.ui, st(11), ImVec2(a.x + st(28), a.y + st(134)), pw_error_.empty() ? kit::kInkFaint : kit::kRed,
+                 pw_error_.empty() ? std::string("Ask the match's host for it. Enter joins, Esc goes back.") : pw_error_,
+                 b.x - a.x - st(56));
+    const bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter) || in.start;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) || in.back) {
+      pw_popup_ = false, pw_text_.clear(), pw_error_.clear();
+      return;
+    }
+    if (!enter || pw_text_.empty()) return;
+    const int answer = KnockMatch(pw_server_.address, settings_.Get("player_name", ""), pw_text_);
+    REXLOG_INFO("BF join: the password for {} was {}", pw_server_.name,
+                answer == 1 ? "right" : answer == 0 ? "wrong" : "not answered");
+    if (answer == 1) {
+      pw_popup_ = false, pw_text_.clear(), pw_error_.clear();
+      pw_passed_ = pw_server_.gid + "@" + pw_server_.address;
+      const ServerInfo sv = pw_server_;
+      Join(sv);
+    } else {
+      pw_error_ = answer == 0 ? "That is not the password." : "The match's host does not answer. Try again in a moment.";
+      pw_text_.clear();
+    }
+  }
   void Join(const ServerInfo& sv) {
+    if (sv.locked && pw_passed_ != sv.gid + "@" + sv.address) {
+      pw_popup_ = true, pw_server_ = sv, pw_text_.clear(), pw_error_.clear();
+      return;
+    }
+    pw_passed_.clear();
     if (sv.Tick() != TickRate() && !SetTickRate(sv.Tick())) {
       tick_popup_ = true, tick_popup_server_ = sv, popup_row_ = 1;
       REXLOG_INFO("BF join: {} runs at {} Hz and this run at {}: the game must start again to join it (asked)", sv.name,

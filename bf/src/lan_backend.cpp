@@ -128,7 +128,7 @@ std::string Printable(const std::string& s, size_t most) {
 
 // ---- what the backend knows (one match's worth), under g_mutex
 struct Game {
-  std::string gid, name, map, next_map, mode = "classic", xnkid, xnkey;
+  std::string gid, name, map, next_map, mode = "classic", xnkid, xnkey, description;
   uint32_t uid = 0, tick = 0;
   int port = 0, players = 0, max_players = 24;
   bool listed = false;
@@ -426,7 +426,8 @@ std::string Listing(const Game& g, const std::string& ip) {
   return "{\"gid\": " + JsonQ(g.gid) + ", \"name\": " + JsonQ(g.name) + ", \"address\": [" + JsonQ(ip) + ", " +
          std::to_string(g.port) + "], \"map\": " + JsonQ(g.map) + ", \"players\": " + std::to_string(g.players) +
          ", \"max_players\": " + std::to_string(g.max_players) + ", \"mode\": " + JsonQ(g.mode) +
-         ", \"description\": \"[player host] A LAN match\", \"official\": false, \"next_map\": " + JsonQ(g.next_map) +
+         ", \"description\": " + JsonQ(g.description.empty() ? std::string("[player host] A LAN match") : g.description + " A LAN match") +
+         ", \"official\": false, \"next_map\": " + JsonQ(g.next_map) +
          ", \"maps\": [], \"night\": false, \"region\": \"\", \"tick\": " + std::to_string(g.tick) + "}";
 }
 
@@ -457,6 +458,7 @@ void ServeRegistry(SOCKET s) {
         g.port = std::atoi(JsonField(m, "port").c_str());
         if (g.port <= 0) g.port = 18300;
         g.map = JsonField(m, "map");
+        g.description = Printable(JsonField(m, "description"), 200);
         if (const int most = std::atoi(JsonField(m, "max_players").c_str()); most > 0) g.max_players = most;
         g.mode = JsonField(m, "mode") == "modern" ? "modern" : "classic";
         g.tick = uint32_t(std::atoi(JsonField(m, "tick").c_str()));

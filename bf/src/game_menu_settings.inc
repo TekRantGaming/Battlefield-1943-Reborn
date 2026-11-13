@@ -447,10 +447,29 @@
     };
     bool open_keys = false, open_remap = false, apply = false, defaults = false;
     if (controls) {  // Keybinds and Remap gamepad over the rows
-      const float h = st(30), gap = st(8), w = (pb.x - pa.x - gap) * 0.5f;
-      open_keys = dark_button(pa, ImVec2(pa.x + w, pa.y + h), "KEYBINDS", false);
-      open_remap = dark_button(ImVec2(pa.x + w + gap, pa.y), ImVec2(pb.x, pa.y + h), "REMAP GAMEPAD", false);
-      pa.y += h + st(8);
+      // 0.4.2: manila folder tabs standing on the rows' sheet (each opens its own page).
+      const float h = st(28), size = st(10);
+      float x = pa.x + st(6);
+      auto folder_tab = [&](const std::string& label) {
+        const float lw = kit::SpacedWidth(f.ui_bold, size, label, st(1.5f)), w = lw + st(44);
+        const ImVec2 a(x, pa.y), b(x + w, pa.y + h);
+        const bool over = ImGui::IsMouseHoveringRect(a, b);
+        kit::FolderTab(d, a, b, st.u, false, over);
+        kit::Spaced(d, f.ui_bold, size, ImVec2(a.x + (w - lw) * 0.5f, a.y + (h - size * 1.45f) * 0.5f), kit::kInk, label,
+                    st(1.5f));
+        x += w - st(3);
+        return over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && capture_.empty();
+      };
+      open_remap = false;
+      {
+        const float x0 = x;
+        const float kw = kit::SpacedWidth(f.ui_bold, size, "KEYBINDS", st(1.5f)) + st(44);
+        x = x0 + kw - st(3);
+        open_remap = folder_tab("REMAP GAMEPAD");  // behind
+        x = x0;
+        open_keys = folder_tab("KEYBINDS");  // in front
+      }
+      pa.y += h;
     }
     if (graphics) {  // Apply settings and Restore defaults under the rows
       const float h = st(30), gap = st(8), w = (pb.x - pa.x - gap) * 0.5f;

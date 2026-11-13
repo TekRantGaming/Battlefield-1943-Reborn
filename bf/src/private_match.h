@@ -20,6 +20,7 @@ struct PrivateMatchOptions {
   bool listed = false;  // Online: shown in everybody's server browser (Community), not only joined by its address
   uint16_t port = 0;    // the UDP port players reach it on; 0: the first free one from 18300
   int tick = 0;         // its tick rate (30, 60, 75, 100); 0: this game's own
+  std::string password;  // only players who know it are let in; empty: none
 };
 
 struct PrivateMatchStatus {
