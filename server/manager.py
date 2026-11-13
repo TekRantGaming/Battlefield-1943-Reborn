@@ -76,7 +76,7 @@ MAPS = [('wake', 'Wake Island', 'Levels/Wake_island_s'), ('guadalcanal', 'Guadal
         ('iwo', 'Iwo Jima', 'Levels/Iwo_Jima_s'), ('coral', 'Coral Sea', 'Levels/Coral_sea')]
 MAP_TITLE = {k: t for k, t, _ in MAPS}
 MAP_LEVEL = {k: l for k, _, l in MAPS}
-BASE_PORT, MAX_SERVERS, WEB_PORT, TICK_HZ = 18300, 16, 18280, 30  # 30 Hz by default; 60, 75, 100 experimental
+BASE_PORT, MAX_SERVERS, WEB_PORT, TICK_HZ = 18300, 16, 18280, 60  # 60 Hz by default; 30 the original; 75, 100 experimental
 # The dedicated game's own socket: UDP 1003 on its loopback address; Linux moves ports under 1024 up by 30000
 # (bf/src/socket_fixes.cpp HostBindPort).
 GAME_PORT = 1003 if WINDOWS else 31003
@@ -244,7 +244,7 @@ def clean_config(raw):
     tick = TICK_HZ
     with contextlib.suppress(TypeError, ValueError):
         tick = int(raw.get('tick') or TICK_HZ)
-    out['tick'] = tick if tick in (30, 60, 75, 100) else TICK_HZ  # 60, 75 and 100: experimental
+    out['tick'] = tick if tick in (30, 60, 75, 100) else TICK_HZ  # 75 and 100: experimental
     out['lan_only'] = raw.get('lan_only') is True
     out['public_address'] = clean_text(raw.get('public_address'), 64)
     out['upnp'] = raw.get('upnp') is not False

@@ -139,7 +139,7 @@
         </div>
         <div id="official-note" class="hint" style="display:none">This is the official package: this machine runs the main backend itself.</div>
         <label class="field"><span>Region</span><select id="region"></select><small>Shown with its flag in the game's server browser, so players can pick a server near them.</small></label>
-        <label class="field"><span>Tick rate</span><select id="tick-rate"><option value="30">30Hz - Default</option><option value="60">60Hz - Experimental</option><option value="75">75Hz - Experimental</option><option value="100">100Hz - Experimental</option></select><small>How many times a second your servers simulate the game. 30 Hz is the game's own. The others are experimental: physics and timing may break, and players are warned before they join. A player's game (v0.4.1 and newer) takes your servers' rate when it joins; older games play at 30 only.</small></label>
+        <label class="field"><span>Tick rate</span><select id="tick-rate"><option value="60">60Hz - Default</option><option value="30">30Hz - Original</option><option value="75">75Hz - Experimental</option><option value="100">100Hz - Experimental</option></select><small>How many times a second your servers simulate the game. 60 Hz is the default; 30 Hz is the original game's. 75 and 100 are experimental: physics and timing may break, and players are warned before they join. A player's game (v0.4.1 and newer) takes your servers' rate when it joins; older games play at 30 only.</small></label>
         <div id="lan-box">
           <label class="field"><span>Public address, for players outside your network (optional)</span><input type="text" id="public-address" placeholder="Found from your router when it allows it" maxlength="64"><small>Players on your network use this machine's network address. Players outside need this address and the ports below opened on your router.</small></label>
         </div>
@@ -489,7 +489,7 @@ function fillForms() {
   const region = $('region');
   region.replaceChildren(h('option', { value: '', text: 'Not said' }), ...state.regions.map(r => h('option', { value: r.code, text: r.name })));
   region.value = c.region;
-  $('tick-rate').value = String(c.tick || 30);
+  $('tick-rate').value = String(c.tick || 60);
   $('public-address').value = c.public_address; $('upnp').checked = c.upnp;
   $('auto-update').checked = c.auto_update;
   const warn = $('warn-minutes');

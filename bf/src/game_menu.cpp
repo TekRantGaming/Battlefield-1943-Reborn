@@ -2082,7 +2082,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   double exp_popup_at_ = 0;           // ImGui's time when it opened
   std::string exp_accepted_address_;  // the server the player chose to connect to anyway
   bool ExperimentalWarned(const ServerInfo& sv) {
-    if (sv.Tick() == 30 || exp_accepted_address_ == sv.address) return true;
+    // 0.4.2: 60 Hz is no longer experimental (the default); the warning is for 75 and 100.
+    if (sv.Tick() <= 60 || exp_accepted_address_ == sv.address) return true;
 #if defined(BF_DEV_TOOLS)
     if (std::getenv("BF_AUTO_JOIN")) return true;  // test joins: nobody to read it
 #endif
@@ -2095,8 +2096,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const kit::Fonts& f = kit::GetFonts();
     d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 190));
     const ImVec2 a = st.P(300, 150), b = st.P(980, 500);
-    static constexpr const char* kParagraphs[] = {
-        "You are connecting to an experimental server currently testing a 60Hz server tick rate.",
+    const std::string first = fmt::format("You are connecting to an experimental server currently testing a {}Hz server tick rate.",
+                                          exp_popup_server_.Tick());
+    const char* kParagraphs[] = {
+        first.c_str(),
         "This server is known to have potential game breaking issues. Increasing the server tick rate introduces "
         "changes to the physics engine, which is currently being decoupled from its original timing. This may cause "
         "unexpected behaviour, physics inconsistencies, broken mechanics or other gameplay issues.",

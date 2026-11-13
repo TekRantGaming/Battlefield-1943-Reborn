@@ -2226,12 +2226,13 @@
   // A password for the match (13 Nov 2026): a switch under the name, and its field while it is on.
   bool pm_pass_on_ = false;
   std::string pm_pass_;
-  // The match's tick rate: 30 by default (the console's), 60 experimental. 0.4.2 ("remove 75Hz and 100Hz from the
+  // The match's tick rate: 60 by default again and no longer experimental ("can we finalize that now that it works
+  // well and make it default again?"), 30 the console's. 0.4.2 ("remove 75Hz and 100Hz from the
   // Client, but keep it for dedicated server"): a match hosted from here is 30 or 60; a dedicated server can still run
   // 75 or 100 (server/manager.py, --bf_tick_rate), and the game still joins one at its rate.
   static constexpr int kPmTicks[] = {30, 60};
   static constexpr int kPmTickCount = int(std::size(kPmTicks));
-  int pm_tick_ = 30;
+  int pm_tick_ = 60;
   bool pm_lan_ = false, pm_listed_ = false;
   std::string pm_name_, pm_port_text_ = "18300";
   // The row takes typing now: the name, or the port when it is the player's to choose.
@@ -2257,8 +2258,8 @@
     pm_port_text_ = settings_.Get("private_match_port", "18300");
     pm_pass_on_ = settings_.Get("private_match_password_on", "0") == "1";
     pm_pass_ = settings_.Get("private_match_password", "");
-    pm_tick_ = std::atoi(settings_.Get("private_match_tick", "30").c_str());
-    if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 30;
+    pm_tick_ = std::atoi(settings_.Get("private_match_tick", "60").c_str());
+    if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 60;
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
@@ -2555,7 +2556,8 @@
       } else if (i == kPmMap) {
         value_text(kPmMapNames[pm_map_], true, false);
       } else if (i == kPmTick) {
-        value_text(std::to_string(pm_tick_) + (pm_tick_ == 30 ? "Hz - Default" : "Hz - Experimental"), true, false);
+        value_text(std::to_string(pm_tick_) + (pm_tick_ == 60 ? "Hz - Default" : pm_tick_ == 30 ? "Hz - Original" : "Hz - Experimental"),
+                   true, false);
       } else if (i == kPmNet) {
         value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
       } else if (i == kPmListed) {
@@ -2587,7 +2589,7 @@
       y += h;
       // An experimental tick rate (every one above 30: TekRantGaming, 13 Nov 2026): the warning right under the
       // row, in red.
-      if (i == kPmTick && pm_tick_ != 30) {
+      if (i == kPmTick && pm_tick_ > 60) {  // 60 is the default now: only a rate above it warns
         const std::string warning = "Physics, weapons, vehicles and timers may behave oddly or break, your PC and every "
                                     "player's connection work harder, and players on older versions cannot join. Use "
                                     "30 Hz for a normal match.";
@@ -2618,9 +2620,8 @@
           "you want another. For an Online match, open it on your router for friends outside your home.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
           "server browser: the pause copies the address for you. The match ends when you leave it.",
-          "How many times a second the match is simulated. 30, the original game's, is the default. 60 is "
-          "experimental: physics and timing may break, and it asks more of your PC and of every player's "
-          "connection. A player's game takes the match's rate when it joins.",
+          "How many times a second the match is simulated. 60 is the default; 30 is the original game's and asks "
+          "less of your PC and of every player's connection. A player's game takes the match's rate when it joins.",
           "On, only players who type the match's password can join; the server browser shows a padlock by its name. "
           "Off, anybody who sees the match can join.",
           "The password players type to join: up to 24 letters, digits or signs, no spaces. Give it to your friends "
