@@ -147,7 +147,7 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
   std::string rotation;
   for (const auto& m : o.maps) rotation += (rotation.empty() ? "" : ",") + m;
   if (rotation.empty()) rotation = "wake";
-  g.port = FreePort();
+  g.port = o.port ? o.port : FreePort();
   const std::string first = o.maps.empty() ? "wake" : o.maps.front();
   const fs::path dir = MatchDir();
   std::ostringstream args;
@@ -161,7 +161,9 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
        << " --bf_gm_backend=" << registry << " --bf_gm_listen=" << (LoopbackOnly() ? "127.0.0.1:" : "0.0.0.0:") << g.port
        << " --bf_gm_name=\"" << Clean(o.name.empty() ? std::string("Private match") : o.name) << "\""
        // Never in a test run: the router is the PC owner's (and a loopback host has nothing to forward).
-       << " --bf_gm_listed=false --bf_gm_upnp=" << (o.upnp && !o.lan && !LoopbackOnly() ? "true" : "false")
+       // Hosted from a player's game: said in the description's first words (server_list.h kPlayerHostTag).
+       << " --bf_gm_description=\"[player host]\""
+       << " --bf_gm_listed=" << (o.listed && !o.lan ? "true" : "false") << " --bf_gm_upnp=" << (o.upnp && !o.lan && !LoopbackOnly() ? "true" : "false")
        << (o.lan ? " --bf_lan_backend=true" : "")
        << " --bf_gm_status_file=\"" << (dir / "status.json").string() << "\""
        << " --bf_gm_parent_pid=" << GetCurrentProcessId();

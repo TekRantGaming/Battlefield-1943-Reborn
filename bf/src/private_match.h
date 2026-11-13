@@ -17,6 +17,8 @@ struct PrivateMatchOptions {
   // 13 Nov 2026, Network type LAN: the match's server answers the sign-in and matchmaking itself (lan_backend.cpp),
   // for this network's players, with no internet: nothing is registered with the main backend, no router is asked.
   bool lan = false;
+  bool listed = false;  // Online: shown in everybody's server browser (Community), not only joined by its address
+  uint16_t port = 0;    // the UDP port players reach it on; 0: the first free one from 18300
 };
 
 struct PrivateMatchStatus {

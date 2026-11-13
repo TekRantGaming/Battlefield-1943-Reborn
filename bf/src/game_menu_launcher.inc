@@ -2192,8 +2192,14 @@
   static constexpr const char* kPmMapNames[] = {"WAKE ISLAND", "GUADALCANAL", "IWO JIMA", "CORAL SEA", "ALL FOUR IN TURN"};
   static constexpr const char* kPmMapTitles[] = {"Wake Island", "Guadalcanal", "Iwo Jima", "Coral Sea"};
   // 13 Nov 2026: Network type (Online, or LAN: the match's own backend, this network's players, no internet).
-  static constexpr int kPmMap = 0, kPmNet = 1, kPmPort = 2, kPmHost = 3, kPmRows = 4;
-  bool pm_lan_ = false;
+  // Later that day: the match's name, whether the server browser shows it, and the router port as a box to tick
+  // (UPnP) with the port typed when it is not ticked.
+  static constexpr int kPmMap = 0, kPmName = 1, kPmNet = 2, kPmListed = 3, kPmUpnp = 4, kPmPort = 5, kPmHost = 6, kPmRows = 7;
+  bool pm_lan_ = false, pm_listed_ = false;
+  std::string pm_name_, pm_port_text_ = "18300";
+  // The row takes typing now: the name, or the port when it is the player's to choose.
+  bool PmPortTyped() const { return pm_lan_ || !pm_upnp_; }
+  bool PmTyping() const { return !pm_hosting_ && (pm_row_ == kPmName || (pm_row_ == kPmPort && PmPortTyped())); }
   int pm_row_ = 0, pm_map_ = 0;
   bool pm_upnp_ = true;
   bool pm_hosting_ = false;  // our server runs for this game
@@ -2207,11 +2213,17 @@
     pm_map_ = std::clamp(std::atoi(settings_.Get("private_match_map", "0").c_str()), 0, 4);
     pm_upnp_ = settings_.Get("private_match_upnp", "1") != "0";
     pm_lan_ = settings_.Get("private_match_lan", "0") == "1";
+    pm_listed_ = settings_.Get("private_match_listed", "0") == "1";
+    pm_name_ = settings_.Get("private_match_name", "");
+    pm_port_text_ = settings_.Get("private_match_port", "18300");
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
     settings_.values["private_match_upnp"] = pm_upnp_ ? "1" : "0";
     settings_.values["private_match_lan"] = pm_lan_ ? "1" : "0";
+    settings_.values["private_match_listed"] = pm_listed_ ? "1" : "0";
+    settings_.values["private_match_name"] = pm_name_;
+    settings_.values["private_match_port"] = pm_port_text_;
     settings_.Save();
   }
 
@@ -2232,7 +2244,17 @@
       UseOwnBackend("127.0.0.1");
     }
     const std::string me = settings_.Get("player_name", "");
-    o.name = me.empty() ? "Private match" : me + "'s match";
+    o.name = !pm_name_.empty() ? pm_name_ : me.empty() ? "Private match" : me + "'s match";
+    o.listed = pm_listed_ && !pm_lan_;
+    if (PmPortTyped()) {
+      const int port = std::atoi(pm_port_text_.c_str());
+      if (port < 1024 || port > 65535) {
+        pm_error_ = "The port is a number from 1024 to 65535 (18300 is the usual one).";
+        return;
+      }
+      o.port = uint16_t(port);
+    }
+    SavePrivateMatchChoices();
     pm_error_.clear();
     std::string why;
     if (!bf1943::StartPrivateMatch(o, &why)) {
@@ -2336,16 +2358,32 @@
     Prompts(d, st, st.P(48, 662), cues, in, 15);
     if (in.up) pm_row_ = (pm_row_ + kPmRows - 1) % kPmRows;
     if (in.down) pm_row_ = (pm_row_ + 1) % kPmRows;
+    if (PmTyping()) {  // the keyboard types straight into the row (as the browser's address)
+      ImGuiContext& g = *ImGui::GetCurrentContext();
+      g.PlatformImeData.WantTextInput = true;
+      g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
+      std::string& text = pm_row_ == kPmName ? pm_name_ : pm_port_text_;
+      const size_t most = pm_row_ == kPmName ? 32 : 5;
+      for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
+        const ImWchar c = io.InputQueueCharacters[i];
+        const bool ok = pm_row_ == kPmName ? (c >= 32 && c < 127 && c != '"' && c != '\\') : (c >= '0' && c <= '9');
+        if (ok && text.size() < most) text += char(c);
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !text.empty()) text.pop_back();
+      in.left = in.right = false;
+    }
     auto change = [&](int row, int step) {
       if (row == kPmMap) pm_map_ = (pm_map_ + 5 + step) % 5;
       if (row == kPmNet) pm_lan_ = !pm_lan_;
-      if (row == kPmPort && !pm_lan_) pm_upnp_ = !pm_upnp_;
+      if (row == kPmListed && !pm_lan_) pm_listed_ = !pm_listed_;
+      if (row == kPmUpnp && !pm_lan_) pm_upnp_ = !pm_upnp_;
       SavePrivateMatchChoices();
     };
     if (in.left && pm_row_ != kPmHost) change(pm_row_, -1);
     if (in.right && pm_row_ != kPmHost) change(pm_row_, 1);
     // ---- the rows, as the main menu's
-    static constexpr const char* kTitles[] = {"MAP", "NETWORK TYPE", "ROUTER PORT", "HOST THE MATCH"};
+    static constexpr const char* kTitles[] = {"MAP",  "SERVER NAME", "NETWORK TYPE",  "SHOW IN SERVER BROWSER",
+                                              "UPNP", "PORT",        "HOST THE MATCH"};
     int clicked = -1;
     float y = rows_y;
     for (int i = 0; i < kPmRows; ++i) {
@@ -2369,14 +2407,42 @@
       if (i == kPmHost) {
         if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(r1.x - st(18) - st(20), r0.y + h * 0.5f), st(20));
       } else {  // its value, typed at the right (between arrows on the chosen row)
-        std::string value = i == kPmMap   ? std::string(kPmMapNames[pm_map_])
-                            : i == kPmNet ? std::string(pm_lan_ ? "LAN" : "ONLINE")
-                            : pm_lan_     ? std::string("NOT NEEDED")
-                                          : std::string(pm_upnp_ ? "OPEN IT FOR ME" : "I OPEN IT MYSELF");
-        if (sel) value = "<  " + value + "  >";
-        const float vw = kit::SpacedWidth(f.typed, st(7.5f), value, st(1.5f));
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2(r1.x - st(18) - vw, r0.y + h * 0.5f - st(5)),
-                    sel ? kit::kInkSection : kit::kKhakiDim, value, st(1.5f));
+        const std::string me = settings_.Get("player_name", "");
+        const bool typed = i == kPmName || i == kPmPort;
+        const bool off = (pm_lan_ && (i == kPmListed || i == kPmUpnp)) || (i == kPmPort && !PmPortTyped());
+        std::string value = i == kPmMap      ? std::string(kPmMapNames[pm_map_])
+                            : i == kPmName   ? (!pm_name_.empty() ? pm_name_ : sel ? std::string() : Upper(me.empty() ? "Private match" : me + "'s match"))
+                            : i == kPmNet    ? std::string(pm_lan_ ? "LAN" : "ONLINE")
+                            : i == kPmListed ? std::string(pm_lan_ ? "ON YOUR NETWORK" : pm_listed_ ? "YES" : "NO")
+                            : i == kPmPort   ? (PmPortTyped() ? pm_port_text_ : std::string("AUTOMATIC"))
+                                             : std::string();
+        if (i == kPmUpnp) {
+          // A box to tick: the router is asked to open the port (not for a LAN match, which no router stands before).
+          const float b = st(13);
+          const ImVec2 b0(r1.x - st(18) - b, r0.y + (h - b) * 0.5f), b1(b0.x + b, b0.y + b);
+          const ImU32 line = off ? IM_COL32(120, 116, 100, 120) : sel ? kit::kInk : kit::kKhaki;
+          d->AddRect(b0, b1, line, 0, 0, st(1.5f));
+          if (pm_upnp_ && !pm_lan_) {
+            d->AddLine(ImVec2(b0.x + b * 0.2f, b0.y + b * 0.55f), ImVec2(b0.x + b * 0.42f, b0.y + b * 0.78f), line, st(2));
+            d->AddLine(ImVec2(b0.x + b * 0.42f, b0.y + b * 0.78f), ImVec2(b0.x + b * 0.82f, b0.y + b * 0.22f), line, st(2));
+          }
+          const std::string said = pm_lan_ ? "NOT NEEDED" : pm_upnp_ ? "ASK THE ROUTER" : "I OPEN IT MYSELF";
+          const float sw = kit::SpacedWidth(f.typed, st(7.5f), said, st(1.5f));
+          kit::Spaced(d, f.typed, st(7.5f), ImVec2(b0.x - st(8) - sw, r0.y + h * 0.5f - st(5)),
+                      off ? IM_COL32(120, 116, 100, 150) : sel ? kit::kInkSection : kit::kKhakiDim, said, st(1.5f));
+        } else {
+          if (typed && sel && !off) value += std::fmod(ImGui::GetTime(), 1.0) < 0.5 ? "_" : " ";
+          else if (sel && !typed && !off) value = "<  " + value + "  >";
+          const float vw = kit::SpacedWidth(f.typed, st(7.5f), value, st(1.5f));
+          const float vx = r1.x - st(18) - vw;
+          if (typed) {  // a field's frame, greyed where it is not the player's to type
+            const float fw = i == kPmName ? st(170) : st(62);
+            const ImVec2 f0(r1.x - st(12) - fw, r0.y + st(9)), f1(r1.x - st(12), r1.y - st(9));
+            d->AddRect(f0, f1, off ? IM_COL32(120, 116, 100, 90) : sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
+          }
+          kit::Spaced(d, f.typed, st(7.5f), ImVec2(vx, r0.y + h * 0.5f - st(5)),
+                      off ? IM_COL32(120, 116, 100, 150) : sel ? kit::kInkSection : kit::kKhakiDim, value, st(1.5f));
+        }
       }
       y += h;
     }
@@ -2384,11 +2450,16 @@
     {
       static constexpr const char* kAbout[] = {
           "The map your match plays. All four in turn: the next map after each round, as on the official servers.",
+          "The match's name in the server browser. Type it with the keyboard; left empty it is your name's match.",
           "Online: friends anywhere join through the main servers. LAN: for the PCs of your own network, with no "
-          "internet needed; your PC answers the sign-in and the match list itself. Friends type your PC's network "
-          "address in Direct connect (the pause copies it).",
-          "Friends outside your home reach your match on UDP 18300. Open it for me asks your router (UPnP); if the "
-          "router says no, open that port on it yourself.",
+          "internet needed; your PC answers the sign-in and the match list itself. Friends find it on the browser's "
+          "LAN tab, or type your PC's network address in Direct connect.",
+          "Yes: everybody sees your match on the server browser's Community tab and can join. No: only friends you "
+          "give the address to (Direct connect). A LAN match is always found by the PCs of your network.",
+          "Ticked, your router is asked to open the match's port (UPnP) and the port is chosen for you. Not ticked, "
+          "you open the port below on your router yourself.",
+          "The UDP port players reach your match on, when UPnP is not ticked: 18300 unless you want another. Open "
+          "it on your router for friends outside your home.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
           "server browser: the pause copies the address for you. The match ends when you leave it."};
       kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, kTitles[pm_row_], st(2));

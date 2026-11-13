@@ -426,7 +426,7 @@ std::string Listing(const Game& g, const std::string& ip) {
   return "{\"gid\": " + JsonQ(g.gid) + ", \"name\": " + JsonQ(g.name) + ", \"address\": [" + JsonQ(ip) + ", " +
          std::to_string(g.port) + "], \"map\": " + JsonQ(g.map) + ", \"players\": " + std::to_string(g.players) +
          ", \"max_players\": " + std::to_string(g.max_players) + ", \"mode\": " + JsonQ(g.mode) +
-         ", \"description\": \"A LAN match\", \"official\": false, \"next_map\": " + JsonQ(g.next_map) +
+         ", \"description\": \"[player host] A LAN match\", \"official\": false, \"next_map\": " + JsonQ(g.next_map) +
          ", \"maps\": [], \"night\": false, \"region\": \"\", \"tick\": " + std::to_string(g.tick) + "}";
 }
 

@@ -77,7 +77,12 @@ struct ServerInfo {
   // the game's own 30): a 30 Hz game on a 60 Hz server, or the other way round, is pulled about by every correction.
   bool OurTick() const { return (tick_hz > 0 ? tick_hz : 30) == TickRate(); }
   int ping_ms = -1;  // -1: not measured (an older server does not answer)
+  // 13 Nov 2026: hosted from a player's own game (Create Private Match), not a dedicated server: its description
+  // begins with kPlayerHostTag (the backend passes descriptions through as they are), taken off here. The browser
+  // draws a person before its name, a server rack before the others.
+  bool player_hosted = false;
 };
+inline constexpr const char* kPlayerHostTag = "[player host]";
 
 // The end of the JSON object or array that starts at `at` (strings and nesting respected), or npos.
 inline size_t JsonEnd(const std::string& s, size_t at) {
@@ -328,6 +333,11 @@ class ServerList {
     s.players = std::atoi(JsonField(obj, "players").c_str());
     s.max_players = std::atoi(JsonField(obj, "max_players").c_str());
     s.description = JsonField(obj, "description");
+    if (s.description.rfind(kPlayerHostTag, 0) == 0) {
+      s.player_hosted = true;
+      s.description.erase(0, std::strlen(kPlayerHostTag));
+      while (!s.description.empty() && s.description.front() == ' ') s.description.erase(s.description.begin());
+    }
     s.next_map = JsonField(obj, "next_map");
     s.official = JsonField(obj, "official") == "true";
     s.night = kNightOps && JsonField(obj, "night") == "true";  // night_ops.h: none without Night Ops

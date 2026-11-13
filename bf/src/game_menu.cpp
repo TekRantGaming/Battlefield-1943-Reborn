@@ -989,7 +989,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // The keyboard: arrows, Enter and Esc everywhere; the launcher's letters (F, R, P, Tab, Q and E) where nothing is
     // typed. Not in a scripted test (BF_DEV_SCRIPTED above).
     const bool typing = page_ == Page::kName || !capture_.empty() ||
-                        (page_ == Page::kServers && (browser_typing_ || browser_tab_ == kTabDirect));  // its search, an address
+                        (page_ == Page::kServers && (browser_typing_ || browser_tab_ == kTabDirect)) ||  // its search, an address
+                        (page_ == Page::kPrivateMatch && PmTyping());  // the match's name, its port
     if (!scripted) {
       key.up |= ImGui::IsKeyPressed(ImGuiKey_UpArrow);
       key.down |= ImGui::IsKeyPressed(ImGuiKey_DownArrow);
