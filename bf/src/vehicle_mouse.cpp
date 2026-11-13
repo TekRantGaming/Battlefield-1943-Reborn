@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdint>
 #include <mutex>
+#include <set>
 
 #include <rex/cvar.h>
 #include <rex/hook.h>
@@ -61,7 +62,7 @@ std::mutex g_mutex;
 uint32_t g_seat_key = 0;
 Clock::time_point g_axis_seen[8] = {};  // when a part on the concept last stepped in this seat
 bool g_yaw_free = false;                // the seat has a yaw part that turns all the way round (a turret, a mount)
-uint32_t g_logged[8] = {};              // the last part logged for each concept
+std::set<uint32_t> g_logged;            // the seat's parts already logged (once each)
 }  // namespace
 }  // namespace bf1943
 
@@ -83,12 +84,13 @@ REX_HOOK_RAW(sub_822ADE38) {
         g_seat_key = seat.key;
         g_axis_seen[5] = g_axis_seen[6] = {};
         g_yaw_free = false;
-        g_logged[5] = g_logged[6] = 0;
+        g_logged.clear();
       }
       g_axis_seen[c] = Clock::now();
       if (c == 6 && (!constrained || !(lo < hi) || hi - lo >= 359.0f)) g_yaw_free = true;
-      if (REXCVAR_GET(bf_debug_vehicle_mouse) && g_logged[c] != helper) {
-        g_logged[c] = helper;
+      // Once for each part of a seat (13 Nov: with several parts on a concept the last-part test logged every step,
+      // 5 MB of log in two minutes).
+      if (REXCVAR_GET(bf_debug_vehicle_mouse) && g_logged.size() < 64 && g_logged.insert(helper).second) {
         REXLOG_INFO("BF vehicle mouse: seat #{} ({}): part {:08X} on concept {} (data {:08X}, {} {:.0f} to {:.0f} "
                     "degrees, {} input)",
                     seat.key, SeatKindName(seat.kind), helper, c, data, constrained ? "limits" : "free, limits",
