@@ -427,6 +427,9 @@ void MarkExitChosen();
 void LeaveMatch();  // auto_join.cpp: Exit Game, the game's own command (doExitLevel)
 void SuicideNow();  // the game's own suicide command
 std::string SmgSightTuneText();                                 // fov.cpp: the SMG's sight tuning, for the screen
+std::string SmgSightTuneGun(double v[6]);                       // fov.cpp: the SMG held now and its values
+void SmgSightTuneSet(const double v[6], bool reset);            // fov.cpp: its values set
+extern std::atomic<bool> g_smg_tune_hold;                       // fov.cpp: the aim held for the pause menu's sliders
 bool SmgSightTakeSave(std::string& name, std::string& value);  // fov.cpp: a tuned value to save
 void GameCommand(const std::string& name, const std::string& args);  // auto_join.cpp: a command as the game's menu sends it
 std::map<std::string, std::pair<int, double>> TakeScoreEvents();  // auto_join.cpp: the HUD's score events
@@ -861,6 +864,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // A frame limit outside the game found since (the driver's read, or measured): the rate offered at most.
     if (SystemFrameCap() != applied_cap_) ApplyFrameRate();
     if (!open_) MenuSteps();  // tests: their bfb and bfa steps act while BF's own screen has the pad
+    if (!open_ || page_ != Page::kPause) g_smg_tune_hold.store(false, std::memory_order_relaxed);  // the sliders are the pause page's
     // The SMG's sight tuning (fov.cpp, bf_smg_sight_tune): its values on the screen while aiming, and saved.
     if (const std::string tune = SmgSightTuneText(); !tune.empty()) {
       const kit::Fonts& tf = kit::GetFonts();

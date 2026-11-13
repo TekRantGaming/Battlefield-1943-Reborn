@@ -239,8 +239,8 @@ REXCVAR_DEFINE_BOOL(bf_smg_sights, false, "BF1943", "SMG zoom: the gun's own sig
 // forward and back, the number pad's 4 6 turn it left and right, 8 2 up and down, 7 9 roll it, and 0 puts the built in
 // values back; Shift makes the steps five times larger, Ctrl five times smaller. The values show on the screen
 // (game_menu.cpp draws SmgSightTuneText) and are saved for that gun.
-REXCVAR_DEFINE_STRING(bf_smg_sight_us, "-0.0725,0.0185,0.15,0,0,0", "BF1943", "Iron Sight: the Thompson's move, x,y,z,yaw,pitch,roll");
-REXCVAR_DEFINE_STRING(bf_smg_sight_jp, "-0.0725,0.0185,0.15,0,0,0", "BF1943", "Iron Sight: the Type 100's move, x,y,z,yaw,pitch,roll");
+REXCVAR_DEFINE_STRING(bf_smg_sight_us, "-0.0725,0.0135,0.0,0,0,0", "BF1943", "Iron Sight: the Thompson's move, x,y,z,yaw,pitch,roll");
+REXCVAR_DEFINE_STRING(bf_smg_sight_jp, "-0.0725,0.0135,0.0,0,0,0", "BF1943", "Iron Sight: the Type 100's move, x,y,z,yaw,pitch,roll");
 REXCVAR_DEFINE_BOOL(bf_smg_sight_tune, false, "BF1943", "Iron Sight: line the SMG's sights up with the keyboard while aiming (arrows, Page Up/Down, number pad)");
 namespace {
 std::mutex g_tune_mutex;
@@ -248,7 +248,38 @@ std::string g_tune_text;          // what the screen shows while tuning (empty: 
 std::string g_tune_save_name, g_tune_save_value;  // a changed setting to save
 std::chrono::steady_clock::time_point g_tune_text_at{};
 }  // namespace
+namespace {
+// The SMG in the hands now, for the pause menu's sliders: 0 none, 1 the Thompson, 2 the Type 100; and when it was seen.
+std::atomic<int> g_tune_gun{0};
+std::atomic<int64_t> g_tune_gun_at{0};
+}  // namespace
 namespace bf1943 {
+// The pause menu's sight sliders ("If you can give me overlay sliders with pitch, yaw, roll and zoom, I can match it
+// by hand"): while they are open the aim is held for the player (auto_join.cpp presses the left trigger).
+std::atomic<bool> g_smg_tune_hold{false};
+// The SMG held now ("Thompson", "Type 100"; empty: none in the last half second) and its six values.
+std::string SmgSightTuneGun(double v[6]) {
+  const int gun = g_tune_gun.load(std::memory_order_relaxed);
+  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  if (!gun || now - g_tune_gun_at.load(std::memory_order_relaxed) > std::chrono::steady_clock::duration(std::chrono::milliseconds(500)).count())
+    return "";
+  const std::string text = gun == 2 ? REXCVAR_GET(bf_smg_sight_jp) : REXCVAR_GET(bf_smg_sight_us);
+  for (int i = 0; i < 6; ++i) v[i] = 0;
+  std::sscanf(text.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+  return gun == 2 ? "Type 100" : "Thompson";
+}
+// Its values set (the sliders); `reset`: the built in ones.
+void SmgSightTuneSet(const double v[6], bool reset) {
+  const int gun = g_tune_gun.load(std::memory_order_relaxed);
+  if (!gun) return;
+  const char* name = gun == 2 ? "bf_smg_sight_jp" : "bf_smg_sight_us";
+  std::string value = fmt::format("{:.4f},{:.4f},{:.4f},{:.2f},{:.2f},{:.2f}", v[0], v[1], v[2], v[3], v[4], v[5]);
+  if (reset)
+    if (const auto* info = rex::cvar::GetFlagInfo(name)) value = info->default_value;
+  rex::cvar::SetFlagByName(name, value);
+  std::lock_guard lock(g_tune_mutex);
+  g_tune_save_name = name, g_tune_save_value = value;
+}
 // game_menu.cpp, each frame: the tuning's line for the screen, and a changed setting to save (true once).
 std::string SmgSightTuneText() {
   std::lock_guard lock(g_tune_mutex);
@@ -346,6 +377,8 @@ void SmgSights(PPCContext& ctx, uint8_t* base, uint32_t soldier, double fov_degr
     japanese = lower.find("thompson") == std::string::npos;
   }
   const char* cvar_name = japanese ? "bf_smg_sight_jp" : "bf_smg_sight_us";
+  g_tune_gun.store(japanese ? 2 : 1, std::memory_order_relaxed);
+  g_tune_gun_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
   double v[6] = {0, 0, 0, 0, 0, 0};
   {
     const std::string text = japanese ? REXCVAR_GET(bf_smg_sight_jp) : REXCVAR_GET(bf_smg_sight_us);
