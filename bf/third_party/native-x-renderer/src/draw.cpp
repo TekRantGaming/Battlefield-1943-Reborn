@@ -2819,7 +2819,9 @@ DrawPath::HudPlace DrawPath::ClassifyHudDraw(std::span<const Copy> copies, uint6
     // a plane's gunsight, drawn in several pieces around one projected point, came apart and shifted in flight).
     ++t.middle, ++t.markers, result = "world marker";
     place.mode = HudMode::kPoint;
-    place.point_x = marker_x;
+    // Not through a scope: its crosshair and mil dots are drawn near the flags seen through it, and moved by a
+    // flag's place they came off the sight as the camera turned (13 Nov: "displacing the crosshair and mildots").
+    place.point_x = hud_scope_ ? -1 : marker_x;
   } else if (prev.valid && prev.place.mode == HudMode::kBox && prev.vertex_shader == vertex_shader &&
              y_lo <= prev.y_hi && y_hi >= prev.y_lo && lo >= prev.lo - 0.02 && lo <= prev.hi + 0.15) {
     // The next glyph of a line, the next part of a bar: where the first went.

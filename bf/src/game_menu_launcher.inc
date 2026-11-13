@@ -2280,9 +2280,11 @@
     Join(sv);
   }
 
-  // Create Private Match in the new look (13 Nov 2026: "should also follow the same theming as the new main menu"):
-  // the menu's backdrop and chrome, the game's lettering for the heading, the rows on paper (the chosen one green with
-  // the red tab, as in Settings), the chosen row's help on a card at the right. Sizes are the Stage's (720 lines).
+  // Create Private Match as the main menu is drawn (13 Nov 2026: "look more like the main menu theming, with the
+  // options on the left side panel in the same font"): the menu's backdrop and chrome, the dark rail at the left with
+  // the rows in the game's own lettering (the chosen one on paper with the red tab and its glyph, its value typed at
+  // the right), and at the right the chosen map's picture over a paper band with the chosen row's help and the green
+  // button, where the main menu has its Quick Play card. Sizes are the Stage's (720 lines).
   void PrivateMatchPage(ImDrawList* d, ImGuiIO& io, Input in) {
     NotePage("private match");
     const Stage st = StageOf(io);
@@ -2291,13 +2293,31 @@
     bool online_ok = false;
     const std::string status = OnlineStatus(online_ok);
     MenuChrome(d, io, st, status, online_ok);
-    kit::Spaced(d, f.typed, st(8.5f), st.P(48, 91), kit::kKhakiDim,
-                "HOSTED ON THIS PC \xC2\xB7 FRIENDS JOIN WITH DIRECT CONNECT", st(2));
-    kit::GameText(d, kit::GameFont::kHeadline, st(40), st.P(48, 105), kit::kCream, "PRIVATE MATCH");
     MenuFoot(d, st);
-    const ImVec2 pa = st.P(48, 167), pb = st.P(640, 167 + 44 * kPmRows + 12);
+    // ---- the rail and its heading
+    const ImVec2 ra = st.P(48, 93), rb = st.P(400, 620);
+    d->AddRectFilled(ra, rb, IM_COL32(13, 15, 11, 204));
+    d->AddRect(ra, rb, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
+    kit::Spaced(d, f.typed, st(8), ImVec2(ra.x + st(24), ra.y + st(18)), kit::kKhakiDim, "HOSTED ON THIS PC", st(2));
+    kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(ra.x + st(24), ra.y + st(32)), kit::kCream, "PRIVATE MATCH");
+    d->AddRectFilled(ImVec2(ra.x, ra.y + st(76)), ImVec2(rb.x, ra.y + st(77)), IM_COL32(241, 234, 211, 30));
+    const float rows_y = ra.y + st(77);
+    // ---- the picture card at the right: the chosen map from the air, the paper band under it
+    const ImVec2 ha = st.P(427, 93), hb = st.P(1232, 380);
+    const ImVec2 band(ha.x, hb.y - st(110));
+    d->PushClipRect(ha, hb, true);
+    MapPicture(d, st.u * 1.5f, ha, ImVec2(hb.x, band.y), pm_map_ < 4 ? kPmMapTitles[pm_map_] : "Wake Island");
+    d->PopClipRect();
+    {  // the chip
+      const std::string chip = "YOUR OWN SERVER \xC2\xB7 FRIENDS JOIN WITH DIRECT CONNECT";
+      const float cw = kit::SpacedWidth(f.ui_bold, st(9), chip, st(1));
+      const ImVec2 c0(ha.x + st(20), ha.y + st(20)), c1(c0.x + cw + st(22), c0.y + st(22));
+      d->AddRectFilled(c0, c1, kit::kStrip);
+      kit::Spaced(d, f.ui_bold, st(9), ImVec2(c0.x + st(11), c0.y + st(4)), kit::kStripText, chip, st(1));
+    }
+    kit::PaperArt(d, band, hb);
     if (pm_hosting_) {
-      PrivateMatchStarting(d, st, in, pa);
+      PrivateMatchStarting(d, st, in, ImVec2(ra.x, rows_y), rb, band, hb);
       return;
     }
     // The prompts first: a click on one is that button's press for the rest of the frame.
@@ -2312,43 +2332,41 @@
     };
     if (in.left && pm_row_ != kPmHost) change(pm_row_, -1);
     if (in.right && pm_row_ != kPmHost) change(pm_row_, 1);
-    // ---- the rows on paper
-    kit::PaperArt(d, pa, pb);
-    static constexpr const char* kLabels[] = {"Map", "Router port", "Host the match"};
+    // ---- the rows, as the main menu's
     static constexpr const char* kTitles[] = {"MAP", "ROUTER PORT", "HOST THE MATCH"};
-    const float rh = st(44), top = pa.y + st(6), tx0 = pa.x + st(18), tx1 = pb.x - st(18), size = st(14);
     int clicked = -1;
+    float y = rows_y;
     for (int i = 0; i < kPmRows; ++i) {
-      const ImVec2 r0(pa.x, top + rh * i), r1(pb.x, top + rh * (i + 1));
+      if (i == kPmHost) y += st(12);  // a rule's worth of air before the action
+      const float h = st(41);
+      const ImVec2 r0(ra.x, y), r1(rb.x, y + h);
       const bool hover = ImGui::IsMouseHoveringRect(r0, r1);
-      if (hover && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) pm_row_ = i;
+      if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) pm_row_ = i;
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
       const bool sel = i == pm_row_;
       if (sel) {
-        d->AddRectFilled(r0, r1, kit::kGreen);
+        kit::PaperArt(d, r0, r1);
         d->AddRectFilled(r0, ImVec2(r0.x + st(5), r1.y), kit::kStamp);
-      } else if (i + 1 < kPmRows) {
-        d->AddLine(ImVec2(tx0, r1.y), ImVec2(tx1, r1.y), kit::kRule, 1.0f);
       }
-      const ImU32 ink = sel ? kit::kCream : kit::kInk;
-      const float ty = r0.y + (rh - size * 1.45f) * 0.5f;
-      d->AddText(i == kPmHost ? f.ui_bold : f.ui, size, ImVec2(tx0, ty), ink, kLabels[i]);
-      std::string value = i == kPmMap ? std::string(kPmMapNames[pm_map_])
-                          : i == kPmPort ? std::string(pm_upnp_ ? "Open it for me" : "I open it myself")
-                                         : std::string("Start");
-      if (sel && i != kPmHost) value = "<   " + value + "   >";
-      const float vw = kit::TextWidth(f.ui_bold, size, value);
-      d->AddText(f.ui_bold, size, ImVec2(tx1 - vw, ty), ink, value.c_str());
+      d->AddRectFilled(ImVec2(r0.x, r1.y - 1), ImVec2(r1.x, r1.y), IM_COL32(241, 234, 211, 20));
+      kit::Spaced(d, f.typed, st(8), ImVec2(r0.x + st(24), r0.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
+                  fmt::format("{:02d}", i + 1), st(1.5f));
+      const float cap = st(19);
+      kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(r0.x + st(52), r0.y + (h - cap) * 0.5f),
+                    sel ? kit::kInk : kit::kKhaki, kTitles[i]);
+      if (i == kPmHost) {
+        if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(r1.x - st(18) - st(20), r0.y + h * 0.5f), st(20));
+      } else {  // its value, typed at the right (between arrows on the chosen row)
+        std::string value = i == kPmMap ? std::string(kPmMapNames[pm_map_])
+                                        : std::string(pm_upnp_ ? "OPEN IT FOR ME" : "I OPEN IT MYSELF");
+        if (sel) value = "<  " + value + "  >";
+        const float vw = kit::SpacedWidth(f.typed, st(7.5f), value, st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2(r1.x - st(18) - vw, r0.y + h * 0.5f - st(5)),
+                    sel ? kit::kInkSection : kit::kKhakiDim, value, st(1.5f));
+      }
+      y += h;
     }
-    if (!pm_error_.empty()) {  // a boxed note with the red tab, under the rows
-      const float wrap = pb.x - pa.x - st(28);
-      const float nh = kit::WrappedHeight(f.ui, st(11), pm_error_, wrap) + st(20);
-      const ImVec2 n0(pa.x, pb.y + st(14)), n1(pb.x, pb.y + st(14) + nh);
-      kit::PaperArt(d, n0, n1);
-      d->AddRectFilled(n0, ImVec2(n0.x + st(3), n1.y), kit::kStamp);
-      kit::Wrapped(d, f.ui, st(11), ImVec2(n0.x + st(14), n0.y + st(10)), kit::kInk, pm_error_, wrap);
-    }
-    // ---- the chosen row's help on the card at the right
+    // ---- the band: the chosen row's help, the green button
     {
       static constexpr const char* kAbout[] = {
           "The map your match plays. All four in turn: the next map after each round, as on the official servers.",
@@ -2356,11 +2374,14 @@
           "router says no, open that port on it yourself.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
           "server browser: the pause copies the address for you. The match ends when you leave it."};
-      const ImVec2 ha = st.P(661, 167), hb = st.P(1232, 167 + 44 * kPmRows + 12);
-      kit::PaperArt(d, ha, hb);
-      kit::Spaced(d, f.typed, st(8), ImVec2(ha.x + st(18), ha.y + st(18)), kit::kInkSection, kTitles[pm_row_], st(2));
-      kit::Wrapped(d, f.ui, st(11.5f), ImVec2(ha.x + st(18), ha.y + st(38)), kit::kInk, kAbout[pm_row_],
-                   hb.x - ha.x - st(36));
+      kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, kTitles[pm_row_], st(2));
+      kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
+                    kPmMapNames[pm_map_]);
+      const ImVec2 q0(hb.x - st(20) - st(190), band.y + st(18)), q1(q0.x + st(190), q0.y + st(40));
+      const bool error = !pm_error_.empty();
+      kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error ? kit::kRed : kit::kInkFaint,
+                   error ? pm_error_ : std::string(kAbout[pm_row_]), q0.x - band.x - st(40));
+      if (GreenButton(d, st, q0, q1, kit::Button::kA, "HOST THE MATCH")) clicked = kPmHost;
     }
     if (in.accept) clicked = pm_row_;
     if (clicked >= 0) {
@@ -2371,8 +2392,9 @@
     if (in.back) BackToMenu(kRowPrivateMatch, MainRowOf("CREATE PRIVATE MATCH")), pm_error_.clear();  // back to the menu
   }
 
-  // While our server starts: its steps on the paper, then the join (PrivateMatchTick); B ends it.
-  void PrivateMatchStarting(ImDrawList* d, const Stage& st, Input& in, ImVec2 pa) {
+  // While our server starts: its steps in the rail (ra..rb under the heading), the wait on the band (band..hb), then
+  // the join (PrivateMatchTick); B ends it.
+  void PrivateMatchStarting(ImDrawList* d, const Stage& st, Input& in, ImVec2 ra, ImVec2 rb, ImVec2 band, ImVec2 hb) {
     const kit::Fonts& f = kit::GetFonts();
     const bf1943::PrivateMatchStatus& status = pm_status_;
     const double t = ImGui::GetTime() - pm_started_at_;
@@ -2386,36 +2408,36 @@
     std::vector<Cue> cues = {{kit::Button::kB, error.empty() ? "CANCEL" : "BACK"}};
     Prompts(d, st, st.P(48, 662), cues, in, 15);
     const bool registered = status.state == "registered";
-    static constexpr const char* kSteps[] = {"Starting your server", "Loading the map and registering it",
-                                             "Joining your match"};
+    static constexpr const char* kSteps[] = {"STARTING YOUR SERVER", "LOADING THE MAP", "JOINING YOUR MATCH"};
     const int at = !status.running ? 0 : registered ? 2 : 1;
-    const float rh = st(40), top = pa.y + st(10);
-    const ImVec2 pb(st.P(640, 0).x, top + rh * 3 + st(40));
-    kit::PaperArt(d, pa, pb);
+    const float h = st(41);
     for (int i = 0; i < 3; ++i) {
-      const float y = top + rh * i;
+      const ImVec2 r0(ra.x, ra.y + h * i), r1(rb.x, ra.y + h * (i + 1));
       const bool done = i < at, now = i == at && error.empty();
-      const ImVec2 c(pa.x + st(30), y + rh * 0.5f);
-      if (done) d->AddCircleFilled(c, st(5), kit::kGreen);
-      else d->AddCircle(c, st(5), now ? kit::kInk : kit::kInkFaint, 0, st(1.5f));
+      if (now) {
+        kit::PaperArt(d, r0, r1);
+        d->AddRectFilled(r0, ImVec2(r0.x + st(5), r1.y), kit::kStamp);
+      }
+      d->AddRectFilled(ImVec2(r0.x, r1.y - 1), ImVec2(r1.x, r1.y), IM_COL32(241, 234, 211, 20));
+      const ImVec2 c(r0.x + st(30), r0.y + h * 0.5f);
+      if (done) d->AddCircleFilled(c, st(5), kit::kGreenBright);
+      else d->AddCircle(c, st(5), now ? kit::kInk : kit::kKhakiDim, 0, st(1.5f));
       if (now) {  // a turning arc over the current step
         const float a0 = float(ImGui::GetTime()) * 5.0f;
         d->PathArcTo(c, st(9), a0, a0 + 2.2f, 16);
         d->PathStroke(kit::kStamp, 0, st(2));
       }
-      d->AddText(now ? f.ui_bold : f.ui, st(14), ImVec2(pa.x + st(52), y + (rh - st(14) * 1.45f) * 0.5f),
-                 done || now ? kit::kInk : kit::kInkFaint, kSteps[i]);
+      const float cap = st(16);
+      kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(r0.x + st(52), r0.y + (h - cap) * 0.5f),
+                    now ? kit::kInk : done ? kit::kKhaki : kit::kKhakiDim, kSteps[i]);
     }
-    kit::Spaced(d, f.typed, st(8), ImVec2(pa.x + st(52), top + rh * 3 + st(8)), kit::kInkSection,
-                fmt::format("{} S \xC2\xB7 {}", int(t), Upper(kPmMapNames[pm_map_])), st(2));
-    if (!error.empty()) {
-      const float wrap = pb.x - pa.x - st(28);
-      const float nh = kit::WrappedHeight(f.ui, st(11), error, wrap) + st(20);
-      const ImVec2 n0(pa.x, pb.y + st(14)), n1(pb.x, pb.y + st(14) + nh);
-      kit::PaperArt(d, n0, n1);
-      d->AddRectFilled(n0, ImVec2(n0.x + st(3), n1.y), kit::kStamp);
-      kit::Wrapped(d, f.ui, st(11), ImVec2(n0.x + st(14), n0.y + st(10)), kit::kInk, error, wrap);
-    }
+    kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection,
+                fmt::format("STARTING \xC2\xB7 {} S", int(t)), st(2));
+    kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
+                  kPmMapNames[pm_map_]);
+    kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error.empty() ? kit::kInkFaint : kit::kRed,
+                 error.empty() ? std::string("Your PC is starting the match's server. You join it as soon as it is up.") : error,
+                 hb.x - band.x - st(40));
     if (in.back) {
       REXLOG_INFO("BF private match: {} on the starting page", error.empty() ? "cancelled" : "back after: " + error);
       EndPrivateMatch();

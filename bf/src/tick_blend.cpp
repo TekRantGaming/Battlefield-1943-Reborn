@@ -2342,21 +2342,20 @@ Xf FreeLookTurn(const Xf& in, double yaw, double pitch) {
     if (d2 < 30.0 * 30.0)
       for (int c = 0; c < 3; ++c) pivot[c] = g.seat.cur.m[3][c];
   }
-  // An outside view (the camera over 4 m from the seat): round the vehicle itself (12 Nov 2026: the jeep's and the
-  // boat's third person view turned about the driver's seat, not round the vehicle). Its tree's root, published each
-  // tick (PublishOwnVehicleLocked; g.mutex is held here, then g_own_mutex, the same order as there).
+  // An outside view: round the vehicle itself (12 Nov 2026: the jeep's and the boat's third person view turned about
+  // the driver's seat, not round the vehicle). Outside is the camera over 3 m from the vehicle's root, not from the
+  // seat: in the jeep and the boat the seat is not tracked, so the pivot above is still the camera, the distance to
+  // it nothing, and the view only looked about from where it stood (13 Nov: "still doesn't orbit the vehicle"). The
+  // root is published each tick (PublishOwnVehicleLocked; g.mutex is held here, then g_own_mutex, the same order as
+  // there).
   {
-    double cam_d2 = 0;
-    for (int c = 0; c < 3; ++c) cam_d2 += (rows[3][c] - pivot[c]) * (rows[3][c] - pivot[c]);
-    if (cam_d2 > 4.0 * 4.0) {
-      std::lock_guard lock(bf1943::g_own_mutex);
-      const auto& own = bf1943::g_own;
-      if (own.valid && bf1943::ClientTicks() - own.tick <= 2) {
-        double v2 = 0;
-        for (int c = 0; c < 3; ++c) v2 += (own.rows[3][c] - rows[3][c]) * (own.rows[3][c] - rows[3][c]);
-        if (v2 < 40.0 * 40.0)
-          for (int c = 0; c < 3; ++c) pivot[c] = own.rows[3][c];
-      }
+    std::lock_guard lock(bf1943::g_own_mutex);
+    const auto& own = bf1943::g_own;
+    if (own.valid && bf1943::ClientTicks() - own.tick <= 4) {
+      double v2 = 0;
+      for (int c = 0; c < 3; ++c) v2 += (own.rows[3][c] - rows[3][c]) * (own.rows[3][c] - rows[3][c]);
+      if (v2 > 3.0 * 3.0 && v2 < 40.0 * 40.0)
+        for (int c = 0; c < 3; ++c) pivot[c] = own.rows[3][c];
     }
   }
   double rel[3] = {rows[3][0] - pivot[0], rows[3][1] - pivot[1], rows[3][2] - pivot[2]};

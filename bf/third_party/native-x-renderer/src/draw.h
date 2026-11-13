@@ -132,6 +132,7 @@ class DrawPath {
   void EndHudFrame() {
     hud_menu_ = (hud_backdrop_ || GameMenuRecently()) && !hud_mesh_;
     hud_tally_.menu_frames += hud_menu_;
+    hud_scope_ = hud_mesh_;
     hud_area_ = 0, hud_prev_ = {}, hud_mesh_ = false, hud_backdrop_ = false;
     hud_seen_last_.swap(hud_seen_);
     hud_seen_.clear();
@@ -316,6 +317,7 @@ class DrawPath {
   double hud_area_ = 0;    // this frame's boxed area (clip space units, full screen 4), overlays of full height left out
   bool hud_menu_ = false;  // the last frame's was a menu's (over 0.3 of the screen): no edges, all in the middle
   bool hud_mesh_ = false;  // this frame drew a 3D overlay (a scope's mask): never a menu
+  bool hud_scope_ = false;  // the last frame did: a scope is up
   // This frame drew a backdrop over exactly the whole canvas (a menu's: the spawn screen, the scoreboard, 12 Nov
   // 21:00 logs). The in-game HUD draws none; its covered area was no sign (a large invisible container there made
   // every frame a menu, 12 Nov 22:08).

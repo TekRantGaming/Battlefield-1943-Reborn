@@ -97,7 +97,15 @@ struct Box {
 };
 constexpr Box kKitCards[3] = {{102, 217, 251, 497}, {257, 217, 406, 497}, {412, 217, 561, 497}};
 constexpr int kKitOfCard[3] = {1, 0, 2};  // Rifleman, Infantry, Scout
-constexpr Box kSpawnMode{94, 529, 330, 568}, kEnter{94, 572, 280, 607}, kBack{94, 611, 210, 644};
+// The three buttons are black brush strokes, each a little off the level (rising to the right): a slanted band from
+// x0 to x1, its middle at y0 on the left and y1 on the right, h high (measured from the same screenshot).
+struct Stroke {
+  float x0, x1, y0, y1, h;
+  float Mid(float x) const { return y0 + (y1 - y0) * (x - x0) / (x1 - x0); }
+  bool Has(float x, float y) const { return x >= x0 && x < x1 && std::fabs(y - Mid(x)) <= h * 0.5f; }
+};
+constexpr Stroke kSpawnMode{89, 325, 547.5f, 538.0f, 40}, kEnter{89, 264, 592.0f, 585.0f, 35},
+    kBack{92, 193, 630.0f, 625.0f, 32};
 constexpr Box kMap{623, 119, 1180, 497};
 // The map: a place in the world (x, z in metres) in stage units.
 constexpr float kMapA = 0.311910f, kMapB = -0.113804f, kMapX = 920.03f, kMapY = 358.16f;
@@ -145,13 +153,21 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
       break;
     }
     const struct {
-      const Box& box;
+      const Stroke& stroke;
       uint16_t button;
       const char* name;
     } buttons[] = {{kSpawnMode, kY, "spawn mode"}, {kEnter, kA, "enter battle"}, {kBack, kB, "back"}};
     for (const auto& b : buttons) {
-      if (!b.box.Has(mx, my)) continue;
-      outline(b.box);
+      const Stroke& k = b.stroke;
+      if (!k.Has(mx, my)) continue;
+      // The highlight lies along the stroke: its slant, a little larger than it, a warm wash and an edge.
+      const float e = 3.0f, half = k.h * 0.5f + e;
+      const ImVec2 quad[4] = {ImVec2(ox + (k.x0 - e) * s, oy + (k.Mid(k.x0 - e) - half) * s),
+                              ImVec2(ox + (k.x1 + e) * s, oy + (k.Mid(k.x1 + e) - half) * s),
+                              ImVec2(ox + (k.x1 + e) * s, oy + (k.Mid(k.x1 + e) + half) * s),
+                              ImVec2(ox + (k.x0 - e) * s, oy + (k.Mid(k.x0 - e) + half) * s)};
+      dl->AddQuadFilled(quad[0], quad[1], quad[2], quad[3], IM_COL32(255, 236, 170, 46));
+      dl->AddQuad(quad[0], quad[1], quad[2], quad[3], IM_COL32(255, 236, 170, 230), 2.5f * s);
       if (click) {
         Queue({b.button});
         REXLOG_INFO("BF spawn mouse: {} clicked", b.name);
