@@ -33,6 +33,7 @@ void GpuBenchmarkStart();
 bool GpuBenchmarkResult(double* ms);
 // D158: whether NVIDIA Image Scaling runs on this GPU, and the GPU's name; false until known.
 bool NisSupport(bool* runs, std::string* gpu);
+bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss);
 // D163: see native_x_renderer::NightLamps.
 void NightLamps(const NightLamp* lamps, uint32_t count);
 void NightModels(const NightModelLamps* models, uint32_t count);

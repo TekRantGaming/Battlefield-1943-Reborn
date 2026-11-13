@@ -143,6 +143,9 @@ void GpuBenchmarkStart() {
 }
 bool GpuBenchmarkResult(double* ms) { return g_renderer && renderer::GpuBenchmarkResult(ms); }
 bool NisSupport(bool* runs, std::string* gpu) { return g_renderer && renderer::NisSupport(runs, gpu); }
+bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss) {
+  return g_renderer && renderer::TemporalSupport(fsr4, fsr3, xess, dlss);
+}
 
 // D163: kept whether the renderer runs yet or not (the level is read on a worker).
 void NightLamps(const NightLamp* lamps, uint32_t count) { renderer::NightLamps(lamps, count); }

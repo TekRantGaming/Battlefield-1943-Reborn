@@ -220,6 +220,15 @@ std::string g_plain_sharpness = "-1";
 // 13 Nov 2026: with a temporal upscaler (bf_temporal) the renderer's antialiasing is that upscaler in its mode, the
 // spatial upscaler is off and so is the sharpening at presenting (the temporal one has its own:
 // native_x_renderer_upscaler_sharpness); without one, the antialiasing is the finished picture's (bf_post_aa).
+// The temporal upscalers this GPU runs (14 Nov 2026, TekRantGaming: "all the upscalers that are offered only appear as
+// an option in the game if the user has a valid vendor that supports each version"): the renderer's answer at the last
+// start, kept in the settings as ",fsr4,fsr,xess,dlss," (those that run; TAA runs everywhere). Empty: not known yet.
+// A choice this GPU does not run: FSR 4 becomes FSR 3.1 where that runs, anything else Off.
+std::string TemporalFallback(const std::string& t, const std::string& supported) {
+  if (supported.empty() || t == "off" || t == "taa" || supported.find("," + t + ",") != std::string::npos) return t;
+  if (t == "fsr4" && supported.find(",fsr,") != std::string::npos) return "fsr";
+  return "off";
+}
 bool TemporalUpscalerOn() {
   const std::string t = rex::cvar::GetFlagByName("bf_temporal");
   return t == "fsr4" || t == "fsr" || t == "dlss" || t == "xess" || t == "taa";
@@ -838,7 +847,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         gpu_benchmark_at_ = ImGui::GetTime() + 3.0;
       else if (ImGui::GetTime() >= gpu_benchmark_at_) gpu_benchmark_started_ = true, native_x_renderer::GpuBenchmarkStart();
     }
-    if (!REXCVAR_GET(server)) AutoDetectWhenTimed(), NoteNisSupport();
+    if (!REXCVAR_GET(server)) AutoDetectWhenTimed(), NoteNisSupport(), NoteTemporalSupport();
 #if defined(BF_DEV_TOOLS)
     // BF_DEV_HD_IMPORT=<pack> (tests): Settings > Graphics > Import HD texture pack, as if chosen, once.
     {
@@ -2756,6 +2765,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
   static bool Truthy(const std::string& v) { return v == "true" || v == "1" || v == "on"; }
 
+  // The Upscaler row's choices: Off and TAA always, the others only where this GPU runs them (the renderer's answer,
+  // NoteTemporalSupport); before the first answer, Off and TAA alone. The one chosen stays listed until it is changed.
+  std::vector<std::pair<std::string, std::string>> TemporalChoices() {
+    const std::string supported = settings_.Get("temporal_support", "");
+    const std::string chosen = Cvar("bf_temporal");
+    std::vector<std::pair<std::string, std::string>> out = {{"Off", "off"}};
+    for (const auto& [title, value] : std::vector<std::pair<std::string, std::string>>{
+             {"AMD FSR 4", "fsr4"}, {"AMD FSR 3.1", "fsr"}, {"Intel XeSS", "xess"}, {"NVIDIA DLSS", "dlss"}})
+      if (supported.find("," + value + ",") != std::string::npos || value == chosen) out.push_back({title, value});
+    out.push_back({"TAA", "taa"});
+    return out;
+  }
   SettingRow Choice(const std::string& section, const std::string& name, const std::string& help,
                     const std::string& cvar, const std::vector<std::pair<std::string, std::string>>& options) {
     SettingRow r{section, name, help};
@@ -3213,14 +3234,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // antialiasing above cannot.
     rows.push_back(Choice("Upscaling", "Upscaler",
                           "Antialiases, and in the modes below Native upscales, with what the last frames showed: the "
-                          "steadiest picture. AMD FSR 4 is AMD's newest (Radeon RX 6000 and later with a current "
-                          "driver; elsewhere AMD's library picks what the card runs). AMD FSR 3.1 runs on any card. "
-                          "Intel XeSS runs on any recent card. NVIDIA DLSS needs a GeForce RTX. TAA is the game's own plain "
-                          "temporal antialiasing, at your display's resolution only. Replaces Antialiasing and the spatial upscaler. Applies at "
-                          "the next start.",
-                          "bf_temporal",
-                          {{"Off", "off"}, {"AMD FSR 4", "fsr4"}, {"AMD FSR 3.1", "fsr"}, {"Intel XeSS", "xess"},
-                           {"NVIDIA DLSS", "dlss"}, {"TAA", "taa"}}));
+                          "steadiest picture. Only the upscalers your graphics card runs are listed: AMD FSR 4 on a "
+                          "Radeon RX 9000, AMD FSR 3.1 and Intel XeSS where AMD's and Intel's libraries run on your "
+                          "card, NVIDIA DLSS on a GeForce RTX. TAA is the game's own plain temporal antialiasing, at "
+                          "your display's resolution only, on any card. Replaces Antialiasing and the spatial "
+                          "upscaler. Applies at the next start.",
+                          "bf_temporal", TemporalChoices()));
     {
       SettingRow mode = Choice("Upscaling", "Upscaler mode",
                                "Native AA draws the game at your display's resolution and only antialiases. The others "
@@ -5240,6 +5259,12 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   // The Upscaler (ApplyUpscaler): the sharpness as the settings and the command line give it is the one for Off.
   if (!REXCVAR_GET(server)) {
     g_plain_sharpness = rex::cvar::GetFlagByName("native_x_renderer_sharpness");
+    // A temporal upscaler the last start found this GPU does not run: one it does (TemporalFallback).
+    const std::string t = rex::cvar::GetFlagByName("bf_temporal");
+    if (const std::string to = TemporalFallback(t, settings.Get("temporal_support", "")); to != t) {
+      REXLOG_INFO("BF upscaler: {} does not run on this GPU (its last start found): {} instead", t, to);
+      rex::cvar::SetFlagByName("bf_temporal", to);
+    }
     ApplyUpscaler(true, settings.Get("nis_support", ""));
   }
   if (auto it = settings.values.find("fullscreen"); it != settings.values.end())

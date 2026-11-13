@@ -333,6 +333,29 @@
   }
   bool nis_noted_ = false;
 
+  // Each frame until known: which temporal upscalers run on this GPU (the renderer's answer at this start), saved for
+  // the Upscaler row; a choice that does not run here becomes one that does (TemporalFallback).
+  void NoteTemporalSupport() {
+    if (temporal_noted_) return;
+    bool fsr4 = false, fsr3 = false, xess = false, dlss = false;
+    if (!native_x_renderer::TemporalSupport(&fsr4, &fsr3, &xess, &dlss)) return;
+    temporal_noted_ = true;
+    const std::string value = std::string(",") + (fsr4 ? "fsr4," : "") + (fsr3 ? "fsr," : "") + (xess ? "xess," : "") +
+                              (dlss ? "dlss," : "") + "taa,";
+    if (settings_.Get("temporal_support", "") != value) {
+      settings_.values["temporal_support"] = value;
+      settings_.Save();
+      REXLOG_INFO("BF upscaler: the Upscaler row offers {}", value);
+    }
+    const std::string t = Cvar("bf_temporal");
+    if (const std::string to = TemporalFallback(t, value); to != t) {
+      REXLOG_INFO("BF upscaler: {} does not run on this GPU: {} from the next start", t, to);
+      settings_.values["cvar.bf_temporal"] = to;
+      settings_.Save();
+    }
+  }
+  bool temporal_noted_ = false;
+
   // ---- a small question over the page: Cancel focused (King Kong's Skip all). True once answered; `yes` the second.
   bool Question(ImDrawList* d, ImGuiIO& io, const Stage& st, const std::string& title, const std::string& text,
                 const std::string& no, const std::string& yes, Input& in, bool& answered_yes) {

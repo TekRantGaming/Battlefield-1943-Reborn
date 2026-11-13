@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 (13 November 2026): only the upscalers your graphics card runs
+
+**Fixed**
+- **The Upscaler row lists only what your graphics card runs.** AMD FSR 4 shows on a Radeon RX 9000 only, AMD FSR 3.1
+  and Intel XeSS where AMD's and Intel's own libraries say they run on your card, and NVIDIA DLSS on a GeForce RTX.
+  TAA works everywhere. If you had chosen one your card does not run, FSR 4 becomes FSR 3.1, and the others Off.
+
 ## 0.4.1 (13 November 2026): the mouse in every vehicle seat, Custom Match with LAN, more antialiasing and upscalers, Enhancements, players on the pause map
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. Earlier versions update to it by

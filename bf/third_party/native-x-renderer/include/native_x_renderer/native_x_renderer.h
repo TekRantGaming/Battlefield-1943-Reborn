@@ -313,6 +313,10 @@ bool GpuBenchmarkResult(double* ms);
 // native_x_renderer_check_nis), and the GPU's name; false until the renderer has started and asked.
 bool NisSupport(bool* runs, std::string* gpu);
 
+// Which temporal upscalers run on this GPU (asked at the renderer's start): FSR 4 and FSR 3.1 as AMD's library lists
+// them for the GPU, XeSS as Intel's library answers, DLSS on an NVIDIA GeForce RTX. False until the renderer has started.
+bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss);
+
 // Developer tests (a camera tour): the terrain's ground height at world x, z, as the grass reads it, asked for with a
 // number and answered a few frames later (GrassProbeResult true once it is, with that number). Grass must be on.
 void GrassProbe(float x, float z, uint32_t id);

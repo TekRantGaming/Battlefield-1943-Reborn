@@ -23,6 +23,8 @@
 #include "scope.h"
 #include "ssgi.h"
 #include "upscaler.h"
+#include "fsr.h"
+#include "xess.h"
 #include "framegen.h"
 #include "overlay_motion.h"
 #include "blit.h"
@@ -222,6 +224,9 @@ DisplayGamma g_gamma;  // the guest's display gamma ramp, applied when presentin
 Scaling g_scaling;     // the image scaled into the window by FSR 1 or NIS, and sharpened (D115)
 // D158: whether NIS runs on this GPU (-1 not asked, 0 no, 1 yes), and the GPU's name, for the game's menus.
 std::atomic<int> g_nis_support{-1};
+// 14 Nov 2026 (TekRantGaming: only the upscalers this GPU's vendor supports are offered): which temporal upscalers run
+// here, asked at the start (bits: 1 FSR 4, 2 FSR 3.1, 4 XeSS, 8 DLSS; -1 until asked).
+std::atomic<int> g_temporal_support{-1};
 std::string g_gpu_name;
 Antialiasing g_aa;     // on the finished scene (D41)
 // 13 Nov 2026: the setting read again once a frame, so Off, FXAA, SMAA and CMAA 2 change while the game runs (not to
@@ -2962,6 +2967,21 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
       g_nis_support = Scaling::Supported(device->device(), Scaling::Filter::kNis) ? 1 : 0;
     }
   }
+  // Which temporal upscalers this GPU runs, for the game's menus (TemporalSupport): FSR as AMD's library lists it for
+  // this GPU (FSR 4 on a Radeon RX 9000 only), XeSS as Intel's library answers for it, DLSS on an NVIDIA GeForce RTX
+  // (NGX runs on RTX cards only).
+  {
+    bool fsr4 = false, fsr3 = false;
+    Fsr probe;
+    probe.Generations(device->device(), &fsr4, &fsr3);
+    const bool xess = Xess::Runs(device->device());
+    const GraphicsAdapterInfo& adapter = device->device()->GetAdapterInfo();
+    const std::string name = adapter.Description;
+    const bool dlss = adapter.Vendor == ADAPTER_VENDOR_NVIDIA && name.find("RTX") != std::string::npos;
+    g_temporal_support = (fsr4 ? 1 : 0) | (fsr3 ? 2 : 0) | (xess ? 4 : 0) | (dlss ? 8 : 0);
+    REXLOG_INFO("[native_x_renderer] temporal upscalers on {}: FSR 4 {}, FSR 3.1 {}, XeSS {}, DLSS {}", name,
+                fsr4 ? "yes" : "no", fsr3 ? "yes" : "no", xess ? "yes" : "no", dlss ? "yes" : "no");
+  }
   // The SDK's dialogs (D75): without them a game that asks for text (GRAW's new game) waits on a black screen.
   g_window = window;
   if (!g_overlay.Initialize(device->device(), device->swap_chain()->GetDesc().ColorBufferFormat)) {
@@ -3227,6 +3247,12 @@ double AspectFactor() { return g_aspect_factor; }
 
 void GpuBenchmarkStart() { g_gpu_benchmark.Request(); }
 bool GpuBenchmarkResult(double* ms) { return g_gpu_benchmark.Result(ms); }
+bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss) {
+  const int support = g_temporal_support.load();
+  if (support < 0) return false;
+  *fsr4 = (support & 1) != 0, *fsr3 = (support & 2) != 0, *xess = (support & 4) != 0, *dlss = (support & 8) != 0;
+  return true;
+}
 bool NisSupport(bool* runs, std::string* gpu) {
   const int support = g_nis_support.load();
   if (support < 0) return false;
