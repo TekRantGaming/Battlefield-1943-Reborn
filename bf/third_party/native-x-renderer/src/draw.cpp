@@ -1142,6 +1142,16 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   bool guest_msaa = regs.Get<reg::RB_SURFACE_INFO>().msaa_samples != xenos::MsaaSamples::k1X;
   bool alpha_to_coverage_blended = (guest_msaa ? alpha_to_coverage_blend_.msaa : alpha_to_coverage_blend_.one) &&
                                    pixel_shader && regs.Get<reg::RB_COLORCONTROL>().alpha_to_mask_enable;
+  // How much of the game is drawn this way (13 Nov 2026, the rendering quirks: a dither that shimmers, or none at
+  // all?): its draws with alpha to coverage counted, said once after the first 2000 and how they are drawn.
+  if (pixel_shader && regs.Get<reg::RB_COLORCONTROL>().alpha_to_mask_enable) {
+    static uint64_t seen = 0, blended = 0, at_1x = 0;
+    ++seen, blended += alpha_to_coverage_blended, at_1x += !guest_msaa;
+    if (seen == 2000)
+      REXLOG_INFO("[native_x_renderer] alpha to coverage: the game's first 2000 such draws, {} on surfaces it draws at "
+                  "1x, {} blended by alpha and {} dithered (native_x_renderer_alpha_to_coverage)",
+                  at_1x, blended, seen - blended);
+  }
   if (alpha_to_coverage_blended) {
     for (uint32_t i = 0; i < render_target_count; ++i) {
       PipelineState::Target& target = state.targets[i];

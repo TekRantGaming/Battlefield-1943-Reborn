@@ -2534,7 +2534,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // values as this run started: a changed one shows NEXT START on its row, and the setup restarts the game at its end
   // (TekRantGaming, 8 Nov: the setup's DLAA and Ultra shadows only arrived at the second start, which then ran much slower
   // than the first match).
-  static constexpr const char* kStartCvars[] = {"bf_temporal", "bf_temporal_mode", "native_x_renderer_frame_generation",
+  static constexpr const char* kStartCvars[] = {"native_x_renderer_alpha_to_coverage", "bf_temporal", "bf_temporal_mode", "native_x_renderer_frame_generation",
                                                 "native_x_renderer_shadow_scale", "native_x_renderer_sharpness",
                                                 "native_x_renderer_scaling", "bf_upscaler_mode", "user_language",
                                                 "native_x_renderer_fill_screen", "bf_render_scale"};
@@ -3153,6 +3153,15 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         sharp.disabled = true, sharp.note = "The upscaler sharpens the picture itself.";
       rows.push_back(sharp);
     }
+    // 13 Nov 2026 (the rendering quirks: "shimmering smoke effects ... texture shimmer"): what the game draws with
+    // alpha to coverage (leaves, fences, some effects) is dithered at the console's 1x, in a 2x2 pattern that
+    // sparkles as the camera moves at a PC's resolution. Smooth blends it by its alpha instead (NativeXRenderer D69).
+    rows.push_back(Choice("Image", "Transparent edges",
+                          "How leaves, fences and other see-through edges are drawn. Original dithers them in a fine "
+                          "dot pattern, as on the console: solid from afar, but it can sparkle as you move. Smooth "
+                          "blends them instead: no sparkle, a little softer, and thin leaves can look more see-through. "
+                          "Applies at the next start.",
+                          "native_x_renderer_alpha_to_coverage", {{"Original", "auto"}, {"Smooth", "blend"}}));
     rows.push_back(Choice("Image", "Texture filtering", "Keeps the ground and distant textures sharp at steep angles.",
                           "anisotropic_override",
                           {{"Game", "-1"}, {"Off", "0"}, {"2\xC3\x97", "2"}, {"4\xC3\x97", "3"}, {"8\xC3\x97", "4"},
