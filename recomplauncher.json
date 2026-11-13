@@ -1,0 +1,37 @@
+{
+    "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+    "format": 1,
+    "name": "Battlefield 1943 Reborn",
+    "repo": "TekRantGaming/Battlefield-1943-Reborn",
+    "start": {
+        "program": [
+            "bf1943.exe"
+        ]
+    },
+    "folders": {
+        "logs": [
+            {
+                "path": "{install}/user"
+            }
+        ],
+        "crashes": [
+            {
+                "path": "{install}/user/crashes"
+            }
+        ]
+    },
+    "actions": [
+        {
+            "id": "logs",
+            "label": "Logs",
+            "help": "The game's settings and logs, kept in the user folder next to the game.",
+            "open": "logs"
+        },
+        {
+            "id": "crashes",
+            "label": "Crash reports",
+            "help": "Crash and hang reports. Attach these when you report a problem on Discord.",
+            "open": "crashes"
+        }
+    ]
+}
