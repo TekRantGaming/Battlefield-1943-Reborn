@@ -2337,13 +2337,15 @@
     d->AddRectFilled(ImVec2(ra.x, ra.y + st(76)), ImVec2(rb.x, ra.y + st(77)), IM_COL32(241, 234, 211, 30));
     const float rows_y = ra.y + st(77);
     // ---- the picture card at the right: the chosen map from the air, the paper band under it
-    const ImVec2 ha = st.P(427, 93), hb = st.P(1232, 380);
+    // (13 Nov 2026: down to the rail's foot, "getting a cleaner full view of the map"; it ended at 380.)
+    const ImVec2 ha = st.P(427, 93), hb = st.P(1232, 620);
     const ImVec2 band(ha.x, hb.y - st(110));
     d->PushClipRect(ha, hb, true);
     MapPicture(d, st.u * 1.5f, ha, ImVec2(hb.x, band.y), pm_map_ < 4 ? kPmMapTitles[pm_map_] : "Wake Island");
     d->PopClipRect();
     {  // the chip
-      const std::string chip = "YOUR OWN SERVER \xC2\xB7 FRIENDS JOIN WITH DIRECT CONNECT";
+      const std::string chip = pm_lan_ ? "YOUR OWN SERVER \xC2\xB7 ON YOUR NETWORK'S LAN TAB"
+                                       : "YOUR OWN SERVER \xC2\xB7 ON THE COMMUNITY TAB";
       const float cw = kit::SpacedWidth(f.ui_bold, st(9), chip, st(1));
       const ImVec2 c0(ha.x + st(20), ha.y + st(20)), c1(c0.x + cw + st(22), c0.y + st(22));
       d->AddRectFilled(c0, c1, kit::kStrip);
