@@ -8,9 +8,8 @@
 //   - a kit card: d-pad left or right until that card is the chosen one (the screen's onKitLeft adds one to its kit
 //     index, onKitRight takes one off, round the three; the cards stand Rifleman 1, Infantry 0, Scout 2);
 //   - Set to flag spawn, Enter battle, Back: Y, A, B;
-//   - a spawn point on the map: the screen's own onSpawnUp or onSpawnDown (its spawn index less or plus one, the
-//     display following), called until the index it tells the game (selectSpawnPoint) is that point's. The index is
-//     the capture point's Index in the level file (run of 13 Nov 03:20: the Axis carrier, Index 6, was sent as 6).
+//   - a spawn point on the map: the right stick pushed from the chosen point toward the clicked one, the game's own
+//     way (the screen's gotoNextSpawnPoint takes the next point in that direction).
 // Where things are on the screen was measured from a screenshot of it (13 Nov, 1280 x 720 stage units). The map: a
 // least squares fit of Wake Island's five flags in that screenshot to their places in the world put every one within
 // a unit, and the carrier's marker too: 0.332 units a metre, turned 20 degrees, the world's origin at 920, 358. Other
@@ -74,10 +73,6 @@ struct State {
   int kit = -1;    // the screen's kit index as it last told the game (0 Infantry, 1 Rifleman, 2 Scout); -1 not known
   int spawn = -1;  // its spawn point index, as last told
   int icons_logged = 0;
-  int want_spawn = -1;  // the spawn index a click asked for, stepped to in the pad hook
-  int want_steps = 0;
-  Clock::time_point quiet_until{};  // the screen's sounds are not passed on until then (a later step of one click)
-  Clock::time_point want_step_at{};
 } g;
 std::atomic<bool> g_active{false};
 
@@ -124,6 +119,21 @@ constexpr Box kMap{623, 119, 1180, 497};
 constexpr float kMapA = 0.311910f, kMapB = -0.113804f, kMapX = 920.03f, kMapY = 358.16f;
 ImVec2 OnMap(float wx, float wz) { return ImVec2(kMapA * wx - kMapB * wz + kMapX, kMapB * wx + kMapA * wz + kMapY); }
 constexpr float kPointReach = 30.0f;  // a click this near a point (stage units) is a click on it
+// The screen's own number for a spawn point (what it sends as selectSpawnPoint), by the point's name; -1 not known.
+// Wake Island from the run of 13 Nov 04:16 (the US carrier was 1, the South Base 6): the two carriers, then the
+// island's points by name. The other levels' numbers are not known yet (bf_debug_spawn_mouse logs them).
+int ScreenIndexOf(const std::string& name) {
+  static constexpr struct {
+    const char* suffix;
+    int index;
+  } kWake[] = {{"AXIS_CARRIER", 0},    {"ALLIED_CARRIER", 1},   {"WAKE_AIRFIELD", 2},  {"WAKE_BEACH", 3},
+               {"WAKE_NORTH_BASE", 4}, {"WAKE_NORTH_VILLAGE", 5}, {"WAKE_SOUTH_BASE", 6}};
+  for (const auto& k : kWake) {
+    const size_t n = std::strlen(k.suffix);
+    if (name.size() >= n && name.compare(name.size() - n, n, k.suffix) == 0) return k.index;
+  }
+  return -1;
+}
 
 void Queue(const Action& a) {
   if (g.actions.size() < 8) g.actions.push_back(a);
@@ -201,7 +211,22 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
         dl->AddCircle(c, 17.0f * s, IM_COL32(255, 236, 170, 235), 32, 2.5f * s);
       }
       if (click) {
-        if (near_point) g.want_spawn = near_point->index, g.want_steps = 0, g.want_step_at = {};
+        // The game's own way to another spawn point: the right stick pushed from the chosen point toward the wanted
+        // one (the screen's gotoNextSpawnPoint takes the next point that way; one push, one sound). The screen's
+        // onSpawnUp and onSpawnDown do not move the choice (run of 13 Nov 04:16: ten calls, ten sounds, the index
+        // unchanged). From the map's middle while the chosen point is not known.
+        if (near_point && ScreenIndexOf(near_point->name) != g.spawn) {
+          ImVec2 from((kMap.x0 + kMap.x1) * 0.5f, (kMap.y0 + kMap.y1) * 0.5f);
+          for (const CapturePoint& p : points)
+            if (g.spawn >= 0 && ScreenIndexOf(p.name) == g.spawn) from = OnMap(p.x, p.z);
+          const float dx = at.x - from.x, dy = from.y - at.y, l = std::sqrt(dx * dx + dy * dy);
+          if (l > 4.0f) {
+            Action a;
+            a.rx = dx / l, a.ry = dy / l, a.hold_ms = 160, a.gap_ms = 220;
+            g.actions.clear();
+            Queue(a);
+          }
+        }
         REXLOG_INFO("BF spawn mouse: map clicked at stage {:.0f}, {:.0f}: {} (index {}); the screen's spawn index {}", mx,
                     my, near_point ? near_point->name : "no point there", near_point ? near_point->index : -1, g.spawn);
       }
@@ -237,28 +262,8 @@ void SpawnMousePad(uint8_t* gamepad, bool may_be_up) {
         REXLOG_INFO("BF spawn mouse: capture point {} index {} letter {} at x {:.1f} z {:.1f}, owner {}, shown {}",
                     p.name, p.index, p.letter < 0 ? '-' : char('A' + p.letter), p.x, p.z, p.owner, p.shown);
     }
-    g.want_spawn = -1;
   }
   if (!active) return;
-  // A spawn point asked for by a click: the screen's own step up (its index less one) or down (plus one), one at a
-  // time, each after the screen has told the game its new index, until it is the one asked for. A point the team may
-  // not spawn at is not taken by the screen: the steps then end.
-  if (g.want_spawn >= 0) {
-    if (g.spawn == g.want_spawn) {
-      g.want_spawn = -1;
-    } else if (g.want_steps >= 10) {
-      REXLOG_INFO("BF spawn mouse: spawn index {} not reached (the screen stays on {})", g.want_spawn, g.spawn);
-      g.want_spawn = -1;
-    } else if (now >= g.want_step_at) {
-      FlashCall(g.spawn >= 0 && g.want_spawn < g.spawn ? "_root.contentMC.loader1.onSpawnUp"
-                                                         : "_root.contentMC.loader1.onSpawnDown");
-      // One click, one sound (13 Nov: "clicking a spawn point plays multiple successive audio clips"): the first
-      // step's is heard, the later steps' are kept from the game (SpawnMouseCommand).
-      if (g.want_steps > 0) g.quiet_until = now + std::chrono::milliseconds(260);
-      ++g.want_steps;
-      g.want_step_at = now + std::chrono::milliseconds(200);
-    }
-  }
   if (now >= g.now_until && now >= g.gap_until && !g.actions.empty()) {
     g.now = g.actions.front();
     g.actions.pop_front();
@@ -276,26 +281,15 @@ void SpawnMousePad(uint8_t* gamepad, bool may_be_up) {
   }
 }
 
-// From the game command hook (auto_join.cpp): what the deploy screen tells the game. True: not to be passed on (a
-// sound of a later step of one click).
+// From the game command hook (auto_join.cpp): what the deploy screen tells the game. True: not to be passed on
+// (never, now).
 bool SpawnMouseCommand(const char* name, const char* args) {
   if (!name) return false;
   const bool kit = std::strcmp(name, "selectKit") == 0, spawn = std::strcmp(name, "selectSpawnPoint") == 0;
   const bool ours = kit || spawn || std::strcmp(name, "selectSquadSpawn") == 0 || std::strcmp(name, "doSpawn") == 0 ||
                     std::strcmp(name, "selectWeapon") == 0;
   std::lock_guard lock(g.mutex);
-  if (!ours) {
-    if (!g.active || Clock::now() >= g.quiet_until) return false;
-    // A sound's command, by its name (any letter case): "sound", "sfx", "audio".
-    std::string lower(name);
-    for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
-    const bool sound = lower.find("sound") != std::string::npos || lower.find("sfx") != std::string::npos ||
-                       lower.find("audio") != std::string::npos;
-    if (REXCVAR_GET(bf_debug_spawn_mouse))
-      REXLOG_INFO("BF spawn mouse: during a step the screen sent {} ({}){}", name, args ? args : "",
-                  sound ? ": a sound, not passed on" : "");
-    return sound;
-  }
+  if (!ours) return false;
   if (args && *args) {
     char* end = nullptr;
     const long v = std::strtol(args, &end, 10);
