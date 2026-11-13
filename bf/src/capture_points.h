@@ -12,6 +12,7 @@ namespace bf1943 {
 struct CapturePoint {
   uint32_t entity = 0;  // the game's object (guest address)
   int index = 0;        // the level file's Index
+  int order = 0;        // its place in the level's own list of points (0 first), before the sort by letter
   std::string name;     // the level file's ControlPointName (CQ_MP_BASE_WAKE_AIRFIELD)
   float x = 0, y = 0, z = 0;
   bool capturable = false;  // a team can take it, and the map shows it

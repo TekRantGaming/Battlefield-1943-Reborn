@@ -8,8 +8,13 @@
 //   - a kit card: d-pad left or right until that card is the chosen one (the screen's onKitLeft adds one to its kit
 //     index, onKitRight takes one off, round the three; the cards stand Rifleman 1, Infantry 0, Scout 2);
 //   - Set to flag spawn, Enter battle, Back: Y, A, B;
-//   - a spawn point on the map: the right stick pushed from the chosen point toward the clicked one, the game's own
-//     way (the screen's gotoNextSpawnPoint takes the next point in that direction).
+//   - a spawn point on the map: chosen directly, with the screen's own script and no stick. The screen's script
+//     (igm_mp_cq, read with tools/apt_disasm.py, 13 Nov) keeps an index into the list of the points the player may
+//     spawn at, and only its flag mode lets the player change it (in its frontline mode, "auto-spawn", setSpawnInfo
+//     puts the index back on the front line each time: why steps and stick pushes did nothing in the runs before).
+//     So a click on a point: toggleSpawnMode() when the index does not move (frontline to flag: m_spawnMode = 1 -
+//     m_spawnMode), then onSpawnDown() or onSpawnUp() (the index plus or less one, round the list) until the point
+//     the screen tells the game (selectSpawnPoint, the point's own number) is the clicked one.
 // Where things are on the screen was measured from a screenshot of it (13 Nov, 1280 x 720 stage units). The map: a
 // least squares fit of Wake Island's five flags in that screenshot to their places in the world put every one within
 // a unit, and the carrier's marker too: 0.332 units a metre, turned 20 degrees, the world's origin at 920, 358. Other
@@ -26,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <iterator>
 #include <mutex>
 #include <string>
@@ -73,6 +79,10 @@ struct State {
   int kit = -1;    // the screen's kit index as it last told the game (0 Infantry, 1 Rifleman, 2 Scout); -1 not known
   int spawn = -1;  // its spawn point index, as last told
   int icons_logged = 0;
+  // A spawn point asked for by a click: its number, and the steps toward it (the pad hook makes them).
+  int want = -1, want_steps = 0, want_toggles = 0, want_count = 1, want_from = -2;
+  bool want_down = true;
+  Clock::time_point want_at{};
 } g;
 std::atomic<bool> g_active{false};
 
@@ -119,21 +129,11 @@ constexpr Box kMap{623, 119, 1180, 497};
 constexpr float kMapA = 0.311910f, kMapB = -0.113804f, kMapX = 920.03f, kMapY = 358.16f;
 ImVec2 OnMap(float wx, float wz) { return ImVec2(kMapA * wx - kMapB * wz + kMapX, kMapB * wx + kMapA * wz + kMapY); }
 constexpr float kPointReach = 30.0f;  // a click this near a point (stage units) is a click on it
-// The screen's own number for a spawn point (what it sends as selectSpawnPoint), by the point's name; -1 not known.
-// Wake Island from the run of 13 Nov 04:16 (the US carrier was 1, the South Base 6): the two carriers, then the
-// island's points by name. The other levels' numbers are not known yet (bf_debug_spawn_mouse logs them).
-int ScreenIndexOf(const std::string& name) {
-  static constexpr struct {
-    const char* suffix;
-    int index;
-  } kWake[] = {{"AXIS_CARRIER", 0},    {"ALLIED_CARRIER", 1},   {"WAKE_AIRFIELD", 2},  {"WAKE_BEACH", 3},
-               {"WAKE_NORTH_BASE", 4}, {"WAKE_NORTH_VILLAGE", 5}, {"WAKE_SOUTH_BASE", 6}};
-  for (const auto& k : kWake) {
-    const size_t n = std::strlen(k.suffix);
-    if (name.size() >= n && name.compare(name.size() - n, n, k.suffix) == 0) return k.index;
-  }
-  return -1;
-}
+// The number the screen sends the game for a spawn point (selectSpawnPoint: the entry's own number in the list the
+// game gave the screen, not the screen's index into it). The game numbers the level's points from the end of its
+// own list: on Wake Island (run of 13 Nov 04:16) the US carrier, sixth of seven, was 1 and the South Base, the
+// first, was 6. Taken as that for every level (bf_debug_spawn_mouse logs each point's number to check it).
+int SpawnNumber(const CapturePoint& p, size_t count) { return int(count) - 1 - p.order; }
 
 void Queue(const Action& a) {
   if (g.actions.size() < 8) g.actions.push_back(a);
@@ -211,24 +211,36 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
         dl->AddCircle(c, 17.0f * s, IM_COL32(255, 236, 170, 235), 32, 2.5f * s);
       }
       if (click) {
-        // The game's own way to another spawn point: the right stick pushed from the chosen point toward the wanted
-        // one (the screen's gotoNextSpawnPoint takes the next point that way; one push, one sound). The screen's
-        // onSpawnUp and onSpawnDown do not move the choice (run of 13 Nov 04:16: ten calls, ten sounds, the index
-        // unchanged). From the map's middle while the chosen point is not known.
-        if (near_point && ScreenIndexOf(near_point->name) != g.spawn) {
-          ImVec2 from((kMap.x0 + kMap.x1) * 0.5f, (kMap.y0 + kMap.y1) * 0.5f);
+        if (near_point) {
+          g.want = SpawnNumber(*near_point, points.size());
+          g.want_steps = 0, g.want_toggles = 0, g.want_at = {}, g.want_from = -2;
+          // The points the player's team holds: how many steps round the list can be needed, and which way is
+          // shorter (the list is in the game's order, the numbers running down it).
+          // The player's team: the owner of a point the game's maps show in the team's colour, else of the point the
+          // screen is on now.
+          int team = 0;
           for (const CapturePoint& p : points)
-            if (g.spawn >= 0 && ScreenIndexOf(p.name) == g.spawn) from = OnMap(p.x, p.z);
-          const float dx = at.x - from.x, dy = from.y - at.y, l = std::sqrt(dx * dx + dy * dy);
-          if (l > 4.0f) {
-            Action a;
-            a.rx = dx / l, a.ry = dy / l, a.hold_ms = 160, a.gap_ms = 220;
-            g.actions.clear();
-            Queue(a);
+            if (SpawnNumber(p, points.size()) == g.spawn && p.owner) team = p.owner;
+          for (const CapturePoint& p : points)
+            if (p.shown == 1 && p.owner) team = p.owner;
+          if (team && near_point->owner != team) {
+            REXLOG_INFO("BF spawn mouse: {} is not the team's: no spawn there", near_point->name);
+            g.want = -1;
+          }
+          std::vector<int> held;
+          for (const CapturePoint& p : points)
+            if (team && p.owner == team) held.push_back(SpawnNumber(p, points.size()));
+          std::sort(held.begin(), held.end(), std::greater<int>());
+          g.want_count = std::max<int>(1, int(held.size()));
+          const auto cur = std::find(held.begin(), held.end(), g.spawn), to = std::find(held.begin(), held.end(), g.want);
+          g.want_down = true;
+          if (cur != held.end() && to != held.end()) {
+            const int n = int(held.size()), forward = (int(to - held.begin()) - int(cur - held.begin()) + n) % n;
+            g.want_down = forward <= n - forward;
           }
         }
-        REXLOG_INFO("BF spawn mouse: map clicked at stage {:.0f}, {:.0f}: {} (index {}); the screen's spawn index {}", mx,
-                    my, near_point ? near_point->name : "no point there", near_point ? near_point->index : -1, g.spawn);
+        REXLOG_INFO("BF spawn mouse: map clicked at stage {:.0f}, {:.0f}: {} (number {}); the screen is on {}", mx, my,
+                    near_point ? near_point->name : "no point there", near_point ? g.want : -1, g.spawn);
       }
     }
   }
@@ -256,14 +268,38 @@ void SpawnMousePad(uint8_t* gamepad, bool may_be_up) {
     g.actions.clear();
     g.now = {}, g.now_until = {}, g.gap_until = {};
     g.icons_logged = 0;
+    g.want = -1;
     REXLOG_INFO("BF spawn mouse: the pointer is {}", active ? "free (deploy screen)" : "the game's again");
     if (active && REXCVAR_GET(bf_debug_spawn_mouse)) {
       for (const CapturePoint& p : CapturePoints())
-        REXLOG_INFO("BF spawn mouse: capture point {} index {} letter {} at x {:.1f} z {:.1f}, owner {}, shown {}",
-                    p.name, p.index, p.letter < 0 ? '-' : char('A' + p.letter), p.x, p.z, p.owner, p.shown);
+        REXLOG_INFO("BF spawn mouse: capture point {} index {} order {} letter {} at x {:.1f} z {:.1f}, owner {}, shown {}",
+                    p.name, p.index, p.order, p.letter < 0 ? '-' : char('A' + p.letter), p.x, p.z, p.owner, p.shown);
     }
   }
   if (!active) return;
+  // A spawn point asked for by a click (see the top): one call of the screen's script at a time, each after the
+  // screen has told the game where it is now.
+  if (g.want >= 0) {
+    if (g.spawn == g.want) {
+      g.want = -1;
+    } else if (now >= g.want_at) {
+      const bool stuck = g.want_steps > 0 && g.spawn == g.want_from;  // the last step did not move the choice
+      if ((stuck || g.want_steps >= g.want_count) && g.want_toggles < 1) {
+        FlashCall("_root.contentMC.loader1.toggleSpawnMode");  // frontline (auto-spawn) to flag spawn
+        ++g.want_toggles, g.want_steps = 0, g.want_from = -2;
+        g.want_at = now + std::chrono::milliseconds(300);
+        REXLOG_INFO("BF spawn mouse: the choice does not move: the screen set to flag spawn");
+      } else if (stuck || g.want_steps >= g.want_count) {
+        REXLOG_INFO("BF spawn mouse: spawn point {} not reached (the screen stays on {})", g.want, g.spawn);
+        g.want = -1;
+      } else {
+        g.want_from = g.spawn;
+        FlashCall(g.want_down ? "_root.contentMC.loader1.onSpawnDown" : "_root.contentMC.loader1.onSpawnUp");
+        ++g.want_steps;
+        g.want_at = now + std::chrono::milliseconds(220);
+      }
+    }
+  }
   if (now >= g.now_until && now >= g.gap_until && !g.actions.empty()) {
     g.now = g.actions.front();
     g.actions.pop_front();

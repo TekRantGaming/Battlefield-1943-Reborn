@@ -140,6 +140,7 @@ std::vector<CapturePoint> ReadPoints(const uint8_t* base) {
     if (!Plausible(data) || Load32(base, data) != kDataVtable) continue;
     CapturePoint p;
     p.entity = entity;
+    p.order = int(out.size());
     p.index = int(Load32(base, data + 0xA4));
     p.x = LoadF(base, data + 0x60), p.y = LoadF(base, data + 0x64), p.z = LoadF(base, data + 0x68);
     p.capturable = base[data + 0x135] == 0 && base[data + 0x12E] != 0;
