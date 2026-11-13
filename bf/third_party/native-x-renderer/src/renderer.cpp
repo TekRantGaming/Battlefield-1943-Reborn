@@ -214,6 +214,10 @@ Scaling g_scaling;     // the image scaled into the window by FSR 1 or NIS, and 
 std::atomic<int> g_nis_support{-1};
 std::string g_gpu_name;
 Antialiasing g_aa;     // on the finished scene (D41)
+// 13 Nov 2026: the setting read again once a frame, so Off, FXAA, SMAA and CMAA 2 change while the game runs (not to
+// or from DLSS or FSR: those draw the 3D view differently from the start).
+std::string g_aa_name;
+bool g_aa_live = false;
 Night g_night;         // the finished scene as a moonlit night (D162)
 // D162: the main view's depth (its shader view) kept at the view's end for the night's haze, the view's share of it,
 // and the frame it is from.
@@ -1638,6 +1642,15 @@ void ExecuteResolve(const Command& c) {
   }
   // The copy of the finished scene (the profile's scene_resolve_caller): antialiased in place (D41).
   // It is of the game's output size (D65).
+  if (g_aa_live && c.scene_caller && slice == 0) {  // the method changed in the settings: taken here, at once
+    std::string name = REXCVAR_GET(native_x_renderer_antialiasing);
+    if (name != g_aa_name) {
+      g_aa_name = name;
+      const bool temporal = name == "dlaa" || name.rfind("dlss", 0) == 0 || name.rfind("fsr", 0) == 0 ||
+                            name.rfind("xess", 0) == 0 || name.rfind("taa", 0) == 0;
+      if (!temporal) g_aa.Initialize(g_device->device(), Antialiasing::ParseMode(name));
+    }
+  }
   if (g_aa.mode() != Antialiasing::Mode::kOff && c.scene_caller && slice == 0 &&
       target->guest_width == g_profile->output_width &&
       target->guest_height == g_profile->output_height &&
@@ -2836,6 +2849,8 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
       mode = Antialiasing::Mode::kOff;
     }
     g_aa.Initialize(device->device(), mode);
+    g_aa_name = name;
+    g_aa_live = !g_temporal && profile.scene_resolve_caller != 0;
   }
   // D132: ambient occlusion where the profile names its moment and the main view is found from the draws.
   // Started whatever native_ao_mode says, so that the menu can turn it on and off at once.

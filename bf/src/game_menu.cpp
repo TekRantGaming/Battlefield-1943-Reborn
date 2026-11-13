@@ -2399,7 +2399,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // values as this run started: a changed one shows NEXT START on its row, and the setup restarts the game at its end
   // (TekRantGaming, 8 Nov: the setup's DLAA and Ultra shadows only arrived at the second start, which then ran much slower
   // than the first match).
-  static constexpr const char* kStartCvars[] = {"native_x_renderer_antialiasing", "native_x_renderer_frame_generation",
+  static constexpr const char* kStartCvars[] = {"native_x_renderer_frame_generation",
                                                 "native_x_renderer_shadow_scale", "native_x_renderer_sharpness",
                                                 "native_x_renderer_scaling", "bf_upscaler_mode", "user_language",
                                                 "native_x_renderer_fill_screen", "bf_render_scale"};
@@ -2861,7 +2861,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "finds the edges and smooths only those, so textures and text stay sharp: Low and Medium "
                           "are faster, High and Ultra search further along each edge. CMAA 2 (Intel's) smooths "
                           "edges and long slanted lines while leaving everything else untouched, the sharpest of the "
-                          "three; Ultra catches fainter edges. Applies at the next start.",
+                          "three; Ultra catches fainter edges.",
                           "native_x_renderer_antialiasing",
                           {{"Off", "off"}, {"FXAA", "fxaa"}, {"SMAA Low", "smaa_low"}, {"SMAA Medium", "smaa_medium"},
                            {"SMAA High", "smaa_high"}, {"SMAA Ultra", "smaa_ultra"}, {"CMAA 2", "cmaa"},

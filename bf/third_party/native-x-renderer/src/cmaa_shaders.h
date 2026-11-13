@@ -10,6 +10,10 @@
 //     full-screen pass lays them over the image. So the image needs no unordered access and keeps its alpha.
 //   - Vulkan does not define a read or write outside an image or a buffer: every one is guarded here (Direct3D
 //     reads zero and drops the write), and the colours read at the image's border are its border's.
+//   - A blend item keeps its colour as three half floats in two words (an item is three words: the next one, red and
+//     green, blue). The original packs it into one word as R11G11B10 with four exponent bits, which holds values
+//     under 2; Battlefield 1943's finished scene can be a float image brighter than that (its sky, a lit sleeve),
+//     and those came out in false colours (13 Nov 2026).
 //   - The edge threshold is a constant of the pass (the presets Low 0.15, Medium 0.10, High 0.07, Ultra 0.05).
 
 #pragma once
@@ -189,7 +193,7 @@ layout(set = 0, binding = 2) uniform sampler2D g_color;
 layout(set = 0, binding = 3, r8ui) uniform uimage2D g_edges;
 layout(set = 0, binding = 4, r32ui) uniform uimage2D g_heads;
 layout(std430, set = 0, binding = 5) buffer CmaaCandidates { uint g_candidates[]; };
-layout(std430, set = 0, binding = 6) buffer CmaaItems { uvec2 g_items[]; };
+layout(std430, set = 0, binding = 6) buffer CmaaItems { uint g_items[]; };  // three words an item
 layout(std430, set = 0, binding = 7) buffer CmaaLocations { uint g_locations[]; };
 
 const uint kSharedItems = 768u;
@@ -208,16 +212,6 @@ vec4 Unpack(uint e) {
               (e & 8u) != 0u ? 1.0 : 0.0);
 }
 
-// R11G11B10 with four exponent bits (the original's, from MiniEngine's PixelPacking_R11G11B10.hlsli, MIT): [0, 2).
-uint Half(float v) { return packHalf2x16(vec2(v, 0.0)) & 0xFFFFu; }
-uint PackColor(vec3 rgb) {
-  rgb = clamp(rgb, vec3(0.0), vec3(uintBitsToFloat(0x3FFFFFFFu)));
-  const uint r = ((Half(rgb.r) + 4u) >> 3) & 0x000007FFu;
-  const uint g = ((Half(rgb.g) + 4u) << 8) & 0x003FF800u;
-  const uint b = ((Half(rgb.b) + 8u) << 18) & 0xFFC00000u;
-  return r | g | b;
-}
-
 void StoreColor(ivec2 p, vec3 color, bool complex_shape) {
   if (any(lessThan(p, ivec2(0))) || any(greaterThanEqual(p, c_size))) return;
   const uint index = atomicAdd(g_control[12], 1u);
@@ -227,7 +221,10 @@ void StoreColor(ivec2 p, vec3 color, bool complex_shape) {
   // 2 bits the place in the quad, 3 unused (the MSAA sample), 1 the complex shape, 26 the item's index
   const uint header = (offset_xy << 30) | ((complex_shape ? 1u : 0u) << 26);
   const uint before = imageAtomicExchange(g_heads, quad, index | header);
-  g_items[index] = uvec2(before, PackColor(color));
+  color = clamp(color, vec3(0.0), vec3(65000.0));
+  g_items[index * 3u] = before;
+  g_items[index * 3u + 1u] = packHalf2x16(color.rg);
+  g_items[index * 3u + 2u] = packHalf2x16(vec2(color.b, 0.0));
   if (before == 0xFFFFFFFFu) {  // the quad's first: one of the places the last pass visits
     const uint location = atomicAdd(g_control[8], 1u);
     if (location < c_locations_max) g_locations[location] = (uint(quad.x) << 16) | uint(quad.y);
@@ -411,14 +408,9 @@ void main() {
 constexpr const char* kCmaaApplyCS = R"(
 layout(local_size_x = 4, local_size_y = 32) in;
 layout(set = 0, binding = 2, r32ui) uniform uimage2D g_heads;
-layout(std430, set = 0, binding = 3) buffer CmaaItems { uvec2 g_items[]; };
+layout(std430, set = 0, binding = 3) buffer CmaaItems { uint g_items[]; };  // three words an item
 layout(std430, set = 0, binding = 4) buffer CmaaLocations { uint g_locations[]; };
 layout(set = 0, binding = 5, rgba16f) uniform image2D g_resolved;
-
-vec3 UnpackColor(uint rgb) {
-  return vec3(unpackHalf2x16((rgb << 3) & 0x3FF8u).x, unpackHalf2x16((rgb >> 8) & 0x3FF8u).x,
-              unpackHalf2x16((rgb >> 18) & 0x3FF0u).x);
-}
 
 void main() {
   const uint candidate = gl_GlobalInvocationID.y;
@@ -435,11 +427,11 @@ void main() {
     const bool complex_shape = ((next >> 26) & 1u) != 0u;
     const uint index = next & ((1u << 26) - 1u);
     if (index >= c_items_max) break;
-    const uvec2 item = g_items[index];
-    next = item.x;
+    next = g_items[index * 3u];
     if (item_offset == offset_xy) {
       const float weight = 0.8 + (complex_shape ? 1.0 : 0.0);
-      sum += vec4(UnpackColor(item.y) * weight, weight);
+      const vec3 color = vec3(unpackHalf2x16(g_items[index * 3u + 1u]), unpackHalf2x16(g_items[index * 3u + 2u]).x);
+      sum += vec4(color * weight, weight);
     }
   }
   if (sum.a == 0.0) return;

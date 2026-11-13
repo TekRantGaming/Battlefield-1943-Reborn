@@ -246,6 +246,13 @@ const char* Antialiasing::ModeName(Mode mode) {
 }
 
 bool Antialiasing::Initialize(IRenderDevice* device, Mode mode) {
+  // Called again when the method is changed while the game runs: the last method's passes and textures go (the GPU
+  // keeps what a frame in flight still uses).
+  smaa_edges_ = smaa_weights_ = cmaa_edges_ = cmaa_args_ = cmaa_process_ = cmaa_apply_ = Pass{};
+  output_passes_.clear();
+  for (Textures& t : textures_) t = Textures{};
+  area_.Release(), search_.Release(), constants_.Release();
+  cmaa_constants_.Release(), cmaa_control_.Release(), cmaa_indirect_.Release();
   device_ = device;
   mode_ = mode;
   if (mode_ == Mode::kOff) return true;
@@ -577,7 +584,7 @@ Antialiasing::Textures* Antialiasing::EnsureTextures(uint32_t width, uint32_t he
                  work(set->resolved, "NativeXRenderer CMAA changed pixels", width, height, TEX_FORMAT_RGBA16_FLOAT,
                       BIND_UNORDERED_ACCESS | BIND_SHADER_RESOURCE | BIND_RENDER_TARGET) &&
                  list(set->candidates, "NativeXRenderer CMAA candidates", set->candidates_max, 4) &&
-                 list(set->items, "NativeXRenderer CMAA blend items", set->items_max, 8) &&
+                 list(set->items, "NativeXRenderer CMAA blend items", set->items_max * 3, 4) &&
                  list(set->locations, "NativeXRenderer CMAA blend places", set->locations_max, 4);
         }());
     if (!ok) {
