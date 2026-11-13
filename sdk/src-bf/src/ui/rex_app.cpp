@@ -43,6 +43,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <string_view>
 
@@ -52,6 +53,32 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex {
+
+// Why the app is quitting by itself (Battlefield 1943, 12 Nov 2026), said by whoever asks for the quit: the UI
+// thread's own sites below, and the module thread once the guest's main thread has ended. ReXApp::OnDestroy logs
+// it and takes the process's exit code from it; the first reason stands.
+namespace {
+std::atomic<const char*> g_self_quit_reason{nullptr};
+std::atomic<int> g_self_quit_code{0};
+std::atomic<SelfQuitCause> g_self_quit_cause{SelfQuitCause::kNone};
+void NoteSelfQuit(SelfQuitCause cause, const char* reason, int code) {
+  const char* none = nullptr;
+  if (g_self_quit_reason.compare_exchange_strong(none, reason)) {
+    g_self_quit_code.store(code);
+    g_self_quit_cause.store(cause);
+  }
+}
+}  // namespace
+
+SelfQuitCause SelfQuitWhy() {
+  return g_self_quit_cause.load();
+}
+const char* SelfQuitReason() {
+  return g_self_quit_reason.load();
+}
+int SelfQuitCode() {
+  return g_self_quit_code.load();
+}
 
 // --- ReXApp ---
 
@@ -84,10 +111,14 @@ system::AchievementManager& ReXApp::achievements() const {
 }
 
 bool ReXApp::OnInitialize() {
-  if (!SetupEnvironment())
+  if (!SetupEnvironment()) {
+    NoteSelfQuit(SelfQuitCause::kInitFailed, "the environment could not be set up", EXIT_FAILURE);
     return false;
-  if (!SetupPresentation())
+  }
+  if (!SetupPresentation()) {
+    NoteSelfQuit(SelfQuitCause::kInitFailed, "the window and its presentation could not be set up", EXIT_FAILURE);
     return false;
+  }
 
   auto paths = OnFinalizePaths(resolved_defaults_, MakeResumeCallback());
   if (!paths) {
@@ -96,8 +127,10 @@ bool ReXApp::OnInitialize() {
     return true;
   }
 
-  if (!ConstructRuntime(*paths))
+  if (!ConstructRuntime(*paths)) {
+    NoteSelfQuit(SelfQuitCause::kRuntimeSetupFailed, "the runtime could not be set up", EXIT_FAILURE);
     return false;
+  }
   LaunchModule();
   return true;
 }
@@ -450,8 +483,12 @@ void ReXApp::LaunchModule() {
     OnPreLaunchModule();
 
     auto main_thread = runtime_->PrepareModuleLaunch();
-    if (!main_thread) {
+    // REX_TEST_FAIL_LAUNCH=1 (tests): as if the module had not launched, the way into OnDestroy with the runtime up
+    // and no guest thread (Battlefield 1943, 12 Nov 2026: the teardown that crashed a player's game).
+    const char* fail_launch = std::getenv("REX_TEST_FAIL_LAUNCH");
+    if (!main_thread || (fail_launch && *fail_launch == '1')) {
       REXLOG_ERROR("Failed to launch module");
+      NoteSelfQuit(SelfQuitCause::kModuleLaunchFailed, "the game's module did not launch", EXIT_FAILURE);
       app_context().QuitFromUIThread();
       return;
     }
@@ -473,6 +510,7 @@ void ReXApp::LaunchModule() {
       OnGuestThreadExit(main_thread.get());
       REXLOG_INFO("Execution complete");
       if (!shutting_down_.load(std::memory_order_acquire)) {
+        NoteSelfQuit(SelfQuitCause::kGuestExited, "the game's main thread ended (Execution complete)", EXIT_SUCCESS);
         app_context().CallInUIThread([this]() { app_context().QuitFromUIThread(); });
       }
     });
@@ -484,6 +522,7 @@ std::function<void(PathConfig)> ReXApp::MakeResumeCallback() {
     if (shutting_down_.load(std::memory_order_acquire))
       return;
     if (!ConstructRuntime(std::move(paths))) {
+      NoteSelfQuit(SelfQuitCause::kRuntimeSetupFailed, "the runtime could not be set up", EXIT_FAILURE);
       app_context().QuitFromUIThread();
       return;
     }
@@ -554,6 +593,37 @@ void ReXApp::OnRestored(ui::UIEvent& e) {
 }
 
 void ReXApp::OnDestroy() {
+  // Battlefield 1943 (TekRantGaming, 12 Nov 2026). OnDestroy is reached only when the app's event loop ends by
+  // itself (QuitFromUIThread): the module did not launch, the guest's main thread ended ("Execution complete"),
+  // the runtime could not be set up, or OnInitialize failed. A window close never comes here: OnClosing hard-exits,
+  // and an SDL quit event is turned into a close request (ProcessQuitRequest). So the teardown below had never run
+  // in a player's game, and the first time it did it crashed: the window was destroyed before the runtime, whose
+  // keyboard and mouse driver (MnkInputDriver, a listener of the window) then detached from the dead window in its
+  // destructor and freed its listener node a second time. STATUS_HEAP_CORRUPTION on the way out (a player's
+  // crash-20261112-233309.dmp), and a crash report that hid why the game had ended. Guest threads other than the
+  // main one can also still be running here, which is why OnClosing tears nothing down either. So the app leaves
+  // the way a window close does: the reason logged, the title ended, the log flushed, a hard exit.
+  // REX_FULL_TEARDOWN=1 (tests) runs the teardown below instead, its order mended (the input drivers go while the
+  // window is still there).
+  const char* reason = g_self_quit_reason.load();
+  const char* full_teardown = std::getenv("REX_FULL_TEARDOWN");
+  if (!(full_teardown && *full_teardown == '1')) {
+    REXLOG_INFO("App quitting by itself: {}. Hard-exiting as a window close does.",
+                reason ? reason : "no reason was given (the lines above may say)");
+    shutting_down_.store(true, std::memory_order_release);
+    if (runtime_ && runtime_->kernel_state()) {
+      runtime_->kernel_state()->TerminateTitle();
+    }
+    // The subclass last, the title already ended and the log on disk: its OnShutdown may wait on the player (a
+    // message that the game could not start: SelfQuitWhy, SelfQuitReason).
+    rex::FlushLogging();
+    OnShutdown();
+    rex::FlushLogging();
+    std::_Exit(g_self_quit_code.load());
+  }
+  REXLOG_INFO("App quitting by itself: {}. Full teardown (REX_FULL_TEARDOWN).",
+              reason ? reason : "no reason was given");
+
   // Notify subclass before cleanup
   OnShutdown();
 
@@ -601,6 +671,12 @@ void ReXApp::OnDestroy() {
   if (window_) {
     window_->RemoveInputListener(this);
     window_->RemoveListener(this);
+  }
+  // The runtime's input drivers listen to the window and detach from it in their destructors, so they go while it
+  // is still there (the top of this function: destroyed with the runtime, after the window, the keyboard and mouse
+  // driver freed its listener node twice).
+  if (runtime_ && runtime_->input_system()) {
+    runtime_->input_system()->Shutdown();
   }
   window_.reset();
   runtime_.reset();

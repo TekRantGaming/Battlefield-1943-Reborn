@@ -15,6 +15,7 @@ Layers, outermost first (see docs/02-dedicated-server-join.md):
               (value + 0x80, + 0x8000, + 0x80000000); strings are an i32 length and the bytes.
 """
 import asyncio
+import json
 import os
 import random
 import socket
@@ -157,6 +158,12 @@ class Player:
 # same IP. Client to host: HELLO, STATE (every half second: team, squad, in the world, where), CHAT, VOICE, BYE.
 # Host to client: WELCOME (its id), REFUSED, CHAT_RELAY, ROSTER (every 5 s), VOICE_RELAY (a VOICE's body as sent).
 C_HELLO, C_WELCOME, C_STATE, C_CHAT_RELAY, C_CHAT, C_ROSTER, C_VOICE, C_VOICE_RELAY, C_BYE, C_REFUSED = range(1, 11)
+# A server broadcast (TekRantGaming, 13 Nov 2026: "any server broadcast should be shown in a box at the top center of
+# the screen ... remain on screen for 10s and play a sound ... to announce things like game updates and server restarts
+# also the server admins will have an option to send custom text messages"): the host to every player on the server,
+# id (2 bytes), kind (BROADCAST_KINDS), seconds on screen, the text. A game older than v0.4.0 ignores the kind.
+C_BROADCAST = 11
+BROADCAST_KINDS = {'custom': 0, 'update': 1, 'restart': 2}
 COMMS_PROTOCOL = 1
 CHAT_ALL, CHAT_TEAM, CHAT_SQUAD = 0, 1, 2
 # metres: a listener further from the speaker gets nothing (the client fades out sooner). BF_DEV_VOICE_RANGE (tests
@@ -186,9 +193,55 @@ class Comms:
         self.ids = {}        # name -> id, kept for the server's life so a rejoin keeps its id
         self.next_id = 1
         self.roster_at = 0.0
+        # Broadcasts: asked for through --broadcast-file, a JSON file the server manager writes ({"seq", "kind",
+        # "text", "seconds"}); each new seq is sent to everyone, three times a third of a second apart (it is UDP;
+        # the games show an id once).
+        self.broadcast_file = ''
+        self.broadcast_seq = None   # the file's seq last seen (None: not looked at yet, so an old file is not sent)
+        self.broadcast_id = 0
+        self.broadcast_due = []     # (monotonic time, body)
+        self.broadcast_looked = 0.0
+        self.broadcast_last = (0.0, b'')  # (monotonic time it leaves the screens, body): a player who links before
+                                          # then gets it too (handle, C_HELLO)
 
     def send(self, kind, body, addr):
         self.host.transport.sendto(COMMS + bytes([kind]) + body, addr)
+
+    def broadcast(self, text_, kind='custom', seconds=10):
+        text_ = ' '.join(''.join(c if c.isprintable() else ' ' for c in str(text_)).split())[:200]
+        if not text_:
+            return
+        self.broadcast_id = (self.broadcast_id % 0xFFFF) + 1
+        body = struct.pack('>HBB', self.broadcast_id, BROADCAST_KINDS.get(kind, 0),
+                           max(3, min(30, int(seconds)))) + short_text(text_)
+        now = time.monotonic()
+        self.broadcast_due += [(now, body), (now + 0.35, body), (now + 0.7, body)]
+        self.broadcast_last = (now + body[3], body)
+        self.host.note('comms: broadcast %d (%s) to %d players: %s' % (self.broadcast_id, kind, len(self.clients), text_))
+
+    def read_broadcast_file(self, now):
+        if not self.broadcast_file or now - self.broadcast_looked < 0.5:
+            return
+        self.broadcast_looked = now
+        try:
+            with open(self.broadcast_file, encoding='utf-8') as f:
+                m = json.load(f)
+            seq = int(m.get('seq', 0))
+        except (OSError, ValueError, TypeError, AttributeError):
+            if self.broadcast_seq is None:
+                self.broadcast_seq = 0  # no file yet: the first one written is new
+            return
+        if self.broadcast_seq is None:
+            self.broadcast_seq = seq  # as the host starts: whatever is there was for an earlier run
+            return
+        if seq == self.broadcast_seq:
+            return
+        self.broadcast_seq = seq
+        try:
+            seconds = int(m.get('seconds', 10))
+        except (TypeError, ValueError):
+            seconds = 10
+        self.broadcast(m.get('text', ''), str(m.get('kind', 'custom')), seconds)
 
     def joined_player(self, name, addr):
         return any(p.state == 'joined' and p.player and p.player.name == name and p.addr[0] == addr[0]
@@ -214,6 +267,7 @@ class Comms:
             if not self.joined_player(name, addr):
                 self.send(C_REFUSED, bytes([1]) + short_text('not in the game on this server yet'), addr)
                 return
+            fresh = not client
             if not client:
                 for other_addr, other in list(self.clients.items()):
                     if other.name == name:
@@ -227,6 +281,8 @@ class Comms:
                 self.roster_at = 0  # everyone gets the new roster at the next tick
             client.team, client.squad, client.last_heard = team, squad, now
             self.send(C_WELCOME, struct.pack('>HB', client.id, COMMS_PROTOCOL), addr)
+            if fresh and now < self.broadcast_last[0]:
+                self.send(C_BROADCAST, self.broadcast_last[1], addr)  # the message still on the others' screens
             return
         if not client:
             self.send(C_REFUSED, bytes([3]) + short_text('say hello first'), addr)
@@ -283,6 +339,17 @@ class Comms:
             self.roster_at = 0
 
     def tick(self, now):
+        try:
+            self.read_broadcast_file(now)
+        except Exception as e:  # never the host's own loop for a message (run bcast1: an error here stopped it)
+            if not getattr(self, 'broadcast_error', None):
+                self.broadcast_error = True
+                self.host.note('comms: the broadcast file could not be read (%s: %s)' % (type(e).__name__, e))
+        if self.broadcast_due:
+            for at, body in [d for d in self.broadcast_due if d[0] <= now]:
+                for c in self.clients.values():
+                    self.send(C_BROADCAST, body, c.addr)
+            self.broadcast_due = [d for d in self.broadcast_due if d[0] > now]
         for addr, client in list(self.clients.items()):
             if now - client.last_heard > 10 or not self.joined_player(client.name, addr):
                 self.host.note('comms: %s out (%s)' % (client.name, 'silent' if now - client.last_heard > 10
@@ -687,8 +754,9 @@ async def serve(args):
         # The address comes from the connection (the backend sees it; nothing to type, SERVERS-PLAN.md section 6);
         # --public only when given (older packages and tests).
         reg = {'op': 'register', 'name': args.name, 'port': public[1], 'map': args.map,
-               'max_players': args.max_players, 'mode': args.mode, 'description': args.description[:200],
-               'maps': [m for m in args.maps.split(',') if m], 'listed': not args.unlisted, 'night': args.night}
+               'max_players': args.max_players, 'mode': 'classic', 'description': args.description[:200],
+               'maps': [m for m in args.maps.split(',') if m], 'listed': not args.unlisted, 'night': args.night,
+               'region': args.region, 'tick': args.tick}
         # A host on one address of its own (tests: 127.0.0.2) says where; one on every address (the packages: 0.0.0.0)
         # is found by the backend.
         if args.public or listen[0] not in ('0.0.0.0', '::'):
@@ -709,6 +777,7 @@ async def serve(args):
             continue
         host = await start(listen, parse_address(args.game_server), reply['uid'], reply['pid'], args.name, log,
                            public, sock)
+        host.comms.broadcast_file = args.broadcast_file
         host.note('registered with the backend as game %s%s%s' % (
             reply['gid'], ' (official)' if reply.get('official') else '', '' if reply.get('listed', True) else
             ' (not listed: Direct connect only)'))
@@ -741,7 +810,8 @@ async def serve(args):
                 upcoming = rotation[(rotation.index(current) + 1) % len(rotation)] if current in rotation else ''
                 send({'op': 'status', 'players': host.player_count(), 'map': current, 'next_map': upcoming,
                       'names': host.player_names()})
-                write_status(args, dict(state, players=host.player_count(), map=current))
+                write_status(args, dict(state, players=host.player_count(), map=current, next_map=upcoming,
+                                        names=host.player_names()))
                 await writer.drain()
                 await asyncio.sleep(5)
 
@@ -801,13 +871,22 @@ def main():
     ap.add_argument('--name', default='BF1943 server')
     ap.add_argument('--map', default='Wake Island')
     ap.add_argument('--max-players', type=int, default=24)
-    # Movement and aiming (TekRantGaming, 7 Nov 2026: servers with the new system and servers with the old, so nothing is
-    # unfair): what the server plays, shown in the server list; players' games take it from there.
+    # Movement and aiming: every server plays the game's own since v0.4.0 (Modern was retired; TekRantGaming, 13 Nov
+    # 2026). The option is still accepted, so an older start script does no harm, and is not used: the server is
+    # registered as classic, which is what the game plays.
     ap.add_argument('--mode', choices=['classic', 'modern'], default='classic',
-                    help='the movement and aiming the server plays')
+                    help='not used since v0.4.0: every server plays the original movement and aiming')
     # Night Ops (TekRantGaming, 11 Nov 2026): the maps at night, shown in the server list; players' games draw it so
     # (NativeXRenderer D162) while they play there.
     ap.add_argument('--night', action='store_true', help='a night server: players see its maps at night')
+    # Where the server is (TekRantGaming, 13 Nov 2026: the browser shows the region with its flag): one of the game's
+    # region codes (bf/src/regions.h, the manager's drop down). And its tick rate, for the browser: the game's own
+    # 30 Hz today.
+    ap.add_argument('--broadcast-file', default='',
+                    help='a JSON file the server manager writes to send a message to every player on the server: '
+                         '{"seq": a new number each time, "kind": "custom", "update" or "restart", "text", "seconds"}')
+    ap.add_argument('--region', default='', help="the server's region code, e.g. gb, de, us-east (shown in the browser)")
+    ap.add_argument('--tick', type=int, default=30, help="the server's tick rate in Hz (shown in the browser)")
     ap.add_argument('--map-file', default='', help="the server's current_map.txt (its map rotation)")
     ap.add_argument('--maps', default='', help='the rotation, map titles separated by commas (for the next map)')
     ap.add_argument('--description', default='', help='shown in the server browser (200 characters)')

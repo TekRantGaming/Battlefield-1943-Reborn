@@ -6,13 +6,19 @@
 #   starts, and the updater writes each version over the file a player has, whatever its name
 #   runs\release\<version>\BF1943-Reborn-OfficialServers-<version>-windows.zip  with -Official: TekRantGaming's private package
 #   (the main backend and the official servers; never published, never in the release's sums)
+#   with -LinuxFiles: the other Linux downloads this version built (WSL, tools\linux\build_flatpak.sh and
+#   build_server.sh): the game's Flatpak, the server's Flatpak, AppImage and plain archive. They are copied in and
+#   summed; a running server manager updates itself from the server's zip (Windows) or plain archive (Linux).
 # from the release build (bf\out\build\bf-relwithdebinfo), with the licences of everything in them. No game file goes
 # in: players and hosts bring their own copy, installed once by the first start's setup (or the server's window). Nothing is uploaded: the release itself is made by hand on GitHub (reborn\docs\RELEASES.md).
 # Usage: powershell -File tools\make_packages.ps1 -Version 0.1.0 -OnlineHost <address> (the main backend: the official one, or 127.0.0.1 for local tests)
 param([Parameter(Mandatory = $true)][string]$Version, [string]$Preset = "bf-relwithdebinfo",
       [Parameter(Mandatory = $true)][string]$OnlineHost,  # the main backend (the official servers' address or name; no default: 0.1.5 and 0.1.6 went out pointing at 127.0.0.1)
       [switch]$Official,  # also the private official server package (TekRantGaming only; never uploaded)
-      [string]$AppImage = "")  # the Linux AppImage this version built (WSL, tools\linux\build_appimage.sh): a release file
+      [string]$AppImage = "",  # the Linux AppImage this version built (WSL, tools\linux\build_appimage.sh): a release file
+      [string[]]$LinuxFiles = @(),  # the other Linux downloads (*.flatpak, the server's *.AppImage and *-linux.tar.gz)
+      # The Python the server package carries is made from this one (python.org's Windows build).
+      [string]$Python = $(if ($env:BF_PYTHON) { $env:BF_PYTHON } else { "python" }))  # Python 3.12
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $build = Join-Path $root "bf\out\build\$Preset"
@@ -119,8 +125,7 @@ A fan project: not made, endorsed or supported by Electronic Arts or DICE. No ga
 1. Start bf1943.exe (Battlefield 1943 Reborn). Your settings, log and crash reports go in the folder 'user'.
 2. The first time, select your own Battlefield 1943 (Xbox 360) package: the single file in 5841097E\000D0000 from
    your console's storage, or a folder that holds it. It is installed into the folder 'game', once.
-3. Quick Match or the server browser: first pick Classic or Modern movement (every time; the screen says what
-   each one changes), then the busiest server that plays it, or one from the list. You play what the server plays.
+3. Quick Play joins the busiest server with room; the server browser lists every official and community server.
 4. Flying with mouse and keyboard is not right yet: take a boat to get to land, or use a controller to fly.
 5. Updates install themselves when the game starts (from GitHub, checked before anything is changed).
 
@@ -132,53 +137,73 @@ If Windows says "rexruntime.dll is either not designed to run on Windows or it c
 
 # ---- the server downloads (SERVERS-PLAN.md section 7): the community package for everyone (its servers only in the
 # Community list; the main backend is the official one, $OnlineHost), and with -Official the private one for TekRantGaming
-# (this PC runs the main backend; servers official with official.key, which is never in a package). The window
-# (server_ui.ps1) installs the game once and runs any number of servers, each with its own name, maps and settings.
+# (this PC runs the main backend; servers official with official.key, which is never in a package). The server
+# manager (server\manager.py, TekRantGaming's new one of 13 Nov 2026: a page in the browser) installs the game once
+# and runs any number of servers; both packages have the same manager and everything it does.
 function New-ServerPackage([string]$sname, [bool]$official) {
     $s = Join-Path $out $sname
     New-Bin $s
     Copy-Licences $s
     $sv = Join-Path $s "server"
-    New-Item -ItemType Directory -Force $sv | Out-Null
-    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\gmhost.py") $sv
-    Copy-Item (Join-Path $root "tools\server_package\*.ps1") $s
-    [ordered]@{ version = 2; upnp = $true; backend = $OnlineHost
+    New-Item -ItemType Directory -Force (Join-Path $sv "manager_ui") | Out-Null
+    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\gmhost.py"), (Join-Path $root "server\manager.py") $sv
+    Copy-Item (Join-Path $root "server\manager_ui\index.html") (Join-Path $sv "manager_ui")
+    Copy-Item (Join-Path $root "tools\server_package\open_firewall.ps1") $s
+    # The package's own Python (tools\server_package\make_python_runtime.py): a host installs nothing. python.org's
+    # files, signed by the Python Software Foundation; their licence goes with the others.
+    & $Python -I (Join-Path $root "tools\server_package\make_python_runtime.py") (Join-Path $s "python") | Out-Host
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $s "python\python.exe"))) { throw "the server package's Python could not be made from $Python" }
+    Move-Item (Join-Path $s "python\LICENSE.txt") (Join-Path $s "licences\Python.txt")
+    Set-Content (Join-Path $s "version.txt") $Version -Encoding ascii
+    [ordered]@{ version = 3; upnp = $true; backend = $OnlineHost
                 servers = @([ordered]@{ name = "Battlefield 1943 Reborn"; description = ""; maps = @("wake", "guadalcanal", "iwo", "coral")
-                                        movement = "classic"; round_end_delay = 45; listed = $true }) } |
+                                        round_end_delay = 45; listed = $true; port = 18300 }) } |
         ConvertTo-Json -Depth 5 | Set-Content (Join-Path $s "server.default.json") -Encoding ascii
     # package.json: the official package (TekRantGaming only), and a game with Night Ops (test builds): the window's Night Ops
-    # box and the hosts' --night only then (server_config.ps1).
+    # box and the hosts' --night only then (server/manager.py package_flags).
     $pkg = [ordered]@{}
     if ($official) { $pkg.official = $true }
     if ($nightOps) { $pkg.night_ops = $true }
     if ($pkg.Count) { $pkg | ConvertTo-Json -Compress | Set-Content (Join-Path $s "package.json") -Encoding ascii }
-    Set-Content (Join-Path $s "BF1943 Server.bat") -Encoding ascii -Value "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"%~dp0server_ui.ps1`""
-    Set-Content (Join-Path $s "Start servers (no window).bat") -Encoding ascii -Value "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0start_servers.ps1`""
-    Set-Content (Join-Path $s "Stop servers.bat") -Encoding ascii -Value "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0stop_servers.ps1`""
+    # "BF1943 Server.bat" opens the manager's page (and starts the manager in the background when it is not running:
+    # it has no window of its own); a failure stays on screen. The other two are for a PC that runs unattended.
+    Set-Content (Join-Path $s "BF1943 Server.bat") -Encoding ascii -Value "@echo off`r`n`"%~dp0python\python.exe`" `"%~dp0server\manager.py`" open`r`nif errorlevel 1 pause"
+    Set-Content (Join-Path $s "Start servers (no window).bat") -Encoding ascii -Value "@echo off`r`n`"%~dp0python\python.exe`" `"%~dp0server\manager.py`" start`r`nif errorlevel 1 pause"
+    Set-Content (Join-Path $s "Stop servers.bat") -Encoding ascii -Value "@echo off`r`n`"%~dp0python\python.exe`" `"%~dp0server\manager.py`" quit"
     Set-Content (Join-Path $s "Open firewall ports.bat") -Encoding ascii -Value "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0open_firewall.ps1`""
     $readme = if ($official) { @"
 Battlefield 1943 Reborn Official Servers $Version (TRG Studios only: never share this package)
 
 The main backend players log in to, and the official servers (the Official list in the game's server browser).
-Needs Python 3.12 (python.org), your own Battlefield 1943 (Xbox 360) package, and official.key.
+Needs your own Battlefield 1943 (Xbox 360) package, and official.key. Nothing else to install.
 
 1. Copy official.key next to this file (your own copy; it is never in a download).
-2. Open 'BF1943 Server.bat': install the game from your package, add your servers (each its own name, description,
-   maps, movement and pause between rounds), and Start all.
+2. Open 'BF1943 Server.bat': the server manager opens in your browser. Install the game from your package (Game
+   files), add your servers (each its own name, description, maps, players and port), and Start all.
 3. On a hosted server (Windows Server), run 'Open firewall ports.bat' once, and open the same ports in your host's
    own firewall: TCP 18241, 18246 and 18250 (the main backend), UDP 18300 and one more for each extra server.
+The manager keeps running in the background and starts a server again if it stops; 'Stop servers.bat' ends it.
 'Start servers (no window).bat' starts them with the saved settings (for a PC that starts them by itself).
+Everything the community package has is here too: the region, messages to the players with a countdown, updates
+(on your word only: the Updates page's button; official servers never update by themselves), the logs.
+The main backend lets in only players on the newest release: it reads the game's release feed on GitHub every
+five minutes, and an older game gets a pop-up with Update now. In server.json, "version_gate": false lets every
+version in, and "required_version": "0.4.0" names the version by hand in place of the feed.
 "@ } else { @"
 Battlefield 1943 Reborn Server $Version (github.com/TekRantGaming/Battlefield-1943-Reborn)
 
 Run your own Battlefield 1943 servers, listed in the game's server browser under Community.
-Needs Python 3.12 (python.org) and your own Battlefield 1943 (Xbox 360) package, installed once.
+Needs your own Battlefield 1943 (Xbox 360) package, installed once. Nothing else to install.
 
-1. Open 'BF1943 Server.bat': install the game from your package.
-2. Add your servers: each has its own name, description, maps, movement and pause between rounds.
-3. 'Show in the server browser' lists it; nothing to type, the game finds where your server is. Untick it for a
-   private server: players then join it by its address (Direct connect in the game's server browser).
-4. Start all. They run in the background with no window; Stop all (or Stop servers.bat) ends them.
+1. Open 'BF1943 Server.bat': the server manager opens in your browser (http://127.0.0.1:18280/).
+2. Game files: install the game from your package.
+3. Servers: each has its own name, description, maps, players and port. Start all.
+4. Network: pick your region (players see it with its flag). 'LAN only' keeps your servers off the main list:
+   players then join with Direct connect, by this PC's address.
+5. Messages: tell everyone on a server about an update or a restart, with a countdown, or type your own.
+The manager keeps running in the background and starts a server again if it stops; new releases install
+themselves (Updates). 'Stop servers.bat' ends everything; 'Start servers (no window).bat' is for a PC that starts
+its servers by itself.
 Players reach your servers on UDP 18300, 18301 and on (one port each server): leave 'Open the ports' on behind a
 home router, or open them yourself. On a hosted server run 'Open firewall ports.bat' once.
 "@ }
@@ -225,6 +250,12 @@ if ($AppImage) {
     Copy-Item $AppImage (Join-Path $out "BF1943-Reborn-linux-x86_64.AppImage")
 }
 foreach ($dir in $serverDirs) { Compress-Archive -Path $dir -DestinationPath "$dir.zip" }
+# The other Linux downloads, as built (their names are the build scripts': none ends with the game AppImage's).
+foreach ($f in $LinuxFiles) {
+    if (-not (Test-Path $f)) { throw "no Linux file at $f" }
+    if ((Split-Path -Leaf $f) -notmatch '\.(flatpak|AppImage|tar\.gz)$') { throw "not a Linux download: $f" }
+    Copy-Item $f $out
+}
 Get-ChildItem $out -Filter *.zip | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
 
 # For the Microsoft developer submission (microsoft.com/wdsi/filesubmission, "Software developer"), which clears new
@@ -253,7 +284,8 @@ if ($sevenZip) {
 }
 # The release's sums: the public downloads only (the official server package is never published).
 $sums = @(Get-ChildItem $out -Filter *.zip | Where-Object { $_.Name -notlike '*OfficialServers*' }) +
-        @(Get-ChildItem $out -Filter *.AppImage) + @($ours | ForEach-Object { Get-Item $_ })
+        @(Get-ChildItem $out -Filter *.AppImage) + @(Get-ChildItem $out -Filter *.flatpak) +
+        @(Get-ChildItem $out -Filter *.tar.gz) + @($ours | ForEach-Object { Get-Item $_ })
 $sums | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } |
     Set-Content (Join-Path $out "SHA256SUMS.txt") -Encoding ascii
 "Microsoft submission: $(Join-Path $sub "BF1943-Reborn-$Version-binaries.zip") (password: infected)"

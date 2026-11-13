@@ -33,6 +33,7 @@
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
 
+#include "capture_points.h"
 #include "comms.h"
 
 #if defined(_WIN32)
@@ -55,7 +56,7 @@ REXCVAR_DEFINE_BOOL(bf_join_open_squad, false, "BF1943",
 namespace bf1943 {
 
 void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated);  // input_settings.cpp
-void LookPad(uint8_t* gamepad);                                  // look.cpp
+void LookPad(uint8_t* gamepad, bool seated);                     // look.cpp
 bool LocalOnFoot();                                              // look.cpp: the vehicle seeker
 bool LocalSeated(const uint8_t* base);                           // look.cpp: in a vehicle, any seat
 void HudGlyphsTick(bool seated);                                 // hud_glyphs.cpp: the prompts drawn again on a change
@@ -74,6 +75,7 @@ void ShowGameMenu();
 void ShowPauseMenu();
 void PressBf(const std::vector<uint16_t>& presses);
 bool GameMenuPassing();
+void NoteMatchDevice(bool keyboard);  // game_menu.cpp: the device used in the match, for the HUD's prompts
 void NoteGameMenuSignal();  // game_menu.cpp: BF's own menu screen is up
 void ShowLostNotice();
 bool LauncherLetsGameSignIn();  // game_menu.cpp: BF signs in behind the launcher
@@ -197,8 +199,10 @@ uint16_t Step() {
     for (size_t pos = 0, i = 0; pos <= presses.size(); ++i) {
       const size_t comma = std::min(presses.find(',', pos), presses.size());
       const std::string b = presses.substr(pos, comma - pos);
+      // lsr, lsl: the left stick right or left (the spawn screen's kit choice), carried in the two button bits XInput
+      // leaves unused and turned into the stick where the driver's press joins the pad (13 Nov 2026).
       const uint16_t button = b == "b" ? 0x2000 : b == "up" ? 0x0001 : b == "down" ? 0x0002 : b == "left" ? 0x0004
-                              : b == "right" ? 0x0008 : kA;
+                              : b == "right" ? 0x0008 : b == "lsr" ? 0x0400 : b == "lsl" ? 0x0800 : kA;
       g.script.push_back({i ? 2.0 : 0.5, button});
       pos = comma + 1;
     }
@@ -1098,6 +1102,21 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     // if the menu closes between here and the check below.
     // The chat box's Enter or Esc (comms_ui.cpp) is not the pause's Start.
     const bool menu_was_open = bf1943::GameMenuOpen() || bf1943::comms::TypingOrJustClosed();
+    // The device the player uses in the match (TekRantGaming, 12 Nov 2026: the prompts follow the keyboard and mouse
+    // or the controller as they change hands mid match; game_menu.cpp NoteMatchDevice, the HUD's prompts): a key or a
+    // mouse button through the keyboard and mouse driver (the buttons, sticks and triggers it gives), else a press on
+    // the controller itself or a push of its sticks or triggers (not our own pulses, nor a stick's drift). With our
+    // menu open the menu decides (TrackDevice). The mouse's movement counts in look.cpp.
+    if (!menu_was_open) {
+      const uint16_t key_buttons = rex::input::mnk::LastKeyButtons();
+      const uint8_t key_lt = rex::input::mnk::LastKeyTrigger(false), key_rt = rex::input::mnk::LastKeyTrigger(true);
+      const auto pushed = [&](int at) { return std::abs(int(int16_t(p[at] << 8 | p[at + 1]))) > 12000; };
+      const bool pad_buttons = (buttons & ~key_buttons & ~bf1943::PulsedButtons()) != 0;
+      const bool pad_axes = (!key_axes && (pushed(8) || pushed(10) || pushed(12) || pushed(14))) ||
+                            (!key_lt && p[6] > 60) || (!key_rt && p[7] > 60);  // p[6], p[7]: the triggers
+      if (key_buttons || key_axes || key_lt || key_rt) bf1943::NoteMatchDevice(true);
+      else if (pad_buttons || pad_axes) bf1943::NoteMatchDevice(false);
+    }
     bf1943::GameMenuPad(uint16_t(buttons & ~rex::input::mnk::LastKeyButtons()), key_axes ? 0 : int16_t(p[8] << 8 | p[9]),
                         key_axes ? 0 : int16_t(p[10] << 8 | p[11]));
     // Start in a match: our pause opens (game_menu.cpp, PausePage), in place of the game's, which never opens (the
@@ -1189,14 +1208,19 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   const bool seated = bf1943::LocalSeated(base);
   bf1943::comms::NoteInWorld(seated || bf1943::LocalOnFoot());  // voice goes out only from the world
   bf1943::comms::ReadTeam(base, bf1943::LevelLoaded());  // team and squad chat (comms.cpp), the deploy screen too
+  bf1943::CapturePointsTick(base, bf1943::LevelLoaded());  // the flags' letters and the pause menu's map
 #if defined(BF_DEV_TOOLS)
   bf1943::DevTeamScan(base, seated || bf1943::LocalOnFoot());  // BF_DEV_TEAMSCAN (dev_team_scan.cpp)
 #endif
   if (!input_off)  // Settings > Controls
     bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, seated);
   bf1943::HudGlyphsTick(seated);  // hud_glyphs.cpp: the keyboard prompts follow the seat's keys
-  if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4);  // look.cpp: the mouse in a vehicle
-  const uint16_t buttons = uint16_t(p[4] << 8 | p[5]) | press;
+  if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4, seated);
+  if (press & 0x0C00) {  // the driver's left stick (BF_SPAWN_PRESSES lsr, lsl)
+    const int v = press & 0x0400 ? 32767 : -32768;
+    p[8] = uint8_t(uint16_t(v) >> 8), p[9] = uint8_t(v);
+  }
+  const uint16_t buttons = uint16_t(p[4] << 8 | p[5]) | uint16_t(press & ~0x0C00);
   p[4] = uint8_t(buttons >> 8);
   p[5] = uint8_t(buttons);
 #if defined(BF_DEV_TOOLS)
@@ -1590,10 +1614,14 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
           vehicle_keys_now.insert(w.substr(4));
           continue;
         }
-        if (w.size() == 3 && (w[0] == 'l' || w[0] == 'r') && w[1] == 's') {
+        if (w.size() >= 3 && (w[0] == 'l' || w[0] == 'r') && w[1] == 's' &&
+            (w.size() == 3 || (w[3] >= '0' && w[3] <= '9'))) {
           const int axis = (w[0] == 'l' ? 8 : 12) + (w[2] == 'u' || w[2] == 'd' ? 2 : 0);
           const bool negative = w[2] == 'd' || w[2] == 'l';
-          p[axis] = negative ? 0x80 : 0x7F, p[axis + 1] = negative ? 0x00 : 0xFF;
+          // "rsu": the stick all the way; "rsu25": a quarter of the way (a controller's gentle input, 13 Nov 2026).
+          const int percent = w.size() > 3 ? std::clamp(std::atoi(w.c_str() + 3), 1, 100) : 100;
+          const int v = (negative ? -32768 : 32767) * percent / 100;
+          p[axis] = uint8_t(uint16_t(v) >> 8), p[axis + 1] = uint8_t(v);
           continue;
         }
         held |= w == "a" ? 0x1000 : w == "b" ? 0x2000 : w == "x" ? 0x4000 : w == "y" ? 0x8000 : w == "lb" ? 0x0100
@@ -1682,6 +1710,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     const uint16_t b = uint16_t(p[4] << 8 | p[5]) | held;
     p[4] = uint8_t(b >> 8), p[5] = uint8_t(b);
     ++packet;
+    if (held) bf1943::NoteMatchDevice(false);  // the script's presses are the controller's (the HUD's prompts)
   }
   // BF_DEV_PADLOG=1 (tests): each change of the buttons, triggers or left stick the game gets, on foot or seated
   // (the keyboard's mappings; the right stick is left out, the mouse moves it all the time in a vehicle).

@@ -58,6 +58,12 @@ REXCVAR_DEFINE_BOOL(bf_mouse_invert_y, false, "BF1943/Controls", "Mouse vertical
 // Issue #3 (a player: one invert for the soldier and the tank, and they went opposite ways): vehicles' own.
 REXCVAR_DEFINE_BOOL(bf_mouse_invert_y_vehicle, false, "BF1943/Controls",
                     "Mouse vertical inverted in vehicles' guns and turrets (Keyboard & mouse)");
+// TekRantGaming, 12 Nov 2026 evening (0.3.0 players with the mouse: "vehicle aiming is inverted"): 0.3.0 gave the
+// vehicles a Normal of their own, the opposite of what a player who plays inverted on foot expects, so by default
+// the vehicles now follow the soldier's own Mouse vertical; Normal and Inverted set them apart (vehicle_mouse.cpp
+// VehicleMouseInverted). A 0.3.0 user folder's Inverted above still counts under "same".
+REXCVAR_DEFINE_STRING(bf_mouse_vehicle_vertical, "same", "BF1943/Controls",
+                      "Mouse vertical in vehicles' guns, turrets and views: same (as on foot), normal or inverted");
 REXCVAR_DECLARE(bool, mnk_mode);
 REXCVAR_DECLARE(bool, mnk_mouse);
 
@@ -214,6 +220,7 @@ void CameraStick(uint8_t* x, uint8_t* y, bool invert_x, bool invert_y) {
 }
 
 bool g_aim_raised = false, g_aim_was_down = false;
+bool g_aim_from_key = false;  // the aim's last press came from the keyboard or mouse (their own Hold or Toggle)
 
 // Keyboard & mouse in a vehicle (BF's own Help & Options > Controls, runs help3 and helpveh1: land and boat vehicles
 // throttle with the left trigger, brake with the left bumper, turn with the left stick and fire their second weapon with
@@ -306,16 +313,23 @@ void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated) {
     if (in & kButtons[i].bit) out |= remap[i];
   // Aim toggle: the left trigger as the game sees it, after remapping.
   if (seated) g_aim_raised = g_aim_was_down = false;
-  // The aim key's own choice when the keyboard or mouse holds the trigger (the right mouse button), else the
-  // controller's.
-  const bool key_aim = rex::input::mnk::LastKeyTrigger(false) > 30;
-  const bool toggle = key_aim ? REXCVAR_GET(bf_mouse_toggle_aim) : REXCVAR_GET(bf_toggle_aim);
+  // Whose press it is decides the choice, the keyboard and mouse's own or the controller's, and the choice is
+  // remembered while the aim stays raised: the mouse's trigger reads 0 again as soon as the button is let go, so
+  // reading it every frame fell back to the controller's Hold and dropped the aim at once (GitHub issue 9, "Keyboard's
+  // aim toggle not working ... continue to work like hold").
+  const bool down = out & 0x10000;
+  if (down && !g_aim_was_down) g_aim_from_key = rex::input::mnk::LastKeyTrigger(false) > 30;
+  const bool toggle = g_aim_from_key ? REXCVAR_GET(bf_mouse_toggle_aim) : REXCVAR_GET(bf_toggle_aim);
   if (toggle && !seated) {
-    const bool down = out & 0x10000;
-    if (down && !g_aim_was_down) g_aim_raised = !g_aim_raised;
-    g_aim_was_down = down;
+    if (down && !g_aim_was_down) {
+      g_aim_raised = !g_aim_raised;
+      REXLOG_INFO("BF aim: toggled {} by the {}", g_aim_raised ? "up" : "down", g_aim_from_key ? "keyboard or mouse" : "controller");
+    }
     out = g_aim_raised ? out | 0x10000 : out & ~0x10000u;
+  } else {
+    g_aim_raised = false;
   }
+  g_aim_was_down = down;
   gamepad[0] = uint8_t(out >> 8), gamepad[1] = uint8_t(out);
   // An analog trigger keeps its own depth when it presses itself; anything else presses fully.
   const uint8_t lt = gamepad[2], rt = gamepad[3];

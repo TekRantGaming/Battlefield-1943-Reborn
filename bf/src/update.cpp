@@ -435,6 +435,7 @@ void Install() {
     return SetState(State::kFailed, "Could not replace the AppImage with the new version, so nothing was changed.");
   }
   fs::remove(ready, ec);
+  setenv("BF_UPDATED_TO", version.c_str(), 1);  // a Flatpak's launcher notes the version it now starts (SpawnSelf)
 #endif
   REXLOG_INFO("BF update: v{} installed; restarting", version);
   SetState(State::kInstalled, "Updated to version " + version + ". Restarting...");
@@ -546,8 +547,15 @@ bool SpawnSelf() {
     for (std::string arg; std::getline(cmdline, arg, '\0');) args.push_back(arg);
   }
   const char* appimage = std::getenv("APPIMAGE");
+  // In a Flatpak (TekRantGaming, 13 Nov 2026: "the Linux version of the game should now be a flatpack version") the
+  // program is the release's AppImage in the sandbox's data folder, unpacked and started by the package's launcher
+  // (tools/linux/flatpak/bf1943-reborn): a sandbox has no FUSE, so the AppImage file cannot start itself there. The
+  // launcher names itself in BF_RESTART_WITH, and a restart goes through it.
+  const char* launcher = std::getenv("BF_RESTART_WITH");
   std::error_code ec;
-  const std::string exe = appimage && *appimage ? std::string(appimage) : fs::read_symlink("/proc/self/exe", ec).string();
+  const std::string exe = launcher && *launcher  ? std::string(launcher)
+                          : appimage && *appimage ? std::string(appimage)
+                                                  : fs::read_symlink("/proc/self/exe", ec).string();
   if (exe.empty()) return false;
   std::vector<char*> argv;
   argv.push_back(const_cast<char*>(exe.c_str()));
@@ -556,7 +564,7 @@ bool SpawnSelf() {
   // An AppImage sets its own library path again (AppRun); the old one names the copy this program runs from.
   std::vector<char*> env;
   for (char** e = environ; *e; ++e)
-    if (!(appimage && std::strncmp(*e, "LD_LIBRARY_PATH=", 16) == 0)) env.push_back(*e);
+    if (!((appimage || launcher) && std::strncmp(*e, "LD_LIBRARY_PATH=", 16) == 0)) env.push_back(*e);
   env.push_back(nullptr);
   pid_t pid = 0;
   if (posix_spawn(&pid, exe.c_str(), nullptr, nullptr, argv.data(), env.data()) != 0) {

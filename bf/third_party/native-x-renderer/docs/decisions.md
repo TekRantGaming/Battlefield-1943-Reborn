@@ -5144,3 +5144,68 @@ nadenight2, Guadalcanal's spawn 5 m from a lamppost, looking down: the view's me
 off, nadenight3). A lamp's light now rolls off with its own strength (lamps / (1 + 1.5 * its brightest channel)), and
 the surface's colour for a light takes less of the day's sun (lin * 0.5 / (luma + 0.2), was 0.6 / (luma + 0.3)): the
 same view 89 (nadenight4), a warm pool rather than the day; light seen from afar is weak enough to keep its strength.
+
+## D165 — A resolve the game reads on the CPU: its guest bytes set to zero at the call (2026-11-13, Claude for Battlefield 1943)
+
+**Decision:** a game profile may name resolves whose destination the game then reads on the CPU
+(`Profile::zeroed_resolves`: the Resolve call's return address; its caller's when every resolve goes through one
+function of the game's, 0 for any; the destination's size, 0 for any; its guest format, -1 for any). For a matching
+resolve the destination's guest bytes are set to zero in `CaptureResolve`, on the game's own thread as it makes the
+call, when they are not zero already. The resolve itself stays on the host as every other (D70). `NXR_RESOLVE_LOG`
+logs each kind of resolve (caller, its caller, size, format) once and, for the small ones, how many found guest
+bytes that were not zero; `NXR_D165_OFF` leaves the bytes alone (to compare).
+
+**Why:** TekRantGaming, 13 Nov 2026: "when you first play your first game it looks perfect but ... the longer I play
+and especially on maps that are not wake island ... the extra vegetation starts to behave strangely and starts
+appearing on roads and places it should not be". Battlefield 1943 has its own undergrowth: for each cell near the
+camera it draws a 64 x 64 mask (guest format 6), resolves it, and CPU jobs read the texture's memory to place the
+plants. A resolve never reaches guest memory here (D70; D140 writes only what a draw reads as vertices), so the jobs
+read whatever the memory held: zeros in a fresh process, so the first level has no game undergrowth (the look
+players know, with the grass of D151), and from the second level on the heap's leftovers: plants on roads and in
+yards, some black. Run veg2 (Wake Island, then Guadalcanal in the same process, D165 off): Wake Island's 340 mask
+resolves all found zeros; Guadalcanal's found guest bytes set in 260 of its first 260 (15973 of 16384 bytes in
+one), and the Japanese base's yard had grass clumps and black fronds on its sand (shot_180). Reading the resolve
+back into guest memory instead would bring the console's own undergrowth, on top of D151's grass and at a readback
+for every cell: not what players have had since the first release, and not asked for.
+
+**Results:** run veg3 (the same two levels, D165 on): the first dirty mask is logged ("held 15621 bytes of another
+use: set to zero before the game reads it"), every one after it is zeroed, and the same base's yard is bare sand.
+Wake Island as the first level is unchanged (its masks were zero already: nothing is written). Battlefield 1943's
+profile names the masks by the game's resolve function (0x82586834, the scene copy's too), 64 x 64, format 6; they
+come from two places in the game (0x827A1124 and 0x827A1150), any caller is taken.
+
+## D166 — Ultrawide without hooks round the 2D views: the HUD placed draw by draw (2026-11-12, pull request 11 of the players' repository, for Battlefield 1943)
+
+**Decision:** `Profile::box_2d_after_composite` (with `widens_cameras`, D43) for a game whose frame is the scene's copy, a
+bloom chain into smaller targets, one composite of the output's size, then the 2D layer. After the composite every
+draw of the output's size is a 2D draw, and each is placed on its own (`DrawPath::SetHudClassify`, `ClassifyHudDraw`):
+- Its place comes from its inline quad (Battlefield 1943: corners -1..1, or the canvas's pixels) and its vertex shader's
+  constants, tried as two rows (x' = r.(x, y, 0, 1)) or a column major matrix; a transform with no x or y term is none.
+- Across the whole canvas: stretched with the 3D view. Past both edges (a quad larger than the screen): drawn twice,
+  stretched then boxed (`kOversize`). From one canvas edge (and wider than 0.15): from the screen's edge to where its
+  inner edge is in the box, the canvas's edge pinned to the screen's (`kExtendLeft` / `kExtendRight`).
+- A mesh from vertex buffers with a 3D matrix (third row not (0, 0, 1, 0), the scope's mask): drawn as the 3D view.
+- A point the game projected to its HUD (`NoteHudMarker`, from the game's world-to-HUD functions) in the last 0.2 s:
+  its centre where the full width puts it, its size the box's (`kPoint`).
+- Inside an edge-anchored panel drawn before it: where the panel went. The next glyph or part of a line (same shader,
+  same row, starting where the last ended): where the last went. Otherwise, with `native_x_renderer_hud_layout` edges,
+  its centre beyond 0.4 of the canvas: boxed against that edge; else in the middle box.
+- A menu frame (a backdrop over exactly the canvas, or the game's `NoteGameMenu` in the last 1.5 s, and no 3D overlay):
+  no edges, no markers. A frame with no scene's copy (a loading screen) is placed the same way.
+`native_x_renderer_debug_hud` logs the decisions every 10 s.
+
+**Why:** the 0.4.0 ultrawide work (12 Nov 2026), played at 3440x1440: a boxed 16:9 HUD was asked for, then the HUD at the edges. Every
+Battlefield 1943 HUD element is the same 6-vertex quad placed by its constants (run 12 Nov 20:17), so the raw vertices
+said nothing; the scope's mask is a 3D mesh; the flags' markers are projected by the game with the widened camera into
+its 1280x720 HUD; the in-game HUD draws a large invisible container, so area was no sign of a menu.
+
+**Added when it was merged into Battlefield 1943 0.4.0 (2026-11-13, Claude for Battlefield 1943), from its review and
+the first runs at 21:9, 32:9, 16:10 and 4:3:**
+- A scissor never starts left of or above the target (`on_target` in `DrawInternal`): an edge anchored draw maps the
+  canvas's x 0 to a negative host x, and Vulkan requires a scissor offset of 0 or more.
+- A cube resolve's texture is square on the host: with a scale per axis both axes take the smaller one
+  (`ResolvedTextures::GetOrCreate`) and the resolve scales its copy into the face (`ExecuteResolve`). Before, the
+  texture could not be made (width 258, height 192 for the game's 128x128 cube at 21:9) and the cube stayed as it was.
+- A world marker (`kPoint`) is moved down as well as across: on an output taller than 16:9 the box sits in the middle
+  of the height, and a marker moved across only sat up to 5 percent of the height off its flag.
+- How a draw's place was found is a kind and a register, worded only for the debug log: no string per HUD draw.

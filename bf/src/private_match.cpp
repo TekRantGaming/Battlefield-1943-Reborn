@@ -157,7 +157,6 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
        << " --fullscreen=false --window_start=hidden --server"
        << " --cl=\"-dedicated -level " << LevelOf(first) << "\""
        << " --bf_map_rotation=" << rotation << " --bf_round_end_delay=45"
-       << " --bf_modern_mode=" << (o.modern ? "true" : "false")
        << " --bf_gm_backend=" << registry << " --bf_gm_listen=" << (LoopbackOnly() ? "127.0.0.1:" : "0.0.0.0:") << g.port
        << " --bf_gm_name=\"" << Clean(o.name.empty() ? std::string("Private match") : o.name) << "\""
        // Never in a test run: the router is the PC owner's (and a loopback host has nothing to forward).
@@ -181,8 +180,8 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
   }
   CloseHandle(pi.hThread);
   g.process = pi.hProcess;
-  REXLOG_INFO("BF private match: our server started (PID {}, maps {}, {}, UDP {}{})", pi.dwProcessId, rotation,
-              o.modern ? "modern" : "classic", g.port, o.upnp && !LoopbackOnly() ? ", router port asked" : "");
+  REXLOG_INFO("BF private match: our server started (PID {}, maps {}, UDP {}{})", pi.dwProcessId, rotation, g.port,
+              o.upnp && !LoopbackOnly() ? ", router port asked" : "");
   return true;
 #else
   if (why) *why = "Hosting a match needs Windows for now.";

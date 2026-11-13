@@ -1,7 +1,8 @@
 // Crash and hang reports (King Kong Recompiled's design, kk/src/crash_dump.cpp, MIT, TekRantGaming; handover pack 04
 // section 4), kept small: <user>\crashes\crash-<time>.dmp and .txt for a crash, hang-<time>.dmp and .txt when no
-// game frame came for 20 s. The text has the exception, the faulting module and offset, and up to 16 callers as
-// module + offset (decoded with the build's bf1943.map). Module paths and user names are never written. Windows only.
+// game frame came for 20 s. The text has the exception, the faulting module and offset, up to 16 callers as module +
+// offset (decoded with the build's bf1943.map), then the stack's third party modules and the overlays hooked into the
+// game (overlay_hooks.inc; also logged at the start). Module paths and user names are never written. Windows only.
 
 #if defined(_WIN32)
 
@@ -20,10 +21,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <cwchar>
 #include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -44,10 +47,53 @@ std::atomic<int64_t> g_last_frame_ms{0};
 std::atomic<bool> g_writing{false};
 std::atomic<bool> g_hang_written{false};
 constexpr int64_t kHangMs = 20000;
+int64_t g_start_ms = 0;             // InstallCrashReports
+std::wstring g_exe_dir, g_windows;  // the game's own folder and Windows' (ThirdParty)
 
 int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
       .count();
+}
+
+#include "overlay_hooks.inc"  // the known overlay and hook DLLs; HookedOverlays(), the ones in the process now
+std::mutex g_overlays_mutex;
+std::string g_overlays_seen;  // the set the last line logged
+
+// "RivaTuner Statistics Server (RTSSHooks64.dll, RTSSVkLayer64.dll), OBS Studio (graphics-hook64.dll)"; "" with none.
+std::string OverlaysText(const std::vector<HookedOverlay>& hooked) {
+  std::string text;
+  for (const HookedOverlay& h : hooked) text += (text.empty() ? "" : ", ") + h.product + " (" + h.files + ")";
+  return text;
+}
+
+// The log's line on them, "BF overlays<when>: <products and their DLLs> is (are) hooked into the game" or "...: none":
+// always, or (`changes`) only when the set differs from the last line's.
+void LogOverlays(const std::string& when, bool changes) {
+  const std::vector<HookedOverlay> hooked = HookedOverlays();
+  const std::string text = OverlaysText(hooked);
+  std::lock_guard<std::mutex> lock(g_overlays_mutex);
+  if (changes && text == g_overlays_seen) return;
+  g_overlays_seen = text;
+  if (hooked.empty()) REXLOG_INFO("BF overlays{}: none", when);
+  else REXLOG_INFO("BF overlays{}: {} {} hooked into the game", when, text, hooked.size() == 1 ? "is" : "are");
+}
+
+// The product a module file name is known as (the table above), "" for any other.
+std::string OverlayProductOf(const std::wstring& file) {
+  for (const OverlayHook& h : kOverlayHooks)
+    if (_wcsicmp(file.c_str(), h.file) == 0) return h.product;
+  return "";
+}
+
+// Whether a module (by its full path) is neither the game's own (bf1943.exe and the DLLs beside it) nor Windows' or a
+// driver's (under the Windows folder: System32, the DriverStore): an overlay's hook, a capture's, an antivirus's,
+// anything injected. "" (no module) is not.
+bool ThirdParty(const std::wstring& path) {
+  const auto under = [&path](const std::wstring& dir) {
+    return !dir.empty() && path.size() > dir.size() && _wcsnicmp(path.c_str(), dir.c_str(), dir.size()) == 0 &&
+           (path[dir.size()] == L'\\' || path[dir.size()] == L'/');
+  };
+  return !path.empty() && !under(g_exe_dir) && !under(g_windows);
 }
 
 std::string Stamp() {
@@ -59,8 +105,8 @@ std::string Stamp() {
   return b;
 }
 
-// "module + 0xoffset" for an address, the module by file name only.
-std::string Where(uint64_t address) {
+// "module + 0xoffset" for an address, the module by file name only; `path` (never written) gets its full path.
+std::string Where(uint64_t address, std::wstring* path = nullptr) {
   HMODULE module = nullptr;
   if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                           reinterpret_cast<LPCWSTR>(address), &module) ||
@@ -69,9 +115,10 @@ std::string Where(uint64_t address) {
     std::snprintf(b, sizeof(b), "0x%llx", static_cast<unsigned long long>(address));
     return b;
   }
-  wchar_t path[MAX_PATH] = {};
-  GetModuleFileNameW(module, path, MAX_PATH);
-  std::string name = std::filesystem::path(path).filename().string();
+  wchar_t p[MAX_PATH] = {};
+  GetModuleFileNameW(module, p, MAX_PATH);
+  if (path) *path = p;
+  std::string name = std::filesystem::path(p).filename().string();
   char b[64];
   std::snprintf(b, sizeof(b), " + 0x%llx", static_cast<unsigned long long>(address - reinterpret_cast<uint64_t>(module)));
   return name + b;
@@ -134,12 +181,20 @@ std::string ReportText(const char* kind, EXCEPTION_POINTERS* ep, const std::stri
   }
   // The callers, by the x64 unwind data from the exception's context (a function without unwind data ends the walk).
   CONTEXT context = *ep->ContextRecord;
+  std::vector<std::wstring> others;  // the stack's modules neither the game's own nor Windows', each once
   for (int i = 0; i < 16 && context.Rip; ++i) {
     bool approximate = false;
     const uint32_t guest = GuestFunctionOf(context.Rip, &approximate);
-    std::string line = "  " + std::to_string(i) + " " + Where(context.Rip);
+    std::wstring path;
+    std::string line = "  " + std::to_string(i) + " " + Where(context.Rip, &path);
     if (guest) line += std::string(" (game function ") + (approximate ? "near sub_" : "sub_") + Hex(guest) + ")";
     out += line + "\n";
+    if (ThirdParty(path)) {
+      const std::wstring file = std::filesystem::path(path).filename().wstring();
+      bool seen = false;
+      for (const std::wstring& o : others) seen = seen || _wcsicmp(o.c_str(), file.c_str()) == 0;
+      if (!seen) others.push_back(file);
+    }
     DWORD64 image = 0;
     PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &image, nullptr);
     if (!function) break;
@@ -147,6 +202,18 @@ std::string ReportText(const char* kind, EXCEPTION_POINTERS* ep, const std::stri
     DWORD64 frame = 0;
     RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, context.Rip, function, &context, &handler_data, &frame, nullptr);
   }
+  // What else is in the stack (ThirdParty), a known overlay with its name: an injected hook shows here (12 Nov 2026: a
+  // player's v0.3.0 crashed at its first frame in five frames of RivaTuner Statistics Server's, and nothing named it).
+  // Then the overlays hooked into the game at the time, in the stack or not.
+  std::string third;
+  for (const std::wstring& file : others) {
+    const std::string product = OverlayProductOf(file);
+    third += (third.empty() ? "" : ", ") + std::filesystem::path(file).string() +
+             (product.empty() ? "" : " (" + product + ")");
+  }
+  out += "Third party in the stack: " + (third.empty() ? std::string("none") : third) + "\n";
+  const std::string hooked = OverlaysText(HookedOverlays());
+  out += "Overlays hooked in: " + (hooked.empty() ? std::string("none") : hooked) + "\n";
   auto* ts = rex::runtime::ThreadState::Get();
   PPCContext* ctx = ts ? ts->context() : nullptr;
   if (!ctx) return out + "No game thread\n";
@@ -221,11 +288,23 @@ LONG WINAPI OnVectored(EXCEPTION_POINTERS* ep) {
 // The crashes folder and the handlers; the hang watchdog starts with the first game frame.
 void InstallCrashReports(const std::filesystem::path& user_root) {
   g_dir = user_root / "crashes";
+  g_start_ms = NowMs();
+  {
+    wchar_t p[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, p, MAX_PATH);
+    g_exe_dir = std::filesystem::path(p).parent_path().wstring();
+    wchar_t w[MAX_PATH] = {};
+    GetWindowsDirectoryW(w, MAX_PATH);
+    g_windows = w;
+  }
   SetUnhandledExceptionFilter(OnUnhandled);
   AddVectoredExceptionHandler(0, OnVectored);
   std::thread([] {
     for (;;) {
       std::this_thread::sleep_for(std::chrono::seconds(2));
+      // A hook that came after the start (RivaTuner's with the first Vulkan device, OBS's when its capture starts): a
+      // line when the set changes.
+      LogOverlays(", " + std::to_string((NowMs() - g_start_ms) / 1000) + " s after the start", true);
       const int64_t last = g_last_frame_ms.load();
       if (!last) continue;
       const int64_t stalled = NowMs() - last;
@@ -238,6 +317,7 @@ void InstallCrashReports(const std::filesystem::path& user_root) {
     }
   }).detach();
   REXLOG_INFO("BF crash reports: on (crashes folder in the user data)");
+  LogOverlays("", false);  // the hooks in already; later ones: the poll above and the first game frame
 }
 
 // The guest's null page (guest 0x0 to 0xFFFF; the runtime keeps it without access, protect_zero): a read there gives
@@ -311,6 +391,9 @@ void NoteGuestFrame() {
   g_last_frame_ms = NowMs();
   static const bool guard = (InstallNullPageGuard(), true);
   (void)guard;
+  // The overlays once more at the first game frame, beside the renderer's first present (where a hook's crash comes).
+  static const bool overlays = (LogOverlays(" at the first game frame", false), true);
+  (void)overlays;
 #if defined(BF_DEV_TOOLS)
   // BF_DEV_NULL_READ_AT=<s> (tests of the null page guard): reads of the guest's 0x8 that long after the first frame,
   // then each 5 s.

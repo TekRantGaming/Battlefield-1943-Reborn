@@ -127,6 +127,15 @@ float Spaced(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const s
 }
 
 float Heading(ImDrawList* d, float size, ImVec2 at, ImU32 col, const std::string& t, float track, float max_w) {
+  // The game's own headline lettering once its font is there (bf_font.cpp, the new look): capitals about 0.72 of the
+  // stencil's size, on the same line.
+  if (GameFontReady(GameFont::kHeadline)) {
+    float cap = size * 0.72f;
+    float w = GameTextWidth(GameFont::kHeadline, cap, t);
+    if (max_w > 0 && w > max_w) cap *= max_w / w, w = max_w;
+    GameText(d, GameFont::kHeadline, cap, ImVec2(at.x, at.y + (size - cap) * 0.5f), col, t);
+    return w;
+  }
   ImFont* f = g_fonts.stencil;
   float w = SpacedWidth(f, size, t, track);
   if (max_w > 0 && w > max_w) {
@@ -262,6 +271,14 @@ void Tape(ImDrawList* d, ImVec2 centre, float w, float h, float degrees) {
 }
 
 void Brand(ImDrawList* d, ImVec2 at, float u) {
+  // The game's own logo with REBORN beside it once the menu art is there (the new look); our lettering before.
+  if (!MenuArtDir().empty()) {
+    const float lw = ArtAt(d, "logo", ImVec2(at.x + 8 * u, at.y + 17 * u), 56 * u);
+    if (lw > 0) {
+      GameText(d, GameFont::kHeadlineMedium, 22 * u, ImVec2(at.x + 8 * u + lw + 10 * u, at.y + 24 * u), kGold, "REBORN");
+      return;
+    }
+  }
   const float size = 30 * u, track = 4 * u;
   const float w = Spaced(d, g_fonts.stencil, size, at, kKhaki, "BATTLEFIELD 1943 ", track);
   Spaced(d, g_fonts.stencil, size, ImVec2(at.x + w + track, at.y), kKhakiDim, "REBORN", track);
@@ -295,13 +312,16 @@ void Stamp(ImDrawList* d, ImVec2 centre, float u, float degrees, float scale, bo
 
 Style StyleFor(const std::string& v, bool keyboard_last) {
   if (v == "keyboard") return Style::kKeyboard;
+  // A chosen controller style is for the controller: the keyboard's keys show while the keyboard or mouse is used,
+  // and the chosen controller's buttons again as soon as it is (TekRantGaming, 12 Nov 2026: "if they change back to
+  // keyboard and mouse midway through their playthrough ... the glyphs update automatically").
+  if (keyboard_last) return Style::kKeyboard;
   if (v == "xbox360") return Style::kXbox360;
   if (v == "xbox_series") return Style::kXboxSeries;
   if (v == "ps3" || v == "ps2") return Style::kPlayStation3;
   if (v == "ps5") return Style::kPlayStation5;
   if (v == "steam_deck") return Style::kSteamDeck;
-  // Automatic: the keyboard's when it was used last, else the controller in use (game_menu.cpp PadFamily).
-  if (keyboard_last) return Style::kKeyboard;
+  // Automatic: the controller in use (game_menu.cpp PadFamily).
   const std::string family = PadFamily();
   return family == "ps5" ? Style::kPlayStation5 : family == "steam_deck" ? Style::kSteamDeck : Style::kXboxSeries;
 }
@@ -357,18 +377,20 @@ const GlyphImage* Picture(const std::string& set, const std::string& name, ImFon
 
 }  // namespace
 
-bool DrawImageFile(ImDrawList* d, const std::filesystem::path& file, ImVec2 a, ImVec2 b, bool stretch, bool fit,
-                   int max_width) {
-  struct FileImage {
-    ImFontAtlasRectId id = ImFontAtlasRectId_Invalid;
-    int w = 0, h = 0;
-    std::vector<uint8_t> rgba;
-    double checked = -10;
-  };
-  static std::map<std::string, FileImage> images;
-  FileImage& g = images[file.string()];
+namespace {
+struct FileImage {
+  ImFontAtlasRectId id = ImFontAtlasRectId_Invalid;
+  int w = 0, h = 0;
+  std::vector<uint8_t> rgba;
+  double checked = -10;
+};
+std::map<std::string, FileImage> g_images;
+
+// A picture file decoded once (looked for again every 2 s while it is not there: the art is made on a worker).
+FileImage* LoadImageFile(const std::filesystem::path& file, int max_width) {
+  FileImage& g = g_images[file.string()];
   if (g.rgba.empty()) {
-    if (ImGui::GetTime() - g.checked < 2.0) return false;  // made on a worker: looked for again every 2 s
+    if (ImGui::GetTime() - g.checked < 2.0) return nullptr;
     g.checked = ImGui::GetTime();
     std::ifstream f(file, std::ios::binary);
     std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -376,7 +398,7 @@ bool DrawImageFile(ImDrawList* d, const std::filesystem::path& file, ImVec2 a, I
     if (!bytes.empty()) g.rgba = DecodePicture(bytes.data(), bytes.size(), w, h);  // PNG or JPEG (picture_decode.cpp)
     if (g.rgba.empty() || w <= 0 || h <= 0) {
       g.rgba.clear();
-      return false;
+      return nullptr;
     }
     // Kept no wider than `max_width` in the atlas (a box average by a whole factor), as King Kong decodes its tiles'
     // pictures at most 960 wide: a 1920 wide banner would take the atlas eight times the room.
@@ -395,6 +417,37 @@ bool DrawImageFile(ImDrawList* d, const std::filesystem::path& file, ImVec2 a, I
     }
     g.w = w, g.h = h;
   }
+  return &g;
+}
+}  // namespace
+
+ImVec2 ImageFileSize(const std::filesystem::path& file) {
+  const FileImage* g = LoadImageFile(file, 0);
+  return g ? ImVec2(float(g->w), float(g->h)) : ImVec2(0, 0);
+}
+
+bool ImageFileUv(const std::filesystem::path& file, ImVec2& uv0, ImVec2& uv1, int& w, int& h) {
+  FileImage* gp = LoadImageFile(file, 0);
+  if (!gp) return false;
+  FileImage& g = *gp;
+  ImFontAtlasRect r;
+  const std::vector<uint8_t>& src = g.rgba;
+  const int gw = g.w;
+  if (!AtlasRect(g.id, g.w, g.h,
+                 [&src, gw, gh = g.h](uint8_t* p, int stride) {
+                   for (int y = 0; y < gh; ++y) std::memcpy(p + y * stride, &src[size_t(y) * gw * 4], size_t(gw) * 4);
+                 },
+                 r))
+    return false;
+  uv0 = r.uv0, uv1 = r.uv1, w = g.w, h = g.h;
+  return true;
+}
+
+bool DrawImageFile(ImDrawList* d, const std::filesystem::path& file, ImVec2 a, ImVec2 b, bool stretch, bool fit,
+                   int max_width, ImU32 tint) {
+  FileImage* gp = LoadImageFile(file, max_width);
+  if (!gp) return false;
+  FileImage& g = *gp;
   ImFontAtlasRect r;
   const std::vector<uint8_t>& src = g.rgba;
   const int w = g.w;
@@ -426,7 +479,7 @@ bool DrawImageFile(ImDrawList* d, const std::filesystem::path& file, ImVec2 a, I
       const float wd = (b.y - a.y) * pic, x = std::round((a.x + b.x - wd) * 0.5f);
       c0.x = x, c1.x = x + wd;
     }
-    d->AddImage(ImGui::GetIO().Fonts->TexRef, c0, c1, uv0, uv1);
+    d->AddImage(ImGui::GetIO().Fonts->TexRef, c0, c1, uv0, uv1, tint);
     return true;
   }
   if (stretch) {
@@ -437,7 +490,7 @@ bool DrawImageFile(ImDrawList* d, const std::filesystem::path& file, ImVec2 a, I
     const float keep = pic / box, dv = (uv1.y - uv0.y) * (1 - keep) * 0.5f;
     uv0.y += dv, uv1.y -= dv;
   }
-  d->AddImage(ImGui::GetIO().Fonts->TexRef, a, b, uv0, uv1);
+  d->AddImage(ImGui::GetIO().Fonts->TexRef, a, b, uv0, uv1, tint);
   return true;
 }
 
@@ -507,6 +560,12 @@ float Cap(ImDrawList* d, const std::string& t, ImVec2 at, float h, bool draw) {
 }  // namespace
 
 float Glyph(ImDrawList* d, Style style, Button b, const std::string& key, ImVec2 at, float h, bool draw) {
+  // The game's own buttons (its menus' glyph sprites, cut from its atlases: A, B, X, Y, LB, RB, LT, RT) for the Xbox
+  // styles, once the menu art is there.
+  if ((style == Style::kXbox360 || style == Style::kXboxSeries) && int(b) <= int(Button::kRT) && !MenuArtDir().empty()) {
+    const float w = ArtAt(d, (std::string("glyph_") + PadName(b)).c_str(), ImVec2(at.x, at.y), h, IM_COL32(255, 255, 255, 255), draw);
+    if (w > 0) return w;
+  }
   if (style == Style::kKeyboard || b == Button::kKey) {
     const std::string name = key.empty() ? "?" : key;
     ImFontAtlasRect r;
@@ -570,6 +629,101 @@ Strip PromptStrip(ImDrawList* d, ImVec2 at, float u, Style style, Button button,
   Spaced(d, f, s, ImVec2(at.x + pad_l + gw + gap, at.y + (h - s * 1.45f) * 0.5f), green ? IM_COL32(255, 255, 255, 255) : kStripText,
          label, 1 * u);
   return out;
+}
+
+// ---- the game's own menu art and fonts
+
+namespace {
+fs::path g_menu_art_dir;
+}  // namespace
+
+void SetMenuArtDir(const fs::path& dir) { g_menu_art_dir = dir; }
+const fs::path& MenuArtDir() { return g_menu_art_dir; }
+
+bool Art(ImDrawList* d, const char* name, ImVec2 a, ImVec2 b, bool stretch, ImU32 tint) {
+  if (g_menu_art_dir.empty()) return false;
+  return DrawImageFile(d, g_menu_art_dir / (std::string(name) + ".png"), a, b, stretch, false, 1280, tint);
+}
+
+ImVec2 ArtSize(const char* name) {
+  if (g_menu_art_dir.empty()) return ImVec2(0, 0);
+  return ImageFileSize(g_menu_art_dir / (std::string(name) + ".png"));
+}
+
+float ArtAt(ImDrawList* d, const char* name, ImVec2 at, float h, ImU32 tint, bool draw) {
+  const ImVec2 size = ArtSize(name);
+  if (size.x <= 0 || size.y <= 0) return 0;
+  const float w = h * size.x / size.y;
+  if (draw) Art(d, name, ImVec2(at.x, at.y - h * 0.5f), ImVec2(at.x + w, at.y + h * 0.5f), true, tint);
+  return w;
+}
+
+void PaperArt(ImDrawList* d, ImVec2 a, ImVec2 b) {
+  if (!Art(d, "paper", a, b, true)) d->AddRectFilled(a, b, kPaper);
+}
+
+}  // namespace bf1943::kit
+
+namespace bf1943 {
+bool BfFontReadyNamed(const std::string& name, const std::filesystem::path& game_dir, const std::filesystem::path& user_dir);
+float BfTextWidthNamed(const std::string& name, const std::string& text, float cap, float track);
+bool BfTextNamed(const std::string& name, ImDrawList* d, ImVec2 top_left, float cap, ImU32 color, const std::string& text,
+                 float track);
+}  // namespace bf1943
+
+namespace bf1943::kit {
+
+namespace {
+const char* GameFontName(GameFont f) {
+  switch (f) {
+    case GameFont::kHeadline: return "headline_large";
+    case GameFont::kHeadlineMedium: return "headline_medium";
+    case GameFont::kText: return "normal_large";
+    case GameFont::kTextMedium: return "normal_medium";
+    case GameFont::kListHeader: return "list_header";
+    case GameFont::kListItem: return "list_item";
+    case GameFont::kNumbers: return "headnumbers";
+  }
+  return "normal_large";
+}
+// Our nearest font while the game's is not ready, and its size for capitals `cap` high (the stencil's and Oswald's
+// capitals are about 0.72 of the size; Courier New Bold's 0.6).
+ImFont* StandIn(GameFont f, float cap, float& size) {
+  switch (f) {
+    case GameFont::kHeadline:
+    case GameFont::kHeadlineMedium:
+    case GameFont::kNumbers: size = cap / 0.72f; return g_fonts.stencil;
+    case GameFont::kListHeader:
+    case GameFont::kListItem: size = cap / 0.6f; return g_fonts.typed;
+    default: size = cap / 0.72f; return g_fonts.ui_bold;
+  }
+}
+fs::path UserDirFromArt() {
+  // user\cache\extracted\menu -> user
+  return g_menu_art_dir.empty() ? fs::path() : g_menu_art_dir.parent_path().parent_path().parent_path();
+}
+}  // namespace
+
+bool GameFontReady(GameFont f) {
+  if (g_menu_art_dir.empty()) return false;
+  return BfFontReadyNamed(GameFontName(f), fs::path(), UserDirFromArt());
+}
+
+float GameTextWidth(GameFont f, float cap, const std::string& t, float track) {
+  if (GameFontReady(f)) return BfTextWidthNamed(GameFontName(f), t, cap, track);
+  float size = 0;
+  ImFont* font = StandIn(f, cap, size);
+  return SpacedWidth(font, size, t, track);
+}
+
+float GameText(ImDrawList* d, GameFont f, float cap, ImVec2 at, ImU32 col, const std::string& t, float track) {
+  if (t.empty()) return 0;
+  if (GameFontReady(f) && BfTextNamed(GameFontName(f), d, at, cap, col, t, track))
+    return BfTextWidthNamed(GameFontName(f), t, cap, track);
+  float size = 0;
+  ImFont* font = StandIn(f, cap, size);
+  // Our fonts' capitals start below the line's top by about (size - cap) / 2
+  return Spaced(d, font, size, ImVec2(at.x, at.y - (size - cap) * 0.5f), col, t, track);
 }
 
 }  // namespace bf1943::kit

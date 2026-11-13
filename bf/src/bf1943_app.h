@@ -58,6 +58,8 @@ void InstallHudGlyphs();                                                     // 
 void InstallLook(rex::ui::Window* window);                               // look.cpp
 void InstallPlaytestMark(rex::ui::Window* window);                       // playtest_mark.cpp: BF_MARK_FILE
 void InstallCrashReports(const std::filesystem::path& user_root);        // crash_report.cpp
+void TellStartFailure(rex::SelfQuitCause cause, const char* reason, double since_launch,
+                      const std::filesystem::path& log, int exit_code, void* native_window);  // start_failure.cpp
 void StartPipelineUploads(const std::filesystem::path& user_dir,
                           const std::filesystem::path& cache_dir);       // pipeline_upload.cpp
 void BeginGameSetup(const std::filesystem::path& game_dir, std::function<void(std::filesystem::path)> done);  // game_menu
@@ -176,6 +178,28 @@ class Bf1943App : public rex::ReXApp {
   // Just before the game starts: the backend's answer to the player's name (game_menu.cpp, a number added when another
   // player online has it), so the game only ever sees one name.
   void OnPreLaunchModule() override { bf1943::FinishNameCheck(); }
+
+  // The game's module is launched: the time, for a game that ends while it is still starting (OnShutdown).
+  void OnPostLaunchModule(rex::system::XThread* thread) override {
+    (void)thread;
+    launched_at_ = std::chrono::steady_clock::now();
+  }
+
+  // The app is quitting by itself (the SDK copy's ReXApp::OnDestroy; a window close never comes here). When that is
+  // because the game could not start, the player is told, with where the log is (start_failure.cpp; TekRantGaming,
+  // 13 Nov 2026: a player's game closed 2 s after its launcher came up and said nothing). A dedicated server has
+  // nobody to tell.
+  void OnShutdown() override {
+    if (REXCVAR_GET(server)) return;
+    const double since_launch =
+        launched_at_ == std::chrono::steady_clock::time_point{}
+            ? -1.0
+            : std::chrono::duration<double>(std::chrono::steady_clock::now() - launched_at_).count();
+    std::filesystem::path log = rex::cvar::GetFlagByName("log_file");
+    if (log.empty() && !paths_.user_data_root.empty()) log = paths_.user_data_root / "bf1943.log";
+    bf1943::TellStartFailure(rex::SelfQuitWhy(), rex::SelfQuitReason(), since_launch, log, rex::SelfQuitCode(),
+                             window() ? window()->GetNativeWindowHandle() : nullptr);
+  }
 
   void OnConfigurePaths(rex::PathConfig& paths) override {
 #if !defined(BF_DEV_TOOLS)
@@ -358,8 +382,8 @@ class Bf1943App : public rex::ReXApp {
   // std::unique_ptr<rex::ui::ImGuiDialog> CreateAchievementsOverlay() override;
   // std::unique_ptr<rex::ui::AchievementNotificationDialog>
   // CreateAchievementNotificationDialog() override;
-  // void OnShutdown() override {}
 
  private:
   rex::PathConfig paths_;
+  std::chrono::steady_clock::time_point launched_at_{};  // OnPostLaunchModule; zero while the game was never launched
 };

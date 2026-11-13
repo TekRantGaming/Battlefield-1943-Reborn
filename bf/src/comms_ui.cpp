@@ -125,6 +125,7 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& io) override {
+    DrawBroadcast(io);  // over everything, our menus too: a restart's warning is for a player in the pause as well
     if (!InMatch() || GameMenuOpen()) {
       if (comms::Typing()) Close();
       comms::SetPushToTalk(false);
@@ -181,6 +182,44 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
       if (!t.empty()) comms::SendChat(channel_, t);
       Close();
     }
+  }
+
+  // A server broadcast (TekRantGaming, 13 Nov 2026: "shown in a box at the top center of the screen that's clear and
+  // big enough to see it should remain on screen for 10s and play a sound when it appears"): a dark plate with a
+  // coloured bar and what it is about (a game update, a restart, the server's own message), the words large, and a
+  // line that runs out with its time. It slides in and fades out. The chime is the mixer's (comms.cpp).
+  void DrawBroadcast(ImGuiIO& io) {
+    std::string text;
+    int kind = 0;
+    double age = 0, seconds = 10;
+    if (!comms::CurrentBroadcast(&text, &kind, &age, &seconds)) return;
+    const float s = io.DisplaySize.y / 1080.0f;
+    ImFont* bold = MenuFont(0) ? MenuFont(0) : ImGui::GetFont();
+    ImFont* font = MenuFont(1) ? MenuFont(1) : ImGui::GetFont();
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const float size = 42.0f * s, head = 20.0f * s, pad = 30.0f * s;
+    const float max_w = io.DisplaySize.x * 0.66f, wrap = max_w - 2 * pad;
+    const ImVec2 ts = bold->CalcTextSizeA(size, FLT_MAX, wrap, text.c_str());
+    const char* label = kind == 1 ? "GAME UPDATE" : kind == 2 ? "SERVER RESTART" : "SERVER MESSAGE";
+    const float w = std::max(std::max(ts.x, 520.0f * s) + 2 * pad, font->CalcTextSizeA(head, FLT_MAX, 0, label).x + 2 * pad);
+    const float h = pad * 0.7f + head + 10.0f * s + ts.y + pad * 0.8f;
+    const float in = float(std::clamp(age / 0.25, 0.0, 1.0)), out = float(std::clamp((seconds - age) / 0.5, 0.0, 1.0));
+    const float alpha = std::min(in, out);
+    // Its top is just under the game's own ticket bars and its row of capture point flags (they end near 152 of
+    // 1080 lines), so neither is hidden while the message is up.
+    const float x0 = (io.DisplaySize.x - w) * 0.5f, y0 = 172.0f * s - (1.0f - in) * 30.0f * s;
+    const ImU32 accent = kind == 2 ? IM_COL32(206, 62, 48, int(255 * alpha)) : kind == 1 ? IM_COL32(143, 179, 79, int(255 * alpha))
+                                                                                         : IM_COL32(201, 183, 122, int(255 * alpha));
+    dl->AddRectFilled(ImVec2(x0 + 4 * s, y0 + 5 * s), ImVec2(x0 + w + 4 * s, y0 + h + 5 * s), IM_COL32(0, 0, 0, int(110 * alpha)), 4 * s);
+    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + w, y0 + h), IM_COL32(16, 18, 14, int(238 * alpha)), 4 * s);
+    dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + w, y0 + h), IM_COL32(241, 234, 211, int(70 * alpha)), 4 * s, 0, 1.5f * s);
+    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + 8 * s, y0 + h), accent, 4 * s, ImDrawFlags_RoundCornersLeft);
+    dl->AddText(font, head, ImVec2(x0 + pad, y0 + pad * 0.7f), accent, label);
+    dl->AddText(bold, size, ImVec2(x0 + pad, y0 + pad * 0.7f + head + 10.0f * s), IM_COL32(241, 234, 211, int(255 * alpha)), text.c_str(),
+                nullptr, wrap);
+    // The time it has left, running out along the foot.
+    const float left = float(std::clamp(1.0 - age / seconds, 0.0, 1.0));
+    dl->AddRectFilled(ImVec2(x0 + 8 * s, y0 + h - 4 * s), ImVec2(x0 + 8 * s + (w - 8 * s) * left, y0 + h), accent);
   }
 
   void Draw(ImGuiIO& io) {

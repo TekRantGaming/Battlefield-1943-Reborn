@@ -196,6 +196,82 @@ class CommsTest(unittest.TestCase):
         self.assertEqual(body[0], 1)
         self.assertEqual(struct.unpack_from('>HBB', body, 1), (a, 1, 1))
 
+    def test_broadcast_reaches_everyone_and_a_player_who_links_while_it_shows(self):
+        import time
+        self.join('Alpha', CA, 1, 1)
+        self.join('Bravo', CB, 2, 3)
+        self.sent()
+        self.comms.broadcast('This server will restart in 5 minutes', 'restart', 10)
+        self.comms.tick(time.monotonic() + 1.0)
+        got = self.sent(gmhost.C_BROADCAST)
+        self.assertEqual(sorted(a for a, _ in got), [CA] * 3 + [CB] * 3)  # three times each: it is UDP
+        body = got[0][1]
+        self.assertEqual(struct.unpack_from('>HBB', body), (1, 2, 10))  # the first, a restart, ten seconds on screen
+        self.assertEqual(body[5:5 + body[4]].decode('utf-8'), 'This server will restart in 5 minutes')
+        self.assertTrue(all(b == body for _, b in got))
+        # Charlie links while the message is still on the others' screens: it gets it too, with its welcome.
+        self.comms.receive(hello('Charlie', 1, 1), CC)
+        self.assertEqual([a for a, _ in self.sent(gmhost.C_BROADCAST)], [CC])
+        # A second hello from the same player (the games repeat it) does not send it again.
+        self.comms.receive(hello('Charlie', 1, 1), CC)
+        self.assertEqual(self.sent(gmhost.C_BROADCAST), [])
+        # Once its time is over a new player gets nothing.
+        self.comms.broadcast_last = (time.monotonic() - 1, body)
+        self.comms.receive(hello('Delta', 2, 1), CD)
+        self.assertEqual(self.sent(gmhost.C_BROADCAST), [])
+
+    def test_broadcast_text_is_cleaned_and_kinds_are_numbered(self):
+        import time
+        self.join('Alpha', CA, 1, 1)
+        self.sent()
+        self.comms.broadcast('  Hello\n\tthere \x07 ' + 'x' * 300, 'custom', 99)
+        self.comms.broadcast('', 'update', 10)  # nothing to say: not sent
+        self.comms.broadcast('New version', 'update', 1)
+        self.comms.tick(time.monotonic() + 1.0)
+        bodies = sorted({b for _, b in self.sent(gmhost.C_BROADCAST)})
+        self.assertEqual(len(bodies), 2)
+        first, second = bodies
+        self.assertEqual(struct.unpack_from('>HBB', first), (1, 0, 30))  # custom; at most 30 s on screen
+        said = first[5:5 + first[4]].decode('utf-8')
+        self.assertTrue(said.startswith('Hello there x') and len(said) == 200)
+        self.assertEqual(struct.unpack_from('>HBB', second), (2, 1, 3))  # a game update; at least 3 s
+        self.assertEqual(second[5:5 + second[4]].decode('utf-8'), 'New version')
+
+    def test_broadcast_file_sends_each_new_message_once(self):
+        import json
+        import tempfile
+        import time
+        self.join('Alpha', CA, 1, 1)
+        self.sent()
+        path = os.path.join(tempfile.mkdtemp(prefix='bfbc_'), 'broadcast.json')
+        self.comms.broadcast_file = path
+
+        def write(seq, text, kind='custom'):
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump({'seq': seq, 'kind': kind, 'text': text, 'seconds': 10}, f)
+
+        now = time.monotonic()
+        write(7, 'left from the last run')
+        self.comms.tick(now)  # the host's first look: what is there was for an earlier run
+        self.comms.tick(now + 2)
+        self.assertEqual(self.sent(gmhost.C_BROADCAST), [])
+        write(8, 'Game has updated to a new version server restarting in 10 minutes', 'update')
+        self.comms.tick(now + 3)
+        self.comms.tick(now + 5)
+        got = self.sent(gmhost.C_BROADCAST)
+        self.assertEqual(len(got), 3)
+        self.assertEqual(got[0][1][2], 1)  # a game update
+        self.comms.tick(now + 6)  # the same file again: nothing new
+        self.comms.tick(now + 8)
+        self.assertEqual(self.sent(gmhost.C_BROADCAST), [])
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('{"seq": 9, "text": ')  # half written: skipped, and the host goes on
+        self.comms.tick(now + 9)
+        write(10, 'This server will restart in 1 minute', 'restart')
+        self.comms.tick(now + 10)
+        self.comms.tick(now + 12)
+        self.assertEqual(len(self.sent(gmhost.C_BROADCAST)), 3)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

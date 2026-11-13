@@ -84,13 +84,13 @@
   // The backdrop (the game's own picture shows through once BF's menu scene is up: the mockups' "art from your game
   // files"), the name at the top left, the step and the stamp.
   void Chrome(ImDrawList* d, ImGuiIO& io, const Stage& st, int step, float over_game = 0) {
-    // The new look (docs/MENUS-PLAN.md section 6): the maps from the air (once the game files give them; plain dark
-    // before), darkened under the pages' papers, never the game's own picture.
+    // The new look (Version A1, game_menu_home.inc): the game's own menu picture with the olive wash (the maps from
+    // the air until the art is there), its logo with REBORN beside it (our brand until the game files are in: the
+    // first setup's pages).
     (void)over_game;
-    MainBackdrop(d, io.DisplaySize);
-    d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(12, 14, 11, 150));
-    kit::Brand(d, st.P(40, 28), st.u);
-    if (step > 0) kit::StepBar(d, st.P(1240, 34), st.u, step, 9);
+    MenuBackdrop(d, io.DisplaySize, st);
+    kit::Brand(d, st.P(40, 28), st.u);  // the logo once the art is there
+    if (step > 0) kit::StepBar(d, st.P(1240, 34), st.u, step, kSetupSteps);
   }
   void StampCorner(ImDrawList* d, const Stage& st) {
     if (kit::WatermarkOn()) kit::Stamp(d, st.P(1240 - 128, 720 - 22 - 33), st.u, -6);
@@ -100,9 +100,16 @@
 
   static void OpenUrl(const std::string& url) {
     REXLOG_INFO("BF launcher: opening {}", url);
-#if defined(_WIN32)
     if (const char* v = std::getenv("BF_DEV_NO_OPEN"); v && *v == '1') return;  // tests: logged only
+#if defined(_WIN32)
     ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    // The desktop's own opener (in a Flatpak it asks the portal). Detached: a browser outlives the game.
+    if (fork() == 0) {
+      setsid();
+      execlp("xdg-open", "xdg-open", url.c_str(), static_cast<char*>(nullptr));
+      _exit(127);
+    }
 #endif
   }
   static constexpr const char* kDiscordUrl = "https://discord.gg/8eakYSvBZS";  // TRG Studios' invite (King Kong's)
@@ -112,6 +119,11 @@
   // After the shaders: the setup from its account page (until it was finished once), else Home. A setup closed half
   // way counts as done at the next start once a name was chosen (TekRantGaming's rule for King Kong, 26 Oct 2026).
   void AfterShaders() {
+    if (setup_shader_step_) {  // the first start's step 8 is done: Ready
+      setup_shader_step_ = false;
+      page_ = Page::kAllSet, allset_row_ = 0, row_ = 0, scroll_ = 0;
+      return;
+    }
     // Play started the game from the launcher: our Getting ready page stays while the game boots and signs in behind
     // it (its films, title and menus never show, TekRantGaming's 10 Nov brief); then our main menu (StartingPage).
     if (played_) {
@@ -154,12 +166,19 @@
         if (setup_tab_ < 2) ++setup_tab_;
         else page_ = Page::kPrompts, prompts_row_ = 0;
         break;
-      case Page::kPrompts: page_ = Page::kPlaystyle; break;
-      case Page::kPlaystyle: page_ = Page::kAllSet, allset_row_ = 0; break;
+      case Page::kPrompts: page_ = Page::kVoice; break;
+      case Page::kVoice:
+        // Step 8, the shaders: prepared now, with the settings the pages before chose (PrepareShadersAtStart), then
+        // Ready. Already prepared (the setup run again over an install that has them): straight to Ready.
+        if (PrepareShadersAtStart("the first start's step 8")) setup_shader_step_ = true;
+        else page_ = Page::kAllSet, allset_row_ = 0;
+        break;
       case Page::kAllSet:
         settings_.values["launcher_setup"] = "done";
+        settings_.values["last_version"] = BfVersion();  // a first install has nothing new to be told (What's new)
         settings_.Save();
         setup_active_ = false;
+        whats_new_pending_ = false;
         REXLOG_INFO("BF launcher: setup finished");
         page_ = Page::kHome, home_row_ = 0;
         // Settings the game takes only at the start were chosen: it starts again now, so the first match already
@@ -178,8 +197,8 @@
         else BeginAccount(true);
         break;
       case Page::kPrompts: page_ = Page::kSetupSettings, setup_tab_ = 2; break;
-      case Page::kPlaystyle: page_ = Page::kPrompts; break;
-      case Page::kAllSet: page_ = Page::kPlaystyle; break;
+      case Page::kVoice: page_ = Page::kPrompts; break;
+      case Page::kAllSet: page_ = Page::kVoice; break;
       default: break;
     }
     row_ = 0, scroll_ = 0, sub_ = kSubNone;
@@ -187,11 +206,11 @@
   int SetupStep() const {
     switch (page_) {
       case Page::kSetup: return 1;
-      case Page::kShaders: return 2;
-      case Page::kName: return 3;
-      case Page::kSetupSettings: return 4 + setup_tab_;
-      case Page::kPrompts: return 7;
-      case Page::kPlaystyle: return 8;
+      case Page::kName: return 2;
+      case Page::kSetupSettings: return 3 + setup_tab_;
+      case Page::kPrompts: return 6;
+      case Page::kVoice: return 7;
+      case Page::kShaders: return 8;
       case Page::kAllSet: return 9;
       default: return 0;
     }
@@ -727,6 +746,12 @@
     ShaderProgress p;
     if (shader_progress_) shader_progress_(&p.queued, &p.done, &p.loading, &p.finished);
     else p.finished = 1;  // a GPU plugin without the storage's progress: nothing to wait for
+    // The game was started for this page (PrepareShadersAtStart): until its renderer exists the storage's progress
+    // says finished (nothing to wait for), which is not the pipelines made. At most a minute, should it never come.
+    if (shaders_wait_from_ >= 0) {
+      if (!REXCVAR_GET(native_x_renderer) || native_x_renderer::Renders() || ImGui::GetTime() - shaders_wait_from_ > 60) shaders_wait_from_ = -1;
+      else p = {};
+    }
     bool forced = false;
 #if defined(BF_DEV_TOOLS)
     // BF_SHADER_SCREEN_TEST=<s>: the screen for that many seconds with a made up count (screenshots; the driver
@@ -766,33 +791,41 @@
     shaders_shown_ = true;
     const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    const bool setup = settings_.Get("launcher_setup", "") != "done";
-    Chrome(d, io, st, setup ? 2 : 0);
+    // The first start's step 8 is drawn in the setup's frame (game_menu_setup.inc: the steps' rail, the page on
+    // paper); after an update the page stands alone, as before.
+    const bool setup = setup_shader_step_;
+    static const char* const kAbout = "Your graphics card is building every shader the game uses, once, so nothing stutters or pops "
+                                      "in while you play. This happens after you install and after each update.";
     const bool full = std::atoi(Cvar("native_x_renderer_compile_threads").c_str()) > 0;
-    Prompts(d, st, st.P(40, 720 - 26 - 40), {{kit::Button::kA, full ? "FULL CPU: ON" : "FULL CPU: OFF"}}, in, 16);
+    SetupPanel panel{};
+    if (setup) {
+      panel = SetupFrame(d, io, st, 8);
+      Prompts(d, st, st.P(48, 662), {{kit::Button::kA, full ? "FULL CPU: ON" : "FULL CPU: OFF"}}, in, 15);
+    } else {
+      Chrome(d, io, st, 0);
+      Prompts(d, st, st.P(40, 720 - 26 - 40), {{kit::Button::kA, full ? "FULL CPU: ON" : "FULL CPU: OFF"}}, in, 16);
+    }
     const float fraction = p.loading && p.queued ? std::clamp(float(p.done) / float(p.queued), 0.0f, 1.0f) : -1.0f;
     shader_bar_ = fraction < 0 ? 0 : std::max(shader_bar_, shader_bar_ + (fraction - shader_bar_) * 0.15f);
     if (fraction >= 0 && shader_started_ < 0) shader_started_ = ImGui::GetTime(), shader_started_done_ = p.done;
     const ImVec2 a = st.P(240, 130), b = st.P(1040, 500);
     int clicked = -1;
     {
-      kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), 0.4f);
-      kit::Paper(d, a, b, st.u, false);
-      const float x = a.x + st(44), w = st(712);
-      float y = a.y + st(34);
-      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
-                  setup ? "FIRST TIME SETUP \xC2\xB7 STEP 2 OF 9"
-                  : ShadersAfterUpdate() ? "UPDATED TO VERSION " + std::string(BfVersion())
-                                         : "BEFORE YOU PLAY",
-                  st(2));
-      y += st(24);
-      kit::Heading(d, st(56), ImVec2(x, y), kit::kInk, "PREPARING THE SHADERS", st(2), w);
-      y += st(68);
-      y += kit::Wrapped(d, f.ui, st(19), ImVec2(x, y), kit::kInkSoft,
-                        "Your graphics card is building every shader the game uses, once, so nothing stutters or pops "
-                        "in while you play. This happens after you install and after each update.",
-                        w) +
-           st(20);
+      std::optional<kit::Turn> turn;
+      float x = a.x + st(44), w = st(712), y = a.y + st(34);
+      if (setup) {
+        x = panel.a.x + st(24), w = panel.b.x - panel.a.x - st(48);
+        y = SetupTitle(d, st, panel, 8, "PREPARING THE SHADERS", kAbout) + st(8);
+      } else {
+        turn.emplace(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), 0.4f);
+        kit::Paper(d, a, b, st.u, false);
+        kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
+                    ShadersAfterUpdate() ? "UPDATED TO VERSION " + std::string(BfVersion()) : "BEFORE YOU PLAY", st(2));
+        y += st(24);
+        kit::Heading(d, st(56), ImVec2(x, y), kit::kInk, "PREPARING THE SHADERS", st(2), w);
+        y += st(68);
+        y += kit::Wrapped(d, f.ui, st(19), ImVec2(x, y), kit::kInkSoft, kAbout, w) + st(20);
+      }
       std::string count = "Checking", left;
       if (fraction >= 0) {
         count = std::to_string(p.done) + " of " + std::to_string(p.queued) + " pipelines";
@@ -842,7 +875,7 @@
                  "Uses every CPU core. Faster, but some PCs crash. From the next start.");
       if (ImGui::IsMouseHoveringRect(c0, c1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = 0;
     }
-    StampCorner(d, st);
+    if (!setup) StampCorner(d, st);  // the setup's frame has its own
     if (in.accept) clicked = 0;
     if (clicked == 0) {
       const unsigned all = std::max(4u, std::thread::hardware_concurrency());
@@ -943,7 +976,7 @@
     NotePage("account");
     const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    Chrome(d, io, st, name_setup_ ? 3 : 0, SceneBehind() ? 0.82f : 0);
+    Chrome(d, io, st, name_setup_ ? 2 : 0, SceneBehind() ? 0.82f : 0);
     // The keyboard's own typing (always, as typed), and the pad on the keys after A. The window gets typed characters
     // only while ImGui asks for text input (the SDK starts SDL's text input from ImGui's IME data, which only ImGui's
     // own text fields set): this page asks for it every frame, or no key typed anything (TekRantGaming, 8 Nov).
@@ -998,7 +1031,7 @@
       const float x = a.x + st(40), w = st(620);
       float y = a.y + st(32);
       kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
-                  name_setup_ ? "STEP 3 OF 9 \xC2\xB7 ACCOUNT" : "ACCOUNT", st(2));
+                  name_setup_ ? "STEP 2 OF 9 \xC2\xB7 ACCOUNT" : "ACCOUNT", st(2));
       y += st(24);
       kit::Heading(d, st(52), ImVec2(x, y), kit::kInk, "CHOOSE YOUR SOLDIER NAME", st(2), w);
       y += st(64);
@@ -1344,7 +1377,7 @@
     skip_popup_ = false;
     if (yes) {
       REXLOG_INFO("BF launcher: setup settings skipped");
-      page_ = Page::kPlaystyle, row_ = 0, scroll_ = 0;
+      page_ = Page::kVoice, row_ = 0, scroll_ = 0;  // the voice chat page is never skipped: players must be told
     }
   }
   // The settings pages' buttons: Start Auto detect, Y Skip all, RB Next page (a held RB repeating within 0.35 s is
@@ -1352,7 +1385,7 @@
   void SetupKeys(Input& in) {
     if (in.start) {
       AutoDetect();
-      page_ = Page::kPlaystyle, row_ = 0, scroll_ = 0;
+      page_ = Page::kVoice, row_ = 0, scroll_ = 0;  // the voice chat page is never skipped: players must be told
       return;
     }
     if (in.y) {
@@ -1446,76 +1479,6 @@
     SetupKeys(in);
   }
 
-  // ---- 8: Modern and Classic servers (the explainer)
-
-  void PlaystylePage(ImDrawList* d, ImGuiIO& io, Input in) {
-    NotePage("setup playstyle");
-    const Stage st = StageOf(io);
-    const kit::Fonts& f = kit::GetFonts();
-    kit::Backdrop(d, io.DisplaySize, st.u, SceneBehind() ? 0.85f : 0);
-    kit::StepBar(d, st.P(1240, 40), st.u, 8, 9);
-    kit::Spaced(d, f.typed, st(16), st.P(56, 34), kit::kKhakiText, "STEP 8 OF 9 \xC2\xB7 PLAYSTYLE", st(2));
-    kit::Heading(d, st(64), st.P(56, 56), kit::kCream, "MODERN AND CLASSIC SERVERS", st(2), st(900));
-    {
-      const ImVec2 at = st.P(56, 150);
-      const std::string lead = "Every server plays one of two ways, and the server list says which: ";
-      d->AddText(f.ui, st(21), at, kit::kBackText, lead.c_str());
-      const float lw = kit::TextWidth(f.ui, st(21), lead);
-      d->AddText(f.ui_bold, st(21), ImVec2(at.x + lw, at.y), IM_COL32(255, 255, 255, 255), "(Modern) or (Classic).");
-    }
-    struct Column {
-      const char* title;
-      ImU32 color;
-      const char* line;
-      std::vector<const char*> points;
-      float turn;
-    };
-    const Column cols[] = {
-        {"(MODERN)", kit::kGreenDark, "Aiming and movement that feel like today's shooters.",
-         {"Aim responds at once, with a clean curve and no acceleration lag.", "Faster aiming down sights.",
-          "Snappier movement.", "Fire sooner after a sprint."},
-         -0.6f},
-        {"(CLASSIC)", kit::kBrown, "The game exactly as it played on the Xbox 360 in 2009.",
-         {"The original aim acceleration and turn speed.", "The original movement and timings.",
-          "For players who want it as it was."},
-         0.7f}};
-    for (int i = 0; i < 2; ++i) {
-      const ImVec2 a = st.P(56 + float(i) * (564 + 40), 214), b = st.P(56 + float(i) * (564 + 40) + 564, 510);
-      kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), cols[i].turn);
-      kit::Paper(d, a, b, st.u);
-      kit::Tape(d, ImVec2(a.x + (b.x - a.x) * 0.45f, a.y + st(4)), st(110), st(26), i ? 2.0f : -3.0f);
-      float y = a.y + st(26);
-      kit::Heading(d, st(44), ImVec2(a.x + st(30), y), cols[i].color, cols[i].title, st(1));
-      y += st(58);
-      y += kit::Wrapped(d, f.typed, st(17), ImVec2(a.x + st(30), y), kit::kInkSoft, cols[i].line, st(500)) + st(12);
-      for (const char* pt : cols[i].points) {
-        d->AddRectFilled(ImVec2(a.x + st(30), y + st(9)), ImVec2(a.x + st(39), y + st(18)), IM_COL32(31, 30, 25, 255));
-        y += kit::Wrapped(d, f.ui, st(18), ImVec2(a.x + st(48), y), IM_COL32(31, 30, 25, 255), pt, st(480)) + st(8);
-      }
-    }
-    {
-      const ImVec2 a = st.P(56, 540), b = st.P(1224, 600);
-      d->AddRectFilled(a, b, IM_COL32(20, 20, 18, 199));
-      d->AddRectFilled(a, ImVec2(a.x + st(6), b.y), kit::kGreenBright);
-      d->AddText(f.ui_bold, st(18), ImVec2(a.x + st(26), a.y + st(6)), kit::kCream, "Both");
-      kit::Wrapped(d, f.ui, st(18), ImVec2(a.x + st(26) + kit::TextWidth(f.ui_bold, st(18), "Both "), a.y + st(6)),
-                   kit::kCream,
-                   "use all of Reborn's new graphics: higher resolutions, new lighting, antialiasing and every advanced "
-                   "setting. Only how the camera and your soldier move is different.",
-                   st(1100));
-    }
-    d->AddText(f.typed, st(15), st.P(56, 618), kit::kKhakiText,
-               "You pick one each time you open Quick Match or the server browser, and you play what the server plays.");
-    {
-      kit::Turn turn(d, st.P(160, 670), -1);
-      Prompts(d, st, st.P(56, 720 - 26 - 48), {{kit::Button::kA, "Got it", "", false}}, in, 20);
-    }
-    Prompts(d, st, st.P(230, 720 - 26 - 44), {{kit::Button::kB, "Back"}}, in, 16);
-    if (kit::WatermarkOn()) kit::Stamp(d, st.P(1240 - 128, 720 - 30 - 36), st.u, -8);
-    if (in.accept) SetupNext();
-    else if (in.back) SetupBack();
-  }
-
   // ---- 9: all set (King Kong's finish page)
 
   void AllSetPage(ImDrawList* d, ImGuiIO& io, Input in) {
@@ -1606,7 +1569,7 @@
     const ImVec2 sz = io.DisplaySize;
     // The new look (TekRantGaming, 10 Nov 2026; docs/MENUS-PLAN.md section 6): the maps from the air behind the main menu's
     // column, as the main menu and the pause.
-    MainBackdrop(d, sz);
+    MenuBackdrop(d, sz, StageOf(io));  // the new look's backdrop
     const float cx0 = st.P(40, 0).x, cx1 = cx0 + st(400);
     d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(15, 17, 13, 226));
     d->AddRectFilled(ImVec2(cx1, 0), ImVec2(cx1 + st(1.4f), sz.y), IM_COL32(201, 183, 122, 110));
@@ -1730,7 +1693,7 @@
     REXLOG_INFO("BF launcher: home {}", kHomeRows[clicked]);
     switch (clicked) {
       case 0: return Play();
-      case 1: return ChooseMovement(false, true);  // the movement choice first, every time (TekRantGaming, 11 Nov 2026)
+      case 1: return OpenBrowser();
       case 2: return;  // Unlockables: nothing yet (TekRantGaming, 8 Nov)
       case 3: page_ = Page::kSettings, from_home_ = true, tab_ = 0, row_ = 0, scroll_ = 0, sub_ = kSubNone; return;
       case 4: return UpdateNow();
@@ -1747,7 +1710,7 @@
     const ImVec2 sz = io.DisplaySize;
     const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    MainBackdrop(d, sz);
+    MenuBackdrop(d, sz, StageOf(io));  // the new look's backdrop
     d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 170));
     const float cx0 = st.P(40, 0).x, cx1 = cx0 + st(400);
     d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(15, 17, 13, 226));
@@ -1817,7 +1780,7 @@
       ly += st(44);
     }
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, in_copy_ = in, 15);
-    if (in.back) page_ = Page::kMain, row_ = 4;  // back on the main menu's Stats & Awards row
+    if (in.back) BackToMenu(kRowStats, 4);  // back on the menu's Stats & Awards row
   }
   Input in_copy_;
   // Achievements, ours (in place of the Xbox screen the game opened): the game's own list from its title data, with
@@ -1827,7 +1790,7 @@
     const ImVec2 sz = io.DisplaySize;
     const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    MainBackdrop(d, sz);
+    MenuBackdrop(d, sz, StageOf(io));  // the new look's backdrop
     d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 186));
     std::vector<rex::system::AchievementInfo> list;
     int unlocked = 0, score = 0, total = 0;
@@ -1877,7 +1840,7 @@
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, cue, 15);
     if (in.back) {  // back where it was opened: the pause, or the main menu's Achievements row
       if (ach_from_pause_) page_ = Page::kPause, pause_row_ = kPauseAchievements, ach_from_pause_ = false;
-      else page_ = Page::kMain, row_ = 6;
+      else BackToMenu(kRowAchievements, 6);
     }
   }
   // Leaderboards, ours (in place of the game's EA screen, docs/MENUS-PLAN.md): every player's own totals as their
@@ -1950,7 +1913,7 @@
         lb_busy_ = false;
       }).detach();
     }
-    MainBackdrop(d, sz);
+    MenuBackdrop(d, sz, StageOf(io));  // the new look's backdrop
     d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 186));
     kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim, "EVERY PLAYER, BY SCORE", st(3));
     Text(d, f.stencil, st(40), ImVec2(st.P(40, 0).x - st(2), st.P(0, 66).y), kit::kCream, "LEADERBOARDS");
@@ -1990,7 +1953,7 @@
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, cue, 15);
     if (in.back) {
       if (lb_from_pause_) page_ = Page::kPause, pause_row_ = kPauseLeaderboards, lb_from_pause_ = false;
-      else page_ = Page::kMain, row_ = 7;  // back on the main menu's Leaderboards row
+      else BackToMenu(kRowLeaderboards, 7);  // back on the menu's Leaderboards row
     }
   }
   // Join Match With Friends, ours (in place of the game's Xbox friends screen, docs/MENUS-PLAN.md): the players signed
@@ -2030,7 +1993,7 @@
         fr_busy_ = false;
       }).detach();
     }
-    MainBackdrop(d, sz);
+    MenuBackdrop(d, sz, StageOf(io));  // the new look's backdrop
     d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 186));
     kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim, "JOIN MATCH WITH FRIENDS", st(3));
     Text(d, f.stencil, st(40), ImVec2(st.P(40, 0).x - st(2), st.P(0, 66).y), kit::kCream, "PLAYERS ONLINE");
@@ -2083,7 +2046,7 @@
           return;
         }
     }
-    if (in.back) page_ = Page::kMain, row_ = 2;  // back on the main menu's Join Match With Friends row
+    if (in.back) BackToMenu(kRowBrowser, 2);  // back to the menu (no Join friends row since 12 Nov 2026)
   }
   // The pause's Scoreboard, ours (in place of the game's, docs/MENUS-PLAN.md): every player on this server by score,
   // as their games send it to our backend (op match_score from MatchScoreTick), asked every 3 s on a worker.
@@ -2160,8 +2123,8 @@
   static constexpr const char* kPmMapKeys[] = {"wake", "guadalcanal", "iwo", "coral"};
   static constexpr const char* kPmMapNames[] = {"WAKE ISLAND", "GUADALCANAL", "IWO JIMA", "CORAL SEA", "ALL FOUR IN TURN"};
   static constexpr const char* kPmMapTitles[] = {"Wake Island", "Guadalcanal", "Iwo Jima", "Coral Sea"};
-  static constexpr int kPmMap = 0, kPmStyle = 1, kPmPort = 2, kPmHost = 3, kPmRows = 4;
-  int pm_row_ = 0, pm_map_ = 0, pm_style_ = -1;  // pm_style_ -1: the player's own playstyle, 0 classic, 1 modern
+  static constexpr int kPmMap = 0, kPmPort = 1, kPmHost = 2, kPmRows = 3;
+  int pm_row_ = 0, pm_map_ = 0;
   bool pm_upnp_ = true;
   bool pm_hosting_ = false;  // our server runs for this game
   bool pm_joining_ = false;  // this game's join to it started
@@ -2169,18 +2132,13 @@
   std::string pm_error_;
   bf1943::PrivateMatchStatus pm_status_;
 
-  bool PmModern() { return pm_style_ < 0 ? MovementPreference() == "modern" : pm_style_ == 1; }
-
   // The page's choices, kept in the settings file from one match to the next.
   void LoadPrivateMatchChoices() {
     pm_map_ = std::clamp(std::atoi(settings_.Get("private_match_map", "0").c_str()), 0, 4);
-    const std::string style = settings_.Get("private_match_style", "");
-    pm_style_ = style == "modern" ? 1 : style == "classic" ? 0 : -1;
     pm_upnp_ = settings_.Get("private_match_upnp", "1") != "0";
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
-    if (pm_style_ >= 0) settings_.values["private_match_style"] = pm_style_ == 1 ? "modern" : "classic";
     settings_.values["private_match_upnp"] = pm_upnp_ ? "1" : "0";
     settings_.Save();
   }
@@ -2189,7 +2147,6 @@
     bf1943::PrivateMatchOptions o;
     if (pm_map_ < 4) o.maps = {kPmMapKeys[pm_map_]};
     else o.maps = {"wake", "guadalcanal", "iwo", "coral"};
-    o.modern = PmModern();
     o.upnp = pm_upnp_;
     const std::string me = settings_.Get("player_name", "");
     o.name = me.empty() ? "Private match" : me + "'s match";
@@ -2201,7 +2158,7 @@
     }
     pm_hosting_ = true, pm_joining_ = false, pm_started_at_ = ImGui::GetTime(), pm_read_at_ = -100;
     pm_status_ = {};
-    REXLOG_INFO("BF private match: hosting ({}, {})", kPmMapNames[pm_map_], o.modern ? "modern" : "classic");
+    REXLOG_INFO("BF private match: hosting ({})", kPmMapNames[pm_map_]);
   }
 
   void EndPrivateMatch() {
@@ -2241,7 +2198,6 @@
     sv.name = me.empty() ? "Private match" : me + "'s match";
     sv.address = pm_status_.address;
     sv.map = pm_map_ < 4 ? kPmMapTitles[pm_map_] : "Wake Island";
-    sv.mode = PmModern() ? "modern" : "classic";
     sv.max_players = 24;
     pm_joining_ = true;
     REXLOG_INFO("BF private match: registered as game {}; joining it", sv.gid);
@@ -2271,7 +2227,6 @@
     if (in.down) pm_row_ = (pm_row_ + 1) % kPmRows;
     auto change = [&](int row, int step) {
       if (row == kPmMap) pm_map_ = (pm_map_ + 5 + step) % 5;
-      if (row == kPmStyle) pm_style_ = PmModern() ? 0 : 1;
       if (row == kPmPort) pm_upnp_ = !pm_upnp_;
       SavePrivateMatchChoices();
     };
@@ -2279,7 +2234,7 @@
     if (in.right && pm_row_ != kPmHost) change(pm_row_, 1);
     const float rh = 66 * u;
     int clicked = -1;
-    static constexpr const char* kLabels[] = {"MAP", "PLAYSTYLE", "ROUTER PORT", "HOST THE MATCH"};
+    static constexpr const char* kLabels[] = {"MAP", "ROUTER PORT", "HOST THE MATCH"};
     for (int i = 0; i < kPmRows; ++i) {
       const ImVec2 a(cx0 - 28 * u, ry + rh * i), b(cx1, ry + rh * (i + 1));
       const bool sel = i == pm_row_;
@@ -2296,9 +2251,7 @@
       kit::Spaced(d, f.ui_bold, i == kPmHost ? 33 * u : 29 * u, ImVec2(cx0 + 52 * u, a.y + (i == kPmHost ? 14 : 17) * u),
                   sel ? kit::kCream : kit::kKhakiText, kLabels[i], 3 * u);
       if (i == kPmHost) continue;
-      const std::string value = i == kPmMap ? kPmMapNames[pm_map_]
-                                : i == kPmStyle ? (PmModern() ? "MODERN" : "CLASSIC")
-                                                : (pm_upnp_ ? "OPEN IT FOR ME" : "I OPEN IT MYSELF");
+      const std::string value = i == kPmMap ? kPmMapNames[pm_map_] : (pm_upnp_ ? "OPEN IT FOR ME" : "I OPEN IT MYSELF");
       const float vw = kit::SpacedWidth(f.typed, 17 * u, value, 2 * u);
       const float vx = cx1 - 70 * u - vw;
       kit::Spaced(d, f.typed, 17 * u, ImVec2(vx, a.y + 24 * u), sel ? kit::kCream : kit::kKhakiText, value, 2 * u);
@@ -2317,8 +2270,6 @@
     {
       static constexpr const char* kAbout[] = {
           "The map your match plays. All four in turn: the next map after each round, as on the official servers.",
-          "Classic plays as the 2009 game did; modern has the new movement and aiming. Everyone in your match plays "
-          "the one you pick.",
           "Friends outside your home reach your match on UDP 18300. Open it for me asks your router (UPnP); if the "
           "router says no, open that port on it yourself.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
@@ -2344,7 +2295,7 @@
       if (clicked == kPmHost) HostPrivateMatch();
       else change(clicked, 1);
     }
-    if (in.back) page_ = Page::kMain, row_ = 3, pm_error_.clear();  // back on the main menu's Create Private Match row
+    if (in.back) BackToMenu(kRowPrivateMatch, MainRowOf("CREATE PRIVATE MATCH")), pm_error_.clear();  // back to the menu
   }
 
   // While our server starts: its steps, then the join (PrivateMatchTick); B ends it.
@@ -2380,7 +2331,7 @@
                   done ? kit::kKhakiText : now ? kit::kCream : kit::kKhakiDim, steps[i], 3 * u);
     }
     kit::Spaced(d, f.typed, 17 * u, ImVec2(cx0 + 40 * u, ry + rh * 3 + 14 * u), kit::kKhakiDim,
-                fmt::format("{} S  /  {}  /  {}", int(t), kPmMapNames[pm_map_], PmModern() ? "MODERN" : "CLASSIC"), 2 * u);
+                fmt::format("{} S  /  {}", int(t), kPmMapNames[pm_map_]), 2 * u);
     if (!error.empty())
       kit::Wrapped(d, f.typed, 19 * u, ImVec2(cx0, ry + rh * 3 + 60 * u), kit::kStamp, Upper(error), cx1 - cx0 - 40 * u);
     const float py = sz.y - 64 * u;
@@ -2468,74 +2419,105 @@
   bool tutorial_ = false;        // the join page shows the tutorial's load
   float credits_scroll_ = 0;
 
-  void HelpPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
+  // Help in the new look (Version A1, game_menu_home.inc): the three rows in a rail, the chosen one's card beside them
+  // with its button; from Home before the game runs too (the tutorial then starts the game first).
+  void HelpPage(ImDrawList* d, ImGuiIO& io, const Input& in_raw) {
     NotePage("help");
-    const ImVec2 sz = io.DisplaySize;
+    Input in = in_raw;
+    const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    const float u = sz.y / 1080.0f;
-    MainBackdrop(d, sz);
-    const float cx0 = sz.x * 0.05f, cx1 = cx0 + 600 * u;
-    d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(15, 17, 13, 226));
-    d->AddRectFilled(ImVec2(cx1, 0), ImVec2(cx1 + 2 * u, sz.y), IM_COL32(201, 183, 122, 110));
-    kit::Brand(d, ImVec2(cx0, 58 * u), u * 0.9f);
-    const float hy = 150 * u;
-    kit::Spaced(d, f.typed, 20 * u, ImVec2(cx0, hy), kit::kKhakiDim, "FIELD MANUAL", 4 * u);
-    Text(d, f.stencil, 88 * u, ImVec2(cx0 - 4 * u, hy + 24 * u), kit::kCream, "HELP");
-    d->AddRectFilled(ImVec2(cx0, hy + 126 * u), ImVec2(cx0 + 64 * u, hy + 132 * u), kit::kStamp);
+    MenuBackdrop(d, io.DisplaySize, st);
+    bool online_ok = false;
+    const std::string status = OnlineStatus(online_ok);
+    const bool edit = MenuChrome(d, io, st, status, online_ok);
+    kit::Spaced(d, f.typed, st(8.5f), st.P(48, 91), kit::kKhakiDim, "FIELD MANUAL \xC2\xB7 THE TUTORIAL, THE CONTROLS, THE CREDITS", st(2));
+    kit::GameText(d, kit::GameFont::kHeadline, st(40), st.P(48, 105), kit::kCream, "HELP");
+    Prompts(d, st, st.P(48, 662), {{kit::Button::kA, "SELECT"}, {kit::Button::kB, "BACK"}}, in, 15);
+    MenuFoot(d, st);
     static constexpr const char* kRows[] = {"TUTORIAL", "CONTROLS", "CREDITS"};
+    static constexpr const char* kNotes[] = {"THE GAME'S TRAINING GROUND", "EVERY BUTTON, EVERY SEAT", "WHO MADE IT"};
+    static constexpr const char* kButtons[] = {"START THE TUTORIAL", "SHOW THE CONTROLS", "ROLL THE CREDITS"};
     static constexpr const char* kAbout[] = {
-        "The game's own tutorial: its training ground on Wake Island, played offline at your own pace.",
-        "What every button does, as the game sets it out: on foot, in vehicles and boats, and in planes.",
+        "The game's own tutorial: its training ground on Wake Island, played offline at your own pace. Before the game "
+        "runs it starts the game first, then the tutorial.",
+        "What every button does, as the game sets it out: on foot, in vehicles and boats, and in planes, in your own "
+        "button style.",
         "Who made Battlefield 1943 Reborn, the original game's makers, and the parts it is built with."};
     const int count = 3;
     if (in.up) help_row_ = (help_row_ + count - 1) % count;
     if (in.down) help_row_ = (help_row_ + 1) % count;
-    const float ry = hy + 168 * u, rh = 62 * u;
+    help_row_ = std::clamp(help_row_, 0, count - 1);
+    const float h = st(43);
+    const ImVec2 ra = st.P(48, 167), rb(st.P(400, 0).x, ra.y + h * float(count));
+    d->AddRectFilled(ra, rb, IM_COL32(13, 15, 11, 204));
+    d->AddRect(ra, rb, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
     int clicked = -1;
     for (int i = 0; i < count; ++i) {
-      const ImVec2 a(cx0 - 28 * u, ry + rh * i), b(cx1, ry + rh * (i + 1));
+      const ImVec2 a(ra.x, ra.y + h * float(i)), b(rb.x, ra.y + h * float(i + 1));
       const bool sel = i == help_row_;
       const bool hover = ImGui::IsMouseHoveringRect(a, b);
-      if (hover && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) help_row_ = i;
+      if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) help_row_ = i;
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
       if (sel) {
-        d->AddRectFilled(a, b, IM_COL32(201, 183, 122, 26));
-        d->AddRectFilled(a, ImVec2(a.x + 8 * u, b.y), kit::kStamp);
+        kit::PaperArt(d, a, b);
+        d->AddRectFilled(a, ImVec2(a.x + st(5), b.y), kit::kStamp);
       }
-      d->AddRectFilled(ImVec2(cx0, b.y - 1 * u), ImVec2(cx1 - 40 * u, b.y), IM_COL32(201, 183, 122, 30));
-      kit::Spaced(d, f.typed, 15 * u, ImVec2(cx0, a.y + 23 * u), sel ? kit::kStamp : kit::kKhakiDim,
-                  fmt::format("{:02d}", i + 1), 2 * u);
-      kit::Spaced(d, f.ui_bold, 33 * u, ImVec2(cx0 + 52 * u, a.y + 13 * u), sel ? kit::kCream : kit::kKhakiText, kRows[i],
-                  3 * u);
+      d->AddRectFilled(ImVec2(a.x, b.y - 1), ImVec2(b.x, b.y), IM_COL32(241, 234, 211, 20));
+      kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(24), a.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
+                  fmt::format("{:02d}", i + 1), st(1.5f));
+      kit::GameText(d, kit::GameFont::kHeadlineMedium, st(19), ImVec2(a.x + st(52), a.y + (h - st(19)) * 0.5f),
+                    sel ? kit::kInk : kit::kKhaki, kRows[i]);
+      if (sel) {
+        kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(b.x - st(18) - st(20), a.y + h * 0.5f), st(20));
+      } else {
+        const float nw = kit::SpacedWidth(f.typed, st(7.5f), kNotes[i], st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2(b.x - st(18) - nw, a.y + h * 0.5f - st(5)), kit::kKhakiDim, kNotes[i], st(1.5f));
+      }
     }
-    {
-      const float w = 620 * u;
-      const ImVec2 ca(sz.x * 0.95f - w, sz.y * 0.62f), cb(sz.x * 0.95f, sz.y * 0.62f + 170 * u);
-      d->AddRectFilled(ca, cb, IM_COL32(15, 17, 13, 210));
-      d->AddRectFilled(ca, ImVec2(ca.x + 6 * u, cb.y), kit::kStamp);
-      kit::Spaced(d, f.ui_bold, 30 * u, ImVec2(ca.x + 30 * u, ca.y + 22 * u), kit::kCream, kRows[help_row_], 3 * u);
-      kit::Wrapped(d, f.typed, 20 * u, ImVec2(ca.x + 30 * u, ca.y + 74 * u), kit::kKhakiText, kAbout[help_row_],
-                   w - 60 * u);
+    {  // the chosen row's card
+      const ImVec2 a = st.P(427, 167), b = st.P(1232, 400);
+      kit::PaperArt(d, a, b);
+      kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(24), a.y + st(22)), kit::kInkSection,
+                  std::string("FIELD MANUAL \xC2\xB7 ") + kRows[help_row_], st(2));
+      kit::GameText(d, kit::GameFont::kHeadline, st(28), ImVec2(a.x + st(24), a.y + st(40)), kit::kInk, kRows[help_row_]);
+      kit::Wrapped(d, f.ui, st(12.5f), ImVec2(a.x + st(24), a.y + st(86)), kit::kInk, kAbout[help_row_], b.x - a.x - st(48) - st(170));
+      if (GreenButton(d, st, ImVec2(a.x + st(24), b.y - st(64)), ImVec2(a.x + st(24) + st(230), b.y - st(24)), kit::Button::kA,
+                      kButtons[help_row_]))
+        clicked = help_row_;
+      d->PushClipRect(a, b, true);
+      kit::ArtAt(d, "corsair", ImVec2(b.x - st(160), b.y - st(70)), st(64));
+      d->PopClipRect();
     }
-    const float py = sz.y - 64 * u;
-    float x = cx0;
-    x += kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(x, py), 34 * u) + 10 * u;
-    x += kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(x, py - 14 * u), kit::kKhakiText, "SELECT", 3 * u) + 34 * u;
-    x += kit::Glyph(d, PromptStyle(), kit::Button::kB, "Esc", ImVec2(x, py), 34 * u) + 10 * u;
-    kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(x, py - 14 * u), kit::kKhakiText, "BACK", 3 * u);
     if (in.accept) clicked = help_row_;
     if (clicked >= 0) {
       help_row_ = clicked;
-      if (clicked == 0) {
-        StartTutorialMatch();
-      } else if (clicked == 1) {
-        page_ = Page::kControls, ctl_tab_ = 0, ctl_from_pause_ = false;
-      } else {
-        page_ = Page::kCredits, credits_scroll_ = 0;
-      }
+      REXLOG_INFO("BF help: {}", kRows[clicked]);
+      if (clicked == 0) BeginTutorial();
+      else if (clicked == 1) page_ = Page::kControls, ctl_tab_ = 0, ctl_from_pause_ = false;
+      else page_ = Page::kCredits, credits_scroll_ = 0;
       return;
     }
-    if (in.back) page_ = Page::kMain, row_ = MainRowOf("HELP");
+    if (edit || in.view) return BeginAccount(false);
+    if (in.back) page_ = pre_game_ ? Page::kHome : Page::kMain, home_row_ = kRowHelp, row_ = MainRowOf("HELP");
+  }
+
+  // The tutorial from Help: before the game runs it starts the game first (as a server picked on Home does), the
+  // tutorial following its sign in (OnDraw, tutorial_pending_); with the game at its menu, at once.
+  bool tutorial_pending_ = false;
+  void BeginTutorial() {
+    if (pre_game_ && start_game_) {
+      REXLOG_INFO("BF help: the tutorial picked before the game ran: the game starts, the tutorial follows its sign in");
+      tutorial_pending_ = true, tutorial_ = true;
+      joining_ = "The game's tutorial", joining_map_ = "Wake Island";
+      joined_gid_.clear();
+      comms::NoteJoined("");
+      SetJoinedServerNight(false);
+      failed_ = false, joined_from_start_ = true;
+      page_ = Page::kJoining;
+      StartGameFromLauncher();
+      return;
+    }
+    StartTutorialMatch();
   }
 
   // The tutorial: the game's own command, then our joining page until the training level is in (as a join).
@@ -2584,7 +2566,7 @@
     if (ctl_from_pause_) {
       d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(8, 9, 7, 238));  // over the match, darkened (more than the pause: text)
     } else {
-      MainBackdrop(d, sz);
+      MenuBackdrop(d, sz, StageOf(io));  // the new look's backdrop
       d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 186));
     }
     const float x0 = sz.x * 0.05f, x1 = sz.x * 0.95f;
@@ -2639,7 +2621,7 @@
     const ImVec2 sz = io.DisplaySize;
     const kit::Fonts& f = kit::GetFonts();
     const float u = sz.y / 1080.0f;
-    MainBackdrop(d, sz);
+    MenuBackdrop(d, sz, StageOf(io));  // the new look's backdrop
     d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 196));
     struct Line {
       int kind;  // 0 heading, 1 name, 2 text, 3 gap
@@ -2803,7 +2785,7 @@
     NotePage("projects");
     const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    kit::Backdrop(d, io.DisplaySize, st.u, SceneBehind() ? 0.86f : 0);
+    MenuBackdrop(d, io.DisplaySize, st);
     kit::Heading(d, st(44), st.P(40, 22), kit::kCream, "MORE FROM TRG STUDIOS", st(2));
     const int n = int(std::size(kProjects));
     // project_: -1 the featured one, 0..n-1 the grid, n the TRG Launcher banner.
@@ -2921,6 +2903,44 @@
                         "opens it). Crash reports are in the crashes folder beside it.",
                         w) +
            st(22);
+#if defined(_WIN32)
+      // An overlay hooked into the game, and what to do if the game crashes at its first frame: a player's v0.3.0 did,
+      // 8 starts of 8, inside RivaTuner Statistics Server's hook, and nothing said so (12 Nov 2026). The table and the
+      // check are crash_report.cpp's (overlay_hooks.inc, included here so this page's edit stays within it; the log
+      // has the same names). Looked up once a second: a hook can come after the start.
+      {
+#include "overlay_hooks.inc"
+        static double checked = -1;
+        static std::string notice;
+        if (const double now = ImGui::GetTime(); checked < 0 || now - checked > 1) {
+          checked = now;
+          std::vector<std::string> names;
+          bool rtss = false;
+          for (const HookedOverlay& h : HookedOverlays()) {
+            // Only the two seen in a crash's stack: Steam's overlay hooks into every game Steam starts (ours too,
+            // Add to Steam), and a notice about it would alarm most players for nothing.
+            if (h.product != "RivaTuner Statistics Server" && h.product != "OBS Studio") continue;
+            names.push_back(h.product);
+            rtss = rtss || h.product == "RivaTuner Statistics Server";
+          }
+          std::string who;
+          for (size_t i = 0; i < names.size(); ++i)
+            who += (i == 0 ? "" : i + 1 == names.size() ? " and " : ", ") + names[i];
+          const bool one = names.size() == 1;
+          notice.clear();
+          if (!names.empty()) {
+            notice = who + (one ? " is" : " are") +
+                     " hooked into the game. If the game crashes at its first frame, close " + (one ? "it" : "them");
+            if (rtss)
+              notice += std::string(" (and MSI Afterburner) or exclude bf1943.exe in ") + (one ? "its" : "their") +
+                        " profiles.";
+            else
+              notice += std::string(" or turn ") + (one ? "its overlay" : "their overlays") + " off for bf1943.exe.";
+          }
+        }
+        if (!notice.empty()) y += kit::Wrapped(d, f.ui, st(20), ImVec2(x, y), kit::kInkSoft, notice, w) + st(22);
+      }
+#endif
       d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(56)), kit::kPaperDim);
       kit::Wrapped(d, f.typed, st(15), ImVec2(x + st(16), y + st(10)), kit::kInkFaint,
                    "Soon this button opens the issue page on GitHub instead.", w - st(32));
@@ -3021,6 +3041,13 @@
         job->state = 4;
         REXLOG_INFO("BF launcher: Add to Steam failed: {}", why);
       };
+#if !defined(_WIN32)
+      // A Flatpak sees Steam's folder read only (and not Steam's own process): its shortcut cannot be written from
+      // inside. Steam's own way does the same, and the package's desktop entry is in its list.
+      if (const char* id = std::getenv("FLATPAK_ID"); id && *id)
+        return fail("The Flatpak cannot change Steam's files. In Steam's desktop mode choose Games, Add a Non-Steam "
+                    "Game to My Library, and tick Battlefield 1943 Reborn in the list.");
+#endif
       const auto where = steam::Locate();
       if (!where) return fail("Steam wasn't found on this computer, or nobody has signed in to it yet.");
       // The artwork first (TekRantGaming, 11 Nov 2026: Battlefield 1943's from SteamGridDB, as King Kong's), so Steam is
@@ -3132,15 +3159,235 @@
   void UpdateNow() {
     const auto state = update::State(update::Get().state.load());
     if (state == update::State::kChecked) page_ = Page::kUpdate;
-    else if (state == update::State::kNone || state == update::State::kFailed) update::CheckInBackground();
+    else if (state == update::State::kNone || state == update::State::kFailed) CheckForUpdate("the Update row");
   }
-  // Every frame on Home: the 6 hourly check, and a checked release installs at once.
+  void CheckForUpdate(const char* why) {
+    update_checked_at_ = ImGui::GetTime();
+    REXLOG_INFO("BF update: checking ({})", why);
+    update::CheckInBackground();
+  }
+  // Every frame on the main menu and its pages: the 6 hourly check, and a checked release installs at once while the
+  // main menu is showing (before the game runs and after it: the program starts again either way).
   void UpdateTick() {
     const double now = ImGui::GetTime();
-    if (now - update_checked_at_ > 6 * 3600) update_checked_at_ = now, update::CheckInBackground();
-    if (update::State(update::Get().state.load()) == update::State::kChecked && page_ == Page::kHome && !quit_popup_ &&
-        !steam_ask_ && !steam_job_)
+    if (now - update_checked_at_ > 6 * 3600) CheckForUpdate("six hours since the last one");
+    if (update::State(update::Get().state.load()) == update::State::kChecked && (page_ == Page::kHome || page_ == Page::kMain) &&
+        !quit_popup_ && !update_popup_ && !steam_ask_ && !steam_job_)
       page_ = Page::kUpdate;
+  }
+  // The check at the main menu (TekRantGaming, 13 Nov 2026: "the updater seemed to have failed for a user that had
+  // skipped a few versions but worked the moment they hit the update button on the menu can we make it so the client
+  // checks for an update once they hit the main menu. kong dose this the same way"). The start's own check runs while
+  // the first pages are up and can end without an answer, before the menu is reached or after (it waits up to 20 s).
+  // While the main menu shows, a check without an answer is made again by itself, what the Update row did by hand: at
+  // once, then after 30 s, 1, 2 and 5 minutes, then every 10; a download that failed three times a run. And every
+  // arrival at the menu (back from a match, from Settings) asks again when the last answer is over ten minutes old,
+  // so a release that came out during a match is found at the menu, before a server refuses the old version.
+  void UpdateOnMenu() {
+    const double now = ImGui::GetTime();
+    const bool arrived = now - menu_shown_at_ > 0.5;  // not drawn on the frames before: another page was up
+    menu_shown_at_ = now;
+    auto& u = update::Get();
+    const auto state = update::State(u.state.load());
+    bool up_to_date = false;
+    {
+      std::lock_guard lock(u.mutex);
+      up_to_date = u.message == "Up to date";
+    }
+    const bool download_failed = state == update::State::kFailed;
+    if (download_failed || (state == update::State::kNone && !up_to_date)) {
+      static constexpr double kWaits[] = {0, 30, 60, 120, 300, 600};
+      const double wait = kWaits[std::min<size_t>(size_t(update_retries_), std::size(kWaits) - 1)];
+      if ((download_failed && update_retries_ >= 3) || now - update_tried_at_ < wait) return;
+      ++update_retries_, update_tried_at_ = now;
+      CheckForUpdate(download_failed ? "at the main menu, the last download failed" : "at the main menu, the last check had no answer");
+    } else if (arrived && state == update::State::kNone && now - update_checked_at_ > 600) {
+      CheckForUpdate("the main menu reached, the last answer is over ten minutes old");
+    }
+  }
+
+  // ---- What's new (TekRantGaming, 13 Nov 2026: "patch notes popup like kong has when game updates make sure it only
+  // shows after the updates shaders have finished exact same as kong"). King Kong's rules (its launcher.cpp and
+  // launcher_policy.h ShowWhatsNewNow): once after an update, never on a first install; only on the main menu, with
+  // no other pop-up up, the setup done and this version's shaders prepared (after an update the shader page comes
+  // first, PrepareShadersAtStart); the notes of every version since the one run before (this version's only when
+  // that is not known); Close, and Every version for the whole changelog. Seen is remembered when it opens
+  // (last_version), so a start ended on the shader page still shows it the next time.
+  // Developer builds: a scripted test run shows none, unless BF_DEV_WHATS_NEW=<the version run before> asks: the
+  // notes since that version, the build counted as the changelog's newest one (a developer build's own version has
+  // no notes).
+  void WhatsNewTick() {
+    if (!whats_new_pending_ || whats_new_open_ || update_popup_ || quit_popup_ || steam_ask_ || steam_job_) return;
+    std::string current = BfVersion();
+#if defined(BF_DEV_TOOLS)
+    const char* dev = std::getenv("BF_DEV_WHATS_NEW");
+    if (dev && *dev) {
+      whats_new_from_ = dev;
+      if (!Changelog().empty()) current = Changelog().front().version;
+    } else if (const char* scripted = std::getenv("BF_DEV_SCRIPTED"); scripted && *scripted == '1') {
+      whats_new_pending_ = false;
+      return;
+    }
+#endif
+    if (!ShadersPreparedForPlay()) return;  // the update's shaders first
+    const auto state = update::State(update::Get().state.load());
+    if (state == update::State::kChecked || state == update::State::kInstalling || state == update::State::kInstalled) return;
+    whats_new_pending_ = false;
+    settings_.values["last_version"] = BfVersion();
+    settings_.Save();
+    whats_new_shown_ = ChangelogSince(whats_new_from_, current);
+    if (whats_new_shown_.empty()) {
+      REXLOG_INFO("BF launcher: What's new: no notes for v{} (after v{}): not shown", current, whats_new_from_.empty() ? "?" : whats_new_from_);
+      return;
+    }
+    whats_new_open_ = true, whats_new_all_ = false, whats_new_scroll_ = 0;
+    REXLOG_INFO("BF launcher: What's new opened (v{} after v{}: {} version{})", current, whats_new_from_.empty() ? "?" : whats_new_from_,
+                whats_new_shown_.size(), whats_new_shown_.size() == 1 ? "" : "s");
+  }
+  std::vector<const ChangelogEntry*> whats_new_shown_;
+
+  // Words drawn one after another from `at`, wrapped at `wrap`, the first `bold_words` of them in bold. Returns the
+  // height; draws nothing without `d`.
+  static float WordsWrapped(ImDrawList* d, const std::string& lead, const std::string& text, ImVec2 at, float wrap, float size,
+                            ImU32 lead_col, ImU32 col) {
+    const kit::Fonts& f = kit::GetFonts();
+    const float line = size * 1.45f, space = kit::TextWidth(f.ui, size, " ");
+    float x = 0, y = 0;
+    for (int part = 0; part < 2; ++part) {
+      const std::string& s = part == 0 ? lead : text;
+      ImFont* font = part == 0 ? f.ui_bold : f.ui;
+      for (size_t i = 0; i < s.size();) {
+        while (i < s.size() && s[i] == ' ') ++i;
+        const size_t end = std::min(s.find(' ', i), s.size());
+        if (end == i) break;
+        const std::string word = s.substr(i, end - i);
+        const float w = kit::TextWidth(font, size, word);
+        if (x > 0 && x + w > wrap) x = 0, y += line;
+        if (d) d->AddText(font, size, ImVec2(at.x + x, at.y + y), part == 0 ? lead_col : col, word.c_str());
+        x += w + space;
+        i = end;
+      }
+    }
+    return y + line;
+  }
+
+  void WhatsNewPopup(ImDrawList* d, ImGuiIO& io, Input in) {
+    const Stage st = StageOf(io);
+    const kit::Fonts& f = kit::GetFonts();
+    d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 190));
+    const ImVec2 a = st.P(250, 56), b = st.P(1030, 664);  // King Kong's reader is 780 wide
+    kit::Paper(d, a, b, st.u, false);
+    kit::Tape(d, ImVec2((a.x + b.x) * 0.5f, a.y), st(110), st(26), -2);
+    const float x0 = a.x + st(34), x1 = b.x - st(34);
+    // The entries: the versions since the last one run, or every version.
+    std::vector<const ChangelogEntry*> all;
+    if (whats_new_all_)
+      for (const ChangelogEntry& e : Changelog()) all.push_back(&e);
+    const std::vector<const ChangelogEntry*>& entries = whats_new_all_ ? all : whats_new_shown_;
+    const ChangelogEntry* first = entries.empty() ? nullptr : entries.front();
+    kit::Spaced(d, f.typed, st(8.5f), ImVec2(x0, a.y + st(26)), kit::kInkSection,
+                whats_new_all_ ? "BATTLEFIELD 1943 REBORN \xC2\xB7 THE CHANGELOG" : "BATTLEFIELD 1943 REBORN \xC2\xB7 UPDATED", st(2));
+    kit::GameText(d, kit::GameFont::kHeadline, st(30), ImVec2(x0, a.y + st(42)), kit::kInk,
+                  whats_new_all_ ? std::string("EVERY VERSION") : "WHAT'S NEW IN " + Upper(first ? first->version : std::string(BfVersion())));
+    d->AddRectFilled(ImVec2(x0, a.y + st(86)), ImVec2(x1, a.y + st(87)), kit::kRule);
+    // The notes, scrolled.
+    const ImVec2 v0(x0, a.y + st(96)), v1(x1, b.y - st(64));
+    const float wrap = v1.x - v0.x - st(18), view = v1.y - v0.y;
+    const bool several = entries.size() > 1;
+    float total = 0;
+    for (int pass = 0; pass < 2; ++pass) {  // 0 measures, 1 draws
+      ImDrawList* out = pass == 1 ? d : nullptr;
+      if (pass == 1) {
+        whats_new_scroll_ = std::clamp(whats_new_scroll_, 0.0f, std::max(0.0f, total - view));
+        d->PushClipRect(v0, v1, true);
+      }
+      float y = v0.y - (pass == 1 ? whats_new_scroll_ : 0.0f);
+      const float y_start = y;
+      for (const ChangelogEntry* e : entries) {
+        // A version's own heading when more than one is listed, its date and what it is about under it.
+        if (several) {
+          if (out) kit::GameText(out, kit::GameFont::kHeadlineMedium, st(17), ImVec2(v0.x, y), kit::kInk, Upper(e->version));
+          y += st(24);
+        }
+        const std::string about = Upper(e->date) + (e->title.empty() ? "" : " \xC2\xB7 " + Upper(e->title));
+        if (!about.empty()) {
+          if (out) kit::Wrapped(out, f.typed, st(8), ImVec2(v0.x, y), kit::kInkSection, about, wrap);
+          y += kit::WrappedHeight(f.typed, st(8), about, wrap) + st(10);
+        }
+        for (const ChangelogLine& l : ChangelogLines(e->body)) {
+          if (l.kind == ChangelogLine::kHead) {
+            y += st(6);
+            if (out) {
+              kit::Spaced(out, f.ui_bold, st(10), ImVec2(v0.x, y), kit::kStamp, Upper(l.text), st(2));
+              out->AddRectFilled(ImVec2(v0.x, y + st(17)), ImVec2(v0.x + wrap, y + st(18)), kit::kRule);
+            }
+            y += st(26);
+          } else if (l.kind == ChangelogLine::kBullet) {
+            if (out) out->AddRectFilled(ImVec2(v0.x + st(2), y + st(6.5f)), ImVec2(v0.x + st(7), y + st(11.5f)), kit::kInk);
+            y += WordsWrapped(out, l.lead, l.text, ImVec2(v0.x + st(16), y), wrap - st(16), st(11.5f), kit::kInk, kit::kInkSoft) + st(5);
+          } else {
+            y += WordsWrapped(out, "", l.text, ImVec2(v0.x, y), wrap, st(11.5f), kit::kInk, kit::kInkSoft) + st(7);
+          }
+        }
+        y += st(16);
+      }
+      if (pass == 0) total = y - y_start;
+      else d->PopClipRect();
+    }
+    if (total > view) {  // how far down the notes are
+      const float track = view, thumb = std::max(st(30), track * view / total);
+      const float top = v0.y + (track - thumb) * (whats_new_scroll_ / std::max(1.0f, total - view));
+      d->AddRectFilled(ImVec2(v1.x - st(4), v0.y), ImVec2(v1.x, v1.y), IM_COL32(34, 36, 27, 24));
+      d->AddRectFilled(ImVec2(v1.x - st(4), top), ImVec2(v1.x, top + thumb), kit::kInkSection);
+    }
+    d->AddRectFilled(ImVec2(x0, v1.y + st(8)), ImVec2(x1, v1.y + st(9)), kit::kRule);
+    Prompts(d, st, ImVec2(x0, b.y - st(46)),
+            {{kit::Button::kA, "CLOSE", "", true}, {kit::Button::kX, whats_new_all_ ? "THIS UPDATE" : "EVERY VERSION"}}, in, 14);
+    if (total > view) {
+      const std::string hint = "UP AND DOWN SCROLL";
+      kit::Spaced(d, f.typed, st(7.5f), ImVec2(x1 - kit::SpacedWidth(f.typed, st(7.5f), hint, st(1.5f)), b.y - st(34)), kit::kInkSection, hint, st(1.5f));
+    }
+    // Up and down (held: the menu's own repeat), the bumpers a page, the wheel.
+    if (in.up) whats_new_scroll_ -= st(70);
+    if (in.down) whats_new_scroll_ += st(70);
+    if (in.prev_tab) whats_new_scroll_ -= view * 0.85f;
+    if (in.next_tab) whats_new_scroll_ += view * 0.85f;
+    if (io.MouseWheel != 0) whats_new_scroll_ -= io.MouseWheel * st(60);
+    if (in.x) whats_new_all_ = !whats_new_all_, whats_new_scroll_ = 0;
+    if (in.accept || in.back) {
+      whats_new_open_ = false;
+      REXLOG_INFO("BF launcher: What's new closed");
+    }
+  }
+
+  // ---- The version gate's pop-up (server_list.h; TekRantGaming, 13 Nov 2026: "reject and prompt outdated clicnt
+  // connections give them a popup advising and a button to update now or close"). Over the page that asked to join.
+  void AskToUpdate(const std::string& needs, const std::string& server) {
+    update_popup_ = true, update_needs_ = needs, update_server_ = server;
+    popup_row_ = 1;  // Update now
+    REXLOG_INFO("BF join: refused by the version gate: {} needs v{}, this is v{}: the update pop-up", server.empty() ? "the server" : server,
+                needs.empty() ? "?" : needs, BfVersion());
+  }
+  void UpdatePopup(ImDrawList* d, ImGuiIO& io, Input in) {
+    const Stage st = StageOf(io);
+    const std::string text =
+        update_needs_.empty()
+            ? fmt::format("The servers play a newer version than this game's, {}. Update now: it takes a moment, and the game "
+                          "starts again by itself.",
+                          BfVersion())
+            : fmt::format("The servers play version {}, and this game is version {}. Update now: it takes a moment, and the "
+                          "game starts again by itself.",
+                          update_needs_, BfVersion());
+    bool yes = false;
+    if (!Question(d, io, st, "UPDATE NEEDED", text, "Close", "Update now", in, yes)) return;
+    update_popup_ = false;
+    REXLOG_INFO("BF join: the update pop-up answered: {}", yes ? "Update now" : "Close");
+    if (!yes) return;
+    // Update now: the update page, which shows the check, the download and the install, then starts the game again.
+    update_asked_ = true;
+    const auto state = update::State(update::Get().state.load());
+    if (state == update::State::kNone || state == update::State::kFailed) CheckForUpdate("Update now on the pop-up");
+    page_ = Page::kUpdate;
   }
   void UpdatePage(ImDrawList* d, ImGuiIO& io, Input in) {
     NotePage("update");
@@ -3160,8 +3407,13 @@
       std::lock_guard lock(u.mutex);
       version = u.version, message = u.message;
     }
-    const bool failed = state == update::State::kFailed;
-    if (failed) Prompts(d, st, st.P(240, 720 - 30 - 42), {{kit::Button::kB, "Back"}}, in);
+    // Reached by Update now on the version gate's pop-up (update_asked_), the page is up from the check on: looking
+    // for the release, downloading it, installing it. A check that found nothing newer, or could not ask, says so.
+    const bool looking = state == update::State::kIdle || state == update::State::kChecking;
+    const bool downloading = state == update::State::kDownloading;
+    const bool nothing = state == update::State::kNone;
+    const bool failed = state == update::State::kFailed || nothing;
+    if (failed) Prompts(d, st, st.P(240, 720 - 30 - 42), {{kit::Button::kA, "Try again"}, {kit::Button::kB, "Back"}}, in);
     const ImVec2 a = st.P(240, 200), b = st.P(1040, 480);
     {
       kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.4f);
@@ -3170,22 +3422,41 @@
       const float x = a.x + st(44), w = st(712);
       kit::Spaced(d, f.typed, st(15), ImVec2(x, a.y + st(40)), kit::kInkFaint,
                   "VERSION " + std::string(BfVersion()) + " \xC2\xB7 AUTOMATIC UPDATE", st(2));
-      kit::Heading(d, st(52), ImVec2(x, a.y + st(64)), kit::kInk, failed ? "UPDATE NOT INSTALLED" : "UPDATING TO " + version,
-                   st(2), w);
-      const std::string line = failed ? message
-                               : state == update::State::kInstalled ? message
-                                                                     : "Installing the new version. The game starts "
-                                                                       "again by itself in a moment.";
-      kit::Wrapped(d, f.ui, st(20), ImVec2(x, a.y + st(134)), failed ? kit::kRed : kit::kInkSoft, line, w);
+      const uint64_t got = u.bytes.load(), total = u.total.load();
+      const std::string heading = nothing       ? (message == "Up to date" ? "NO NEWER VERSION YET" : "UPDATE NOT FOUND")
+                                  : failed      ? "UPDATE NOT INSTALLED"
+                                  : looking     ? "LOOKING FOR THE UPDATE"
+                                  : downloading ? "DOWNLOADING " + version
+                                                : "UPDATING TO " + version;
+      kit::Heading(d, st(52), ImVec2(x, a.y + st(64)), kit::kInk, heading, st(2), w);
+      std::string line;
+      if (nothing && message == "Up to date")
+        line = fmt::format("Version {} is the newest one out{}. Try again in a few minutes.", BfVersion(),
+                           update_needs_.empty() ? "" : ", and the servers ask for " + update_needs_);
+      else if (nothing) line = message.empty() ? "Could not check for updates." : message + " Check your connection, then try again.";
+      else if (failed) line = message;
+      else if (looking) line = "Asking for the newest version.";
+      else if (downloading)
+        line = total ? fmt::format("{:.0f} MB of {:.0f} MB. It installs by itself when it is here.", double(got) / 1048576.0,
+                                   double(total) / 1048576.0)
+                     : std::string("Downloading the new version.");
+      else if (state == update::State::kInstalled) line = message;
+      else line = "Installing the new version. The game starts again by itself in a moment.";
+      kit::Wrapped(d, f.ui, st(20), ImVec2(x, a.y + st(134)), failed && !nothing ? kit::kRed : kit::kInkSoft, line, w);
       if (!failed) {
         const ImVec2 b0(x, a.y + st(206)), b1(x + w, a.y + st(226));
         d->AddRectFilled(b0, b1, IM_COL32(34, 36, 27, 38));
-        const float t = float(std::fmod(ImGui::GetTime() * 0.6, 1.0));
-        d->AddRectFilled(ImVec2(b0.x + w * std::max(0.0f, t * 1.3f - 0.3f), b0.y), ImVec2(b0.x + w * std::min(1.0f, t * 1.3f), b1.y),
-                         kit::kGreen);
+        if (downloading && total) {  // how much of it is here
+          d->AddRectFilled(b0, ImVec2(b0.x + w * float(std::min(1.0, double(got) / double(total))), b1.y), kit::kGreen);
+        } else {
+          const float t = float(std::fmod(ImGui::GetTime() * 0.6, 1.0));
+          d->AddRectFilled(ImVec2(b0.x + w * std::max(0.0f, t * 1.3f - 0.3f), b0.y), ImVec2(b0.x + w * std::min(1.0f, t * 1.3f), b1.y),
+                           kit::kGreen);
+        }
         d->AddRect(b0, b1, kit::kInk, 0, 0, st(2));
       }
     }
     StampCorner(d, st);
-    if (failed && in.back) page_ = Page::kHome;
+    if (failed && in.accept) CheckForUpdate("Try again on the update page");
+    if (failed && in.back) update_asked_ = false, page_ = pre_game_ ? Page::kHome : Page::kMain;
   }

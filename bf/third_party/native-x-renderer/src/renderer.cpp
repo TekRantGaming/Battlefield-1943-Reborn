@@ -63,6 +63,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <span>
 #include <string>
@@ -137,6 +138,11 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_aspect, 0.0, "NativeXRenderer",
                       "With native_x_renderer_fill_screen, the image's aspect ratio (read at startup, D104): 0 = the "
                       "output's, which it fills; another (2.3889 for 21:9, 3.5556 for 32:9) renders the game at that "
                       "ratio, with bars where the output is narrower or wider");
+REXCVAR_DEFINE_STRING(native_x_renderer_hud_layout, "edges", "NativeXRenderer",
+                      "With Profile::box_2d_after_composite on a wider output: edges = the HUD's left and right thirds "
+                      "at the screen's edges, the rest in the middle; centered = all of it in a 16:9 box in the middle");
+REXCVAR_DEFINE_BOOL(native_x_renderer_debug_hud, false, "NativeXRenderer",
+                    "Log the 2D layer's draws after the composite every 10 s (Profile::box_2d_after_composite)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_raise_priority, false, "NativeXRenderer",
                     "The renderer's thread and the guest GPU's command processor thread one step above normal "
                     "priority (read at startup, D136): the game waits on both, and its own threads spin while they "
@@ -290,6 +296,9 @@ bool g_queries_on = false;
 RenderScale g_scale;  // host pixels per guest pixel (D37), per axis when filling the output (D43)
 double g_aspect_factor = 1.0;  // g_scale.x / g_scale.y: how much wider the image is than the game's
 bool g_aspect_box = false;     // the draws are a 2D layer kept at the game's aspect ratio (D43)
+// Profile::box_2d_after_composite: 0 before the scene's copy, 1 after it (the composite next), 2 after the composite.
+int g_hud_phase = 0;
+bool g_scene_copied_this_frame = false, g_scene_copied_last_frame = true;
 // DLSS or FSR 3.1 (D47, D49, D116): on when native_x_renderer_antialiasing is dlaa, a DLSS mode, fsr_native or an FSR
 // mode, and the provider is available. Between BeginView with a matrix and EndViewGeometry the draws into targets of
 // the game's output size are the main 3D view's: jittered, and their color and depth targets kept for the upscaler.
@@ -706,6 +715,15 @@ void CarryColorIntoDepth(const GuestSurface& surface, HostTarget* depth) {
   }
 }
 
+void LogHudStats() {
+  static auto at = std::chrono::steady_clock::now();
+  if (!g_draw || !REXCVAR_GET(native_x_renderer_debug_hud) ||
+      std::chrono::steady_clock::now() - at < std::chrono::seconds(10))
+    return;
+  at = std::chrono::steady_clock::now();
+  REXLOG_INFO("[native_x_renderer] HUD draws after the composite: {}", g_draw->TakeHudLog());
+}
+
 void ExecuteDraw(const Command& c) {
   RendererTime time(&g_phase.draws);
   if (!g_draw) {
@@ -750,7 +768,20 @@ void ExecuteDraw(const Command& c) {
     g_draw->SetWaitForPipelines(offscreen,
                                 new_target ? 0.0 : std::max(0.0, REXCVAR_GET(native_x_renderer_pipeline_wait_budget_ms)));
   }
-  g_draw->SetAspectBox(g_aspect_box);
+  // Profile::box_2d_after_composite: the HUD's draws (and a frame without a 3D view) into the aspect box.
+  bool box = g_aspect_box;
+  float align = 0.5f;
+  bool composite = false, hud = false;
+  if (g_profile->box_2d_after_composite && g_aspect_factor != 1.0 && targets[0] &&
+      targets[0]->guest_width == g_profile->output_width && targets[0]->guest_height == g_profile->output_height) {
+    if (g_hud_phase == 1) composite = true;
+    else if (g_hud_phase == 2) box = hud = true;
+    else if (!g_scene_copied_this_frame && !g_scene_copied_last_frame) box = hud = true;
+  }
+  g_draw->SetAspectBox(box, align);
+  // The HUD's draws are placed one by one from their vertex shader's constants (DrawPath::SetHudClassify).
+  g_draw->SetHudClassify(hud, REXCVAR_GET(native_x_renderer_hud_layout) == "edges",
+                         REXCVAR_GET(native_x_renderer_debug_hud));
   // The main view's draws: their targets kept for the upscaler, and jittered (a view found from the draws only after a
   // frame whose view reached the upscale point, D119).
   bool scene = g_scene_view && (g_temporal || g_gtao_on || g_ssgi_on);
@@ -777,6 +808,7 @@ void ExecuteDraw(const Command& c) {
   g_draw->Draw(c.programs[0] ? *c.programs[0] : StateTracker::kNoProgram,
                c.programs[1] ? *c.programs[1] : StateTracker::kNoProgram, std::span(copies.data(), c.copy_count),
                targets, g_tiling);
+  if (composite) g_hud_phase = 2;
   // D162: the night on the game's composite, the first draw into a target of the output size after the scene's copy
   // (Battlefield 1943: its bloom chain draws only smaller targets in between): the picture with the game's bloom and
   // exposure, before the HUD drawn over it.
@@ -1477,6 +1509,8 @@ void ExecuteResolve(const Command& c) {
   from = HostRect(source->scale, from);
   to = HostRect(target->scale, to);
   bool scaled = source->reduced || aliased;
+  // Into a cube's face, which is square on the host whatever the render scale's axes (targets.cpp): the copy scales.
+  if (cube && (source->scale.x != target->scale.x || source->scale.y != target->scale.y)) scaled = true;
   if (scaled && source->samples > 1) {
     ++g_stats.skipped_resolves;  // reduced targets have no MSAA (NativeXRenderer draws without it)
     return;
@@ -1609,6 +1643,12 @@ void ExecuteResolve(const Command& c) {
       !(g_profile->scene_resolve_once && g_scene_antialiased)) {
     g_aa.Apply(g_device->context(), target->texture, target_view);
     g_scene_antialiased = true;
+  }
+  // Profile::box_2d_after_composite: the scene's copy; the composite comes next, then the HUD.
+  if (g_profile->box_2d_after_composite && c.scene_caller && slice == 0 &&
+      target->guest_width == g_profile->output_width && target->guest_height == g_profile->output_height) {
+    g_hud_phase = 1;
+    g_scene_copied_this_frame = true;
   }
   // Night (D162): the scene's copy arms it; it runs after the game's composite (ExecuteDraw). Graded here, before the
   // bloom chain, the game's automatic exposure (its 1x1 luminance) brightened it back (runs night_wake2, night_gc2).
@@ -2187,6 +2227,11 @@ void ExecutePresent(const Command& c) {
   if (with_swap) PresentPending(true);  // room for this frame
   RendererTime time(&g_phase.present);
   g_aspect_box = false;
+  g_hud_phase = 0;
+  LogHudStats();
+  if (g_draw) g_draw->EndHudFrame();
+  g_scene_copied_last_frame = g_scene_copied_this_frame;
+  g_scene_copied_this_frame = false;
   PromoteReduced(nullptr);  // a view without EndViewGeometry (D49)
   g_scene_view = false;
   g_auto_upscaled_last_frame = g_auto_view_done;
@@ -2388,6 +2433,60 @@ void CaptureResolve(const uint8_t* base, const Arguments& a, const PacketScan& s
   c.scene_caller = a.lr == g_profile->scene_resolve_caller &&
                    (!g_profile->scene_resolve_outer_caller || a.outer_lr == g_profile->scene_resolve_outer_caller);
   c.caller = a.lr;
+  // D165: a destination the game reads on the CPU gets defined guest bytes (zeros) now, on the game's thread, before
+  // the game can read them. NXR_RESOLVE_LOG (a diagnosis aid): each caller's resolves by destination size and format,
+  // once, and for the small ones how many found guest bytes that were not zero (what a CPU reader would have got).
+  if (texture) {
+    const uint32_t fetch1 = c.fetch[1], fetch2 = c.fetch[2];
+    const uint32_t format = fetch1 & 0x3F, width = (fetch2 & 0x1FFF) + 1, height = ((fetch2 >> 13) & 0x1FFF) + 1;
+    bool zero = false;
+    for (const Profile::ZeroedResolve& z : g_profile->zeroed_resolves) {
+      zero |= z.caller && z.caller == a.lr && (!z.outer_caller || z.outer_caller == a.outer_lr) &&
+              (!z.width || z.width == width) && (!z.height || z.height == height) &&
+              (z.format < 0 || uint32_t(z.format) == format);
+    }
+    static const bool log = std::getenv("NXR_RESOLVE_LOG") != nullptr;
+    static const bool off = std::getenv("NXR_D165_OFF") != nullptr;  // a diagnosis aid: the game reads what is there
+    if (off) zero = false;
+    if (zero || log) {
+      const uint32_t dimension = (c.fetch[5] >> 9) & 3;
+      const bool cube = dimension == uint32_t(rex::graphics::xenos::DataDimension::kCube);
+      const uint32_t slices = (fetch2 >> 26) + 1, address = GpuAddress(fetch1 & 0xFFFFF000u);
+      const bool flat = dimension == uint32_t(rex::graphics::xenos::DataDimension::k2DOrStacked) || cube;
+      const uint32_t bytes = flat ? ResolveGuestBytes(c.fetch[0], c.fetch[5], format, width, height, slices, cube) : 0;
+      GuestMemory* memory = g_resolved.memory();
+      uint8_t* data = memory && bytes && bytes <= (1u << 20) ? memory->memory().TranslatePhysical<uint8_t*>(address) : nullptr;
+      size_t set = 0;
+      if (data)
+        for (uint32_t i = 0; i < bytes; ++i) set += data[i] != 0;
+      if (log) {
+        struct Seen {
+          uint64_t calls = 0, dirty = 0;
+        };
+        static std::mutex mutex;
+        static std::map<uint64_t, Seen> seen;
+        std::lock_guard lock(mutex);
+        Seen& s = seen[uint64_t(a.lr) << 32 | uint64_t(width & 0xFFF) << 20 | uint64_t(height & 0xFFF) << 8 | format];
+        ++s.calls;
+        s.dirty += set != 0;
+        // Each kind once, then the small ones (what a game would read on the CPU) every 200th call and whenever one
+        // is the first of its kind to hold something.
+        if (s.calls == 1 || (data && width <= 256 && height <= 256 && (s.calls % 200 == 0 || (set && s.dirty == 1))))
+          REXLOG_INFO("[native_x_renderer] resolve from {:#x} < {:#x} to {}x{} guest format {} at {:#x}: call {} of this "
+                      "kind, {} of them found guest bytes not zero (this one {} of {}){}",
+                      a.lr, a.outer_lr, width, height, format, address, s.calls, s.dirty, set, bytes,
+                      zero ? ", zeroed (D165)" : "");
+      }
+      if (zero && data && set) {
+        std::memset(data, 0, bytes);
+        static std::atomic<uint32_t> zeroed{0};
+        if (zeroed.fetch_add(1, std::memory_order_relaxed) == 0)
+          REXLOG_INFO("[native_x_renderer] D165: a resolve destination the game reads on the CPU ({}x{} guest format {} "
+                      "from {:#x}) held {} bytes of another use: set to zero before the game reads it",
+                      width, height, format, a.lr, set);
+      }
+    }
+  }
 }
 
 // BeginTiling(dev, flags, count, tileRects*, clearColor*, Z (f1), stencil): the size of the image the tiles
@@ -2834,9 +2933,10 @@ void OnEnter(Call call, PPCContext& ctx, uint8_t* base, bool nested) {
   g_call.r = {ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32};
   g_call.f1 = ctx.f1.f64;
   g_call.lr = uint32_t(ctx.lr);
-  g_call.outer_lr = call == Call::kResolve && g_profile->scene_resolve_outer_caller
-                        ? OuterReturnAddress(base, ctx.r1.u32)
-                        : 0;
+  static const bool resolve_log = std::getenv("NXR_RESOLVE_LOG") != nullptr;
+  bool outer = g_profile->scene_resolve_outer_caller != 0 || resolve_log;
+  for (const Profile::ZeroedResolve& z : g_profile->zeroed_resolves) outer |= z.caller && z.outer_caller;  // D165
+  g_call.outer_lr = call == Call::kResolve && outer ? OuterReturnAddress(base, ctx.r1.u32) : 0;
   if (call == Call::kPresent) g_front_buffer = ctx.r4.u32;
 }
 

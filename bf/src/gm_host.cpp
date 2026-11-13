@@ -45,7 +45,6 @@
 #endif
 
 REXCVAR_DECLARE(bool, server);          // server_mode.cpp
-REXCVAR_DECLARE(bool, bf_modern_mode);  // modern_mode.cpp
 REXCVAR_DEFINE_STRING(bf_gm_backend, "", "BF1943",
                       "A dedicated server's own GameManager host: the backend's server registry (host:port). Empty: "
                       "none (the server package runs server/gmhost.py)");
@@ -58,10 +57,17 @@ REXCVAR_DEFINE_STRING(bf_gm_status_file, "", "BF1943",
                       "The host's state as JSON for the game that started this server (registered, game, address, "
                       "reachable, players)");
 REXCVAR_DEFINE_BOOL(bf_gm_upnp, false, "BF1943", "Ask the router to forward bf_gm_listen's port to this PC (UPnP)");
+REXCVAR_DEFINE_STRING(bf_gm_region, "", "BF1943",
+                      "A dedicated server's own GameManager host: where the server is, one of the region codes "
+                      "(regions.h: gb, de, us-east...); the server browser shows its name and flag");
+REXCVAR_DEFINE_INT32(bf_gm_tick, 30, "BF1943",
+                     "A dedicated server's own GameManager host: the tick rate in Hz told to the server browser (the "
+                     "game's own 30 today)");
 REXCVAR_DEFINE_INT32(bf_gm_parent_pid, 0, "BF1943",
                      "End this server when that process (the player's game that started it) ends");
 
 namespace bf1943 {
+const char* BfVersion();  // pipeline_upload.cpp
 std::vector<std::string> RotationTitles();  // server_rotation.cpp: the maps in turn, by title
 std::string CurrentMapTitle();              // server_rotation.cpp: the one running now
 }  // namespace bf1943
@@ -814,12 +820,14 @@ void Serve() {
     if (current.empty()) current = titles.empty() ? "Wake Island" : titles[0];
     std::string maps;
     for (const auto& t : titles) maps += (maps.empty() ? "" : ", ") + JsonQuote(t);
-    const std::string mode = REXCVAR_GET(bf_modern_mode) ? "modern" : "classic";
+    // "mode": every server plays the game's own movement and aiming since v0.4.0 (Modern was retired); the field
+    // stays for the players still on an older version, whose browsers list servers by it. "version": this server's.
     std::string reg = fmt::format(
-        "{{\"op\": \"register\", \"name\": {}, \"port\": {}, \"map\": {}, \"max_players\": {}, \"mode\": \"{}\", "
-        "\"description\": {}, \"maps\": [{}], \"listed\": {}",
+        "{{\"op\": \"register\", \"name\": {}, \"port\": {}, \"map\": {}, \"max_players\": {}, \"mode\": \"classic\", "
+        "\"version\": {}, \"region\": {}, \"tick\": {}, \"description\": {}, \"maps\": [{}], \"listed\": {}",
         JsonQuote(host.name), ntohs(host.public_addr.sin_port), JsonQuote(current), REXCVAR_GET(bf_gm_max_players),
-        mode, JsonQuote(REXCVAR_GET(bf_gm_description).substr(0, 200)), maps, st.listed ? "true" : "false");
+        JsonQuote(bf1943::BfVersion()), JsonQuote(REXCVAR_GET(bf_gm_region).substr(0, 16)), REXCVAR_GET(bf_gm_tick),
+        JsonQuote(REXCVAR_GET(bf_gm_description).substr(0, 200)), maps, st.listed ? "true" : "false");
     // A host on one address of its own (tests) says where; one on every address is found by the backend.
     if (host.listen.sin_addr.s_addr != htonl(INADDR_ANY)) {
       char ip[32] = {};

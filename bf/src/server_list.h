@@ -2,6 +2,12 @@
 // list: every listed server with name, address, map, players, description, official; find: one server by its address
 // (Direct connect); reserve: the player's next Quick Match joins that game. While the browser is open each listed
 // server is pinged over UDP (its host answers BF43PING with BF43PONG, server/gmhost.py).
+//
+// The version gate (TekRantGaming, 13 Nov 2026: "server version check for latest version and only to allow latest
+// version on and reject and prompt outdated clicnt connections give them a popup advising and a button to update now
+// or close"; server/plasma.py VERSION_GATE): list, find and reserve say this game's version and platform. The list's
+// answer names the version players need, if any (required_version), and reserve answers "outdated" in place of
+// "reserved" for a game older than it: the menu then shows its update pop-up (game_menu.cpp Join, AskToUpdate).
 
 #pragma once
 
@@ -42,13 +48,29 @@ REXCVAR_DECLARE(std::string, bf_online_host);
 
 namespace bf1943 {
 
+const char* BfVersion();  // pipeline_upload.cpp
+
+// This game's version and platform, as the fields of a registry request.
+inline std::string ClientFields() {
+#if defined(_WIN32)
+  const char* platform = "windows";
+#else
+  const char* platform = "linux";
+#endif
+  return std::string("\"version\": \"") + BfVersion() + "\", \"platform\": \"" + platform + "\"";
+}
+
 struct ServerInfo {
   std::string gid, name, address, map;
-  std::string mode = "classic";  // the movement and aiming it plays: "classic" or "modern" (modern_mode.cpp)
+  // A server of an older version that plays the retired Modern movement and aiming (modern_mode.cpp): never listed
+  // and never found, since v0.4.0's game plays the original everywhere and would be pulled about on it.
+  bool retired_mode = false;
   int players = 0, max_players = 0;
   std::string description, next_map;
   bool official = false;
   bool night = false;  // a Night Ops server: its maps drawn at night (NativeXRenderer D162) while playing there
+  std::string region;  // where it is, a region code (regions.h); empty: not said (an older server)
+  int tick_hz = 0;     // its tick rate; 0: not said
   int ping_ms = -1;  // -1: not measured (an older server does not answer)
 };
 
@@ -117,8 +139,10 @@ inline std::string JsonField(const std::string& obj, const char* key) {
   return obj.substr(at, end - at);
 }
 
-inline bool RegistryRequest(const std::string& request, std::string& reply) {
-  std::string target = REXCVAR_GET(bf_backend_registry);
+// One request to the registry at `target` (host:port); the reply's first line. The game's own registry when `target`
+// is empty (bf_backend_registry, else bf_online_host's port 18250).
+inline bool RegistryRequest(const std::string& request, std::string& reply, std::string target = {}) {
+  if (target.empty()) target = REXCVAR_GET(bf_backend_registry);
   if (target.empty()) target = REXCVAR_GET(bf_online_host) + ":18250";
   const size_t colon = target.rfind(':');
   if (colon == std::string::npos) return false;
@@ -189,13 +213,19 @@ class ServerList {
   }
   bool reachable() const { return reachable_; }
   int players_online() const { return players_online_; }
+  // The version players need, from the list's last answer; empty: none asked (no gate, or the backend is older).
+  std::string required_version() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return required_version_;
+  }
 
   // The browser is open: ping the servers (until 3 s after it closes); RefreshNow fetches the list again now.
   void WantPings() { want_pings_until_ = Now() + 3.0; }
   void RefreshNow() { refresh_now_ = true; }
 
-  // Direct connect: the server at host:port (a name is looked up first) if the backend knows it.
-  bool Find(const std::string& host, int port, ServerInfo& out) {
+  // Direct connect: the server at host:port (a name is looked up first) if the backend knows it: the game's own
+  // backend, or the one whose registry is `registry` (host:port; a server on a backend of its own).
+  bool Find(const std::string& host, int port, ServerInfo& out, const std::string& registry = {}) {
     addrinfo hints{}, *found = nullptr;
     hints.ai_family = AF_INET;
     if (getaddrinfo(host.c_str(), nullptr, &hints, &found) || !found) return false;
@@ -204,19 +234,40 @@ class ServerList {
     freeaddrinfo(found);
     std::string reply;
     if (!RegistryRequest("{\"op\": \"find\", \"address\": \"" + std::string(ip) + "\", \"port\": " +
-                             std::to_string(port) + "}",
-                         reply))
+                             std::to_string(port) + ", " + ClientFields() + "}",
+                         reply, registry))
       return false;
     const size_t at = reply.find("{\"gid\"");
     if (at == std::string::npos) return false;
     out = Parse(reply.substr(at, JsonEnd(reply, at) - at + 1));
-    return !out.gid.empty();
+    return !out.gid.empty() && !out.retired_mode;
   }
 
-  bool Reserve(const std::string& gid) {
+  // The servers the backend at `host` lists (its registry on port 18250), for Direct connect to a server that runs
+  // on its own backend (the server package's LAN only mode: such a server is not on the main backend's list).
+  static bool ListAt(const std::string& host, std::vector<ServerInfo>& out) {
     std::string reply;
-    return RegistryRequest("{\"op\": \"reserve\", \"gid\": \"" + gid + "\"}", reply) &&
-           reply.find("reserved") != std::string::npos;
+    if (!RegistryRequest("{\"op\": \"list\", " + ClientFields() + "}", reply, host + ":18250")) return false;
+    for (size_t at = reply.find("{\"gid\""); at != std::string::npos;) {
+      const size_t end = JsonEnd(reply, at);
+      if (end == std::string::npos) break;
+      ServerInfo sv = Parse(reply.substr(at, end - at + 1));
+      if (!sv.retired_mode) out.push_back(std::move(sv));
+      at = reply.find("{\"gid\"", end);
+    }
+    return reply.find("\"servers\"") != std::string::npos;
+  }
+
+  // kOutdated: the backend's version gate refused this game; `required` (if given) gets the version players need.
+  enum class Reserved { kYes, kNo, kOutdated };
+  Reserved Reserve(const std::string& gid, std::string* required = nullptr) {
+    std::string reply;
+    if (!RegistryRequest("{\"op\": \"reserve\", \"gid\": \"" + gid + "\", " + ClientFields() + "}", reply)) return Reserved::kNo;
+    if (JsonField(reply, "op") == "outdated") {
+      if (required) *required = JsonField(reply, "required");
+      return Reserved::kOutdated;
+    }
+    return reply.find("reserved") != std::string::npos ? Reserved::kYes : Reserved::kNo;
   }
 
  private:
@@ -224,11 +275,12 @@ class ServerList {
     while (!stop_) {
       std::string reply;
       std::vector<ServerInfo> found;
-      reachable_ = RegistryRequest("{\"op\": \"list\"}", reply);
+      reachable_ = RegistryRequest("{\"op\": \"list\", " + ClientFields() + "}", reply);
       for (size_t at = reply.find("{\"gid\""); at != std::string::npos;) {
         const size_t end = JsonEnd(reply, at);
         if (end == std::string::npos) break;
-        found.push_back(Parse(reply.substr(at, end - at + 1)));
+        ServerInfo sv = Parse(reply.substr(at, end - at + 1));
+        if (!sv.retired_mode) found.push_back(std::move(sv));
         at = reply.find("{\"gid\"", end);
       }
       if (Now() < want_pings_until_) Ping(found);
@@ -250,6 +302,7 @@ class ServerList {
       {
         std::lock_guard<std::mutex> lock(mutex_);
         servers_ = std::move(found);
+        if (reachable_) required_version_ = JsonField(reply, "required_version");
       }
       for (int i = 0; i < 50 && !stop_ && !refresh_now_.exchange(false); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -266,13 +319,15 @@ class ServerList {
     s.name = JsonField(obj, "name");
     s.address = JsonField(obj, "address");
     s.map = JsonField(obj, "map");
-    if (JsonField(obj, "mode") == "modern") s.mode = "modern";
+    s.retired_mode = JsonField(obj, "mode") == "modern";
     s.players = std::atoi(JsonField(obj, "players").c_str());
     s.max_players = std::atoi(JsonField(obj, "max_players").c_str());
     s.description = JsonField(obj, "description");
     s.next_map = JsonField(obj, "next_map");
     s.official = JsonField(obj, "official") == "true";
     s.night = kNightOps && JsonField(obj, "night") == "true";  // night_ops.h: none without Night Ops
+    s.region = JsonField(obj, "region");
+    s.tick_hz = std::atoi(JsonField(obj, "tick").c_str());
     return s;
   }
 
@@ -330,6 +385,7 @@ class ServerList {
   std::atomic<int> players_online_{0};
   std::mutex mutex_;
   std::vector<ServerInfo> servers_;
+  std::string required_version_;
 };
 
 }  // namespace bf1943

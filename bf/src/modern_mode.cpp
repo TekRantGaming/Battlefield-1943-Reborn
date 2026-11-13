@@ -1,3 +1,11 @@
+// RETIRED in v0.4.0 (TekRantGaming, 13 Nov 2026: "we are dropping support for modern and going full in on classic
+// being the default make sure all ui areas of the game now account for this removal"). The game plays its own
+// movement and aiming everywhere: no menu asks, no server plays Modern (a dedicated server started with
+// --bf_modern_mode=true plays Classic and registers as such), and a server of an older version that still plays it is
+// not listed (server_list.h). Both settings below are still accepted, so an older server package's command line and
+// an older settings file do no harm, and are not used. What this file still does: the developer builds' dump of the
+// game's tuning data (BF_DEV_FIELDS) and their speed log (BF_DEV_SPEED). The rest is how Modern worked.
+//
 // Modern movement and aiming (TekRantGaming, 7 Nov 2026: "build a new modern movement and aiming system that takes from modern
 // FPS games ... it must retain aim assist ... a toggle on/off setting ... servers that have the new system enabled and
 // servers for the old system so we dont end up with anything unfair in the competitive space").
@@ -44,23 +52,15 @@
 #include <rex/logging.h>
 
 REXCVAR_DEFINE_STRING(bf_movement_pref, "classic", "BF1943/Gameplay",
-                      "Movement and aiming the player picks: classic (the original game) or modern");
+                      "Not used since v0.4.0 (Modern movement and aiming was retired): accepted and ignored");
 REXCVAR_DEFINE_BOOL(bf_modern_mode, false, "BF1943/Gameplay",
-                    "Modern movement and aiming in this game (a dedicated server: what it plays; a player's game: "
-                    "what the joined server plays)");
+                    "Not used since v0.4.0 (Modern movement and aiming was retired): accepted and ignored");
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
 
 namespace bf1943 {
 
-// Joining a server from our menu (game_menu.cpp Join): the game plays what that server plays.
-void SetJoinedServerMode(bool modern) {
-  if (REXCVAR_GET(bf_modern_mode) != modern)
-    REXLOG_INFO("BF modern mode: the server plays {} movement and aiming", modern ? "modern" : "classic");
-  rex::cvar::SetFlagByName("bf_modern_mode", modern ? "true" : "false");
-}
-
-// Whether this game plays the modern system now.
-bool ModernMode() { return REXCVAR_GET(bf_modern_mode); }
+// Whether this game plays the modern system now: never (retired in v0.4.0, above).
+bool ModernMode() { return false; }
 bool InMatch();      // auto_join.cpp
 bool LevelLoaded();  // auto_join.cpp: the level's loading screen is over
 
@@ -372,8 +372,9 @@ void NoteLevelChange() { g_level_serial.fetch_add(1); }
 
 namespace {
 // The scanner's thread: once a second, a scan when a level (re)loaded, then the values the mode wants. A scan reads
-// hundreds of MB of guest memory (about 3 s here), so it never runs on the game's thread.
-void Scanner(uint8_t* base) {
+// hundreds of MB of guest memory (about 3 s here), so it never runs on the game's thread. Since v0.4.0 only a
+// developer build with BF_DEV_FIELDS starts it (ModernModeTick), and it never writes: the mode is always classic.
+[[maybe_unused]] void Scanner(uint8_t* base) {
   bool was_in_match = false;
   auto settled_at = std::chrono::steady_clock::now();
   for (;;) {
@@ -440,14 +441,18 @@ void DevSpeed() {
 }
 #endif
 
-// Called often from the game's frame (auto_join.cpp's pad read; server_rotation.cpp's server tick): the first call
-// starts the scanner's own thread.
+// Called often from the game's frame (auto_join.cpp's pad read; server_rotation.cpp's server tick). Since v0.4.0
+// nothing for players and servers; a developer build with BF_DEV_FIELDS starts the scanner's thread for its dump.
 void ModernModeTick(uint8_t* base) {
 #if defined(BF_DEV_TOOLS)
   DevSpeed();
-#endif
+  static const bool fields = std::getenv("BF_DEV_FIELDS") != nullptr;
+  if (!fields) return;
   static std::once_flag once;
   std::call_once(once, [base] { std::thread([base] { Scanner(base); }).detach(); });
+#else
+  (void)base;
+#endif
 }
 
 }  // namespace bf1943

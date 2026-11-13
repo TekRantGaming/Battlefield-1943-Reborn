@@ -1,16 +1,22 @@
-// BF's own menu lettering for our rows (TekRantGaming, 6 Nov 2026: our rows must look as if they were always there).
+// BF's own menu lettering for our rows (TekRantGaming, 6 Nov 2026: our rows must look as if they were always there), and
+// since 12 Nov 2026 every font its menus have, for the launcher's new look (TekRantGaming: "extract anything from the game
+// files and use it within these menus ... fonts").
 //
-// BF's menus draw their text in "Eurostile LT Std Condensed" (its font map, Fonts/us_fonts), from glyph atlases the
-// game builds into build_overlay: Fonts/us/normal_large_texture.res (an Xbox 360 texture, 1024 x 512, 8 bit, tiled)
-// and Fonts/us/normal_large_meta.dbx (each glyph's place in it, its offset and advance, and kerning pairs). They are
-// read from the player's own installed game, never shipped: the first start unpacks them into the user folder
-// (cache\bf_menu_font.bin), later starts read that. The atlas goes into ImGui's font texture as one custom
-// rectangle, and BfText draws each glyph from it as an image.
+// BF's menus draw their text from glyph atlases the game builds into build_overlay-00.fbrb: Fonts/us/<name>_texture.res
+// (an Xbox 360 texture, 8 bit, tiled) and Fonts/us/<name>_meta.dbx (each glyph's place in it, its offset and advance,
+// and kerning pairs). Its fonts (the source names are in each font's dbx; only the rendered atlases are in the
+// package, at 720p sizes): headline_large, headline_medium, headline_small and headnumbers from Artbrush (brush
+// capitals), normal_small, normal_medium, normal_large and custom1 from Eurostile LT Std Bold Condensed, instruction
+// from its Bold Cn Italic, list_header from Century Schoolbook Bold Italic and list_item from Century Schoolbook.
+// They are read from the player's own installed game, never shipped: the first start unpacks each into the user
+// folder (cache\bf_font_<name>.bin; normal_large also as cache\bf_menu_font.bin, as before), later starts read that.
+// Each atlas goes into ImGui's font texture as one custom rectangle, and BfText draws each glyph from it as an image.
 //
-// Measured against BF's own rows (runs origmenu3, 3200 x 1800; menu2c): BF draws this font with its advances at
-// 0.88, at 1.55 atlas pixels per screen pixel at 1800 lines (BF's 720p menu, 2.5 times
-// up). Three glyphs (W, % and @) have no entry in BF's metrics file although they are in the atlas, at its left edge
-// and a little larger; W, the one our labels need, is placed from the atlas (scaled to the other capitals).
+// normal_large, measured against BF's own rows (runs origmenu3, 3200 x 1800; menu2c): BF draws it with its advances
+// at 0.88, at 1.55 atlas pixels per screen pixel at 1800 lines (BF's 720p menu, 2.5 times up). Three glyphs (W, % and
+// @) have no entry in its metrics file although they are in the atlas, at its left edge and a little larger; W, the
+// one our labels need, is placed from the atlas (scaled to the other capitals). The other fonts are drawn plain: the
+// capitals `cap` pixels high (the H's rows), their advances and kerning as the game's tables have them.
 
 #include <algorithm>
 #include <cstdint>
@@ -19,34 +25,48 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include <imgui.h>
+#include <imgui_internal.h>  // ImFontAtlasTextureBlockQueueUpload
 #include <rex/logging.h>
+
+#include "dbx_tree.h"
 
 namespace bf1943 {
 
 bool ReadFbrbEntry(const std::filesystem::path& archive, const std::string& name, std::vector<uint8_t>& out);  // shader_prep.cpp
+bool ReadFbrbEntries(const std::filesystem::path& archive, const std::vector<std::string>& names,
+                     std::vector<std::vector<uint8_t>>& out);  // shader_prep.cpp: several at one read of the archive
 
 namespace {
 
 namespace fs = std::filesystem;
 
-constexpr int kAtlasW = 1024, kAtlasH = 512;
-
 struct Glyph {
   int x = 0, y = 0, w = 0, h = 0, min_x = 0, y_offset = 0, advance = 0;
   float scale = 1;  // drawn this much larger than its atlas size (W, from a larger set)
 };
+// The glyph tables' X and Y are 3 texels up and left of each glyph's ink in every font (the font tool's padding):
+// the atlas rect is (X + 3, Y + 3, Width, Rows). Without it the glyphs lost their last 3 rows and columns
+// ("SERVER" without its feet, 12 Nov 2026).
+constexpr int kInkShift = 3;
 
 struct Font {
   bool tried = false, ok = false;
+  int w = 0, h = 0;              // the atlas
+  int cap_rows = 0, cap_top = 0;  // a capital's rows and its offset from the line's top (H, else A)
   std::map<int, Glyph> glyphs;
   std::map<std::pair<int, int>, int> kerning;
-  std::vector<uint8_t> alpha;  // kAtlasW x kAtlasH, untiled
+  std::vector<uint8_t> alpha;  // w x h, untiled
   ImFontAtlasRectId rect = ImFontAtlasRectId_Invalid;
-} g_font;
+};
+
+constexpr const char* kLegacy = "normal_large";
+std::map<std::string, Font> g_fonts;  // by the game's font name; the UI thread's (the worker writes only files)
+std::mutex g_prepare_mutex;
 
 uint32_t Be32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
 
@@ -61,45 +81,37 @@ uint32_t TiledOffset(uint32_t x, uint32_t y, uint32_t width, uint32_t tp) {
           (((((y & 8) >> 2) + (x >> 3)) & 3) << 6)) >> lb;
 }
 
-// The metrics DBX ("{binary}"): a string table, then fields as 02 71 01 <name index> 01 04 <int32, big endian>.
-// Glyph starts each glyph; First, Second and Kerning make a kerning pair.
+// The metrics DBX ("{binary}", dbx_tree.h): one UI.UIFontGlyph instance a glyph (Glyph, X, Y, Width, Rows, MinX,
+// YOffset, Advance) and one UI.UIFontGlyphKerning a kerning pair (First, Second, Kerning). (A pattern scan of the
+// bytes, used before 12 Nov 2026, missed W and M in the Artbrush fonts.)
 bool ParseMeta(const std::vector<uint8_t>& b, Font& f) {
-  if (b.size() < 24 || std::memcmp(b.data(), "{binary}", 8) != 0) return false;
-  const uint32_t strings = Be32(&b[16]), count = Be32(&b[20]);
-  const size_t base = 24 + size_t(count) * 4;
-  if (base + strings > b.size()) return false;
-  std::vector<std::string> names(count);
-  for (uint32_t i = 0; i < count; ++i) {
-    const size_t at = base + Be32(&b[24 + i * 4]);
-    if (at >= b.size()) return false;
-    names[i] = reinterpret_cast<const char*>(&b[at]);
+  std::vector<dbx::Node> roots;
+  if (!dbx::Parse(b, roots)) return false;
+  auto iv = [](const dbx::Node* n, const char* k, int& out) {
+    const dbx::Node* c = n->Field(k);
+    int32_t v = 0;
+    if (!c || !c->Int(v)) return false;
+    out = v;
+    return true;
+  };
+  for (const dbx::Node* g : dbx::Instances(roots, "UI.UIFontGlyph")) {
+    int code = 0;
+    if (!iv(g, "Glyph", code)) continue;
+    Glyph gl;
+    iv(g, "X", gl.x), iv(g, "Y", gl.y), iv(g, "Width", gl.w), iv(g, "Rows", gl.h);
+    iv(g, "MinX", gl.min_x), iv(g, "YOffset", gl.y_offset), iv(g, "Advance", gl.advance);
+    gl.x += kInkShift, gl.y += kInkShift;
+    f.glyphs[code] = gl;
   }
-  Glyph* cur = nullptr;
-  int first = -1, second = -1;
-  for (size_t i = base + strings; i + 10 <= b.size(); ++i) {
-    if (b[i] != 0x02 || b[i + 1] != 0x71 || b[i + 2] != 0x01 || b[i + 4] != 0x01 || b[i + 5] != 0x04) continue;
-    if (b[i + 3] >= names.size()) continue;
-    const std::string& n = names[b[i + 3]];
-    const int v = int32_t(Be32(&b[i + 6]));
-    i += 9;
-    if (n == "Glyph") cur = &f.glyphs[v], first = second = -1;
-    else if (n == "First") first = v, cur = nullptr;
-    else if (n == "Second") second = v;
-    else if (n == "Kerning" && first >= 0 && second >= 0) f.kerning[{first, second}] = v;
-    else if (!cur) continue;
-    else if (n == "X") cur->x = v;
-    else if (n == "Y") cur->y = v;
-    else if (n == "Width") cur->w = v;
-    else if (n == "Rows") cur->h = v;
-    else if (n == "MinX") cur->min_x = v;
-    else if (n == "YOffset") cur->y_offset = v;
-    else if (n == "Advance") cur->advance = v;
+  for (const dbx::Node* k : dbx::Instances(roots, "UI.UIFontGlyphKerning")) {
+    int first = 0, second = 0, v = 0;
+    if (iv(k, "First", first) && iv(k, "Second", second) && iv(k, "Kerning", v)) f.kerning[{first, second}] = v;
   }
-  return f.glyphs.size() > 90;
+  return f.glyphs.size() > 60;
 }
 
-// W: in the atlas at its left edge (x 0 to 38, y 37 to 73), drawn larger than the rest; scaled to the capitals
-// (A: 31 rows, offset 10).
+// W: in normal_large's atlas at its left edge (x 0 to 38, y 37 to 73), drawn larger than the rest; scaled to the
+// capitals (A: 31 rows, offset 10).
 void AddW(Font& f) {
   if (f.glyphs.count('W')) return;
   Glyph w;
@@ -109,14 +121,25 @@ void AddW(Font& f) {
   f.glyphs['W'] = w;
 }
 
-// The cache: "BFMF", version 1, glyph count, glyphs (8 ints and a float), kerning count, pairs (3 ints), the atlas.
+void MeasureCaps(Font& f) {
+  auto it = f.glyphs.find('H');
+  if (it == f.glyphs.end()) it = f.glyphs.find('A');
+  if (it == f.glyphs.end()) it = f.glyphs.begin();
+  f.cap_rows = std::max(1, it->second.h), f.cap_top = it->second.y_offset;
+}
+
+
+// The cache: "BFMF", version 4 (2 before 12 Nov 2026: tables without W and M; 3: rects without kInkShift), the
+// atlas's width and height, glyph count, glyphs (8 ints and a float), kerning count, pairs (3 ints), the atlas.
 bool ReadCache(const fs::path& p, Font& f) {
   std::ifstream in(p, std::ios::binary);
   if (!in) return false;
   char magic[4];
-  uint32_t version = 0, n = 0;
-  in.read(magic, 4).read(reinterpret_cast<char*>(&version), 4).read(reinterpret_cast<char*>(&n), 4);
-  if (!in || std::memcmp(magic, "BFMF", 4) != 0 || version != 1 || n > 4096) return false;
+  uint32_t version = 0, w = 0, h = 0, n = 0;
+  in.read(magic, 4).read(reinterpret_cast<char*>(&version), 4);
+  if (!in || std::memcmp(magic, "BFMF", 4) != 0 || version != 4) return false;
+  in.read(reinterpret_cast<char*>(&w), 4).read(reinterpret_cast<char*>(&h), 4).read(reinterpret_cast<char*>(&n), 4);
+  if (!in || w == 0 || h == 0 || w > 4096 || h > 4096 || n > 4096) return false;
   for (uint32_t i = 0; i < n; ++i) {
     int32_t v[8];
     float s;
@@ -133,103 +156,205 @@ bool ReadCache(const fs::path& p, Font& f) {
     in.read(reinterpret_cast<char*>(v), sizeof(v));
     f.kerning[{v[0], v[1]}] = v[2];
   }
-  f.alpha.resize(size_t(kAtlasW) * kAtlasH);
+  f.w = int(w), f.h = int(h);
+  f.alpha.resize(size_t(w) * h);
   in.read(reinterpret_cast<char*>(f.alpha.data()), std::streamsize(f.alpha.size()));
-  return bool(in) && f.glyphs.size() > 90;
+  if (!in || f.glyphs.size() < 60) return false;
+  MeasureCaps(f);
+  return true;
 }
 
 void WriteCache(const fs::path& p, const Font& f) {
   std::error_code ec;
   fs::create_directories(p.parent_path(), ec);
-  std::ofstream out(p, std::ios::binary | std::ios::trunc);
-  const uint32_t version = 1, n = uint32_t(f.glyphs.size()), k = uint32_t(f.kerning.size());
-  out.write("BFMF", 4).write(reinterpret_cast<const char*>(&version), 4).write(reinterpret_cast<const char*>(&n), 4);
-  for (const auto& [c, g] : f.glyphs) {
-    const int32_t v[8] = {c, g.x, g.y, g.w, g.h, g.min_x, g.y_offset, g.advance};
-    out.write(reinterpret_cast<const char*>(v), sizeof(v)).write(reinterpret_cast<const char*>(&g.scale), 4);
+  const fs::path temp = p.string() + ".tmp";
+  {
+    std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+    const uint32_t version = 4, w = uint32_t(f.w), h = uint32_t(f.h), n = uint32_t(f.glyphs.size()),
+                   k = uint32_t(f.kerning.size());
+    out.write("BFMF", 4).write(reinterpret_cast<const char*>(&version), 4);
+    out.write(reinterpret_cast<const char*>(&w), 4).write(reinterpret_cast<const char*>(&h), 4);
+    out.write(reinterpret_cast<const char*>(&n), 4);
+    for (const auto& [c, g] : f.glyphs) {
+      const int32_t v[8] = {c, g.x, g.y, g.w, g.h, g.min_x, g.y_offset, g.advance};
+      out.write(reinterpret_cast<const char*>(v), sizeof(v)).write(reinterpret_cast<const char*>(&g.scale), 4);
+    }
+    out.write(reinterpret_cast<const char*>(&k), 4);
+    for (const auto& [pair, v] : f.kerning) {
+      const int32_t e[3] = {pair.first, pair.second, v};
+      out.write(reinterpret_cast<const char*>(e), sizeof(e));
+    }
+    out.write(reinterpret_cast<const char*>(f.alpha.data()), std::streamsize(f.alpha.size()));
   }
-  out.write(reinterpret_cast<const char*>(&k), 4);
-  for (const auto& [pair, v] : f.kerning) {
-    const int32_t e[3] = {pair.first, pair.second, v};
-    out.write(reinterpret_cast<const char*>(e), sizeof(e));
-  }
-  out.write(reinterpret_cast<const char*>(f.alpha.data()), std::streamsize(f.alpha.size()));
+  fs::rename(temp, p, ec);
 }
 
-bool LoadFromGame(const fs::path& game_dir, Font& f) {
-  const fs::path archive = game_dir / "dist" / "xenon" / "build_overlay-00.fbrb";
-  std::vector<uint8_t> meta, tex;
-  if (!ReadFbrbEntry(archive, "Output/xenon/Fonts/us/normal_large_meta.dbx", meta) ||
-      !ReadFbrbEntry(archive, "Output/xenon/Fonts/us/normal_large_texture.res", tex))
-    return false;
-  if (!ParseMeta(meta, f) || tex.size() < size_t(kAtlasW) * kAtlasH) return false;
-  const uint8_t* data = tex.data() + tex.size() - size_t(kAtlasW) * kAtlasH;  // the texture after its header
-  f.alpha.resize(size_t(kAtlasW) * kAtlasH);
-  for (uint32_t y = 0; y < uint32_t(kAtlasH); ++y)
-    for (uint32_t x = 0; x < uint32_t(kAtlasW); ++x) f.alpha[y * kAtlasW + x] = data[TiledOffset(x, y, kAtlasW, 1)];
+fs::path CachePath(const fs::path& user_dir, const std::string& name) {
+  return user_dir / "cache" / ("bf_font_" + name + ".bin");
+}
+
+// A font from its two archive entries: the texture (an optional 0x40 byte "RES" wrapper, then a 0x5C byte header:
+// format at +0x08, width +0x10, height +0x14; format 10 is one byte a texel, tiled) and its metrics.
+bool FontFromEntries(const std::string& name, const std::vector<uint8_t>& meta, const std::vector<uint8_t>& tex, Font& f) {
+  if (!ParseMeta(meta, f)) return false;
+  const size_t at = tex.size() >= 3 && std::memcmp(tex.data(), "RES", 3) == 0 ? 0x40 : 0;
+  if (tex.size() < at + 0x5C) return false;
+  const uint8_t* hd = &tex[at];
+  const uint32_t fmt = Be32(hd + 8), w = Be32(hd + 16), h = Be32(hd + 20);
+  if (fmt != 10 || w == 0 || h == 0 || w > 4096 || h > 4096 || tex.size() < at + 0x5C + size_t(w) * h) return false;
+  const uint8_t* data = hd + 0x5C;
+  f.w = int(w), f.h = int(h);
+  f.alpha.resize(size_t(w) * h);
+  for (uint32_t y = 0; y < h; ++y)
+    for (uint32_t x = 0; x < w; ++x) f.alpha[size_t(y) * w + x] = data[TiledOffset(x, y, w, 1)];
+  if (name == kLegacy) AddW(f);
+  MeasureCaps(f);
   return true;
+}
+
+bool LoadFromGame(const std::string& name, const fs::path& game_dir, Font& f) {
+  const fs::path archive = game_dir / "dist" / "xenon" / "build_overlay-00.fbrb";
+  std::vector<std::vector<uint8_t>> parts;
+  if (!ReadFbrbEntries(archive, {"Output/xenon/Fonts/us/" + name + "_meta.dbx", "Output/xenon/Fonts/us/" + name + "_texture.res"}, parts) ||
+      parts.size() != 2)
+    return false;
+  return FontFromEntries(name, parts[0], parts[1], f);
 }
 
 // The atlas into ImGui's font texture, once (it may move when ImGui grows its texture; GetCustomRect follows it).
-bool EnsureRect() {
+bool EnsureRect(Font& f) {
   ImFontAtlas* atlas = ImGui::GetIO().Fonts;
-  if (g_font.rect != ImFontAtlasRectId_Invalid) {
+  if (f.rect != ImFontAtlasRectId_Invalid) {
     ImFontAtlasRect r;
-    if (atlas->GetCustomRect(g_font.rect, &r)) return true;
+    if (atlas->GetCustomRect(f.rect, &r)) return true;
   }
   ImFontAtlasRect r;
-  g_font.rect = atlas->AddCustomRect(kAtlasW, kAtlasH, &r);
-  if (g_font.rect == ImFontAtlasRectId_Invalid || !atlas->TexData || !atlas->TexData->Pixels) return false;
+  f.rect = atlas->AddCustomRect(f.w, f.h, &r);
+  if (f.rect == ImFontAtlasRectId_Invalid || !atlas->TexData || !atlas->TexData->Pixels) return false;
   ImTextureData* tex = atlas->TexData;
-  for (int y = 0; y < kAtlasH; ++y) {
+  for (int y = 0; y < f.h; ++y) {
     auto* row = static_cast<uint8_t*>(tex->GetPixelsAt(r.x, r.y + y));
-    const uint8_t* src = &g_font.alpha[size_t(y) * kAtlasW];
+    const uint8_t* src = &f.alpha[size_t(y) * f.w];
     if (tex->Format == ImTextureFormat_Alpha8) {
-      std::memcpy(row, src, kAtlasW);
+      std::memcpy(row, src, size_t(f.w));
     } else {
-      for (int x = 0; x < kAtlasW; ++x) row[x * 4] = row[x * 4 + 1] = row[x * 4 + 2] = 255, row[x * 4 + 3] = src[x];
+      for (int x = 0; x < f.w; ++x) row[x * 4] = row[x * 4 + 1] = row[x * 4 + 2] = 255, row[x * 4 + 3] = src[x];
     }
   }
+  ImFontAtlasTextureBlockQueueUpload(atlas, tex, r.x, r.y, f.w, f.h);
   return true;
+}
+
+// The font called `name`, loaded once from its cache in the user folder; normal_large also from the game itself
+// (its old path; the others are prepared on the worker, BfFontPrepare).
+Font* Get(const std::string& name, const fs::path& game_dir, const fs::path& user_dir) {
+  Font& f = g_fonts[name];
+  if (f.tried) return f.ok ? &f : nullptr;
+  f.tried = true;
+  const fs::path cache = CachePath(user_dir, name);
+  if (ReadCache(cache, f)) {
+    f.ok = true;
+  } else if (name == kLegacy) {
+    f = Font{};
+    f.tried = true;
+    if (LoadFromGame(name, game_dir, f)) {
+      WriteCache(cache, f);
+      f.ok = true;
+    }
+  }
+  if (f.ok || name == kLegacy)
+    REXLOG_INFO("BF menu font {}: {} ({} glyphs, {} kerning pairs, {}x{}, capitals {} rows)", name,
+                f.ok ? "ready" : "not found", f.glyphs.size(), f.kerning.size(), f.w, f.h, f.cap_rows);
+  return f.ok ? &f : nullptr;
 }
 
 // BF's drawing of its rows, per screen pixel at 1800 lines (see the top).
 constexpr float kScaleAt1800 = 1.55f, kWide = 1.0f, kTrack = 0.88f;
 
+fs::path g_game_dir, g_user_dir;
+
 }  // namespace
+
+// Every font the launcher draws with, from the player's game into the user folder's cache (one read of the
+// archive), on a worker after the game is installed. Fonts already cached are left alone.
+void BfFontPrepare(const fs::path& game_dir, const fs::path& user_dir) {
+  static const char* kNames[] = {"normal_large", "headline_large", "headline_medium", "normal_medium", "list_header",
+                                 "list_item", "normal_small", "headnumbers"};
+  std::lock_guard lock(g_prepare_mutex);
+  std::vector<std::string> todo, names;
+  for (const char* n : kNames)
+    if (!fs::exists(CachePath(user_dir, n))) todo.push_back(n);
+  if (todo.empty()) return;
+  for (const std::string& n : todo)
+    names.push_back("Output/xenon/Fonts/us/" + n + "_meta.dbx"), names.push_back("Output/xenon/Fonts/us/" + n + "_texture.res");
+  std::vector<std::vector<uint8_t>> parts;
+  if (!ReadFbrbEntries(game_dir / "dist" / "xenon" / "build_overlay-00.fbrb", names, parts) || parts.size() != names.size()) {
+    REXLOG_WARN("BF menu fonts: the game's font archive could not be read");
+    return;
+  }
+  int made = 0;
+  for (size_t i = 0; i < todo.size(); ++i) {
+    Font f;
+    if (!FontFromEntries(todo[i], parts[i * 2], parts[i * 2 + 1], f)) {
+      REXLOG_WARN("BF menu fonts: {} could not be read from the game", todo[i]);
+      continue;
+    }
+    WriteCache(CachePath(user_dir, todo[i]), f);
+    ++made;
+  }
+  REXLOG_INFO("BF menu fonts: {} of {} prepared from the game's atlases ({} already there)", made, todo.size(),
+              std::size(kNames) - todo.size());
+}
 
 // Loads BF's lettering once: from the cache in the user folder, else from the player's game (then cached).
 bool BfFontReady(const fs::path& game_dir, const fs::path& user_dir) {
-  if (g_font.tried) return g_font.ok;
-  g_font.tried = true;
-  const fs::path cache = user_dir / "cache" / "bf_menu_font.bin";
-  if (ReadCache(cache, g_font)) {
-    g_font.ok = true;
-  } else {
-    g_font = Font{};
-    g_font.tried = true;
-    if (LoadFromGame(game_dir, g_font)) {
-      AddW(g_font);
-      WriteCache(cache, g_font);
-      g_font.ok = true;
-    }
+  g_game_dir = game_dir, g_user_dir = user_dir;
+  return Get(kLegacy, game_dir, user_dir) != nullptr;
+}
+
+// One of the game's other fonts (headline_large, headline_medium, normal_medium, list_header...): true once its
+// cache is there (BfFontPrepare makes it); false until then (callers draw with our own fonts meanwhile).
+bool BfFontReadyNamed(const std::string& name, const fs::path& game_dir, const fs::path& user_dir) {
+  g_game_dir = game_dir, g_user_dir = user_dir;
+  Font* f = Get(name, game_dir, user_dir);
+  if (!f) {  // not cached yet: looked for again, the worker may have made it meanwhile
+    Font& again = g_fonts[name];
+    static std::map<std::string, double> last;
+    const double now = ImGui::GetTime();
+    if (now - last[name] > 2.0) last[name] = now, again.tried = false;
   }
-  REXLOG_INFO("BF menu font: {} ({} glyphs, {} kerning pairs)", g_font.ok ? "BF's own Eurostile" : "not found",
-              g_font.glyphs.size(), g_font.kerning.size());
-  return g_font.ok;
+  return f != nullptr;
 }
 
 // The width of text in BF's lettering with capitals `cap` pixels high (BF's own rows: 42 at 1800 lines).
 float BfTextWidth(const std::string& text, float cap) {
-  if (!g_font.ok) return 0;
+  const Font* f = Get(kLegacy, g_game_dir, g_user_dir);
+  if (!f) return 0;
   const float s = cap / 42.0f * kScaleAt1800;
   float w = 0;
   int prev = -1;
   for (unsigned char c : text) {
-    auto it = g_font.glyphs.find(c);
+    auto it = f->glyphs.find(c);
     if (prev >= 0)
-      if (auto k = g_font.kerning.find({prev, c}); k != g_font.kerning.end()) w += k->second * s * kWide;
-    w += (it == g_font.glyphs.end() ? 10 : it->second.advance) * s * kWide * kTrack;
+      if (auto k = f->kerning.find({prev, c}); k != f->kerning.end()) w += k->second * s * kWide;
+    w += (it == f->glyphs.end() ? 10 : it->second.advance) * s * kWide * kTrack;
+    prev = c;
+  }
+  return w;
+}
+
+// The width of `text` in the font `name`, its capitals `cap` pixels high, `track` extra pixels after each glyph.
+float BfTextWidthNamed(const std::string& name, const std::string& text, float cap, float track) {
+  const Font* f = Get(name, g_game_dir, g_user_dir);
+  if (!f) return 0;
+  const float s = cap / float(f->cap_rows);
+  float w = 0;
+  int prev = -1;
+  for (unsigned char c : text) {
+    auto it = f->glyphs.find(c);
+    if (prev >= 0)
+      if (auto k = f->kerning.find({prev, c}); k != f->kerning.end()) w += k->second * s;
+    w += (it == f->glyphs.end() ? f->cap_rows / 3 : it->second.advance) * s + track;
     prev = c;
   }
   return w;
@@ -265,6 +390,7 @@ void BfPaper(ImDrawList* d, ImVec2 a, ImVec2 b, float strength) {
         else row[x * 4] = row[x * 4 + 1] = row[x * 4 + 2] = v > 200 ? 255 : 0, row[x * 4 + 3] = a8;
       }
     }
+    ImFontAtlasTextureBlockQueueUpload(atlas, tex, r.x, r.y, 256, 64);
     atlas->GetCustomRect(rect, &r);
   }
   const float tile = (b.y - a.y) * 4.0f;
@@ -281,11 +407,12 @@ void BfFontDebug(ImDrawList* d) {
     const char* v = std::getenv("BF_FONT_DEBUG");
     return v && *v == '1';
   }();
-  if (!on || !g_font.ok || !EnsureRect()) return;
+  Font* f = on ? Get(kLegacy, g_game_dir, g_user_dir) : nullptr;
+  if (!f || !EnsureRect(*f)) return;
   ImFontAtlasRect r;
-  if (!ImGui::GetIO().Fonts->GetCustomRect(g_font.rect, &r)) return;
-  d->AddRectFilled(ImVec2(0, 0), ImVec2(1024, 512), IM_COL32(0, 0, 0, 255));
-  d->AddImage(ImGui::GetIO().Fonts->TexRef, ImVec2(0, 0), ImVec2(1024, 512), r.uv0, r.uv1);
+  if (!ImGui::GetIO().Fonts->GetCustomRect(f->rect, &r)) return;
+  d->AddRectFilled(ImVec2(0, 0), ImVec2(float(f->w), float(f->h)), IM_COL32(0, 0, 0, 255));
+  d->AddImage(ImGui::GetIO().Fonts->TexRef, ImVec2(0, 0), ImVec2(float(f->w), float(f->h)), r.uv0, r.uv1);
 }
 
 // Text in BF's lettering: `top` is where BF's capitals start, `cap` their height in pixels.
@@ -300,21 +427,22 @@ void BfText(ImDrawList* d, ImVec2 top_left, float cap, ImU32 color, const std::s
     for (const ImVec2 o : {ImVec2(-e, 0), ImVec2(e, 0), ImVec2(0, -e), ImVec2(0, e), ImVec2(e, e)})
       BfText(d, ImVec2(top_left.x + o.x, top_left.y + o.y), cap, edge, text, 0);
   }
-  if (!g_font.ok || !EnsureRect()) return;
+  Font* f = Get(kLegacy, g_game_dir, g_user_dir);
+  if (!f || !EnsureRect(*f)) return;
   ImFontAtlasRect r;
-  if (!ImGui::GetIO().Fonts->GetCustomRect(g_font.rect, &r)) return;
+  if (!ImGui::GetIO().Fonts->GetCustomRect(f->rect, &r)) return;
   const float s = cap / 42.0f * kScaleAt1800;
-  const float du = (r.uv1.x - r.uv0.x) / kAtlasW, dv = (r.uv1.y - r.uv0.y) / kAtlasH;
-  // The capitals' top in the atlas is about 3 rows into a capital's cell (A: offset 10 + 3).
+  const float du = (r.uv1.x - r.uv0.x) / float(f->w), dv = (r.uv1.y - r.uv0.y) / float(f->h);
+  // The capitals' top is their cell's top (A: offset 10) now that the rects sit on the ink (kInkShift).
   float x = top_left.x;
-  const float y0 = top_left.y - 13.0f * s;
+  const float y0 = top_left.y - 10.0f * s;
   const float bold = cap / 42.0f * 0.0f, soft = cap / 42.0f * 0.9f;
   int prev = -1;
   for (unsigned char c : text) {
-    auto it = g_font.glyphs.find(c);
+    auto it = f->glyphs.find(c);
     if (prev >= 0)
-      if (auto k = g_font.kerning.find({prev, c}); k != g_font.kerning.end()) x += k->second * s * kWide;
-    if (it == g_font.glyphs.end()) {
+      if (auto k = f->kerning.find({prev, c}); k != f->kerning.end()) x += k->second * s * kWide;
+    if (it == f->glyphs.end()) {
       x += 10 * s * kWide * kTrack;
       prev = c;
       continue;
@@ -323,8 +451,6 @@ void BfText(ImDrawList* d, ImVec2 top_left, float cap, ImU32 color, const std::s
     const float gs = s * g.scale;
     const ImVec2 p0(x + g.min_x * s * kWide, y0 + g.y_offset * s), p1(p0.x + g.w * gs * kWide, p0.y + g.h * gs);
     const ImVec2 uv0(r.uv0.x + g.x * du, r.uv0.y + g.y * dv), uv1(r.uv0.x + (g.x + g.w) * du, r.uv0.y + (g.y + g.h) * dv);
-    // BF's bold (its "propBold"): the glyph drawn again a little to the right, about 1.2 pixels at 1800 lines in
-    // all, as Flash thickens text (runs menu2a to menu2c: same size as BF's letters, thinner strokes without it).
     // BF's bold (its "propBold"): the glyph drawn again a little to the right, 1.2 pixels at 1800 lines in all; then
     // a faint copy a pixel out on each side, as BF's letters are soft (its menu is drawn at 720p and scaled up).
     // Letter widths and gaps then match BF's own to a pixel (run menu2c, LEADERBOARDS).
@@ -339,6 +465,40 @@ void BfText(ImDrawList* d, ImVec2 top_left, float cap, ImU32 color, const std::s
     x += g.advance * s * kWide * kTrack;
     prev = c;
   }
+}
+
+// Text in the font `name`, plain: `top_left` is where its capitals start, `cap` their height in pixels, `track` extra
+// pixels after each glyph. Nothing is drawn (and false returned) until the font is ready.
+bool BfTextNamed(const std::string& name, ImDrawList* d, ImVec2 top_left, float cap, ImU32 color, const std::string& text,
+                 float track) {
+  Font* f = Get(name, g_game_dir, g_user_dir);
+  if (!f || !EnsureRect(*f)) return false;
+  ImFontAtlasRect r;
+  if (!ImGui::GetIO().Fonts->GetCustomRect(f->rect, &r)) return false;
+  const float s = cap / float(f->cap_rows);
+  const float du = (r.uv1.x - r.uv0.x) / float(f->w), dv = (r.uv1.y - r.uv0.y) / float(f->h);
+  float x = top_left.x;
+  const float y0 = top_left.y - float(f->cap_top) * s;
+  int prev = -1;
+  for (unsigned char c : text) {
+    auto it = f->glyphs.find(c);
+    if (prev >= 0)
+      if (auto k = f->kerning.find({prev, c}); k != f->kerning.end()) x += k->second * s;
+    if (it == f->glyphs.end()) {
+      x += f->cap_rows / 3 * s + track;
+      prev = c;
+      continue;
+    }
+    const Glyph& g = it->second;
+    if (g.w > 0 && g.h > 0) {
+      const ImVec2 p0(x + g.min_x * s, y0 + g.y_offset * s), p1(p0.x + g.w * s * g.scale, p0.y + g.h * s * g.scale);
+      const ImVec2 uv0(r.uv0.x + g.x * du, r.uv0.y + g.y * dv), uv1(r.uv0.x + (g.x + g.w) * du, r.uv0.y + (g.y + g.h) * dv);
+      d->AddImage(ImGui::GetIO().Fonts->TexRef, p0, p1, uv0, uv1, color);
+    }
+    x += g.advance * s + track;
+    prev = c;
+  }
+  return true;
 }
 
 }  // namespace bf1943

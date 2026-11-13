@@ -178,6 +178,19 @@ struct Profile {
   // out from the depth and multiplied into the scene's colour just before it. Needs the view found from the draws
   // (upscale_resolve_caller). 0: no ambient occlusion.
   uint32_t ao_resolve_caller = 0;
+  // Resolves whose destination the game then reads on the CPU (D165). A resolve stays on the host (D70): its texels
+  // reach guest memory only where a draw reads them as vertices (D140). A CPU reader would get what that memory held
+  // before: zeros in a fresh process, another level's leftovers once the heap has been used again. For a resolve
+  // that matches an entry here (the return address of the Resolve call; its caller's too when the game resolves
+  // through one function of its own, 0: any; the destination's size, 0: any; its guest format, -1: any) the
+  // destination's guest bytes are set to zero as the game makes the call, on its own thread, so the reader finds an
+  // empty picture every time (Battlefield 1943's undergrowth cell masks: its jobs place the game's own undergrowth
+  // from them, and placed plants on roads from a second level on). caller 0: an unused entry.
+  struct ZeroedResolve {
+    uint32_t caller = 0, outer_caller = 0, width = 0, height = 0;
+    int32_t format = -1;
+  };
+  ZeroedResolve zeroed_resolves[4];
   // The game draws its 2D layer after the main 3D view (its HUD; GH Metallica's note highway and notes) with inline
   // vertices whose first two floats are their position in pixels of the output canvas (output_width x output_height).
   // With frame generation those draws' motion comes from their vertices, each draw matched with the last frame's
@@ -190,6 +203,12 @@ struct Profile {
   // The game's hooks widen its 16:9 cameras by AspectFactor() (D43): NativeXRenderer then fills an output of any
   // aspect ratio, with a separate render scale per axis, instead of showing the 16:9 image with bars.
   bool widens_cameras = false;
+  // With widens_cameras, a game without hooks round its 2D views whose frame is: the scene's copy
+  // (scene_resolve_caller), then only smaller targets (a bloom chain), then one draw of the output's size (the
+  // composite), then the HUD into the output: every draw of the output's size after that first one goes into the
+  // aspect box (D43), and so does every one in a frame without a scene's copy (a loading screen, a video, a menu)
+  // when the frame before had none either. Battlefield 1943 (D162's order).
+  bool box_2d_after_composite = false;
   // Float constants in which the game gives its shaders the size of a texture they sample, as (width, height,
   // 1 / width, 1 / height), to compute texel positions themselves (POTCAWE's shadow maps: a bilinear filter of four
   // point samples on the map's texels). A resolve result is larger on the host (the render scale, the shadow scale,
@@ -257,6 +276,18 @@ double AspectFactor();
 // draws go into a box of the game's aspect ratio in the middle of their render target instead of being
 // stretched with the 3D view. Set by the game's hooks around its 2D views; off again at every Present.
 void SetGameAspectBox(bool on);
+
+// A world marker the game projected to its HUD this moment (a capture flag's icon, a name tag), in pixels of the
+// game's output (1280x720): with Profile::box_2d_after_composite on a wider output, a HUD draw on it is placed where
+// the widened 3D view shows that point, not in the 16:9 box. Any thread; kept 0.2 s.
+void NoteHudMarker(float x, float y);
+// Whether a HUD marker was noted within `radius` pixels of (x, y) in the last 0.2 s.
+bool NearHudMarker(double x, double y, double radius);
+// One of the game's own menu screens is up now (its UI says so about once a second): the 2D layer is a menu, kept
+// together in the middle, not anchored to the edges. Any thread.
+void NoteGameMenu();
+// Whether NoteGameMenu came within the last 1.5 s.
+bool GameMenuRecently();
 
 // D150: a fixed GPU workload timed once, for a first start's auto detect: started now, run at a present soon after;
 // its time (ms) once known (false until then; -1 if it could not run). About 0.6 ms on an RTX 4070 Ti.

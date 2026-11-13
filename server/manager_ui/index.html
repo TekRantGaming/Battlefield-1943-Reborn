@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Battlefield 1943 Reborn Server Manager</title>
+<style>
+  /* The launcher's Field Report colours. Nothing is loaded from anywhere: the page works with no internet. */
+  :root {
+    --bg: #23271c; --panel: #1c2016; --bar: #14170f; --card: #2b3022; --line: #3a4030;
+    --cream: #ece4cc; --paper: #f1ead6; --ink: #24251f; --khaki: #b9ad7c; --faint: #9d9578;
+    --green: #6e9a3c; --green-dark: #55792e; --red: #ce3e30; --blue: #3d74b8; --amber: #d1a03a;
+    --head: "Bahnschrift SemiBold Condensed", "Bahnschrift Condensed", "Oswald", "Arial Narrow", "Segoe UI", sans-serif;
+    --body: "Segoe UI", system-ui, -apple-system, "Noto Sans", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--cream); font: 15px/1.45 var(--body); }
+  button, input, select, textarea { font: inherit; }
+  h1, h2, h3 { font-family: var(--head); font-weight: 600; letter-spacing: .04em; margin: 0; text-transform: uppercase; }
+  header { background: var(--bar); display: flex; align-items: center; gap: 18px; padding: 14px 24px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 24px; color: var(--cream); }
+  header h1 small { color: var(--khaki); font-size: 15px; margin-left: 10px; letter-spacing: .12em; }
+  .pill { font: 600 11px/1 var(--body); letter-spacing: .12em; text-transform: uppercase; padding: 6px 10px; border-radius: 2px; background: var(--card); color: var(--khaki); white-space: nowrap; }
+  .pill.green { background: var(--green); color: #fff; } .pill.red { background: var(--red); color: #fff; }
+  .pill.amber { background: var(--amber); color: #201a08; } .pill.blue { background: var(--blue); color: #fff; }
+  .spacer { flex: 1; }
+  .layout { display: flex; min-height: calc(100% - 62px); }
+  nav { width: 210px; background: var(--panel); padding: 16px 0; flex: none; border-right: 1px solid var(--line); }
+  nav button { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--khaki); padding: 11px 24px; font: 600 17px var(--head); letter-spacing: .08em; text-transform: uppercase; cursor: pointer; border-left: 4px solid transparent; }
+  nav button:hover { color: var(--cream); background: #222719; }
+  nav button.on { color: var(--ink); background: var(--paper); border-left-color: var(--red); }
+  nav .foot { padding: 18px 24px 0; color: var(--faint); font-size: 12px; line-height: 1.5; }
+  main { flex: 1; padding: 26px 30px 60px; max-width: 1180px; min-width: 0; }
+  section { display: none; } section.on { display: block; }
+  .lead { color: var(--faint); margin: 6px 0 20px; max-width: 760px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .btn { background: var(--card); color: var(--cream); border: 1px solid var(--line); padding: 8px 16px; cursor: pointer; font: 600 13px var(--body); letter-spacing: .08em; text-transform: uppercase; border-radius: 2px; }
+  .btn:hover { border-color: var(--khaki); }
+  .btn.go { background: var(--green); border-color: var(--green-dark); color: #fff; box-shadow: 0 3px 0 var(--green-dark); }
+  .btn.go:hover { background: #7aaa44; }
+  .btn.stop { background: #3b241f; border-color: #6a322a; color: #f0c9c2; }
+  .btn.small { padding: 5px 10px; font-size: 11px; }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .card { background: var(--card); border: 1px solid var(--line); padding: 18px 20px; margin-bottom: 14px; border-radius: 2px; }
+  .paper { background: var(--paper); color: var(--ink); padding: 20px 22px; margin-bottom: 16px; border-radius: 2px; }
+  .paper h3 { color: var(--ink); font-size: 19px; margin-bottom: 10px; }
+  .paper .hint, .paper label small { color: #6b6450; }
+  .server { display: grid; grid-template-columns: 1fr auto; gap: 8px 18px; align-items: center; }
+  .server h3 { font-size: 22px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: #5d5d55; flex: none; }
+  .dot.running { background: #7dc24a; box-shadow: 0 0 0 3px rgba(125,194,74,.18); } .dot.starting, .dot.restarting, .dot.waiting { background: var(--amber); }
+  .dot.refused { background: var(--red); }
+  .facts { color: var(--khaki); font-size: 14px; display: flex; gap: 6px 18px; flex-wrap: wrap; }
+  .facts b { color: var(--cream); font-weight: 600; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .chip { background: var(--bar); color: var(--cream); padding: 3px 9px; font-size: 12px; border-radius: 2px; }
+  .warn { color: #f0b9ae; font-size: 13px; margin-top: 6px; } .ok { color: #a9d08a; }
+  .banner { background: #4a2a22; border: 1px solid #7a3a30; color: #f6d3cc; padding: 12px 16px; margin-bottom: 16px; border-radius: 2px; }
+  .banner.info { background: #25351f; border-color: #46663a; color: #d4e6c6; }
+  label.field { display: block; margin-bottom: 14px; }
+  label.field > span { display: block; font: 600 11px var(--body); letter-spacing: .12em; text-transform: uppercase; color: #6b6450; margin-bottom: 5px; }
+  .dark label.field > span { color: var(--khaki); }
+  input[type=text], input[type=number], input[type=password], select, textarea { width: 100%; padding: 9px 11px; border: 1px solid #b9ae8c; background: #fbf7ea; color: var(--ink); border-radius: 2px; }
+  textarea { resize: vertical; min-height: 70px; }
+  div.field { margin-bottom: 16px; }
+  input:focus, select:focus, textarea:focus, .btn:focus-visible, nav button:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
+  .check { display: flex; gap: 10px; align-items: flex-start; margin: 10px 0; cursor: pointer; }
+  .check input { margin-top: 4px; width: 16px; height: 16px; flex: none; accent-color: var(--green); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 22px; }
+  .choice { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
+  .choice label { border: 2px solid #c9bf9f; padding: 14px 16px; cursor: pointer; display: block; border-radius: 2px; background: #f7f1df; }
+  .choice label.on { border-color: var(--green); background: #eef4e0; }
+  .choice input { margin-right: 8px; accent-color: var(--green); }
+  .choice b { font: 600 18px var(--head); letter-spacing: .05em; text-transform: uppercase; }
+  .choice p { margin: 6px 0 0; color: #5a5440; font-size: 13.5px; }
+  table { border-collapse: collapse; width: 100%; } td, th { text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid #d9cfae; font-size: 14px; }
+  th { font: 600 11px var(--body); letter-spacing: .12em; text-transform: uppercase; color: #6b6450; }
+  code, .mono { font-family: Consolas, "DejaVu Sans Mono", monospace; font-size: 13px; }
+  pre { background: #11140d; color: #cfd6bd; padding: 14px 16px; overflow: auto; max-height: 560px; font: 12.5px/1.5 Consolas, "DejaVu Sans Mono", monospace; border: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; margin: 0; }
+  .maps { border: 1px solid #c9bf9f; background: #fbf7ea; } .maps div { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid #e3dabd; }
+  .maps div:last-child { border-bottom: 0; } .maps span { flex: 1; } .maps input { accent-color: var(--green); width: 16px; height: 16px; }
+  /* The message as players see it (the game's box: dark, an accent bar, what it is about, the words large). */
+  .preview { background: #10120e; color: #f1ead3; border-left: 8px solid var(--khaki); padding: 14px 20px 16px; border-radius: 3px; max-width: 640px; box-shadow: 4px 5px 0 rgba(0,0,0,.35); }
+  .preview small { display: block; font: 600 12px var(--body); letter-spacing: .1em; margin-bottom: 6px; color: var(--khaki); }
+  .preview b { font: 600 24px/1.25 var(--body); }
+  .preview.update { border-left-color: #8fb34f; } .preview.update small { color: #8fb34f; }
+  .preview.restart { border-left-color: var(--red); } .preview.restart small { color: var(--red); }
+  progress { width: 100%; height: 14px; accent-color: var(--green); }
+  .modal { position: fixed; inset: 0; background: rgba(8,10,6,.72); display: none; align-items: flex-start; justify-content: center; padding: 5vh 16px; overflow: auto; z-index: 20; }
+  .modal.on { display: flex; }
+  .modal .paper { width: 640px; max-width: 100%; box-shadow: 8px 10px 0 rgba(0,0,0,.4); margin: 0; }
+  .list { max-height: 360px; overflow: auto; border: 1px solid #c9bf9f; background: #fbf7ea; }
+  .list div { padding: 7px 11px; border-bottom: 1px solid #e3dabd; cursor: pointer; display: flex; gap: 10px; }
+  .list div:hover { background: #eef4e0; } .list div span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .list div small { color: #6b6450; }
+  #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); background: var(--paper); color: var(--ink); padding: 12px 20px; border-left: 6px solid var(--green); box-shadow: 4px 5px 0 rgba(0,0,0,.4); display: none; z-index: 30; max-width: 80vw; }
+  #toast.bad { border-left-color: var(--red); }
+  .muted { color: var(--faint); } .right { margin-left: auto; }
+  @media (max-width: 860px) { .layout { flex-direction: column; } nav { width: auto; display: flex; overflow: auto; padding: 0; } nav button { width: auto; white-space: nowrap; border-left: 0; border-bottom: 4px solid transparent; } nav button.on { border-bottom-color: var(--red); } nav .foot { display: none; } .grid2, .choice, .server { grid-template-columns: 1fr; } main { padding: 18px 14px 50px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Battlefield 1943 Reborn <small>Server Manager</small></h1>
+  <span class="pill" id="mode">...</span>
+  <span class="pill" id="version"></span>
+  <span class="spacer"></span>
+  <button class="btn go" id="start-all">Start all</button>
+  <button class="btn stop" id="stop-all">Stop all</button>
+</header>
+<div class="layout">
+  <nav id="nav">
+    <button data-tab="servers" class="on">Servers</button>
+    <button data-tab="network">Network</button>
+    <button data-tab="messages">Messages</button>
+    <button data-tab="updates">Updates</button>
+    <button data-tab="game">Game files</button>
+    <button data-tab="logs">Logs</button>
+    <button data-tab="settings">Settings</button>
+    <div class="foot">The manager keeps running when you close this page. Your servers stay up until you stop them or shut the manager down.</div>
+  </nav>
+  <main>
+    <div id="banners"></div>
+
+    <section id="servers" class="on">
+      <div class="row"><h2>Your servers</h2><span class="spacer"></span><button class="btn" id="add-server">Add a server</button></div>
+      <p class="lead">Each server is one match with its own name, maps and port. Players find a listed server in the game's server browser.</p>
+      <div id="server-list"></div>
+    </section>
+
+    <section id="network">
+      <h2>Network</h2>
+      <p class="lead">Where your servers are, and who can find them.</p>
+      <div class="paper">
+        <h3>Who can join</h3>
+        <div class="choice" id="mode-choice">
+          <label><input type="radio" name="lan" value="0"><b>Online</b><p>Your servers are on the main server list, for every player. They register with the Battlefield 1943 Reborn backend.</p></label>
+          <label><input type="radio" name="lan" value="1"><b>LAN only</b><p>Nothing is sent to the main backend. This machine runs everything itself. Players join with Direct connect, by this machine's address.</p></label>
+        </div>
+        <div id="official-note" class="hint" style="display:none">This is the official package: this machine runs the main backend itself.</div>
+        <label class="field"><span>Region</span><select id="region"></select><small>Shown with its flag in the game's server browser, so players can pick a server near them.</small></label>
+        <div id="lan-box">
+          <label class="field"><span>Public address, for players outside your network (optional)</span><input type="text" id="public-address" placeholder="Found from your router when it allows it" maxlength="64"><small>Players on your network use this machine's network address. Players outside need this address and the ports below opened on your router.</small></label>
+        </div>
+        <label class="check"><input type="checkbox" id="upnp"><span>Open the ports on my router automatically (UPnP)<br><small id="upnp-note"></small></span></label>
+        <div class="row"><button class="btn go" id="save-network">Save</button><span class="hint" id="network-note"></span></div>
+      </div>
+      <div class="paper">
+        <h3>Addresses and ports</h3>
+        <table id="address-table"></table>
+        <p class="hint" id="port-hint"></p>
+        <div class="row"><button class="btn" id="firewall" style="display:none">Open Windows Firewall for these ports</button></div>
+      </div>
+    </section>
+
+    <section id="messages">
+      <h2>Messages to players</h2>
+      <p class="lead">A message shows in a box at the top of every player's screen for ten seconds, with a sound. With a time, it is said again as the time runs out.</p>
+      <div class="paper">
+        <div class="grid2">
+          <label class="field"><span>Send to</span><select id="msg-target"></select></label>
+          <label class="field"><span>Message</span><select id="msg-kind">
+            <option value="update">Game update released</option>
+            <option value="restart">Restart server</option>
+            <option value="custom">Custom</option></select></label>
+          <label class="field"><span>Time</span><select id="msg-time"></select></label>
+          <label class="check" id="msg-restart-box" style="align-self:end;margin-bottom:22px"><input type="checkbox" id="msg-restart" checked><span id="msg-restart-label">Restart the server when the time is up</span></label>
+        </div>
+        <label class="field" id="msg-text-box"><span>Your message <small id="msg-count" style="float:right"></small></span><textarea id="msg-text" maxlength="200" placeholder="Teams are balanced after this round"></textarea><small>Write {time} where the time left should be, to count a custom message down.</small></label>
+        <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:6px">Players will see</span>
+          <div class="preview" id="msg-preview"><small></small><b></b></div></div>
+        <div class="row"><button class="btn go" id="msg-send">Send message</button><span class="hint" id="msg-note"></span></div>
+      </div>
+      <div class="paper" id="countdown-box" style="display:none"><h3>Counting down</h3><div id="countdowns"></div></div>
+      <div class="paper"><h3>Sent</h3><div id="sent" class="hint"></div></div>
+    </section>
+
+    <section id="updates">
+      <h2>Updates</h2>
+      <p class="lead">A new release of the game needs the same release on the server. The manager can do it by itself: it tells the players, waits, installs the release and starts your servers again.</p>
+      <div class="paper">
+        <table>
+          <tr><th>This server package</th><td id="up-have"></td></tr>
+          <tr><th>Newest release</th><td id="up-latest"></td></tr>
+          <tr><th>Status</th><td id="up-text"></td></tr>
+        </table>
+        <progress id="up-progress" max="100" value="0" style="display:none;margin-top:12px"></progress>
+        <div class="row" style="margin-top:14px"><button class="btn" id="up-check">Check now</button><button class="btn go" id="up-apply" disabled>Update now</button></div>
+      </div>
+      <div class="paper">
+        <h3>Automatic updates</h3>
+        <label class="check"><input type="checkbox" id="auto-update"><span>Install new releases by themselves<br><small id="auto-note">Checked every half hour.</small></span></label>
+        <label class="field" style="max-width:340px"><span>Warn players this long before the restart</span><select id="warn-minutes"></select></label>
+        <div class="row"><button class="btn go" id="save-updates">Save</button></div>
+      </div>
+    </section>
+
+    <section id="game">
+      <h2>Game files</h2>
+      <p class="lead">A server needs the game's own files, from your copy of Battlefield 1943: the package file in the folder 5841097E\000D0000, or a folder with the unpacked game. They are copied in once.</p>
+      <div class="paper">
+        <h3 id="game-state"></h3>
+        <label class="field"><span>Your Battlefield 1943 package or folder, on this machine</span><input type="text" id="game-path" placeholder="Pick it with Browse, or type its path"></label>
+        <div class="row"><button class="btn" id="game-browse">Browse</button><button class="btn go" id="game-install">Install</button><span class="hint" id="game-note"></span></div>
+        <progress id="game-progress" max="100" value="0" style="display:none;margin-top:14px"></progress>
+      </div>
+    </section>
+
+    <section id="logs">
+      <h2>Logs</h2>
+      <p class="lead">What the manager and each server wrote last.</p>
+      <div class="row" style="margin-bottom:12px"><select id="log-which" style="width:auto;min-width:260px"></select><button class="btn" id="log-refresh">Refresh</button><label class="check" style="margin:0"><input type="checkbox" id="log-auto" checked><span>Keep it fresh</span></label><span class="muted mono" id="log-file"></span></div>
+      <pre id="log-text"></pre>
+    </section>
+
+    <section id="settings">
+      <h2>Settings</h2>
+      <p class="lead">How the manager itself runs.</p>
+      <div class="paper">
+        <h3>Starting</h3>
+        <label class="check"><input type="checkbox" id="start-servers"><span>Start my servers when the manager starts</span></label>
+        <label class="check" id="autostart-box"><input type="checkbox" id="autostart"><span>Start the manager when I sign in to Windows</span></label>
+        <div id="systemd-box" style="display:none"><p class="hint">To start the manager with a Linux machine, save this as a systemd user unit (~/.config/systemd/user/bf1943-server.service), then run: systemctl --user enable --now bf1943-server</p><pre id="systemd-unit"></pre></div>
+        <div class="row"><button class="btn go" id="save-settings">Save</button></div>
+      </div>
+      <div class="paper">
+        <h3>This page from another machine</h3>
+        <p class="hint">The page answers only on this machine. To use it from another one, set a password first, then open it to your network. The manager must be started again for that to take hold.</p>
+        <div class="grid2">
+          <label class="field" id="pw-current-box"><span>Current password</span><input type="password" id="pw-current" autocomplete="current-password"></label>
+          <label class="field"><span>New password (8 characters or more; empty removes it)</span><input type="password" id="pw-new" autocomplete="new-password"></label>
+        </div>
+        <div class="row"><button class="btn" id="pw-save">Set password</button><span class="hint" id="pw-note"></span></div>
+        <label class="check"><input type="checkbox" id="web-remote"><span>Open this page to other machines on my network (needs the password)</span></label>
+      </div>
+      <div class="paper">
+        <h3>About</h3>
+        <table id="about-table"></table>
+        <div class="row" style="margin-top:14px"><button class="btn stop" id="quit">Shut down the manager and my servers</button></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="edit-modal"><div class="paper">
+  <h3 id="edit-title">Server</h3>
+  <label class="field"><span>Name, as the server browser shows it</span><input type="text" id="e-name" maxlength="48"></label>
+  <label class="field"><span>Description (optional)</span><input type="text" id="e-description" maxlength="200" placeholder="Shown when a player selects the server"></label>
+  <div class="grid2">
+    <label class="field"><span>Players</span><select id="e-max"></select></label>
+    <label class="field"><span>Port (UDP)</span><input type="number" id="e-port" min="1024" max="65535"></label>
+    <label class="field"><span>Pause between rounds</span><select id="e-delay"></select></label>
+    <label class="field"><span>Tick rate</span><input type="text" id="e-tick" disabled></label>
+  </div>
+  <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Maps, in the order they are played</span><div class="maps" id="e-maps"></div></div>
+  <label class="check"><input type="checkbox" id="e-listed"><span>Listed in the server browser<br><small>Off: players join only with Direct connect, by the address you give them.</small></span></label>
+  <label class="check" id="e-night-box"><input type="checkbox" id="e-night"><span>Night Ops: players see the maps at night</span></label>
+  <label class="check"><input type="checkbox" id="e-autostart"><span>Start this server when the manager starts</span></label>
+  <div class="row" style="margin-top:14px"><button class="btn go" id="e-save">Save</button><button class="btn" id="e-save-restart">Save and restart it</button><button class="btn" id="e-cancel">Cancel</button><span class="spacer"></span><button class="btn stop" id="e-remove">Remove server</button></div>
+  <p class="hint" id="e-note" style="margin-bottom:0"></p>
+</div></div>
+
+<div class="modal" id="browse-modal"><div class="paper">
+  <h3>Pick your Battlefield 1943 package or folder</h3>
+  <p class="hint mono" id="b-path"></p>
+  <div class="list" id="b-list"></div>
+  <div class="row" style="margin-top:14px"><button class="btn go" id="b-use">Use this folder</button><button class="btn" id="b-cancel">Cancel</button><span class="hint">Click a file to pick it, a folder to open it.</span></div>
+</div></div>
+
+<div class="modal" id="login-modal"><div class="paper" style="width:420px">
+  <h3>Sign in</h3>
+  <label class="field"><span>Password</span><input type="password" id="login-password" autocomplete="current-password"></label>
+  <div class="row"><button class="btn go" id="login-go">Sign in</button><span class="hint" id="login-note"></span></div>
+</div></div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+// The page of the Battlefield 1943 Reborn server manager (server/manager.py serves it and answers /api/...).
+// Everything a server or a player named is put into the page as text, never as markup.
+const $ = id => document.getElementById(id);
+function h(tag, attrs, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === 'class') e.className = v; else if (k === 'text') e.textContent = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v); else if (v !== false && v != null) e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of children.flat()) if (c != null && c !== false) e.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return e;
+}
+let state = null, filled = false, editing = 0;
+// A part of the page is built again only when what it shows has changed (the manager is asked every two seconds): a
+// button is never replaced under the mouse, and an open list never closes by itself.
+function sync(el, key, build) {
+  key = JSON.stringify(key);
+  if (el.dataset.key === key) return false;
+  el.dataset.key = key;
+  el.replaceChildren(...[build()].flat().filter(x => x != null && x !== false));
+  return true;
+}
+
+async function api(path, data) {
+  const options = data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'bf1943' }, body: JSON.stringify(data) };
+  let reply;
+  try { reply = await fetch(path, options); } catch (e) { throw new Error('The manager does not answer. Is it still running?'); }
+  let body = {};
+  try { body = await reply.json(); } catch (e) {}
+  if (reply.status === 401 && path !== '/api/login') { $('login-modal').classList.add('on'); $('login-password').focus(); throw new Error('Sign in first.'); }
+  if (!reply.ok) throw new Error(body.error || ('The manager said ' + reply.status));
+  if (body.state) { state = body.state; render(); }
+  return body;
+}
+function toast(text, bad) {
+  const t = $('toast'); t.textContent = text; t.className = bad ? 'bad' : ''; t.style.display = 'block';
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.style.display = 'none'; }, bad ? 7000 : 3500);
+}
+async function act(path, data, done) {
+  try { const r = await api(path, data || {}); if (done) toast(done); return r; } catch (e) { toast(e.message, true); return null; }
+}
+function ago(seconds) {
+  if (seconds < 90) return Math.max(1, Math.round(seconds)) + ' s';
+  if (seconds < 5400) return Math.round(seconds / 60) + ' min';
+  return (seconds / 3600).toFixed(seconds < 36000 ? 1 : 0) + ' h';
+}
+function words(seconds) {
+  let n = seconds, unit = 'second';
+  if (seconds >= 3600 && seconds % 3600 === 0) { n = seconds / 3600; unit = 'hour'; } else if (seconds >= 60 && seconds % 60 === 0) { n = seconds / 60; unit = 'minute'; }
+  return n + ' ' + unit + (n === 1 ? '' : 's');
+}
+const STATE_WORDS = { running: 'Running', starting: 'Starting', stopped: 'Stopped', restarting: 'Starting again', waiting: 'Waiting to try again', refused: 'Refused' };
+
+// ---- the tabs
+$('nav').addEventListener('click', e => {
+  const tab = e.target.dataset && e.target.dataset.tab;
+  if (!tab) return;
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b === e.target));
+  document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === tab));
+  if (tab === 'logs') loadLog();
+});
+function goTab(tab) { document.querySelector('nav button[data-tab="' + tab + '"]').click(); }
+
+// ---- what the manager says, into the page
+function render() {
+  const s = state, c = s.config;
+  $('version').textContent = 'Version ' + s.version;
+  const running = s.servers.filter(x => x.wanted).length;
+  const mode = $('mode');
+  mode.textContent = (s.official ? 'Official' : c.lan_only ? 'LAN only' : 'Online') + ' · ' + running + ' of ' + s.servers.length + ' up';
+  mode.className = 'pill ' + (running ? 'green' : '');
+  // banners
+  const newer = s.update.state === 'available' || s.update.state === 'downloaded';
+  sync($('banners'), [s.game_installed, newer, s.update.latest, s.countdowns.map(cd => [cd.id, cd.text])], () => [
+    !s.game_installed && h('div', { class: 'banner' }, 'The game is not installed yet, so no server can start. ', h('a', { href: '#', style: 'color:inherit', onclick: e => { e.preventDefault(); goTab('game'); } }, 'Install it from your own copy on the Game files page.')),
+    newer && h('div', { class: 'banner info' }, 'Version ' + s.update.latest + ' is out. ', h('a', { href: '#', style: 'color:inherit', onclick: e => { e.preventDefault(); goTab('updates'); } }, 'Open Updates.')),
+    ...s.countdowns.map(cd => h('div', { class: 'banner info' }, cd.text + (cd.update ? ' The update installs then.' : cd.restart ? ' The server restarts then.' : '')))]);
+  renderServers(); renderNetwork(); renderMessages(); renderUpdates(); renderGame(); renderSettings();
+  if (!filled) { fillForms(); filled = true; }
+}
+
+function renderServers() {
+  const list = $('server-list');
+  const limits = state.config.servers.map(x => x.max_players);
+  const shown = state.servers.map(sv => [sv.n, sv.name, sv.state, sv.players, sv.names, sv.map, sv.next_map, sv.why, sv.reachable, sv.port, sv.listed, sv.wanted]);
+  sync(list, [shown, limits, state.tick], () => state.servers.map(sv => {
+    const facts = h('div', { class: 'facts' });
+    if (sv.state === 'running' || sv.state === 'starting') {
+      if (sv.map) facts.append(h('span', {}, 'Map ', h('b', { text: sv.map }), sv.next_map && sv.next_map !== sv.map ? ', then ' + sv.next_map : ''));
+      facts.append(h('span', {}, h('b', { text: String(sv.players || 0) }), ' / ' + limits[sv.n - 1] + ' players'));
+      facts.append(h('span', { id: 'up-' + sv.n }));
+    }
+    facts.append(h('span', {}, 'UDP ', h('b', { text: String(sv.port) })));
+    facts.append(h('span', {}, sv.listed ? 'Listed' : 'Not listed'));
+    facts.append(h('span', {}, state.tick + ' Hz'));
+    const body = h('div', {}, h('h3', {}, h('span', { class: 'dot ' + sv.state }), sv.name,
+      h('span', { class: 'pill ' + (sv.state === 'running' ? 'green' : sv.state === 'refused' ? 'red' : sv.state === 'stopped' ? '' : 'amber'), text: STATE_WORDS[sv.state] || sv.state })), facts);
+    if (sv.names && sv.names.length) body.append(h('div', { class: 'chips' }, sv.names.map(n => h('span', { class: 'chip', text: n }))));
+    if (sv.why) body.append(h('div', { class: 'warn', text: sv.why }));
+    if (sv.state === 'running' && sv.reachable === false) body.append(h('div', { class: 'warn', text: 'Players outside your network cannot reach it yet: open UDP ' + sv.port + ' on your router.' }));
+    if (sv.state === 'running' && sv.reachable === true) body.append(h('div', { class: 'warn ok', text: 'Players can reach it from the internet.' }));
+    const up = sv.wanted;
+    const buttons = h('div', { class: 'row' },
+      up ? h('button', { class: 'btn small', onclick: () => act('/api/restart', { n: sv.n }, 'Restarting ' + sv.name) }, 'Restart')
+         : h('button', { class: 'btn go small', onclick: () => act('/api/start', { n: sv.n }, 'Starting ' + sv.name) }, 'Start'),
+      up ? h('button', { class: 'btn stop small', onclick: () => act('/api/stop', { n: sv.n }, sv.name + ' stopped') }, 'Stop') : null,
+      h('button', { class: 'btn small', onclick: () => openEdit(sv.n) }, 'Edit'));
+    return h('div', { class: 'card server' }, body, buttons);
+  }));
+  state.servers.forEach(sv => { const up = $('up-' + sv.n); if (up) up.textContent = sv.since ? 'Up ' + ago(state.now - sv.since) : ''; });
+  $('add-server').disabled = state.servers.length >= state.max_servers;
+}
+
+function renderNetwork() {
+  const s = state, c = s.config, table = $('address-table');
+  const lan = s.addresses.lan || [];
+  const pub = s.addresses.public;
+  const portsOf = s.servers.map(x => x.port);
+  const seen = (s.servers.find(x => x.address) || {}).address || '';
+  sync(table, [c.lan_only, lan, pub, portsOf, seen], () => {
+    const rows = [h('tr', {}, h('th', { text: 'For' }), h('th', { text: 'Address to give players' }))];
+    const add = (who, text) => rows.push(h('tr', {}, h('td', { text: who }), h('td', { class: 'mono', text: text })));
+    if (c.lan_only) {
+      lan.forEach(ip => add('Players on your network', ip + (portsOf.length > 1 ? '  (or ' + ip + ':<port> for one server)' : '')));
+      if (!lan.length) add('Players on your network', 'This machine has no network address.');
+      add('Players outside your network', pub ? pub : 'Your public address (set it above, or let your router say it)');
+    } else {
+      add('Everyone', 'Your servers are in the server browser. For Direct connect: ' + (pub || seen || 'the address the server browser shows').toString().replace(/:\d+$/, '') + ':<port>');
+    }
+    return rows;
+  });
+  const tcp = s.backend.mode ? ' and TCP ' + s.backend_ports.join(', ') : '';
+  $('port-hint').textContent = 'Ports players must reach on this machine: UDP ' + portsOf.join(', ') + tcp + '. ' + (s.addresses.upnp || '');
+  $('firewall').style.display = s.platform === 'windows' ? '' : 'none';
+  $('upnp-note').textContent = s.addresses.upnp || 'Asked when the servers start.';
+  $('official-note').style.display = s.official ? '' : 'none';
+  $('mode-choice').style.display = s.official ? 'none' : '';
+  document.querySelectorAll('#mode-choice label').forEach(l => l.classList.toggle('on', l.querySelector('input').checked));
+  $('lan-box').style.display = document.querySelector('input[name=lan][value="1"]').checked || s.official ? '' : 'none';
+}
+
+function renderMessages() {
+  const s = state, target = $('msg-target'), keep = target.value;
+  if (sync(target, s.servers.map(x => [x.n, x.name, x.wanted]), () => [h('option', { value: '0', text: 'Every running server' }), ...s.servers.map(x => h('option', { value: x.n, text: x.name + (x.wanted ? '' : ' (stopped)') }))]))
+    target.value = keep && [...target.options].some(o => o.value === keep) ? keep : '0';
+  $('countdown-box').style.display = s.countdowns.length ? '' : 'none';
+  sync($('countdowns'), s.countdowns.map(cd => cd.id), () => s.countdowns.map(cd => h('div', { class: 'row', style: 'margin-bottom:8px' }, h('span', { id: 'cd-' + cd.id }), h('span', { class: 'spacer' }),
+    h('button', { class: 'btn small', onclick: () => act('/api/broadcast/cancel', { id: cd.id }, 'Countdown cancelled') }, 'Cancel'))));
+  s.countdowns.forEach(cd => { const e = $('cd-' + cd.id); if (e) e.textContent = (cd.update ? 'Update' : cd.restart ? 'Restart' : 'Message') + ' in ' + (cd.left >= 120 ? Math.round(cd.left / 60) + ' minutes' : cd.left + ' seconds') + ', for ' + (cd.servers.length || 'no') + (cd.servers.length === 1 ? ' server' : ' servers'); });
+  sync($('sent'), s.sent.map(m => [m.at, m.text]), () => s.sent.length ? s.sent.map(m => h('div', { style: 'padding:5px 0;border-bottom:1px solid #d9cfae;color:#24251f' }, h('small', { class: 'mono', style: 'color:#6b6450', text: new Date(m.at * 1000).toLocaleTimeString() + '  ' }), m.text)) : 'Nothing sent yet.');
+  previewMessage();
+}
+function previewMessage() {
+  const kind = $('msg-kind').value, seconds = Number($('msg-time').value), custom = kind === 'custom';
+  $('msg-text-box').style.display = custom ? '' : 'none';
+  $('msg-restart-box').style.display = custom ? 'none' : '';
+  $('msg-restart-label').textContent = kind === 'update' ? 'Restart the server when the time is up' : 'Restart the server when the time is up';
+  const template = custom ? $('msg-text').value.trim() : (state ? state.presets[kind] : '');
+  const text = template.replace('{time}', seconds ? words(seconds) : '...');
+  const p = $('msg-preview'); p.className = 'preview ' + (custom ? '' : kind);
+  p.querySelector('small').textContent = kind === 'update' ? 'GAME UPDATE' : kind === 'restart' ? 'SERVER RESTART' : 'SERVER MESSAGE';
+  p.querySelector('b').textContent = text || 'Your message';
+  $('msg-count').textContent = custom ? $('msg-text').value.length + ' / 200' : '';
+  const needsTime = template.includes('{time}');
+  $('msg-note').textContent = needsTime && !seconds ? 'Pick a time for this message.' : !needsTime && seconds && custom ? 'Sent once, now: the message has no {time} in it.' : '';
+}
+
+function renderUpdates() {
+  const u = state.update;
+  $('up-have').textContent = state.version + (state.version === 'dev' ? ' (a development copy: it does not update itself)' : '');
+  $('up-latest').textContent = u.latest ? u.latest + (u.checked ? '  (looked ' + ago(state.now - u.checked) + ' ago)' : '') : 'Not looked yet';
+  $('up-text').textContent = u.text || 'Not looked yet.';
+  const p = $('up-progress'); p.style.display = u.state === 'downloading' ? '' : 'none'; p.value = u.progress || 0;
+  $('up-apply').disabled = !(u.state === 'available' || u.state === 'downloaded');
+  $('auto-note').textContent = state.official ? 'Off for official servers: they change only on your word, with Update now.' : 'Checked every half hour. Players are told first, with the Game update released message.';
+}
+function renderGame() {
+  const i = state.install;
+  $('game-state').textContent = state.game_installed ? 'The game is installed' : 'The game is not installed yet';
+  const p = $('game-progress'); p.style.display = i.state === 'running' ? '' : 'none';
+  p.value = i.total ? Math.min(100, 100 * i.done / i.total) : 0;
+  $('game-note').textContent = i.state === 'idle' ? '' : i.text;
+  $('game-install').disabled = i.state === 'running';
+}
+function renderSettings() {
+  const s = state;
+  $('autostart-box').style.display = s.platform === 'windows' ? '' : 'none';
+  $('systemd-box').style.display = s.platform === 'windows' ? 'none' : '';
+  $('systemd-unit').textContent = '[Unit]\nDescription=Battlefield 1943 Reborn server manager\nAfter=network-online.target\n\n[Service]\nExecStart=/usr/bin/env python3 ' + s.root + '/server/manager.py run --no-browser\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n';
+  $('pw-current-box').style.display = s.config.web_password ? '' : 'none';
+  $('pw-save').textContent = s.config.web_password ? 'Change password' : 'Set password';
+  sync($('about-table'), [s.version, s.root, s.data], () => [
+    h('tr', {}, h('th', { text: 'Version' }), h('td', { text: s.version })),
+    h('tr', {}, h('th', { text: 'Program' }), h('td', { class: 'mono', text: s.root })),
+    h('tr', {}, h('th', { text: 'Settings, game, logs' }), h('td', { class: 'mono', text: s.data })),
+    h('tr', {}, h('th', { text: 'This page' }), h('td', { class: 'mono', text: location.origin }))]);
+  // the logs' list follows the servers
+  const which = $('log-which'), keep = which.value;
+  if (sync(which, [s.backend.mode, s.servers.map(x => x.name)], () => [h('option', { value: 'manager:0', text: 'Manager' }), s.backend.mode ? h('option', { value: 'backend:0', text: 'Backend' }) : null,
+      ...s.servers.flatMap(x => [h('option', { value: 'host:' + x.n, text: x.name + ': host' }), h('option', { value: 'game:' + x.n, text: x.name + ': game' })])]) && keep)
+    which.value = keep;
+}
+
+// The settings' forms are filled once (and after a save), so a refresh never types over the host.
+function fillForms() {
+  const c = state.config;
+  document.querySelector('input[name=lan][value="' + (c.lan_only ? 1 : 0) + '"]').checked = true;
+  const region = $('region');
+  region.replaceChildren(h('option', { value: '', text: 'Not said' }), ...state.regions.map(r => h('option', { value: r.code, text: r.name })));
+  region.value = c.region;
+  $('public-address').value = c.public_address; $('upnp').checked = c.upnp;
+  $('auto-update').checked = c.auto_update;
+  const warn = $('warn-minutes');
+  warn.replaceChildren(...[0, 1, 2, 5, 10, 15, 30, 60].map(m => h('option', { value: m, text: m ? words(m * 60) : 'No warning' })));
+  if (![0, 1, 2, 5, 10, 15, 30, 60].includes(c.update_warning_minutes)) warn.append(h('option', { value: c.update_warning_minutes, text: words(c.update_warning_minutes * 60) }));
+  warn.value = c.update_warning_minutes;
+  $('start-servers').checked = c.start_servers; $('web-remote').checked = c.web_remote;
+  $('autostart').checked = !!state.autostart;
+  const time = $('msg-time');
+  time.replaceChildren(h('option', { value: 0, text: 'Now, once' }), ...[30, 60, 120, 300, 600, 900, 1800, 3600].map(t => h('option', { value: t, text: words(t) })));
+  time.value = 300;
+  renderNetwork(); previewMessage();
+}
+async function saveConfig(changes, done) {
+  const r = await act('/api/config', { config: changes }, done);
+  if (r) { filled = false; render(); }
+  return r;
+}
+
+// ---- servers: edit, add, remove
+function openEdit(n) {
+  editing = n;
+  const fresh = n > state.config.servers.length;
+  const used = state.config.servers.map(x => x.port);
+  let port = 18300; while (used.includes(port)) port++;
+  const sv = fresh ? { name: 'Battlefield 1943 Reborn ' + n, description: '', maps: state.maps.map(m => m.key), round_end_delay: 45, listed: true, night: false, port: port, max_players: 24, autostart: true } : state.config.servers[n - 1];
+  $('edit-title').textContent = fresh ? 'A new server' : 'Server ' + n;
+  $('e-name').value = sv.name; $('e-description').value = sv.description; $('e-port').value = sv.port;
+  $('e-max').replaceChildren(...[8, 12, 16, 20, 24].map(m => h('option', { value: m, text: m + ' players' })));
+  if (![8, 12, 16, 20, 24].includes(sv.max_players)) $('e-max').append(h('option', { value: sv.max_players, text: sv.max_players + ' players' }));
+  $('e-max').value = sv.max_players;
+  $('e-delay').replaceChildren(...[30, 45, 60, 90, 120].map(m => h('option', { value: m, text: m + ' seconds' })));
+  if (![30, 45, 60, 90, 120].includes(sv.round_end_delay)) $('e-delay').append(h('option', { value: sv.round_end_delay, text: sv.round_end_delay + ' seconds' }));
+  $('e-delay').value = sv.round_end_delay;
+  $('e-tick').value = state.tick + ' Hz (the game\'s own rate)';
+  $('e-listed').checked = sv.listed; $('e-night').checked = sv.night; $('e-autostart').checked = sv.autostart;
+  $('e-night-box').style.display = state.night_ops ? '' : 'none';
+  $('e-remove').style.display = fresh || state.config.servers.length < 2 ? 'none' : '';
+  $('e-save-restart').style.display = fresh ? 'none' : '';
+  const order = sv.maps.concat(state.maps.map(m => m.key).filter(k => !sv.maps.includes(k)));
+  drawMaps(order.map(k => ({ key: k, on: sv.maps.includes(k) })));
+  $('e-note').textContent = fresh ? '' : 'A running server takes its new settings when it is restarted.';
+  $('edit-modal').classList.add('on'); $('e-name').focus();
+}
+function drawMaps(rows) {
+  const box = $('e-maps'); box.replaceChildren();
+  rows.forEach((row, i) => {
+    const title = state.maps.find(m => m.key === row.key).title;
+    box.append(h('div', { 'data-key': row.key }, h('input', { type: 'checkbox', checked: row.on, 'aria-label': title }), h('span', { text: title }),
+      h('button', { class: 'btn small', type: 'button', disabled: i === 0, onclick: () => { const r = readMaps(); [r[i - 1], r[i]] = [r[i], r[i - 1]]; drawMaps(r); } }, 'Up'),
+      h('button', { class: 'btn small', type: 'button', disabled: i === rows.length - 1, onclick: () => { const r = readMaps(); [r[i + 1], r[i]] = [r[i], r[i + 1]]; drawMaps(r); } }, 'Down')));
+  });
+}
+function readMaps() { return [...$('e-maps').children].map(d => ({ key: d.dataset.key, on: d.querySelector('input').checked })); }
+async function saveEdit(restart) {
+  const maps = readMaps().filter(r => r.on).map(r => r.key);
+  if (!maps.length) return toast('Pick at least one map.', true);
+  const name = $('e-name').value.trim();
+  if (!name) return toast('Give the server a name.', true);
+  const port = Number($('e-port').value);
+  const servers = state.config.servers.map(x => Object.assign({}, x));
+  if (servers.some((x, i) => i !== editing - 1 && x.port === port)) return toast('Another server has port ' + port + '.', true);
+  servers[editing - 1] = { name: name, description: $('e-description').value.trim(), maps: maps, round_end_delay: Number($('e-delay').value), listed: $('e-listed').checked,
+    night: $('e-night').checked, port: port, max_players: Number($('e-max').value), autostart: $('e-autostart').checked };
+  const n = editing;
+  if (!await saveConfig({ servers: servers }, 'Saved')) return;
+  $('edit-modal').classList.remove('on');
+  if (restart && state.servers[n - 1] && state.servers[n - 1].wanted) act('/api/restart', { n: n }, 'Restarting ' + name);
+}
+$('e-save').onclick = () => saveEdit(false);
+$('e-save-restart').onclick = () => saveEdit(true);
+$('e-cancel').onclick = () => $('edit-modal').classList.remove('on');
+$('e-remove').onclick = async () => {
+  if (!confirm('Remove ' + state.config.servers[editing - 1].name + '? Its settings are gone; its logs stay on disk.')) return;
+  const servers = state.config.servers.filter((x, i) => i !== editing - 1);
+  if (await saveConfig({ servers: servers }, 'Server removed')) $('edit-modal').classList.remove('on');
+};
+$('add-server').onclick = () => openEdit(state.config.servers.length + 1);
+$('start-all').onclick = () => act('/api/start', { n: 0 }, 'Starting your servers');
+$('stop-all').onclick = () => { if (confirm('Stop every server? Players on them are disconnected.')) act('/api/stop', { n: 0 }, 'Servers stopped'); };
+
+// ---- network
+document.querySelectorAll('input[name=lan]').forEach(r => r.addEventListener('change', renderNetwork));
+$('save-network').onclick = async () => {
+  const lan = document.querySelector('input[name=lan][value="1"]').checked;
+  const r = await saveConfig({ lan_only: lan, region: $('region').value, public_address: $('public-address').value.trim(), upnp: $('upnp').checked }, 'Saved');
+  if (r) $('network-note').textContent = state.servers.some(x => x.wanted) ? 'Restart your servers for this to take hold.' : '';
+};
+$('firewall').onclick = () => act('/api/firewall', {}, 'Windows asks for permission on this machine\'s screen');
+
+// ---- messages
+['msg-kind', 'msg-time', 'msg-text'].forEach(id => $(id).addEventListener('input', previewMessage));
+$('msg-kind').addEventListener('change', () => { $('msg-time').value = $('msg-kind').value === 'custom' ? 0 : 300; previewMessage(); });
+$('msg-send').onclick = async () => {
+  const kind = $('msg-kind').value, target = Number($('msg-target').value);
+  const r = await act('/api/broadcast', { kind: kind, seconds: Number($('msg-time').value), text: $('msg-text').value, servers: target ? [target] : [], restart: kind !== 'custom' && $('msg-restart').checked });
+  if (r) toast(r.countdown ? 'Sent. The countdown runs.' : 'Sent.');
+};
+
+// ---- updates
+$('up-check').onclick = () => act('/api/update/check', {}, 'Looked');
+$('up-apply').onclick = () => { if (confirm('Install version ' + state.update.latest + '? Players are told first, then your servers restart on it.')) act('/api/update/apply', {}, 'The update is on its way'); };
+$('save-updates').onclick = () => saveConfig({ auto_update: $('auto-update').checked, update_warning_minutes: Number($('warn-minutes').value) }, 'Saved');
+
+// ---- game files
+$('game-install').onclick = () => { const path = $('game-path').value.trim(); if (!path) return toast('Pick your package or folder first.', true); act('/api/install', { path: path }, 'Installing'); };
+$('game-browse').onclick = () => browse($('game-path').value.trim().replace(/[\\/][^\\/]*$/, ''));
+let browsePath = '';
+async function browse(path) {
+  let r;
+  try { r = await api('/api/browse?path=' + encodeURIComponent(path || '')); } catch (e) { return toast(e.message, true); }
+  browsePath = r.path;
+  $('b-path').textContent = r.path || 'This machine\'s drives';
+  const list = $('b-list'); list.replaceChildren();
+  if (r.parent !== null && r.parent !== undefined) list.append(h('div', { onclick: () => browse(r.parent) }, h('span', { text: '.. (up)' })));
+  if (r.error) list.append(h('div', {}, h('span', { text: r.error })));
+  r.entries.forEach(e => list.append(h('div', { onclick: () => { if (e.dir) browse(e.path); else { $('game-path').value = e.path; $('browse-modal').classList.remove('on'); } } },
+    h('span', { text: (e.dir ? '▸ ' : '') + e.name }), h('small', { text: e.dir ? 'folder' : (e.size / 1048576).toFixed(1) + ' MB' }))));
+  $('browse-modal').classList.add('on');
+}
+$('b-use').onclick = () => { if (browsePath) { $('game-path').value = browsePath; $('browse-modal').classList.remove('on'); } };
+$('b-cancel').onclick = () => $('browse-modal').classList.remove('on');
+
+// ---- logs
+async function loadLog() {
+  const [which, n] = ($('log-which').value || 'manager:0').split(':');
+  try {
+    const r = await api('/api/log?which=' + which + '&n=' + (n || 1));
+    const pre = $('log-text'), bottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+    pre.textContent = r.text || 'Nothing written yet.'; $('log-file').textContent = r.file;
+    if (bottom) pre.scrollTop = pre.scrollHeight;
+  } catch (e) {}
+}
+$('log-refresh').onclick = loadLog; $('log-which').onchange = loadLog;
+
+// ---- settings
+$('save-settings').onclick = async () => {
+  if (!await saveConfig({ start_servers: $('start-servers').checked, web_remote: $('web-remote').checked }, 'Saved')) return;
+  if (state.platform === 'windows' && $('autostart').checked !== !!state.autostart) act('/api/autostart', { on: $('autostart').checked });
+};
+$('pw-save').onclick = async () => {
+  const r = await act('/api/password', { current: $('pw-current').value, password: $('pw-new').value }, $('pw-new').value ? 'Password set' : 'Password removed');
+  if (r) { $('pw-current').value = ''; $('pw-new').value = ''; filled = false; render(); }
+};
+$('quit').onclick = async () => {
+  if (!confirm('Shut down the manager and stop every server?')) return;
+  if (await act('/api/quit', {})) { clearInterval(tick.timer); document.body.replaceChildren(h('div', { style: 'padding:60px 30px;font:600 24px var(--head);letter-spacing:.06em' }, 'THE MANAGER HAS SHUT DOWN. START IT AGAIN TO OPEN THIS PAGE.')); }
+};
+
+// ---- signing in (only when a password is set)
+$('login-go').onclick = async () => {
+  try { await api('/api/login', { password: $('login-password').value }); $('login-modal').classList.remove('on'); $('login-password').value = ''; tick(); }
+  catch (e) { $('login-note').textContent = e.message; }
+};
+$('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') $('login-go').click(); });
+document.querySelectorAll('.modal').forEach(m => m.addEventListener('mousedown', e => { if (e.target === m && m.id !== 'login-modal') m.classList.remove('on'); }));
+document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.modal.on').forEach(m => { if (m.id !== 'login-modal') m.classList.remove('on'); }); });
+
+async function tick() {
+  try { state = await api('/api/state'); render(); } catch (e) { $('mode').textContent = 'No answer'; $('mode').className = 'pill red'; }
+  if ($('logs').classList.contains('on') && $('log-auto').checked) loadLog();
+}
+tick(); tick.timer = setInterval(tick, 2000);
+</script>
+</body>
+</html>

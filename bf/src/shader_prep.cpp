@@ -52,7 +52,11 @@
 #include <xxhash.h>
 
 #include "../third_party/miniz/miniz.h"
+#include "capture_points.h"
+#include "dbx_tree.h"
 #include "night_ops.h"
+
+#include <map>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -492,6 +496,23 @@ bool ReadFbrbEntry(const fs::path& archive, const std::string& name, std::vector
   return true;
 }
 
+// Several entries at one read of the archive (the fonts: build_overlay is 32 MB to inflate). False when one is
+// missing; `out` then holds nothing.
+bool ReadFbrbEntries(const fs::path& archive, const std::vector<std::string>& names, std::vector<std::vector<uint8_t>>& out) {
+  out.clear();
+  Archive a;
+  if (!LoadArchive(archive, a)) return false;
+  for (const std::string& name : names) {
+    auto it = a.entries.find(name);
+    if (it == a.entries.end() || size_t(it->second.first) + it->second.second > a.data.size()) {
+      out.clear();
+      return false;
+    }
+    out.emplace_back(a.data.begin() + it->second.first, a.data.begin() + it->second.first + it->second.second);
+  }
+  return true;
+}
+
 // ---- pictures from the player's game files for our menus (SERVERS-PLAN.md section 2): never shipped, made once
 // into the user's cache after the game is installed. The server browser's map pictures are each level's own loading
 // screen picture (levels\<map>\ui\multiplayer-00.fbrb, Levels/<Map>/UI/Load_Image_<Name>.res), 512 pixels wide.
@@ -532,6 +553,16 @@ bool DecodeXenonTexture(const std::vector<uint8_t>& res, std::vector<uint8_t>& r
         if (o + 4 > size) continue;
         uint8_t* p = &rgba[(size_t(y) * w + x) * 4];
         p[0] = data[o + 1], p[1] = data[o + 2], p[2] = data[o + 3], p[3] = data[o];
+      }
+    return true;
+  }
+  if (fmt == 10) {  // one byte a texel (the fonts' glyph coverage): white, the byte its alpha
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x) {
+        const size_t o = size_t(TiledOffset(uint32_t(x), uint32_t(y), uint32_t(w), 1));
+        if (o >= size) continue;
+        uint8_t* p = &rgba[(size_t(y) * w + x) * 4];
+        p[0] = p[1] = p[2] = 255, p[3] = data[o];
       }
     return true;
   }
@@ -799,13 +830,14 @@ void BlurPlane(std::vector<float>& p, int w, int h, int r) {
 // DICE, Frostbite, Dolby, 1024 x 512): each pixel the brightest of the four, the specks left where their logos overlap
 // filled from the paper around them, then warmed as his card's paper is (green 99.3%, blue 96.6%). The card is the
 // logo's size (2:1, as the other cards). Never shipped: made in the user's cache with the cards.
-bool MakeTrgCard(const std::vector<std::vector<uint8_t>>& cards, int w, int h, const fs::path& logo_file,
-                 const fs::path& out) {
+// The card paper from the four logo cards (RGB): the brightest of the four at each pixel (the logos never overlap),
+// the specks where they do filled from around them (`filled` says how many).
+bool PaperFromCards(const std::vector<std::vector<uint8_t>>& cards, int w, int h, std::vector<float>& paper, int& filled) {
   const size_t n = size_t(w) * h;
   if (cards.size() != 4 || w <= 0 || h <= 0) return false;
   for (const auto& c : cards)
     if (c.size() != n * 3) return false;
-  std::vector<float> paper(n * 3);
+  paper.assign(n * 3, 0.0f);
   for (size_t i = 0; i < n * 3; ++i) {
     uint8_t m = 0;
     for (const auto& c : cards) m = std::max(m, c[i]);
@@ -826,7 +858,7 @@ bool MakeTrgCard(const std::vector<std::vector<uint8_t>>& cards, int w, int h, c
   }
   std::vector<float> weight = keep;
   BlurPlane(weight, w, h, 6);
-  int filled = 0;
+  filled = 0;
   for (int c = 0; c < 3; ++c) {
     std::vector<float> plane(n);
     for (size_t i = 0; i < n; ++i) plane[i] = paper[i * 3 + c] * keep[i];
@@ -837,6 +869,14 @@ bool MakeTrgCard(const std::vector<std::vector<uint8_t>>& cards, int w, int h, c
       if (c == 0) ++filled;
     }
   }
+  return true;
+}
+
+bool MakeTrgCard(const std::vector<std::vector<uint8_t>>& cards, int w, int h, const fs::path& logo_file,
+                 const fs::path& out) {
+  std::vector<float> paper;
+  int filled = 0;
+  if (!PaperFromCards(cards, w, h, paper, filled)) return false;
   std::ifstream f(logo_file, std::ios::binary);
   const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
   int lw = 0, lh = 0;
@@ -932,6 +972,268 @@ bool MakeIntroMusic(const fs::path& in, const fs::path& out) {
 }
 }  // namespace
 
+// ---- the menus' own art (TekRantGaming, 12 Nov 2026: "extract anything from the game files and use it within these
+// menus ... Assets, texts, fonts, textures, anything"): the pieces the launcher's new look draws, cut from the
+// atlases BF's menus draw from (menu\main\mainmenu-00.fbrb and menu\hud\hud_multiplayer_cq-00.fbrb), once into
+// user\cache\extracted\menu\, never shipped. The sprites' numbers are the atlases' own (atlas_meta.dbx; the pictures
+// were picked in runs\ui-designs, 12 Nov). The fonts go through bf_font.cpp (BfFontPrepare).
+void BfFontPrepare(const fs::path& game_dir, const fs::path& user_dir);  // bf_font.cpp
+
+namespace {
+
+constexpr int kMenuArtVersion = 2;  // 2: the Xbox bumpers and triggers (12 Nov 2026)
+constexpr const char* kMapIconsFile = "icons-1.png";  // the pause menu map's icons; its number follows the letters' look
+
+struct Picture {
+  std::vector<uint8_t> rgba;
+  int w = 0, h = 0;
+};
+
+bool MenuArtReady(const fs::path& out_dir) {
+  std::ifstream f(out_dir / "menu" / "ready.txt");
+  int v = 0;
+  return bool(f) && bool(f >> v) && v >= kMenuArtVersion;
+}
+
+// An archive entry by its name, case aside (the archives mix cases: Menu/... and menu/...).
+const uint8_t* FindEntry(const Archive& a, std::string name, size_t& size) {
+  for (char& c : name) c = char(std::tolower(static_cast<unsigned char>(c)));
+  for (const auto& [n, where] : a.entries) {
+    if (n.size() != name.size()) continue;
+    bool same = true;
+    for (size_t i = 0; i < n.size() && same; ++i) same = char(std::tolower(static_cast<unsigned char>(n[i]))) == name[i];
+    if (!same) continue;
+    if (size_t(where.first) + where.second > a.data.size()) return nullptr;
+    size = where.second;
+    return a.data.data() + where.first;
+  }
+  return nullptr;
+}
+
+bool DecodeEntry(const Archive& a, const std::string& name, Picture& out) {
+  size_t size = 0;
+  const uint8_t* p = FindEntry(a, name, size);
+  if (!p) return false;
+  const std::vector<uint8_t> res(p, p + size);
+  return DecodeXenonTexture(res, out.rgba, out.w, out.h) && out.w > 0 && out.h > 0;
+}
+
+// The sprites of an atlas by their numbers: each one's place in it (the UV rects of its atlas_meta.dbx).
+struct SpriteRect {
+  float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+};
+std::map<std::string, SpriteRect> AtlasRects(const Archive& a, const std::string& meta_name) {
+  std::map<std::string, SpriteRect> out;
+  size_t size = 0;
+  const uint8_t* p = FindEntry(a, meta_name, size);
+  if (!p) return out;
+  std::vector<dbx::Node> roots;
+  if (!dbx::Parse(std::vector<uint8_t>(p, p + size), roots)) return out;
+  for (const dbx::Node* inst : dbx::Instances(roots, "UI.UITextureAtlasInfo")) {
+    const dbx::Node* file = inst->Field("TextureFile");
+    const dbx::Node *u0 = inst->Field("MinU"), *u1 = inst->Field("MaxU"), *v0 = inst->Field("MinV"), *v1 = inst->Field("MaxV");
+    SpriteRect r;
+    if (!file || !u0 || !u1 || !v0 || !v1 || !u0->Float(r.u0) || !u1->Float(r.u1) || !v0->Float(r.v0) || !v1->Float(r.v1))
+      continue;
+    out[file->text] = r;
+  }
+  return out;
+}
+
+// A sprite cut from its atlas, trimmed to where it has any alpha (drawn to its own shape).
+bool CutSprite(const Picture& atlas, const SpriteRect& r, Picture& out, bool trim) {
+  int x0 = std::clamp(int(std::lround(r.u0 * atlas.w)), 0, atlas.w), x1 = std::clamp(int(std::lround(r.u1 * atlas.w)), 0, atlas.w);
+  int y0 = std::clamp(int(std::lround(r.v0 * atlas.h)), 0, atlas.h), y1 = std::clamp(int(std::lround(r.v1 * atlas.h)), 0, atlas.h);
+  if (x1 <= x0 || y1 <= y0) return false;
+  if (trim) {
+    int tx0 = x1, ty0 = y1, tx1 = x0, ty1 = y0;
+    for (int y = y0; y < y1; ++y)
+      for (int x = x0; x < x1; ++x)
+        if (atlas.rgba[(size_t(y) * atlas.w + x) * 4 + 3] > 8)
+          tx0 = std::min(tx0, x), tx1 = std::max(tx1, x + 1), ty0 = std::min(ty0, y), ty1 = std::max(ty1, y + 1);
+    if (tx1 <= tx0 || ty1 <= ty0) return false;
+    x0 = tx0, x1 = tx1, y0 = ty0, y1 = ty1;
+  }
+  out.w = x1 - x0, out.h = y1 - y0;
+  out.rgba.resize(size_t(out.w) * out.h * 4);
+  for (int y = 0; y < out.h; ++y)
+    std::memcpy(&out.rgba[size_t(y) * out.w * 4], &atlas.rgba[(size_t(y0 + y) * atlas.w + x0) * 4], size_t(out.w) * 4);
+  return true;
+}
+
+bool WritePicture(const Picture& p, const fs::path& path, bool rgb) {
+  std::vector<uint8_t> data;
+  const uint8_t* src = p.rgba.data();
+  int channels = 4;
+  if (rgb) {
+    data.resize(size_t(p.w) * p.h * 3);
+    for (size_t i = 0; i < size_t(p.w) * p.h; ++i)
+      data[i * 3] = p.rgba[i * 4], data[i * 3 + 1] = p.rgba[i * 4 + 1], data[i * 3 + 2] = p.rgba[i * 4 + 2];
+    src = data.data(), channels = 3;
+  }
+  size_t length = 0;
+  void* png = tdefl_write_image_to_png_file_in_memory_ex(src, p.w, p.h, channels, &length, 6, MZ_FALSE);
+  if (!png) return false;
+  const std::vector<uint8_t> bytes(static_cast<uint8_t*>(png), static_cast<uint8_t*>(png) + length);
+  mz_free(png);
+  return WriteFileAtomic(path, bytes);
+}
+
+struct Cut {
+  const char* atlas;   // the atlas texture entry
+  const char* meta;    // its sprite table
+  const char* sprite;  // the sprite's number in it
+  const char* out;     // our name for it
+};
+
+int CutAll(const Archive& a, const fs::path& dir, const std::vector<Cut>& cuts) {
+  int made = 0;
+  std::string loaded;
+  Picture atlas;
+  std::map<std::string, SpriteRect> rects;
+  for (const Cut& c : cuts) {
+    if (loaded != c.atlas) {
+      loaded = c.atlas;
+      atlas = Picture{};
+      rects.clear();
+      if (!DecodeEntry(a, c.atlas, atlas)) {
+        REXLOG_WARN("BF menu art: {} could not be decoded", c.atlas);
+        continue;
+      }
+      rects = AtlasRects(a, c.meta);
+    }
+    if (atlas.w == 0) continue;
+    const std::string out = c.out;
+    const bool whole = out == "backdrop";
+    auto it = rects.find(c.sprite);
+    Picture sprite;
+    if (it == rects.end() || !CutSprite(atlas, it->second, sprite, !whole)) {
+      REXLOG_WARN("BF menu art: sprite {} ({}) is not in {}", c.sprite, out, c.meta);
+      continue;
+    }
+    if (WritePicture(sprite, dir / (out + ".png"), whole)) ++made;
+  }
+  return made;
+}
+
+// A whole texture entry as one picture.
+bool CutWhole(const Archive& a, const fs::path& dir, const std::string& entry, const std::string& out, bool trim) {
+  Picture p;
+  if (!DecodeEntry(a, entry, p)) {
+    REXLOG_WARN("BF menu art: {} ({}) could not be decoded", entry, out);
+    return false;
+  }
+  if (trim) {
+    Picture t;
+    const SpriteRect all{0, 0, 1, 1};
+    if (CutSprite(p, all, t, true)) p = std::move(t);
+  }
+  return WritePicture(p, dir / (out + ".png"), false);
+}
+
+// The card paper (the panels' paper), from the four logo cards already in the cache (startup/card1 to card4).
+bool MakePaper(const fs::path& out_dir) {
+  std::vector<std::vector<uint8_t>> cards;
+  int w = 0, h = 0;
+  for (int i = 1; i <= 4; ++i) {
+    std::ifstream f(out_dir / "startup" / ("card" + std::to_string(i) + ".png"), std::ios::binary);
+    const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    int cw = 0, ch = 0;
+    const std::vector<uint8_t> rgba = bytes.empty() ? std::vector<uint8_t>{} : rex::ui::DecodeImageRGBA(bytes.data(), bytes.size(), cw, ch);
+    if (rgba.empty() || cw <= 0 || ch <= 0 || (w && (cw != w || ch != h))) return false;
+    w = cw, h = ch;
+    std::vector<uint8_t> rgb(size_t(w) * h * 3);
+    for (size_t p = 0; p < size_t(w) * h; ++p) rgb[p * 3] = rgba[p * 4], rgb[p * 3 + 1] = rgba[p * 4 + 1], rgb[p * 3 + 2] = rgba[p * 4 + 2];
+    cards.push_back(std::move(rgb));
+  }
+  std::vector<float> paper;
+  int filled = 0;
+  if (!PaperFromCards(cards, w, h, paper, filled)) return false;
+  static constexpr float kWarm[3] = {1.0f, 0.993f, 0.966f};  // as the TRG card's paper
+  Picture p;
+  p.w = w, p.h = h;
+  p.rgba.resize(size_t(w) * h * 4, 255);
+  for (size_t i = 0; i < size_t(w) * h; ++i)
+    for (int c = 0; c < 3; ++c) p.rgba[i * 4 + c] = uint8_t(std::clamp(paper[i * 3 + c] * kWarm[c] + 0.5f, 0.0f, 255.0f));
+  return WritePicture(p, out_dir / "menu" / "paper.png", true);
+}
+
+void ExtractMenuArt(const fs::path& game, const fs::path& out_dir) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const fs::path dir = out_dir / "menu";
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  int made = 0;
+  const fs::path xenon = game / "dist" / "xenon";
+  {
+    Archive a;
+    if (!LoadArchive(xenon / "menu" / "main" / "mainmenu-00.fbrb", a)) {
+      REXLOG_WARN("BF menu art: the main menu archive could not be read");
+    } else {
+      static const char* kShared = "menu/menu_shared_images_textures_xenon/atlas0.res";
+      static const char* kSharedMeta = "menu/menu_shared_images_textures_xenon/atlas_meta.dbx";
+      static const char* kComp = "menu/igm_comp_images_textures_xenon/atlas0.res";
+      static const char* kCompMeta = "menu/igm_comp_images_textures_xenon/atlas_meta.dbx";
+      static const char* kPopups = "menu/main_popups_textures_xenon/atlas0.res";
+      static const char* kPopupsMeta = "menu/main_popups_textures_xenon/atlas_meta.dbx";
+      static const char* kCommon = "menu/menu_common_textures_xenon/atlas0.res";
+      static const char* kCommonMeta = "menu/menu_common_textures_xenon/atlas_meta.dbx";
+      made += CutAll(a, dir, {{kShared, kSharedMeta, "12", "logo"},        {kShared, kSharedMeta, "9", "backdrop"},
+                              {kShared, kSharedMeta, "1", "corsair"},      {kShared, kSharedMeta, "5", "zero"},
+                              {kComp, kCompMeta, "28", "brush_bar"},       {kComp, kCompMeta, "31", "brush_a"},
+                              {kComp, kCompMeta, "34", "brush_b"},         {kComp, kCompMeta, "37", "brush_c"},
+                              {kComp, kCompMeta, "63", "brush_line"},      {kComp, kCompMeta, "25", "brush_block_a"},
+                              {kComp, kCompMeta, "45", "brush_block_b"},   {kComp, kCompMeta, "60", "brush_small"},
+                              {kComp, kCompMeta, "10", "portrait_us_rifleman"}, {kComp, kCompMeta, "14", "portrait_us_scout"},
+                              {kComp, kCompMeta, "2", "portrait_us_infantry"},  {kComp, kCompMeta, "18", "portrait_ijn_a"},
+                              {kComp, kCompMeta, "22", "portrait_ijn_b"},  {kComp, kCompMeta, "6", "portrait_ijn_c"},
+                              {kComp, kCompMeta, "48", "pad_xbox"},        {kComp, kCompMeta, "40", "pad_ps3"},
+                              {kPopups, kPopupsMeta, "20", "glyph_a"},     {kPopups, kPopupsMeta, "30", "glyph_b"},
+                              {kPopups, kPopupsMeta, "16", "glyph_x"},     {kPopups, kPopupsMeta, "26", "glyph_y"},
+                              {kPopups, kPopupsMeta, "35", "glyph_refresh"},
+                              // (55, 61, 48 and 47 beside them are the PlayStation set: L1, R1, L2, R2)
+                              {kCommon, kCommonMeta, "57", "glyph_lb"},    {kCommon, kCommonMeta, "63", "glyph_rb"},
+                              {kCommon, kCommonMeta, "51", "glyph_lt"},    {kCommon, kCommonMeta, "50", "glyph_rt"}});
+      for (int i = 1; i <= 25; ++i) {
+        char entry[64], out[16];
+        std::snprintf(entry, sizeof(entry), "awards/images/ranks/r%03d.res", i);
+        std::snprintf(out, sizeof(out), "rank_%02d", i);
+        if (CutWhole(a, dir, entry, out, true)) ++made;
+      }
+      if (CutWhole(a, dir, "menu/images/mainnav/mp_anypic.res", "polaroid", false)) ++made;
+    }
+  }
+  {
+    Archive a;
+    if (!LoadArchive(xenon / "menu" / "hud" / "hud_multiplayer_cq-00.fbrb", a)) {
+      REXLOG_WARN("BF menu art: the HUD archive could not be read");
+    } else {
+      static const char* kCq = "menu/igm_mp_cq_textures_xenon/atlas0.res";
+      static const char* kCqMeta = "menu/igm_mp_cq_textures_xenon/atlas_meta.dbx";
+      made += CutAll(a, dir, {{kCq, kCqMeta, "223", "flag_us"},        {kCq, kCqMeta, "225", "flag_jp"},
+                              {kCq, kCqMeta, "273", "class_rifleman"}, {kCq, kCqMeta, "278", "class_infantry"},
+                              {kCq, kCqMeta, "283", "class_scout"},    {kCq, kCqMeta, "311", "icon_tank"},
+                              {kCq, kCqMeta, "313", "icon_plane"},     {kCq, kCqMeta, "319", "icon_jeep"},
+                              {kCq, kCqMeta, "315", "icon_boat"},      {kCq, kCqMeta, "339", "icon_tank_w"},
+                              {kCq, kCqMeta, "329", "icon_plane_w"},   {kCq, kCqMeta, "337", "icon_jeep_w"},
+                              {kCq, kCqMeta, "333", "icon_boat_w"}});
+      if (CutWhole(a, dir, "textures/ui/minimap/minimapcompass.res", "compass", true)) ++made;
+    }
+  }
+  if (MakePaper(out_dir)) ++made;
+  else REXLOG_WARN("BF menu art: the card paper was not made (the startup cards are not in the cache yet)");
+  {
+    std::ofstream f(dir / "ready.txt", std::ios::trunc);
+    f << kMenuArtVersion << "\n";
+  }
+  REXLOG_INFO("BF menu art: {} pictures from the game's menus in {} ms", made,
+              std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+}
+
+}  // namespace
+
+const char* MapIconsFileName() { return kMapIconsFile; }
+
 void ExtractGameArt(const fs::path& game, const fs::path& out_dir) {
   static const std::pair<const char*, const char*> kMaps[] = {
       {"wake", "wake_island_s"}, {"iwo", "iwo_jima_s"}, {"guadalcanal", "guadal_canal"}, {"coral", "coral_sea"}};
@@ -949,8 +1251,19 @@ void ExtractGameArt(const fs::path& game, const fs::path& out_dir) {
   const bool startup = !fs::exists(out_dir / "startup" / "logos.wav") || !fs::exists(out_dir / "startup" / "card5.png") ||
                        !fs::exists(out_dir / "startup" / "intro.wav") ||
                        (fs::exists(trg_logo) && !fs::exists(out_dir / "startup" / "trg.png"));
-  if (todo.empty() && !music && !plants && !startup) return;
-  std::thread([game, out_dir, todo, music, plants, startup, trg_logo] {
+  // The menus' own art and fonts (ExtractMenuArt, bf_font.cpp BfFontPrepare), after the cards (the paper needs them).
+  const bool menu = !MenuArtReady(out_dir);
+  const bool fonts = !fs::exists(out_dir.parent_path() / "bf_font_headline_large.bin");
+  // The pause menu's map (TekRantGaming, 13 Nov 2026: "the current pause menu doesn't have a map which makes bombers
+  // hard to use"): each level's own map picture (the one its minimap and deploy screen draw, 1024 x 1024 over 2048 m)
+  // and the game's map icons with the capture point flags' letters drawn in (capture_points.cpp), in
+  // cache\extracted\minimap.
+  std::vector<std::string> minimaps;
+  for (const auto& [key, folder] : kMaps)
+    if (!fs::exists(out_dir / "minimap" / (std::string(folder) + ".png"))) minimaps.push_back(folder);
+  const bool map_icons = !fs::exists(out_dir / "minimap" / kMapIconsFile);
+  if (todo.empty() && !music && !plants && !startup && !menu && !fonts && minimaps.empty() && !map_icons) return;
+  std::thread([game, out_dir, todo, music, plants, startup, trg_logo, menu, fonts, minimaps, map_icons] {
     if (plants) {
       std::error_code made;
       fs::create_directories(out_dir, made);
@@ -993,6 +1306,41 @@ void ExtractGameArt(const fs::path& game, const fs::path& out_dir) {
         break;
       }
       if (!done) REXLOG_WARN("BF game art: no map picture made for {}", key);
+    }
+    if (!minimaps.empty() || map_icons) fs::create_directories(out_dir / "minimap", ec);
+    for (const std::string& folder : minimaps) {
+      const auto t0 = std::chrono::steady_clock::now();
+      Archive a;
+      if (!LoadArchive(game / "dist" / "xenon" / "levels" / folder / "reduced-level-00.fbrb", a)) {
+        REXLOG_WARN("BF game art: the {} level archive could not be read: no map in the pause menu there", folder);
+        continue;
+      }
+      bool done = false;
+      for (const auto& [name, where] : a.entries) {
+        std::string lower = name;
+        for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+        if (lower.find("/ui/minimap/") == std::string::npos || lower.size() < 4 || lower.substr(lower.size() - 4) != ".res")
+          continue;
+        if (size_t(where.first) + where.second > a.data.size()) continue;
+        const std::vector<uint8_t> res(a.data.begin() + where.first, a.data.begin() + where.first + where.second);
+        Picture p;
+        if (!DecodeXenonTexture(res, p.rgba, p.w, p.h) || p.w != p.h || p.w < 256) continue;
+        done = WritePicture(p, out_dir / "minimap" / (folder + ".png"), true);
+        REXLOG_INFO("BF game art: {} minimap picture from {} ({}x{}) in {} ms", folder, name, p.w, p.h,
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+        break;
+      }
+      if (!done) REXLOG_WARN("BF game art: no minimap picture made for {}", folder);
+    }
+    if (map_icons) {
+      Archive a;
+      Picture p;
+      if (LoadArchive(game / "dist" / "xenon" / "menu" / "hud" / "hud_multiplayer_cq-00.fbrb", a) &&
+          DecodeEntry(a, "menu/minimap/icons0.res", p) && DrawFlagLetters(p.rgba, uint32_t(p.w), uint32_t(p.h)) > 0 &&
+          WritePicture(p, out_dir / "minimap" / kMapIconsFile, false))
+        REXLOG_INFO("BF game art: the map's icons ({}x{}, the flags lettered)", p.w, p.h);
+      else
+        REXLOG_WARN("BF game art: the map's icons were not made: the pause menu's map draws its own marks only");
     }
     if (startup) {
       const auto t0 = std::chrono::steady_clock::now();
@@ -1070,6 +1418,8 @@ void ExtractGameArt(const fs::path& game, const fs::path& out_dir) {
         REXLOG_INFO("BF game art: the menu music in {} ms",
                     std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
     }
+    if (menu) ExtractMenuArt(game, out_dir);
+    if (fonts) BfFontPrepare(game, out_dir.parent_path().parent_path());  // user\cache\extracted -> user
   }).detach();
 }
 
@@ -1335,6 +1685,12 @@ void NoteGameFile(const char* path) {
   }).detach();
 }
 }  // namespace
+
+// The folder of the level the game has loaded (wake_island_s...), empty before the first.
+std::string LoadedLevelFolder() {
+  std::lock_guard lock(g_level_mutex);
+  return g_level_folder;
+}
 
 // The HD texture pack's source (developer: BF_DEV_HD_EXPORT=<folder>, TekRantGaming, 9 Nov: an HD pack made here, imported
 // in the launcher): every world texture in the game's archives (DXT1, DXT3 or DXT5, its first level at least 64 KB;
