@@ -1627,19 +1627,15 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       }
     }
   }
-  // The HUD's scale (draw.h SetHudScale): about the screen's point the draw's part of the HUD hangs on. A world
-  // marker about its own centre (it stays on what it marks). Not a menu's frames, nor what is stretched or reaches
-  // to an edge.
-  if (hud_placed && hud_scaling && !hud_menu_ && (place.mode == HudMode::kBox || place.mode == HudMode::kPoint)) {
+  // The HUD's scale (draw.h SetHudScale): about the screen's point the draw's part of the HUD hangs on. Not a world
+  // marker (13 Nov 2026: "do not change 3D Flag icons scaling": the flags' icons over the map keep the game's size),
+  // not a menu's frames, nor what is stretched or reaches to an edge.
+  if (hud_placed && hud_scaling && !hud_menu_ && place.mode == HudMode::kBox) {
     const float gw = float(sized->guest_width), gh = float(sized->guest_height);
     const bool minimap = place.mode == HudMode::kBox && place.align == 0.0f && place.anchor_y == 1.0f;
     const float k = minimap ? minimap_scale_ : hud_scale_;
     if (k != 1.0f && k > 0.1f) {
-      float ax = place.align * gw, ay = place.anchor_y * gh;
-      if (place.mode == HudMode::kPoint) {
-        ax = float(place.point_x >= 0 ? place.point_x / 1280.0 * gw : ((place.lo + place.hi) * 0.5 + 1.0) * 0.5 * gw);
-        ay = float((1.0 - (place.y_lo + place.y_hi) * 0.5) * 0.5 * gh);
-      }
+      const float ax = place.align * gw, ay = place.anchor_y * gh;
       offset_x += ax * scale_x * (1.0f - k);
       offset_y += ay * scale_y * (1.0f - k);
       scale_x *= k, scale_y *= k;
