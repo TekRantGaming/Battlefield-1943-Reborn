@@ -257,8 +257,12 @@ void StorageProgress(uint32_t* queued, uint32_t* done, uint32_t* loading, uint32
 // it is): after RepatchTextures, each texture it took is offered again with `again` true, its guest data unchanged
 // since it was last offered (a texture whose data changed is offered at its load, `again` false), before the next draw
 // that follows.
+// 13 Nov 2026 (HD packs): when the HD pack has an uncompressed picture for a texture `fn` filled, `fn` is called once
+// more with `scale` above 1 and `hd_base`, the pack's picture (R, G, B, A rows, width * scale by height * scale), and
+// fills `rgba` at that size (in the byte order it uses at scale 1): the HD picture with the game's own pictures drawn
+// at its size, which is then what draws sample. `scale` is 1 and `hd_base` null in every other call.
 using TexturePatchFn = bool (*)(uint32_t width, uint32_t height, const uint8_t* guest_data, std::vector<uint8_t>& rgba,
-                                bool again);
+                                bool again, uint32_t scale, const uint8_t* hd_base);
 void SetTexturePatcher(TexturePatchFn fn);
 // D160: the textures the patcher took are offered to it again before the next draw, for pictures that follow the
 // game's state (Battlefield 1943's keyboard prompts: the keys of a vehicle's seat differ from a soldier's on foot).

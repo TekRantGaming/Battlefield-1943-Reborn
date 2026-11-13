@@ -272,7 +272,17 @@ const std::vector<uint8_t>& Untouched(const Atlas& atlas, const uint8_t* guest) 
 // (D160), so a later style or seat draws it again (`again`: offered again, its data unchanged since, so it is not
 // hashed again); in the Xbox 360 style a first load is left as it is and a texture offered again gets its own
 // pictures back.
-bool Patch(uint32_t width, uint32_t height, const uint8_t* guest, std::vector<uint8_t>& rgba, bool again) {
+// 13 Nov 2026 (HD packs): with `scale` above 1 the same pictures are drawn into the pack's picture of the atlas
+// (`hd_base`, R, G, B, A, `scale` times the size), each rectangle `scale` times as large, from the same prompt
+// pictures (they are larger than either size).
+bool Patch(uint32_t width, uint32_t height, const uint8_t* guest, std::vector<uint8_t>& rgba, bool again,
+           uint32_t scale, const uint8_t* hd_base) {
+  const bool hd = scale > 1 && hd_base;
+  const int s = hd ? int(scale) : 1;
+  auto start = [&](const Atlas& a) {  // the picture the prompts are drawn into
+    if (hd) rgba.assign(hd_base, hd_base + size_t(width) * s * height * s * 4);
+    else rgba = Untouched(a, guest);
+  };
   const Atlas* atlas = nullptr;
   int sized = 0;
   for (const Atlas& a : Atlases())
@@ -294,29 +304,31 @@ bool Patch(uint32_t width, uint32_t height, const uint8_t* guest, std::vector<ui
   }
   if (atlas->name == kFlagAtlas) {  // the icons: the capture point flags' letters, in every prompt style
     std::lock_guard lock(g_mutex);
-    rgba = Untouched(*atlas, guest);
-    const int drawn = DrawFlagLetters(rgba, width, height);
+    start(*atlas);
+    const int drawn = DrawFlagLetters(rgba, width * s, height * s, s);
     if (!drawn) return false;
-    FlagLettersReady();
+    if (!hd) FlagLettersReady();
     for (size_t i = 0; i < rgba.size(); i += 4) std::swap(rgba[i], rgba[i + 2]);  // as below
-    if (!again) REXLOG_INFO("BF flags: {} lettered flags drawn into the game's icon atlas", drawn);
+    if (!again && !hd) REXLOG_INFO("BF flags: {} lettered flags drawn into the game's icon atlas", drawn);
     return true;
   }
   const std::string set = StyleSet();
   const bool seated = g_seated.load(std::memory_order_relaxed);
   std::lock_guard lock(g_mutex);
-  if (set.empty() && !again) return true;
-  rgba = Untouched(*atlas, guest);
+  if (set.empty() && !again && !hd) return true;
+  start(*atlas);
   int drawn = 0;
   if (!set.empty())
     for (const Rect& r : atlas->rects) {
       Choice c;
       if (!Choose(set, r.button, seated, c)) continue;
-      if (const Picture* p = Load(c.set, c.name)) Draw(rgba, width, r, *p, c.turns), ++drawn;
+      const Rect at{r.button, r.x * s, r.y * s, r.w * s, r.h * s};
+      if (const Picture* p = Load(c.set, c.name)) Draw(rgba, width * s, at, *p, c.turns), ++drawn;
     }
   // The host texture holds each guest word byte swapped (B, G, R, A, as the loader writes it; run glyph1 showed the
   // flags red for blue with R, G, B, A).
   for (size_t i = 0; i < rgba.size(); i += 4) std::swap(rgba[i], rgba[i + 2]);
+  if (hd) return true;  // said once, at the game's own size
   if (set.empty()) {
     REXLOG_INFO("BF prompts: the game's {} atlas has its own pictures again", atlas->name);
   } else {

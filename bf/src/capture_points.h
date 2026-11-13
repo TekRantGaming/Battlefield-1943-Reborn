@@ -36,7 +36,7 @@ void CapturePointsTick(const uint8_t* base, bool level_loaded);
 // right hand side; how many it drew (0: this is not that atlas as we know it). hud_glyphs.cpp's patcher does it to
 // the atlas the game draws from, and then says so (FlagLettersReady: from then on the game's flags are answered with
 // their lettered copies); shader_prep.cpp does it to the copy the pause menu's map draws its icons from.
-int DrawFlagLetters(std::vector<uint8_t>& rgba, uint32_t width, uint32_t height);
+int DrawFlagLetters(std::vector<uint8_t>& rgba, uint32_t width, uint32_t height, int scale = 1);
 void FlagLettersReady();
 
 // The lettered copy of a flag in that atlas, in texels: `kind` 0 white (no owner), 1 blue (friendly), 2 red (enemy).

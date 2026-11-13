@@ -102,6 +102,7 @@ class GuestTextures final : public rex::graphics::TextureCache {
   // D142, D160: the game's patcher over a texture whose base level is loaded (`again`: offered again, its data the
   // same); the textures it took are kept in `patched_` for RepatchTextures.
   void Patch(HostTexture& texture, bool again);
+  void PatchHd(HostTexture& texture, bool again);  // the HD pack's picture of a patched texture, patched at its size
   std::unordered_set<HostTexture*> patched_;
   uint32_t repatched_ = 0;  // the RepatchTextures count last served
   // D149: the HD pack's texture for a game texture's current data, or null.

@@ -433,30 +433,47 @@ void FlagLettersReady() { g_atlas_ready.store(true, std::memory_order_relaxed); 
 // three flags, a column a colour and a row a letter, in its empty right hand side. A copy is the game's own flag with
 // the letter laid over it: dark on the white flag, white with a dark edge on the blue and the red one; only where
 // the flag is (its transparent surround stays clear).
-int DrawFlagLetters(std::vector<uint8_t>& rgba, uint32_t width, uint32_t height) {
-  if (width != kAtlasW || height != kAtlasH || rgba.size() < size_t(kAtlasW) * kAtlasH * 4) return 0;
-  // The room the copies need must be empty in this atlas (another build of the game might use it).
-  for (int y = 0; y < kAtlasH; ++y)
-    for (int x = 396; x < kAtlasW; ++x)
-      if (rgba[(size_t(y) * kAtlasW + x) * 4 + 3] != 0) {
+// 13 Nov 2026 (HD packs): `scale` times the size for an HD copy of the atlas (hud_glyphs.cpp), every place `scale`
+// times as far and the letters' masks read between their texels.
+int DrawFlagLetters(std::vector<uint8_t>& rgba, uint32_t width, uint32_t height, int scale) {
+  const int s = std::max(1, scale), aw = kAtlasW * s, ah = kAtlasH * s;
+  if (width != uint32_t(aw) || height != uint32_t(ah) || rgba.size() < size_t(aw) * ah * 4) return 0;
+  // The room the copies need must be empty in this atlas (another build of the game might use it). An upscaled copy
+  // may carry a trace of its neighbours' edges there.
+  const int clear = s > 1 ? 16 : 0;
+  for (int y = 0; y < ah; ++y)
+    for (int x = 396 * s; x < aw; ++x)
+      if (rgba[(size_t(y) * aw + x) * 4 + 3] > clear) {
         REXLOG_WARN("BF flags: the icon atlas is not empty where the lettered flags go ({}, {}): no letters", x, y);
         return 0;
       }
   static constexpr uint8_t kInk[3][3] = {{28, 28, 26}, {250, 248, 240}, {250, 248, 240}};
   static constexpr uint8_t kEdge[3][3] = {{0, 0, 0}, {8, 20, 44}, {52, 10, 6}};
+  auto mask = [&](int letter, int which, int x, int y) {  // the mask at an HD texel, between the mask's own
+    const float fx = (x + 0.5f) / s - 0.5f, fy = (y + 0.5f) / s - 0.5f;
+    const int x0 = int(std::floor(fx)), y0 = int(std::floor(fy));
+    const float ax = fx - x0, ay = fy - y0;
+    auto at = [&](int mx, int my) {
+      mx = std::clamp(mx, 0, kLetterW - 1), my = std::clamp(my, 0, kLetterH - 1);
+      return float(kLetterMask[letter][which][my * kLetterW + mx]);
+    };
+    const float top = at(x0, y0) * (1 - ax) + at(x0 + 1, y0) * ax;
+    const float bottom = at(x0, y0 + 1) * (1 - ax) + at(x0 + 1, y0 + 1) * ax;
+    return (top * (1 - ay) + bottom * ay) / 255.0f;
+  };
   int drawn = 0;
   for (int kind = 0; kind < 3; ++kind)
     for (int letter = 0; letter < kLetterCount; ++letter) {
       const Texel from = kBig[kind], to = Lettered(kind, letter);
-      for (int y = 0; y < kFlag; ++y)
-        std::memcpy(&rgba[(size_t(to.y + y) * kAtlasW + to.x) * 4], &rgba[(size_t(from.y + y) * kAtlasW + from.x) * 4],
-                    size_t(kFlag) * 4);
-      for (int y = 0; y < kLetterH; ++y)
-        for (int x = 0; x < kLetterW; ++x) {
-          uint8_t* px = &rgba[(size_t(to.y + kLetterY + y) * kAtlasW + to.x + kLetterX + x) * 4];
+      for (int y = 0; y < kFlag * s; ++y)
+        std::memcpy(&rgba[(size_t(to.y * s + y) * aw + to.x * s) * 4],
+                    &rgba[(size_t(from.y * s + y) * aw + from.x * s) * 4], size_t(kFlag) * s * 4);
+      for (int y = 0; y < kLetterH * s; ++y)
+        for (int x = 0; x < kLetterW * s; ++x) {
+          uint8_t* px = &rgba[(size_t((to.y + kLetterY) * s + y) * aw + (to.x + kLetterX) * s + x) * 4];
           if (px[3] == 0) continue;
-          const float edge = kind == 0 ? 0.0f : kLetterMask[letter][1][y * kLetterW + x] / 255.0f * 0.55f;
-          const float ink = kLetterMask[letter][0][y * kLetterW + x] / 255.0f;
+          const float edge = kind == 0 ? 0.0f : mask(letter, 1, x, y) * 0.55f;
+          const float ink = mask(letter, 0, x, y);
           for (int c = 0; c < 3; ++c) {
             float value = px[c] * (1.0f - edge) + kEdge[kind][c] * edge;
             value = value * (1.0f - ink) + kInk[kind][c] * ink;

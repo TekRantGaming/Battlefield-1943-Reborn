@@ -1815,12 +1815,12 @@ void HdExportUi(const fs::path& game) {
         std::string lower = name;
         for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
         if (lower.find("menu/") == std::string::npos && lower.find("awards/") == std::string::npos &&
-            lower.find("/ui/") == std::string::npos)
+            lower.find("/ui/") == std::string::npos && lower.find("hud") == std::string::npos)
           continue;
         bool skip = false;
-        for (const char* k : {"menu_common_textures", "igm_mp_cq_textures", "hud_root_cq_textures", "minimap", "font",
-                              "dummy"})
-          skip = skip || lower.find(k) != std::string::npos;
+        // (13 Nov, later: the atlases the prompts and flag letters are drawn into are in too; NativeXRenderer has the
+        // game draw them into the pack's picture at its size.)
+        for (const char* k : {"font", "dummy"}) skip = skip || lower.find(k) != std::string::npos;
         if (skip || size_t(at.first) + at.second > a.data.size() || at.second < 0x5C + 4096) continue;
         const uint8_t* res = &a.data[at.first];
         const size_t hdr = std::memcmp(res, "RES", 3) == 0 ? 0x40 : 0;

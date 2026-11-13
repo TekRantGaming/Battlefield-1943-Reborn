@@ -347,6 +347,8 @@ class GuestTextures::HostTexture final : public rg::TextureCache::Texture {
   std::optional<uint64_t> base_hash, mips_hash;
   // The HD pack's texture for that data (D149), or null.
   ITextureView* hd_view = nullptr;
+  // The HD picture with the patcher's pictures drawn in (Patch), this texture's own: `hd_view` is then its view.
+  RefCntAutoPtr<ITexture> hd_patched;
   // D160: to be offered to the patcher again when its data is next found unchanged (it was outdated at the request).
   bool repatch = false;
 
@@ -532,6 +534,16 @@ ITextureView* GuestTextures::HdView(HostTexture& host_texture) {
   if (auto it = hd_textures_.find(content); it != hd_textures_.end())
     return it->second ? it->second->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
   const HdEntry* e = pack->Find(content);
+  // NXR_HD_LOG=1: every texture the pack was asked for and did not have (what a pack's maker has to match).
+  static const bool log_misses = [] {
+    const char* v = std::getenv("NXR_HD_LOG");
+    return v && *v == '1';
+  }();
+  if (!e && log_misses)
+    REXLOG_INFO("[native_x_renderer] HD texture {:016X} not in the pack: {}x{} format {}, base {} bytes at {:08X}, "
+                "tiled {}, packed mips {}, levels {}",
+                content, w, h, format, host_texture.GetGuestBaseSize(), uint32_t(key.base_page) << 12,
+                bool(key.tiled), bool(key.packed_mips), uint32_t(key.mip_max_level) + 1);
   RefCntAutoPtr<ITexture> texture;
   if (e && e->width == w && e->height == h && e->mips > 0 && e->mips <= 14 &&
       (e->bc == 0 || ((e->bc == 1 || e->bc == 3) && block_compression_))) {
@@ -539,6 +551,9 @@ ITextureView* GuestTextures::HdView(HostTexture& host_texture) {
     if (pack->Read(*e, data)) {
       const uint32_t block = e->bc == 1 ? 8 : 16;
       const bool plain = e->bc == 0;  // RGBA8, a row after a row
+      // The host holds a guest 8_8_8_8 texture's words byte swapped (B, G, R, A) and the draws' swizzle is for that.
+      if (plain)
+        for (size_t i = 0; i + 3 < data.size(); i += 4) std::swap(data[i], data[i + 2]);
       std::vector<TextureSubResData> levels(e->mips);
       uint64_t at = 0;
       bool fits = true;
@@ -570,7 +585,7 @@ ITextureView* GuestTextures::HdView(HostTexture& host_texture) {
         if (texture) {
           ++stats_.hd_textures;
           stats_.hd_bytes += data.size();
-          if (stats_.hd_textures <= 5 || stats_.hd_textures % 25 == 0)
+          if (stats_.hd_textures <= 5 || stats_.hd_textures % 25 == 0 || log_misses)
             REXLOG_INFO("[native_x_renderer] HD texture {:016X}: {}x{} for the game's {}x{} (format {}); {} HD textures "
                         "made, {} MB",
                         content, e->hd_width, e->hd_height, w, h, format, stats_.hd_textures, stats_.hd_bytes >> 20);
@@ -737,7 +752,7 @@ bool GuestTextures::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool
   }
   if (!LoadFromMemory(host_texture, load_base, load_mips)) return false;
   if (load_base) host_texture.base_hash = base_hash;
-  if (load_base) host_texture.hd_view = HdView(host_texture);
+  if (load_base && !host_texture.hd_patched) host_texture.hd_view = HdView(host_texture);
   if (load_mips) host_texture.mips_hash = mips_hash;
   return true;
 }
@@ -959,25 +974,38 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
 void GuestTextures::Patch(HostTexture& host_texture, bool again) {
   host_texture.repatch = false;
   const TextureKey key = host_texture.key();
+  // Its own HD picture (below) is of the patcher's last pictures: without them, the pack's as it is.
+  auto drop_hd = [&] {
+    if (!host_texture.hd_patched) return;
+    host_texture.hd_patched.Release();
+    host_texture.hd_view = HdView(host_texture);
+  };
   TexturePatchFn patch = g_texture_patcher.load(std::memory_order_acquire);
   if (!patch || uint32_t(key.format) != 6 /* k_8_8_8_8 */ || key.mip_max_level != 0 ||
       key.GetDepthOrArraySize() != 1) {
     patched_.erase(&host_texture);
+    drop_hd();
     return;
   }
   const uint32_t w = key.GetWidth(), h = key.GetHeight();
   if (host_texture.GetGuestBaseSize() < uint64_t(w) * h * 4) {
     patched_.erase(&host_texture);
+    drop_hd();
     return;
   }
   const uint8_t* guest = memory_.memory().TranslatePhysical<const uint8_t*>(key.base_page << 12);
   std::vector<uint8_t> rgba;
-  if (!patch(w, h, guest, rgba, again)) {
+  if (!patch(w, h, guest, rgba, again, 1, nullptr)) {
     patched_.erase(&host_texture);
+    drop_hd();
     return;
   }
   patched_.insert(&host_texture);
-  if (rgba.size() != size_t(w) * h * 4) return;
+  if (rgba.size() != size_t(w) * h * 4) {
+    drop_hd();
+    return;
+  }
+  PatchHd(host_texture, again);
   Box box;
   box.MaxX = w, box.MaxY = h;
   TextureSubResData data;
@@ -987,6 +1015,77 @@ void GuestTextures::Patch(HostTexture& host_texture, bool again) {
                           RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
   REXLOG_INFO("[native_x_renderer] the game's pictures written over the {}x{} texture at {:08X} ({})", w, h,
               uint32_t(key.base_page) << 12, again ? "again, D160" : "D142");
+}
+
+// 13 Nov 2026: the HD pack's picture of a texture the patcher filled, with the patcher's pictures drawn into it at
+// its size (Battlefield 1943's HUD and deploy screen atlases: the pack's copy alone would show the Xbox 360's buttons
+// and no flag letters). The texture's own HD texture, made again at each patch; its smaller levels are made here
+// (colour weighted by alpha, so a transparent surround does not darken an edge).
+void GuestTextures::PatchHd(HostTexture& host_texture, bool again) {
+  auto none = [&] {
+    if (!host_texture.hd_patched) return;
+    host_texture.hd_patched.Release();
+    host_texture.hd_view = HdView(host_texture);
+  };
+  TexturePatchFn patch = g_texture_patcher.load(std::memory_order_acquire);
+  HdPack* pack = REXCVAR_GET(native_x_renderer_hd_textures) && patch ? HdPackOpen() : nullptr;
+  if (!pack) return none();
+  const TextureKey key = host_texture.key();
+  const uint32_t w = key.GetWidth(), h = key.GetHeight();
+  const uint8_t* guest = memory_.memory().TranslatePhysical<const uint8_t*>(key.base_page << 12);
+  const size_t hashed = size_t(std::min<uint64_t>(host_texture.GetGuestBaseSize(), 65536));
+  const uint64_t content = XXH3_64bits(guest, hashed) ^ (uint64_t(6) << 56) ^ (uint64_t(w) << 32) ^ (uint64_t(h) << 16);
+  const HdEntry* e = pack->Find(content);
+  if (!e || e->bc != 0 || e->width != w || e->height != h || e->hd_width % w != 0 || e->hd_width / w < 2 ||
+      e->hd_height != h * (e->hd_width / w))
+    return none();
+  const uint32_t scale = e->hd_width / w, hw = e->hd_width, hh = e->hd_height;
+  std::vector<uint8_t> base;
+  if (!pack->Read(*e, base) || base.size() < size_t(hw) * hh * 4) return none();
+  std::vector<std::vector<uint8_t>> chain(1);
+  if (!patch(w, h, guest, chain[0], again, scale, base.data()) || chain[0].size() != size_t(hw) * hh * 4) return none();
+  std::vector<std::pair<uint32_t, uint32_t>> sizes{{hw, hh}};
+  while (sizes.back().first > 1 || sizes.back().second > 1) {
+    const auto [sw, sh] = sizes.back();
+    const uint32_t dw = std::max(1u, sw / 2), dh = std::max(1u, sh / 2);
+    const std::vector<uint8_t>& s = chain.back();
+    std::vector<uint8_t> d(size_t(dw) * dh * 4);
+    for (uint32_t y = 0; y < dh; ++y)
+      for (uint32_t x = 0; x < dw; ++x) {
+        uint32_t sum[4] = {0, 0, 0, 0}, plain[3] = {0, 0, 0};
+        for (uint32_t j = 0; j < 2; ++j)
+          for (uint32_t i = 0; i < 2; ++i) {
+            const uint8_t* p = &s[(size_t(std::min(sh - 1, y * 2 + j)) * sw + std::min(sw - 1, x * 2 + i)) * 4];
+            for (int c = 0; c < 3; ++c) sum[c] += uint32_t(p[c]) * p[3], plain[c] += p[c];
+            sum[3] += p[3];
+          }
+        uint8_t* o = &d[(size_t(y) * dw + x) * 4];
+        for (int c = 0; c < 3; ++c) o[c] = uint8_t(sum[3] ? (sum[c] + sum[3] / 2) / sum[3] : (plain[c] + 2) / 4);
+        o[3] = uint8_t((sum[3] + 2) / 4);
+      }
+    chain.push_back(std::move(d));
+    sizes.push_back({dw, dh});
+  }
+  std::vector<TextureSubResData> levels(chain.size());
+  for (size_t m = 0; m < chain.size(); ++m) levels[m].pData = chain[m].data(), levels[m].Stride = uint64_t(sizes[m].first) * 4;
+  TextureDesc desc;
+  desc.Name = "NativeXRenderer HD texture, patched";
+  desc.Type = RESOURCE_DIM_TEX_2D_ARRAY;
+  desc.ArraySize = 1;
+  desc.Width = hw;
+  desc.Height = hh;
+  desc.MipLevels = uint32_t(chain.size());
+  desc.Format = TEX_FORMAT_RGBA8_UNORM;
+  desc.Usage = USAGE_IMMUTABLE;
+  desc.BindFlags = BIND_SHADER_RESOURCE;
+  TextureData init{levels.data(), uint32_t(levels.size())};
+  RefCntAutoPtr<ITexture> texture;
+  device_->CreateTexture(desc, &init, &texture);
+  if (!texture) return none();
+  host_texture.hd_patched = texture;
+  host_texture.hd_view = texture->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+  REXLOG_INFO("[native_x_renderer] HD texture {:016X}: {}x{} with the game's pictures for its {}x{} texture at {:08X}{}",
+              content, hw, hh, w, h, uint32_t(key.base_page) << 12, again ? " (again)" : "");
 }
 
 void SetTexturePatcher(TexturePatchFn fn) { g_texture_patcher.store(fn, std::memory_order_release); }
