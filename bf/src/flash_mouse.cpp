@@ -79,6 +79,7 @@ struct State {
   int kit = -1;    // the screen's kit index as it last told the game (0 Infantry, 1 Rifleman, 2 Scout); -1 not known
   int spawn = -1;  // its spawn point index, as last told
   int icons_logged = 0;
+  Clock::time_point said_at{};  // the screen last told the game its kit or spawn point (it does while it is up)
   // A spawn point asked for by a click: its number, and the steps toward it (the pad hook makes them).
   int want = -1, want_steps = 0, want_toggles = 0, want_count = 1, want_from = -2;
   bool want_down = true;
@@ -252,16 +253,21 @@ bool SpawnMouseActive() { return g_active.load(std::memory_order_relaxed); }
 // From the pad hook (auto_join.cpp), at each of the game's pad reads: whether the deploy screen may be up (a level is
 // loaded, the player is in no seat and not on foot, our own menu is closed), and the pad as the game will read it
 // (X_INPUT_GAMEPAD, big endian: buttons at +0, the right stick at +8 and +10). The queued presses are put in.
-void SpawnMousePad(uint8_t* gamepad, bool may_be_up) {
+void SpawnMousePad(uint8_t* gamepad, bool allowed, bool out_of_world) {
   const auto now = Clock::now();
   std::lock_guard lock(g.mutex);
-  const bool on = may_be_up && REXCVAR_GET(bf_spawn_mouse);
+  const bool on = allowed && out_of_world && REXCVAR_GET(bf_spawn_mouse);
   if (on) {
     if (now - g.seen > std::chrono::milliseconds(300)) g.since = now;
     g.seen = now;
   }
-  // Up for 0.7 s without a break (a moment out of the world between two seats is not the deploy screen).
-  const bool active = on && now - g.since > std::chrono::milliseconds(700);
+  // The screen is up while it talks to the game: it sends its kit and spawn point when it opens and again every
+  // second and a half, until doSpawn (SpawnMouseCommand). After a death the soldier still counts as in the world, so
+  // being out of the world alone left the mouse turning the camera behind the screen (13 Nov: "after player death,
+  // the mouse is stuck with mouse look on the spawn screen"). Else: out of the world for 0.7 s without a break (a
+  // moment between two seats is not the deploy screen).
+  const bool talking = allowed && REXCVAR_GET(bf_spawn_mouse) && now - g.said_at < std::chrono::milliseconds(2500);
+  const bool active = talking || (on && now - g.since > std::chrono::milliseconds(700));
   if (active != g.active) {
     g.active = active;
     g_active.store(active, std::memory_order_relaxed);
@@ -325,6 +331,11 @@ bool SpawnMouseCommand(const char* name, const char* args) {
   const bool ours = kit || spawn || std::strcmp(name, "selectSquadSpawn") == 0 || std::strcmp(name, "doSpawn") == 0 ||
                     std::strcmp(name, "selectWeapon") == 0;
   std::lock_guard lock(g.mutex);
+  // The screen is up while it says these, and gone at doSpawn (or when the game's menus are left: enterMenu 0).
+  if (std::strcmp(name, "doSpawn") == 0 || (std::strcmp(name, "enterMenu") == 0 && args && args[0] == '0'))
+    g.said_at = {};
+  else if (ours)
+    g.said_at = Clock::now();
   if (!ours) return false;
   if (args && *args) {
     char* end = nullptr;
