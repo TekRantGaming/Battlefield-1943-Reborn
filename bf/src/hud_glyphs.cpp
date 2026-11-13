@@ -6,6 +6,8 @@
 //   Menu/main_popups (= hud_popups)   128x128  dialogs
 //   Menu/hud_root_cq_textures_Xenon   512x512  the HUD's hints (d-pad, sticks, triggers)
 //   Menu/igm_mp_cq_textures_Xenon     512x256  the pause and deploy screens
+// A fifth atlas has no prompts: menu/minimap/icons0 (512x256), the HUD's and the maps' icons. Its capture point flags
+// get their letters here (capture_points.cpp: lettered copies drawn into its empty side), whatever the prompt style.
 // King Kong found its sheet by scanning guest memory (its freezes, issue 11). Here nothing is scanned: NativeXRenderer
 // hands each k_8_8_8_8 texture it loads (D142); one of those sizes is hashed, and a known atlas gets the chosen
 // style's pictures (bf/glyphs, Xelu's and Kenney's CC0 prompts) drawn over its Xbox 360 ones. The Xbox 360 style
@@ -35,6 +37,8 @@
 #include <rex/logging.h>
 #include <rex/ui/image_decode.h>
 
+#include "capture_points.h"
+
 namespace bf1943 {
 
 std::filesystem::path ExecutableDir();  // shader_prep.cpp
@@ -59,6 +63,8 @@ struct Atlas {
   std::vector<Rect> rects;
 };
 
+constexpr const char* kFlagAtlas = "minimap_icons";
+
 const std::vector<Atlas>& Atlases() {
   static const std::vector<Atlas> atlases = {
       {"menu_common", 256, 128, 0x1099BEF8DCBBF9FBull,
@@ -77,6 +83,8 @@ const std::vector<Atlas>& Atlases() {
         {"ls_click", 141, 264, 30, 30}, {"rs_click", 262, 150, 30, 30}, {"ls_lr", 0, 312, 30, 30},
         {"ls_ud", 242, 180, 30, 30}, {"rs_lr", 313, 0, 30, 30}, {"rs_ud", 301, 72, 30, 30}, {"rs", 94, 294, 30, 30},
         {"ls", 30, 312, 30, 30}}},
+      // The HUD's and the maps' icons: no prompts, the capture point flags' letters (kFlagAtlas).
+      {kFlagAtlas, 512, 256, 0x189F8B5D47F80C8Full, {}},
   };
   return atlases;
 }
@@ -222,7 +230,11 @@ void Draw(std::vector<uint8_t>& rgba, uint32_t width, const Rect& r, const Pictu
 // The style for the game's prompts (bf_button_prompts; automatic follows the device used last in our menus).
 std::string StyleSet() {
   std::string v = rex::cvar::GetFlagByName("bf_button_prompts");
-  if (v == "auto") v = LauncherKeyboardLast() ? "keyboard" : PadFamily();  // the controller in use
+  // The keyboard's keys whenever the keyboard or mouse was used last, whatever controller style was chosen; the
+  // chosen style (or, automatic, the controller in use) as soon as the controller is used again (TekRantGaming, 12
+  // Nov 2026; launcher_kit.cpp StyleFor is the same rule for our menus).
+  if (LauncherKeyboardLast()) v = "keyboard";
+  else if (v == "auto") v = PadFamily();  // the controller in use
   if (v == "ps3" || v == "ps2") return "ps2";  // King Kong's DualShock set
   if (v == "ps5" || v == "xbox_series" || v == "steam_deck" || v == "keyboard") return v;
   return {};  // Xbox 360: the game's own pictures
@@ -262,10 +274,34 @@ const std::vector<uint8_t>& Untouched(const Atlas& atlas, const uint8_t* guest) 
 // pictures back.
 bool Patch(uint32_t width, uint32_t height, const uint8_t* guest, std::vector<uint8_t>& rgba, bool again) {
   const Atlas* atlas = nullptr;
+  int sized = 0;
   for (const Atlas& a : Atlases())
-    if (a.width == width && a.height == height) atlas = &a;
+    if (a.width == width && a.height == height) atlas = &a, ++sized;
   if (!atlas) return false;
-  if (!again && Fnv(guest, size_t(width) * height * 4) != atlas->hash) return false;  // another texture of that size
+  // Known by its data's hash: on a first load (another texture can have that size), and whenever two atlases share
+  // the size (the pause screens' and the icons' are both 512 x 256).
+  if (!again || sized > 1) {
+    const uint64_t hash = Fnv(guest, size_t(width) * height * 4);
+    atlas = nullptr;
+    for (const Atlas& a : Atlases())
+      if (a.width == width && a.height == height && a.hash == hash) atlas = &a;
+    if (!atlas) {
+#if defined(BF_DEV_TOOLS)
+      if (!again && width == 512 && height == 256) REXLOG_INFO("BF prompts: a 512 x 256 texture that is no atlas of ours (hash {:016X})", hash);
+#endif
+      return false;
+    }
+  }
+  if (atlas->name == kFlagAtlas) {  // the icons: the capture point flags' letters, in every prompt style
+    std::lock_guard lock(g_mutex);
+    rgba = Untouched(*atlas, guest);
+    const int drawn = DrawFlagLetters(rgba, width, height);
+    if (!drawn) return false;
+    FlagLettersReady();
+    for (size_t i = 0; i < rgba.size(); i += 4) std::swap(rgba[i], rgba[i + 2]);  // as below
+    if (!again) REXLOG_INFO("BF flags: {} lettered flags drawn into the game's icon atlas", drawn);
+    return true;
+  }
   const std::string set = StyleSet();
   const bool seated = g_seated.load(std::memory_order_relaxed);
   std::lock_guard lock(g_mutex);
@@ -298,6 +334,8 @@ bool Patch(uint32_t width, uint32_t height, const uint8_t* guest, std::vector<ui
 
 }  // namespace
 
+bool LocalSeatedNow() { return g_seated.load(std::memory_order_relaxed); }  // fov.cpp: the vehicle's own field of view
+
 void InstallHudGlyphs() { native_x_renderer::SetTexturePatcher(&Patch); }
 
 // From the pad hook (auto_join.cpp), at each of the game's pad reads: whether the local soldier sits in a vehicle. What
@@ -323,6 +361,8 @@ void HudGlyphsTick(bool seated) {
   }
   if (next == shown) return;
   shown = std::move(next);
+  REXLOG_INFO("BF prompts: the game's atlases drawn again in the {} style{}", StyleSet().empty() ? "xbox360" : StyleSet(),
+              seated ? ", seated" : "");
   native_x_renderer::RepatchTextures();
 }
 

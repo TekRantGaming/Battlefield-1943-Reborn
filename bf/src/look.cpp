@@ -67,6 +67,8 @@ REXCVAR_DECLARE(bool, bf_mouse_invert_y);
 REXCVAR_DECLARE(bool, bf_mouse_invert_y_vehicle);
 REXCVAR_DECLARE(bool, mnk_mode);
 REXCVAR_DECLARE(bool, mnk_mouse);
+REXCVAR_DECLARE(bool, bf_native_input);       // native_input.cpp
+REXCVAR_DECLARE(bool, bf_mouse_vehicle_aim);  // vehicle_mouse.cpp
 
 #if defined(BF_DEV_TOOLS)
 namespace bf1943 {
@@ -78,6 +80,7 @@ std::atomic<bool> g_dev_camera_valid{false};
 
 namespace bf1943 {
 bool GameMenuOpen();  // game_menu.cpp
+void NoteMatchDevice(bool keyboard);  // game_menu.cpp: the device used in the match, for the HUD's prompts
 uint64_t ClientTicks();  // vehicle_camera.cpp: the client ticks run so far
 void ResetVehicleMouse();  // vehicle_mouse.cpp
 void ResetPlaneMouse();    // plane_mouse.cpp
@@ -263,6 +266,9 @@ class Listener : public rex::ui::WindowInputListener {
  public:
   void OnMouseMove(rex::ui::MouseEvent& e) override {
     if ((e.dx() == 0.0f && e.dy() == 0.0f) || !MouseLook() || bf1943::GameMenuOpen() || bf1943::comms::Typing()) return;
+    // A move of two counts or more is the player's (a hand resting on the mouse jitters by one): the HUD's prompts
+    // show keys (game_menu.cpp NoteMatchDevice).
+    if (std::fabs(e.dx()) + std::fabs(e.dy()) >= 2.0f) bf1943::NoteMatchDevice(true);
     std::lock_guard lock(g.mutex);
     g.raw_dx += e.dx();
     g.raw_dy += e.dy();
@@ -299,8 +305,10 @@ double MouseZoom(const State& s) {
 namespace bf1943 {
 
 void InstallLook(rex::ui::Window* window) {
-  // Keep the runtime's keyboard and mouse capture while turning the camera from raw motion here.
-  rex::cvar::SetFlagByName("mnk_sensitivity", "0");
+  // The mouse turns the soldier itself (above) and aims or steers in vehicles (LookPad): the runtime's mouse to right
+  // stick part stays at its lowest, under the game's dead zone. (The pull request asked for 0, which needs a runtime
+  // DLL with a wider range for this setting; 0.01 does the same with the DLL every player has, 13 Nov 2026.)
+  rex::cvar::SetFlagByName("mnk_sensitivity", "0.010000");
   std::lock_guard lock(g.mutex);
   if (!window || g.window) return;
   g.window = window;
@@ -384,8 +392,10 @@ void LookFrame() {
 
 // For vehicle_mouse.cpp: the mouse's counts since the last call (not times the display density), and the seconds since
 // it last moved. False without mouse look.
-bool VehicleMouseStick(float real_x, float real_y, unsigned& axes, float& x, float& y);  // vehicle_mouse.cpp
+bool MouseStickSeat();  // plane_mouse.cpp: a plane, or a seat whose gun the mouse's stick turns
 bool VehicleMouseTurretSeat();                                                           // vehicle_mouse.cpp
+bool VehicleMouseInverted();  // vehicle_mouse.cpp: Mouse vertical in vehicles (same as on foot, normal, inverted)
+bool GameVerticalLookInverted();  // game_menu.cpp: the game's own Vertical look (it negates the stick's y in vehicles)
 bool TickBlendVehicleView();                                                             // tick_blend.cpp
 void NoteSeatLook(double dx, double dy);                                                 // native_input.cpp
 
@@ -451,7 +461,19 @@ void LookPad(uint8_t* gamepad, bool seated) {
       g.stick_moved = now;
   }
   const bool mouse_active = MouseLook() && !comms::Typing();
-  const bool vehicle_mouse = seated && mouse_active;
+  // A seat where the soldier's own aim update runs (a landing boat's gunner: its gun follows the soldier's look): the
+  // mouse turns that aim itself on every frame, as on foot (LookFrame and the aim hook), so it is no vehicle seat for
+  // the mouse here. (The pull request took every seat: LookFrame then handed the aim hook no turn, and the hook, which
+  // replaces the game's own turn with the frames', held the aim still for the mouse and a controller alike; found in
+  // its review, 13 Nov 2026.)
+  // The new way needs both switches on: bf_native_input (the game's concepts written) and bf_mouse_vehicle_aim (the
+  // mouse turns guns). With either off the mouse in a vehicle is 0.3's: it pushes the pad's right stick (below).
+  const bool native = REXCVAR_GET(bf_native_input) && REXCVAR_GET(bf_mouse_vehicle_aim);
+  // A plane, or a seat whose gun has turning parts (0.4.1): the mouse's stick has it (plane_mouse.cpp), also where the
+  // soldier's own aim update runs too (a gunner's seat is a soldier's controllable, seat_info.h).
+  const bool stick_seat = seated && mouse_active && native && MouseStickSeat();
+  const bool own_aim = Alive(g, now) && REXCVAR_GET(bf_look) && !stick_seat;
+  const bool vehicle_mouse = seated && mouse_active && !own_aim && native;
   if (vehicle_mouse != g.vehicle_pad_seated || !mouse_active) {
     g.pad_moves.clear();
     g.vehicle_dx = g.vehicle_dy = 0;
@@ -461,11 +483,11 @@ void LookPad(uint8_t* gamepad, bool seated) {
     if (g.vehicle_pad_seated) ResetVehicleMouse(), ResetPlaneMouse();
     g.vehicle_pad_seated = vehicle_mouse;
   }
-  if (!mouse_active || (!seated && Alive(g, now) && REXCVAR_GET(bf_look))) return;
-  // In a vehicle (0.4.0, native mouse and keyboard): the mouse never pushes the pad. It steers a plane (plane_mouse.cpp),
-  // aims a seat's guns (vehicle_mouse.cpp), both written into the game's input concepts (native_input.cpp), or turns
-  // the view in a seat without a gun (free look, tick_blend.cpp). A controller's sticks are left as they are.
-  if (seated) {
+  if (!mouse_active || own_aim) return;
+  // In a vehicle (native mouse and keyboard): the mouse never pushes the pad. Its stick flies a plane and turns a
+  // seat's gun (plane_mouse.cpp), written into the game's input concepts (native_input.cpp), or it turns the view in a
+  // seat without a gun (free look, tick_blend.cpp). A controller's sticks are left as they are.
+  if (vehicle_mouse) {
     double pdx = 0, pdy = 0;
     for (const auto& m : g.pad_moves) pdx += m.dx, pdy += m.dy;
     g.pad_moves.clear();
@@ -473,10 +495,6 @@ void LookPad(uint8_t* gamepad, bool seated) {
     g.vehicle_pad_at = {};
     const double d = Density(g);
     if (PlaneMouse(gamepad, pdx / d, pdy / d)) return;
-    // A seat with a turning part: vehicle_mouse.cpp takes the mouse in the part's step (TakeVehicleMouse); it is only
-    // told whether a controller's right stick is pushed (the controller then aims).
-    // The counts also go to the seat's own look (native_input.cpp writes them only when no turret part took the
-    // tick: a seat whose gun follows the soldier's look, as a boat's or a jeep's).
     if (VehicleMouseTurretSeat()) {  // a gun's seat between its parts' steps: nothing but the stick writes there
       g_free_at.store(0);
       return;
@@ -497,7 +515,7 @@ void LookPad(uint8_t* gamepad, bool seated) {
       return;
     }
     const double k = kRadiansPerCount * std::clamp(REXCVAR_GET(bf_mouse_vehicle_sensitivity), 0.05, 10.0) / d;
-    const double iy = REXCVAR_GET(bf_mouse_invert_y_vehicle) ? -1.0 : 1.0;
+    const double iy = VehicleMouseInverted() ? -1.0 : 1.0;  // Invert vehicle (vehicle_mouse.cpp)
     double yaw = g_free_yaw.load(), pitch = g_free_pitch.load();
     if (std::isfinite(pdx)) yaw = std::remainder(yaw + pdx * k, kTwoPi);
     if (std::isfinite(pdy)) pitch = std::clamp(pitch - pdy * k * iy, -kFreePitch, kFreePitch);
@@ -506,7 +524,7 @@ void LookPad(uint8_t* gamepad, bool seated) {
     return;
   }
   g_free_at.store(0);
-  // Not seated (dead, watching): the mouse to the right stick, as before.
+  // Not seated (dead, watching), or a seat without a gun the 0.3 way: the mouse to the right stick, as before.
   double dx = 0, dy = 0;
   for (const auto& m : g.pad_moves) dx += m.dx, dy += m.dy;
   if (dx == 0 && dy == 0) return;
@@ -523,7 +541,7 @@ void LookPad(uint8_t* gamepad, bool seated) {
     p[0] = uint8_t(uint16_t(out) >> 8), p[1] = uint8_t(out);
   };
   add(gamepad + 8, dx * k);
-  add(gamepad + 10, -dy * k * (REXCVAR_GET(bf_mouse_invert_y) ? -1.0 : 1.0));
+  add(gamepad + 10, -dy * k * (VehicleMouseInverted() ? -1.0 : 1.0));  // a vehicle's view: the vehicles' setting
 }
 
 }  // namespace bf1943

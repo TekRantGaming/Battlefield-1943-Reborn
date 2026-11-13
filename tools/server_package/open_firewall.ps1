@@ -7,7 +7,8 @@ if (-not $admin) {
     return
 }
 $rules = @(
-    # Every server's port: UDP 18300 for the first, 18301 for the second and on (server_config.ps1, at most 16).
+    # The usual ports of the servers: UDP 18300 for the first, 18301 for the second and on (server/manager.py, at most
+    # 16; a server given another port in the manager needs that one opened by hand).
     @{ Name = 'Battlefield 1943 Reborn servers (UDP 18300 to 18315)'; Protocol = 'UDP'; Port = '18300-18315' },
     @{ Name = 'Battlefield 1943 Reborn backend login (TCP 18241)'; Protocol = 'TCP'; Port = 18241 },
     @{ Name = 'Battlefield 1943 Reborn backend games (TCP 18246)'; Protocol = 'TCP'; Port = 18246 },

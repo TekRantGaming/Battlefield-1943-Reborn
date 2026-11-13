@@ -36,6 +36,7 @@ set(BF1943_SOURCES
     src/http.cpp
     src/f8_panel.cpp
     src/hud_glyphs.cpp
+    src/capture_points.cpp
     src/game_music.cpp
     src/plane_mouse.cpp
     src/vehicle_mouse.cpp
@@ -66,6 +67,8 @@ set(BF1943_SOURCES
     src/look.cpp
     src/playtest_mark.cpp
     src/crash_report.cpp
+    src/start_failure.cpp
+    src/changelog.cpp
     src/fov.cpp
     src/vehicle_camera.cpp
     src/tick_blend.cpp
@@ -224,6 +227,19 @@ if(WIN32)
     configure_file(src/bf1943_version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/bf1943_version.rc" @ONLY)
     target_sources(bf1943 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/bf1943_version.rc")
 endif()
+# CHANGELOG.md, built into the program for the launcher's What's new pop-up (src/changelog.cpp), as King Kong does.
+# The public changelog (the players' repository) is this file.
+set(BF_CHANGELOG_MD "${CMAKE_CURRENT_SOURCE_DIR}/CHANGELOG.md")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${BF_CHANGELOG_MD}")
+file(READ "${BF_CHANGELOG_MD}" BF_CHANGELOG_TEXT)
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/changelog_text.cpp"
+     CONTENT "namespace bf1943 {
+extern const char* const kChangelogText;
+const char* const kChangelogText = R\"BFCHANGELOG(@BF_CHANGELOG_TEXT@)BFCHANGELOG\";
+}
+"
+     @ONLY)
+target_sources(bf1943 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/changelog_text.cpp")
 # The version the graphics pipelines are sent with (src/pipeline_upload.cpp), on that file alone.
 set_source_files_properties(src/pipeline_upload.cpp PROPERTIES COMPILE_DEFINITIONS "BF_VERSION_STRING=\"${BF_VERSION}\"")
 

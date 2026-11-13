@@ -23,12 +23,17 @@ param(
     [string]$Preset = "bf-dev",  # the client's build (bf-relwithdebinfo: the players' one; no dev pad there)
     [switch]$NoNetTrace,  # no network trace in the client's log (as players run; for frame time tests)
     [string]$Level = "",  # the server's level, e.g. Levels/Guadal_Canal (both teams start on land); Wake by default
-    [ValidateSet("classic", "modern")][string]$Mode = "classic",  # the movement and aiming the server plays (bf\src\modern_mode.cpp)
     [string]$UserFrom = "",  # run_game.ps1 -UserFrom: an earlier run's user folder (a finished launcher setup, say)
     [string[]]$BackendArgs = @(),  # extra backend flags, e.g. --official-key-file <file> (browser tests)
     [switch]$BuiltInHost,  # the dedicated server runs our own GameManager host (bf\src\gm_host.cpp), no gmhost.py
     [string]$Stacks = "",  # run_game.ps1 -Stacks: seconds at which the client logs every guest thread (bf-dev)
-    [switch]$Night  # the server is a Night Ops server (gmhost.py --night): players' games draw its map at night
+    [string[]]$HostArgs = @(),  # more options for gmhost.py: --region gb, --broadcast-file <file>...
+    [switch]$Night,  # the server is a Night Ops server (gmhost.py --night): players' games draw its map at night
+    [switch]$FollowRestart,  # run_game.ps1 -FollowRestart: go on with a game that started itself again
+    [switch]$ClientOnMain,  # with -BackendHost: the client stays on the main backend (127.0.0.1), so the server is one
+                            # on a backend of its own (the server package's LAN only mode: Direct connect finds it)
+    [string]$BackendHost = "127.0.0.1"  # the backend's address: another loopback one (127.0.0.5) runs the test beside
+                                        # the play test's servers, whose backend keeps 127.0.0.1 (run_local_servers.ps1)
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -38,6 +43,11 @@ if ($Dump) { $env:BF_NET_DUMP = "1" }
 $log = Join-Path $root "runs\plasma_$Name.log"
 $gateway = $(if ($PeerPad) { "127.0.0.3:1000" } else { "127.0.0.2:1000" })
 $plasmaArgs = @("-I", (Join-Path $root "server\plasma.py"), "--seconds", "$($Seconds + 60)", "--log", $log)
+if ($BackendHost -ne "127.0.0.1") {
+    $plasmaArgs += @("--host", $BackendHost, "--theater-host", $BackendHost)
+    if (-not $ClientOnMain) { $GameArgs += "--bf_online_host=$BackendHost" }
+    $PeerArgs = ("--bf_online_host=$BackendHost " + $PeerArgs).Trim()
+}
 if ($InProcess) { $plasmaArgs += @("--dedicated", "$gateway=127.0.0.1:1003") }
 $plasmaArgs += $BackendArgs
 $p = Start-Process -FilePath $python -ArgumentList $plasmaArgs -WindowStyle Hidden `
@@ -45,13 +55,14 @@ $p = Start-Process -FilePath $python -ArgumentList $plasmaArgs -WindowStyle Hidd
 $gm = $null
 if ($BuiltInHost) {
     # The server registers itself (bf_gm_backend) once its level runs; listed, so the client's Quick Match finds it.
-    $ServerArgs = ("--bf_gm_backend=127.0.0.1:18250 --bf_gm_listen=$gateway --bf_gm_name=`"Local test server`" " +
+    $ServerArgs = ("--bf_gm_backend=$($BackendHost):18250 --bf_gm_listen=$gateway --bf_gm_name=`"Local test server`" " +
                    "--bf_gm_listed=true " + $ServerArgs).Trim()
 } elseif (-not $InProcess) {
     $gmLog = Join-Path $root "runs\gmhost_$Name.log"
-    $gmArgs = @("-I", (Join-Path $root "server\gmhost.py"), "--backend", "127.0.0.1:18250", "--listen", $gateway,
-                "--game-server", "127.0.0.1:1003", "--name", "`"Local test server`"", "--mode", $Mode, "--log", $gmLog)
+    $gmArgs = @("-I", (Join-Path $root "server\gmhost.py"), "--backend", "$($BackendHost):18250", "--listen", $gateway,
+                "--game-server", "127.0.0.1:1003", "--name", "`"Local test server`"", "--log", $gmLog)
     if ($Night) { $gmArgs += "--night" }  # Start-Process takes no empty argument
+    $gmArgs += $HostArgs
     $gm = Start-Process -FilePath $python -ArgumentList $gmArgs -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $root "runs\gmhost_$Name.out") -PassThru
     $log = $gmLog
@@ -59,7 +70,7 @@ if ($BuiltInHost) {
 Start-Sleep 1
 try {
     & (Join-Path $PSScriptRoot "run_game.ps1") -Name $Name -Seconds $Seconds -Preset $Preset -NetTrace:(-not $NoNetTrace) -WithServer `
-        -ServerCl $(if ($Level) { "-dedicated -level $Level" } else { "-dedicated" }) -ServerWarmup 25 -DevPad $DevPad -Shots $Shots -SeedCache $SeedCache -PeerPad $PeerPad -PeerArgs $PeerArgs -ServerArgs $(if ($Mode -eq "modern") { ($ServerArgs + " --bf_modern_mode=true").Trim() } else { $ServerArgs }) -RuntimeDll $RuntimeDll -GameArgs $GameArgs -Launcher:$Launcher -StopServerAt $StopServerAt -GpuPlugin $GpuPlugin -UserFrom $UserFrom -Stacks $Stacks | Select-Object -Last 3
+        -ServerCl $(if ($Level) { "-dedicated -level $Level" } else { "-dedicated" }) -ServerWarmup 25 -DevPad $DevPad -Shots $Shots -SeedCache $SeedCache -PeerPad $PeerPad -PeerArgs $PeerArgs -ServerArgs $ServerArgs -RuntimeDll $RuntimeDll -GameArgs $GameArgs -Launcher:$Launcher -StopServerAt $StopServerAt -GpuPlugin $GpuPlugin -UserFrom $UserFrom -Stacks $Stacks -FollowRestart:$FollowRestart | Select-Object -Last 3
 } finally {
     Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
     if ($gm) { Stop-Process -Id $gm.Id -Force -ErrorAction SilentlyContinue }

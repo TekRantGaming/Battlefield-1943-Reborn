@@ -14,7 +14,7 @@ brought back on servers that anyone can run.
 This is a fan project by TekRantGaming. It is not made, endorsed or supported by Electronic Arts or DICE. It contains
 no game files: you need your own copy of the Xbox 360 game (Xbox Live Arcade, title ID `5841097E`).
 
-**Latest build: [0.3.0](../../releases/latest)** (Windows and Linux) &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
+**Latest build: [0.4.0](../../releases/latest)** (Windows and Linux) &nbsp;·&nbsp; **Discord: [discord.gg/8eakYSvBZS](https://discord.gg/8eakYSvBZS)**
 
 - [Download and play](#download-and-play)
 - [Requirements](#requirements)
@@ -41,21 +41,24 @@ no game files: you need your own copy of the Xbox 360 game (Xbox Live Arcade, ti
    own (for example `~/Games/BF1943-Reborn`): its `game` and `user` folders go beside it.
 2. Make it runnable (`chmod +x` on the file, or Allow executing in its properties) and start it.
 
-Its name is the same in every release. To update by hand, put the new file over the old one in the game folder
-to keep your settings, game files and Steam shortcut.
+Its name is the same in every release. Updates install themselves; to update by hand, put the new file over the old one
+(not in Downloads), so your settings, game files and Steam shortcut stay.
 
 **Then, on both**
 1. The first time, select your own Battlefield 1943 (Xbox 360) package: the single file in `5841097E\000D0000` from
    your console's storage, or a folder that holds it. It is installed into the folder `game`, once. The first start
    then prepares the game's shaders, so effects do not stutter the first time you see them.
 2. Choose your name, then press **Play**.
-3. **Quick Match** or the **Server Browser** first asks which movement you want, Classic or Modern (see
-   [Features](#features)), every time: then the busiest server that plays it, or one from its list.
+3. **Quick Play** joins the busiest server with room, or pick one in the **Server Browser**.
 
 Your settings, logs and crash reports stay in the folder `user` next to the game.
 
-**This fork defaults to manual updates.** Setting `bf_update_feed` in `bf1943.toml` to a GitHub releases API endpoint
-enables automatic updates from that feed and first-start file repair on Windows. Use an empty feed to disable both.
+**Updates install themselves.** At every start the game looks at this page's latest release; a newer one is downloaded,
+checked against the release's `SHA256SUMS.txt`, installed and started. On Windows only the files that changed are
+replaced, and if any of them cannot be, every one is put back; on Linux the AppImage replaces itself. Your `game` and
+`user` folders are never touched. The servers only let the newest version in: when a newer one is out, the game says
+so, with **Update now**. Builds before 0.2.0 cannot update themselves: download the latest build once and unzip it
+over your folder (Windows), or put the AppImage in place of the old one (Linux).
 
 If Windows says *"rexruntime.dll is either not designed to run on Windows or it contains an error"* (Bad Image,
 0xc0e90002), it is not a broken download: the builds are not code signed yet, and Windows 11's Smart App Control has
@@ -68,27 +71,30 @@ not cleared this build's files.
 - A graphics card with Vulkan (NVIDIA GTX 10 series, AMD RX 5000 series, Intel Arc or newer recommended; on Linux,
   Mesa's RADV or NVIDIA's driver).
 - Your own copy of Battlefield 1943 for Xbox 360: its package file from your console.
-- To host a server: Windows (10, 11 or Server) and [Python 3.12](https://www.python.org/downloads/).
+- To host a server: Windows (10, 11 or Server). The server download brings everything else.
 
 ## Features
 
 **The game**
 - All four maps: Wake Island, Guadalcanal, Iwo Jima and Coral Sea.
 - Up to 24 players a server, on foot, in jeeps, tanks, boats and planes, with the air raid, as in the original.
-- Two movement styles. **Classic** is the original game. **Modern** has quicker starts and stops, faster aiming with
-  no turn lag and quicker shots after a sprint or a jump, with aim assist kept. Each server plays one or the other, so
-  nobody has an edge: Quick Match and the server browser ask which one you want every time and show only its servers,
-  and your game always plays what the server you join plays (there is no setting for it).
+- Capture points lettered A to E: in the HUD, on the markers in the world, on the minimap and on the deploy map, and
+  a map of the whole battle in the pause menu.
 - The game's own tutorial (Help), and our Stats and Awards, Achievements and Leaderboards pages.
 
 **Online**
-- A server browser with the official servers and everyone else's (Community), each with its map and players, and
-  Direct connect for a server that is not listed.
-- **Quick Match** joins the busiest server with room that plays the movement you pick.
-- A server package for anyone to host their own dedicated servers, listed for everyone.
+- A server browser with the official servers and everyone else's (Community), each with its map, players, region
+  and tick rate, a region filter, and Direct connect for a server that is not listed or runs on a LAN.
+- **Quick Play** joins the busiest server with room.
+- **Create Private Match**: a match on your own PC for you and your friends.
+- Messages from a server to everyone on it, for an update or a restart.
+- A server package for anyone to host their own dedicated servers, listed for everyone or kept to a LAN, managed
+  from a page in the browser.
 
 **On PC**
 - A native Windows and Linux program with a Vulkan renderer, at your screen's resolution and refresh rate.
+- Ultrawide screens: on 21:9, 32:9 and other wide screens the game fills the screen with a wider view, with the HUD
+  at the screen's sides or kept in the middle.
 - Any frame rate: a limit from 30 to 240 or none, and VSync. The game still runs its world 30 times a second as on
   the console, but the camera turns on every frame, and soldiers, vehicles and vehicle cameras move smoothly between
   the game's updates.
@@ -99,16 +105,17 @@ not cleared this build's files.
   with quality and distance settings).
 - Grass and shrubs on Wake Island, Guadalcanal and Iwo Jima, placed from each level's own data, drawn as far as the
   whole map.
-- Field of view, motion blur on or off, camera shake and its strength, brightness and gamma.
-- Keyboard and mouse beside controllers, with rebindable keys and the mouse aiming vehicle guns and turrets directly;
-  the game's button prompts show the keys you play with, on foot and in vehicles.
+- Field of view on foot and in vehicles, motion blur on or off, camera shake and its strength, brightness and gamma.
+- Keyboard and mouse beside controllers, with rebindable keys: the mouse aims vehicle guns and turrets directly,
+  flies planes and looks around from a driver's or passenger's seat. The button prompts show what you play with, on
+  foot and in vehicles, and change when you change between controller and keyboard.
 - Volume for master, music, effects and voices, menu music and sounds.
 - The game in English, French, German, Italian, Spanish or Japanese, and aim assist on or off.
 - Proximity voice chat that both teams hear (hold B to talk, or open mic), and text chat to everyone, your team or
   your squad (T, Y, U), with a profanity filter.
 - Performance metrics in the corner (off unless you turn them on; F2: off, FPS only or full), and crash and hang
   reports in `user\crashes`.
-- Optional automatic updates from a configured release feed (see [Download and play](#download-and-play)).
+- Updates that install themselves (see [Download and play](#download-and-play)).
 - Add to Steam from the launcher's Home, with the game's artwork.
 
 ## Controls
@@ -119,7 +126,7 @@ Keyboard bindings.
 | Key | On foot | In a vehicle |
 |---|---|---|
 | W A S D | move | W throttle, S brake, A D turn |
-| Mouse | look and aim | aim the guns and turret |
+| Mouse | look and aim | aim the guns and turret; look around from a driver's or passenger's seat; fly a plane |
 | Left mouse button | fire | fire |
 | Right mouse button | aim down sights | second weapon (bombs in a plane) |
 | Space | jump | change seat |
@@ -137,9 +144,10 @@ Keyboard bindings.
 | Esc or Enter | pause menu | pause menu |
 | F2 | performance metrics | the same |
 
-Planes: flying with keyboard and mouse is not right yet (see [Known issues](#known-issues)): take a boat to get to
-land, or fly with a controller. On a controller planes fly as on the Xbox 360: left trigger throttle, right stick pitch
-and roll, left stick rudder, right bumper bombs, left bumper free look.
+Planes: the mouse moves the stick. Left and right roll, forward and back pitch, and the stick springs back to the
+centre when the mouse stops; W is the throttle, S the brake, A and D the rudder. Which way is up follows Vertical fly
+(Settings > Controls > Game controls). On a controller planes fly as on the Xbox 360: left trigger throttle, right
+stick pitch and roll, left stick rudder, right bumper bombs, left bumper free look.
 
 Controllers: Xbox controllers play as on the console, with the game's own button layouts (Normal, Southpaw, Lefty)
 for soldiers, land vehicles and planes. Button prompts can show Xbox 360, Xbox Series, PlayStation 3, PlayStation 5
@@ -150,8 +158,8 @@ or Steam Deck buttons, or the keys.
 Everything is in our Settings menu, from the main menu and the pause menu.
 
 - **Display**: window mode (windowed or borderless), monitor, window size, resolution, refresh rate, aspect ratio
-  (the game is 16:9: letterbox or stretch), brightness, gamma, VSync, frame rate limit, field of view, motion blur,
-  camera shake.
+  (Fill screen, or Letterbox 16:9), HUD layout on wide screens (Edges or Centered), brightness, gamma, VSync, frame
+  rate limit, field of view on foot and in vehicles, motion blur, camera shake.
 - **Graphics**: graphics preset (Potato, Low, Medium, High, Ultra), antialiasing (FXAA), upscaler (Off, AMD FSR 1
   or NVIDIA NIS) and its mode, shadow quality,
   sharpness, texture filtering, ambient occlusion, global illumination, grass distance, HD textures.
@@ -170,22 +178,22 @@ Everything is in our Settings menu, from the main menu and the pause menu.
 EA's servers for Battlefield 1943 are gone. Reborn brings online play back with its own main backend, which every
 player logs in to and which lists every server.
 
-- **Official servers** are run by TekRantGaming: for Classic and for Modern, two with all maps in turn, one each for
-  Wake Island, Iwo Jima and Guadalcanal around the clock, and Air Superiority on Coral Sea.
-- **Community servers**: anyone can host dedicated servers with `BF1943-Reborn-Server-<version>-windows.zip`. Each
-  server has its own name, description, maps, movement (Classic or Modern) and pause between rounds, and shows in
-  everyone's server browser under Community. See [docs/SERVER.md](docs/SERVER.md).
+- **Official servers** are run by TekRantGaming: eight with Wake Island, Guadalcanal and Iwo Jima in turn, one each
+  for Wake Island, Guadalcanal and Iwo Jima around the clock, and Air Superiority on Coral Sea.
+- **Community servers**: anyone can host dedicated servers with `BF1943-Reborn-Server-<version>-windows.zip`, from a
+  manager page in the browser. Each server has its own name, description, maps, players and pause between rounds,
+  and shows in everyone's server browser under Community with its region; LAN only keeps it off the list. See
+  [docs/SERVER.md](docs/SERVER.md).
 
 ## Known issues
 
-This is an alpha. The main ones in 0.3.0:
+This is an alpha. The main ones in 0.4.0:
 
-- **Avoid flying with mouse and keyboard for now.** Take a boat to get to land, or use a controller to fly
-  (controllers fly as on the Xbox 360). This will be fixed in a later update; mouse and keyboard work everywhere else.
 - The first person weapon and hands still move 30 times a second at high frame rates (the view itself turns on every
   frame).
 - Stats, awards and leaderboards are kept only while the official backend runs: they reset when it restarts.
-- No HDR, and no ultrawide picture (the game is 16:9: letterbox or stretch).
+- No HDR. On 16:10 and 4:3 screens Fill screen crops the picture's sides: Settings > Display > Aspect ratio >
+  Letterbox 16:9 shows all of it.
 - Linux: the Vulkan renderer needs X11 or XWayland (a Wayland only session falls back to a slower one); the game's
   tutorial (Help) can drop back to the menu at once; dedicated servers on Linux are not tested yet.
 - Voice chat has no echo cancelling: with Open mic, use headphones. Push to talk and the chat keys are keyboard
@@ -209,7 +217,7 @@ Report anything else on [Discord](https://discord.gg/8eakYSvBZS), with the files
   players to it. A dedicated server is the game itself, run as a server with no window.
 - **Our menus.** The first start setup, main menu, server browser, pause menu and settings are this project's own,
   drawn over the game, which keeps its own HUD.
-- **Updates.** When configured, the game reads the selected feed through GitHub's API. The Windows download carries a
+- **Updates.** The game reads this repository's latest release through GitHub's API. The Windows download carries a
   list of every file with its hash (`bf-files.txt`) and of files earlier builds had that it does not
   (`bf-retired.txt`): an update installs exactly those, removes a retired file only while it is unchanged, and checks
   the folder again at the first start of the new version.
@@ -252,9 +260,9 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 
 ## Privacy
 
-- **Share graphics data** defaults to Off under Settings > Gameplay > Sharing. Uploads also require a
-  `bf_pipelines_url` endpoint in `bf1943.toml`. When enabled, the upload contains graphics pipeline state,
-  shader hashes, a random persistent install ID, the build version, the renderer API and levels played this session.
+- **Share graphics data** (on by default, Settings > Gameplay > Sharing) sends the graphics pipelines your game builds
+  (render settings and shader numbers: no game files, no name, nothing about you) to our server, at most every 15
+  minutes and only when something new was built, so the next update has them ready and everyone gets less stutter.
 - Playing online, the backend sees the name you chose and your IP address, as any game server does.
 - **Voice and text chat** go through the server you play on: your voice only to the players near you, and only
   while you hold push to talk (or speak, with Open mic); the game opens your microphone only when you first use
@@ -262,23 +270,11 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 - The game's own Telemetry setting changes nothing: its reports went to EA's servers, which are gone.
 - Settings, logs and crash reports stay on your PC, in the folder `user`.
 
-## Test profiles
-
-Copy [the test profile example](docs/bf1943-test-profile.example.txt) to `user/bf1943-test-profile.txt` beside
-the fork's executable. Edit the rank, match time, score events and achievement states, then reopen Stats & Awards
-or Achievements to preview the changes. The preview reads the game's achievement list and displays the IDs to
-use for individual overrides. The test file is separate from saved progression and leaderboard submissions.
-
-To test persistence on Windows, run `python tools/test_progression.py --launch` from the source checkout
-after building the fork and SDK. The tool imports the editable fixture from the build's `user` directory
-into a separate `test-user` save, seeds a loopback leaderboard and launches the game against it. The
-fixture's `enabled` flag controls preview mode only. Close the test game before re-importing, since each import
-replaces the test stats and applies the requested achievement states. Run without `--launch` to save and submit
-the fixture without opening the game.
-
 ## Credits and licences
 
 - **Battlefield 1943 Reborn** by TekRantGaming and contributors (MIT, [LICENSE](LICENSE)): the port's own code.
+- **ThatZaliaSGuy**: ultrawide screens, mouse flying, free look in vehicles and the mouse written into the game's own
+  input ([pull request 11](../../pull/11)).
 - **ReXGlue SDK** (BSD 3 Clause), derived from Xenia: the recompiler and runtime.
 - **NativeXRenderer** by Gustavo Garcia (MIT): the Vulkan renderer.
 - **GHMetalRecomp** (MIT): its NativeXRenderer profile, which Battlefield's started from.

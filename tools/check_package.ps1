@@ -99,6 +99,30 @@ foreach ($a in $appimages) {
 }
 "assets: $(($assets | ForEach-Object Name) -join ', ')"
 
+# 2b. The community server package: the manager, its page, its own Python and the package's version (a running
+# manager updates itself from this zip and checks it against SHA256SUMS.txt); the Linux server files summed too.
+$serverZip = @($assets | Where-Object { $_.Name -match '^BF1943-Reborn-Server-.*-windows\.zip$' }) | Select-Object -First 1
+if (!$serverZip) { Bad 'no community server package (BF1943-Reborn-Server-<version>-windows.zip)' } else {
+    $sz = [IO.Compression.ZipFile]::OpenRead($serverZip.FullName)
+    try {
+        $names = @($sz.Entries | ForEach-Object { ($_.FullName -replace '\\', '/') -replace '^[^/]+/', '' })
+        foreach ($r in 'server/manager.py', 'server/manager_ui/index.html', 'server/gmhost.py', 'server/plasma.py', 'python/python.exe',
+                       'python/pythonw.exe', 'bin/bf1943.exe', 'bin/rexruntime.dll', 'version.txt', 'server.default.json', 'BF1943 Server.bat') {
+            if ($names -notcontains $r) { Bad "the server package lacks $r" }
+        }
+        foreach ($n in $names) { if ($n -match '(^|/)(official\.key|server\.json)$' -or $n -like 'game/*' -or $n -like 'logs/*') { Bad "the server package must not hold $n" } }
+        $ve = $sz.Entries | Where-Object { ($_.FullName -replace '\\', '/') -match '^[^/]+/version\.txt$' } | Select-Object -First 1
+        if ($ve) { $rd = New-Object IO.StreamReader($ve.Open()); $sv = $rd.ReadToEnd().Trim(); $rd.Close(); if ($sv -ne $Version) { Bad "the server package says version '$sv', expected '$Version'" } }
+    } finally { $sz.Dispose() }
+}
+if (Test-Path $sums) {
+    foreach ($a in @($assets | Where-Object { $_.Name -match '\.(flatpak|tar\.gz)$' -or $_.Name -match '^BF1943-Reborn-Server-.*\.(zip|AppImage)$' })) {
+        $h = (Get-FileHash $a.FullName -Algorithm SHA256).Hash.ToLower()
+        $line = (Get-Content $sums) | Where-Object { $_ -match "^([0-9a-f]{64})\s+\*?$([regex]::Escape($a.Name))$" } | Select-Object -First 1
+        if (!$line) { Bad "SHA256SUMS.txt has no line for $($a.Name)" } elseif ($line.Substring(0, 64) -ne $h) { Bad "SHA256SUMS.txt does not match $($a.Name)" }
+    }
+}
+
 # 3. required
 foreach ($r in 'bf1943.exe', 'rexruntime.dll', 'rexgpu-bfnative.dll', 'bf1943.toml', 'data/shaders/bf1943-shaders.list',
                'data/startup/trg_studios.png', 'bf-retired.txt', 'README.txt') {

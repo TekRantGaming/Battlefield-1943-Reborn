@@ -964,8 +964,9 @@ void TickBlendCameraForManager(uint8_t* base, uint32_t manager) {
 }
 
 namespace {
-// The local player's own vehicle, published once a tick for the pad hook (plane_mouse.cpp). Its own lock, never held
-// together with another: the pad hook holds look.cpp's lock, and this file calls into look.cpp under g.mutex.
+// The local player's own vehicle, kept once a tick for free look's pivot (FreeLookTurn below) and for the log (which
+// vehicle has how many parts). It is not how a plane is known: that is its physics kind (plane_mouse.cpp), since the
+// nearest tree's part count took a landing boat (52 parts) for a plane (13 Nov 2026). Its own lock.
 struct OwnSnapshot {
   bool valid = false, scored = false;
   float rows[4][3] = {};  // the base world transform: right, up, forward, position
@@ -989,7 +990,7 @@ void PublishOwnVehicleLocked(uint64_t tick) {
     int parts, score;
     double d;
   };
-  Near near[8];
+  Near nearby[8];  // (not "near": a macro of the Windows headers)
   int n_near = 0;
   if (ref) {
     for (const auto& [tree, t] : g_trees) {
@@ -999,7 +1000,7 @@ void PublishOwnVehicleLocked(uint64_t tick) {
         const double d = double(t.cur[0].m[3][c]) - ref->cur.m[3][c];
         d2 += d * d;
       }
-      if (d2 < 30.0 * 30.0 && n_near < 8) near[n_near++] = {int(t.count) - 1, t.base.own_score, std::sqrt(d2)};
+      if (d2 < 30.0 * 30.0 && n_near < 8) nearby[n_near++] = {int(t.count) - 1, t.base.own_score, std::sqrt(d2)};
       if (int(t.count) - 1 >= 8 && d2 < best_d2) best_d2 = d2, best = &t;
     }
   }
@@ -1018,7 +1019,7 @@ void PublishOwnVehicleLocked(uint64_t tick) {
     logged = tick;
     std::string list;
     for (int i = 0; i < n_near; ++i)
-      list += fmt::format("{}{} parts (score {}) at {:.1f} m", i ? ", " : "", near[i].parts, near[i].score, near[i].d);
+      list += fmt::format("{}{} parts (score {}) at {:.1f} m", i ? ", " : "", nearby[i].parts, nearby[i].score, nearby[i].d);
     REXLOG_INFO("BF own vehicle: from the {}: {}; chosen {}", seat ? "seat" : "camera", list.empty() ? "none" : list,
                 best ? fmt::format("{} parts at {:.1f} m", s.parts, std::sqrt(best_d2)) : std::string("none"));
   }
@@ -2341,19 +2342,21 @@ Xf FreeLookTurn(const Xf& in, double yaw, double pitch) {
     if (d2 < 30.0 * 30.0)
       for (int c = 0; c < 3; ++c) pivot[c] = g.seat.cur.m[3][c];
   }
-  // An outside view (the camera over 4 m from the vehicle): round the vehicle itself (12 Nov 2026: the jeep's and the
-  // boat's third person view turned about the driver's seat, not round the vehicle; 13 Nov: still "in a fixed position
-  // from behind", the seat not being tracked in the jeep, so the distance was taken from the camera to itself). Its
-  // tree's root, published each tick (PublishOwnVehicleLocked; g.mutex is held here, then g_own_mutex, the same order
-  // as there).
+  // An outside view (the camera over 4 m from the seat): round the vehicle itself (12 Nov 2026: the jeep's and the
+  // boat's third person view turned about the driver's seat, not round the vehicle). Its tree's root, published each
+  // tick (PublishOwnVehicleLocked; g.mutex is held here, then g_own_mutex, the same order as there).
   {
-    std::lock_guard lock(bf1943::g_own_mutex);
-    const auto& own = bf1943::g_own;
-    if (own.valid && bf1943::ClientTicks() - own.tick <= 4) {
-      double v2 = 0;
-      for (int c = 0; c < 3; ++c) v2 += (own.rows[3][c] - rows[3][c]) * (own.rows[3][c] - rows[3][c]);
-      if (v2 > 4.0 * 4.0 && v2 < 40.0 * 40.0)
-        for (int c = 0; c < 3; ++c) pivot[c] = own.rows[3][c];
+    double cam_d2 = 0;
+    for (int c = 0; c < 3; ++c) cam_d2 += (rows[3][c] - pivot[c]) * (rows[3][c] - pivot[c]);
+    if (cam_d2 > 4.0 * 4.0) {
+      std::lock_guard lock(bf1943::g_own_mutex);
+      const auto& own = bf1943::g_own;
+      if (own.valid && bf1943::ClientTicks() - own.tick <= 2) {
+        double v2 = 0;
+        for (int c = 0; c < 3; ++c) v2 += (own.rows[3][c] - rows[3][c]) * (own.rows[3][c] - rows[3][c]);
+        if (v2 < 40.0 * 40.0)
+          for (int c = 0; c < 3; ++c) pivot[c] = own.rows[3][c];
+      }
     }
   }
   double rel[3] = {rows[3][0] - pivot[0], rows[3][1] - pivot[1], rows[3][2] - pivot[2]};
@@ -2428,10 +2431,7 @@ REX_HOOK_RAW(sub_82583348) {
 #endif
   if (uint32_t(ctx.lr) == kMainView && ctx.r4.u32 && bf1943::VehicleCameraFrame() && REXCVAR_GET(bf_smooth_motion)) {
     double free_yaw = 0, free_pitch = 0;
-    // Free look in a seat without a gun; in a gun's seat, the gun's lead (bf_turret_camera_lead: the view shows where the
-    // mouse aims, the gun follows it).
-    bool free_look = bf1943::VehicleFreeLook(free_yaw, free_pitch) && (free_yaw != 0 || free_pitch != 0);
-    if (!free_look) free_look = bf1943::TurretViewOffset(free_yaw, free_pitch) && (free_yaw != 0 || free_pitch != 0);
+    const bool free_look = bf1943::VehicleFreeLook(free_yaw, free_pitch) && (free_yaw != 0 || free_pitch != 0);
     const Xf now_xf = LoadXf(base + ctx.r4.u32);
     const uint64_t tick = bf1943::ClientTicks();
     uint32_t copy = 0;
@@ -2572,29 +2572,16 @@ bool TickBlendViewWithoutManager(PPCContext& ctx, uint8_t* base) {
 }  // namespace bf1943
 
 namespace bf1943 {
-// For vehicle_mouse.cpp: the game camera's forward row in the world as last handed to the view (before any free look
-// turn): an AA gun's direction, the camera turning with the gun. False when there is none.
-bool TickBlendGameCameraForward(double forward[3]) {
-  std::lock_guard lock(g.mutex);
-  if (!g.view_game_valid) return false;
-  for (int c = 0; c < 3; ++c) forward[c] = g.view_game.m[2][c];
-  const double l = std::sqrt(forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]);
-  if (!(l > 1e-6)) return false;
-  for (int c = 0; c < 3; ++c) forward[c] /= l;
-  return true;
-}
-
 // For look.cpp's free look: the vehicle view is handed to the renderer through our hook (smooth motion in a vehicle),
 // so a turn of it will be shown. No lock (a frame count compared; a stale read is a frame off).
 bool TickBlendVehicleView() { return InVehicleView(g_frame.load(std::memory_order_relaxed)); }
 
-// For plane_mouse.cpp: the local player's own vehicle as of the last tick (its base world transform, rows right, up,
-// forward, position; its part count; whether it was found by moving with the seat). False when none is known.
-bool OwnVehicle(float rows[4][3], int& parts, bool& scored, uint64_t& tick) {
+// For plane_mouse.cpp's log (bf_debug_vehicle_mouse): the local player's own vehicle as of the last tick, its base
+// world transform (a body's rows: left, up, forward, position). False when none is known.
+bool OwnVehicleRows(float rows[4][3]) {
   std::lock_guard lock(g_own_mutex);
   if (!g_own.valid) return false;
   std::memcpy(rows, g_own.rows, sizeof(g_own.rows));
-  parts = g_own.parts, scored = g_own.scored, tick = g_own.tick;
   return true;
 }
 }  // namespace bf1943

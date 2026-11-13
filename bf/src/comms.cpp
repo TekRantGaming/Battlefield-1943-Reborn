@@ -57,12 +57,13 @@
 
 REXCVAR_DEFINE_STRING(bf_voice_mode, "push", "BF1943/Voice", "Voice chat: push (push to talk), open (open mic) or off");
 REXCVAR_DEFINE_STRING(keybind_push_to_talk, "B", "Input/Keybinds/Voice", "Push to talk (voice chat)");
-REXCVAR_DEFINE_DOUBLE(bf_voice_volume, 100.0, "BF1943/Voice", "Other players' voices, 0 to 200 (%)");
+REXCVAR_DEFINE_DOUBLE(bf_voice_volume, 100.0, "BF1943/Voice", "Other players' voices, 0 to 500 (%)");
 REXCVAR_DEFINE_DOUBLE(bf_voice_mic_sensitivity, 50.0, "BF1943/Voice",
                       "Open mic: how quiet a voice still opens it, 0 to 100 (%)");
 REXCVAR_DEFINE_DOUBLE(bf_voice_range, 50.0, "BF1943/Voice", "Metres at which a voice fades to nothing");
 REXCVAR_DEFINE_BOOL(bf_text_chat, true, "BF1943/Chat", "Text chat shown in matches");
 REXCVAR_DECLARE(bool, server);
+REXCVAR_DECLARE(double, bf_master_volume);  // audio_settings.cpp: the broadcast chime is as loud as the game
 
 namespace bf1943 {
 const std::string& PlayerName();  // live_layers.cpp: the name played under online
@@ -77,8 +78,9 @@ using Clock = std::chrono::steady_clock;
 const Clock::time_point kStart = Clock::now();
 
 constexpr char kMagic[8] = {'B', 'F', '4', '3', 'C', 'O', 'M', 'M'};
-enum : uint8_t { kHello = 1, kWelcome, kState, kChatRelay, kChat, kRoster, kVoice, kVoiceRelay, kBye, kRefused };
-constexpr uint8_t kProtocol = 2;  // 2 from 0.4.0 (60 Hz): server/gmhost.py COMMS_PROTOCOL
+enum : uint8_t { kHello = 1, kWelcome, kState, kChatRelay, kChat, kRoster, kVoice, kVoiceRelay, kBye, kRefused,
+                 kBroadcast };  // kBroadcast (11, v0.4.0): the host's message to every player on the server
+constexpr uint8_t kProtocol = 1;
 constexpr int kRate = 16000, kFrame = 320;  // 20 ms
 constexpr uint8_t kCodecAdpcm = 1;
 
@@ -273,6 +275,13 @@ std::string g_joined;
 std::deque<ChatLine> g_chat;
 std::deque<std::pair<Channel, std::string>> g_outbox;
 std::vector<std::string> g_speaking;
+// The server's last broadcast (kBroadcast): shown for its seconds from when it arrived (comms_ui.cpp).
+struct BroadcastNow {
+  std::string text;
+  int kind = 0;
+  double at = -1000, seconds = 10;
+} g_broadcast;
+std::atomic<int> g_chime{0};  // a broadcast arrived: the mix plays its two notes (counted up, the mixer takes it)
 std::once_flag g_started;
 
 double NowS() { return std::chrono::duration<double>(Clock::now() - kStart).count(); }
@@ -346,6 +355,73 @@ std::string ShownName(const std::string& name) {
   return text_filter::NameAllowed(name) ? name : std::string(name.size(), '*');
 }
 
+// ---- how loud a voice is (TekRantGaming, 13 Nov 2026: "voice chat volume needs to be higher so lets update the volume
+// slider to go higher than 200% lets say a 500% max or shold we just adjust the current system so that the original
+// slider amount increases it more per %"). Both. Voices were played as their microphones sent them, 3 dB down, so a
+// quiet microphone was a quiet player and no slider made up for it:
+//   - each voice is levelled to the same speaking level before it is placed (VoiceLevel: its level followed while it
+//     speaks, the gain that brings it to kVoiceTargetDb), so 100% is one loudness for every player, well above what
+//     most microphones sent;
+//   - a voice straight ahead plays at that level in both ears (it played 3 dB under it);
+//   - the slider goes to 500%;
+//   - the mix is limited where it was cut off at full scale: a frame that would pass 0.9 of it is turned down as a
+//     whole (MixFrame), so a raised voice is loud and clean, not crackling; SoftLimit is the last guard after it.
+// Tuned on two recordings of the same speech, 20 dB apart (scratchpad agc_sim.py), then heard in the game from one
+// client by another (runs voicelvl1 to 8, 13 Nov 2026: recordings in and out, never real devices).
+constexpr float kVoiceTargetDb = -16.0f;                    // a speaking voice's level (its loud frames' RMS) at 100%
+constexpr float kVoiceGainMinDb = -12.0f, kVoiceGainMaxDb = 24.0f;
+constexpr float kVoiceFloorDb = -58.0f;                     // quieter than this is no speech: the level is not followed
+constexpr float kVoiceStartDb = -45.0f;                     // a voice's level is first taken from a frame over this
+constexpr float kVoicePauseDb = 15.0f;                      // this far under the voice's level is a pause, not the voice
+constexpr float kVoicePeak = 0.9f;                          // of full scale: a levelled voice's peak, and the mix's
+
+// A frame's level in dB full scale (RMS), and its peak (0 to 1).
+float FrameDb(const int16_t* pcm, int n, float* peak) {
+  double sum = 0;
+  int top = 0;
+  for (int i = 0; i < n; ++i) sum += double(pcm[i]) * pcm[i], top = std::max(top, std::abs(int(pcm[i])));
+  *peak = float(top) / 32768.0f;
+  return float(10.0 * std::log10(sum / n / (32768.0 * 32768.0) + 1e-12));
+}
+
+// One voice's level, followed while it speaks: quickly up (a voice louder than thought is turned down within a few
+// frames), slowly down, and all but not through a pause (a held push to talk key sends the room between the words:
+// its noise must not pull the level down, or the gain would rise on it and the next word would come in too loud).
+// The level is first taken from a frame that can be speech (a voice often begins with a breath or the room), and the
+// gain comes down at once but goes up by half a dB a frame at most (25 dB a second), from none. Whatever the level
+// says, a frame's own peak is never raised past kVoicePeak: run voicelvl3 had 28 samples at full scale at 100%, the
+// gain for a quiet lead in landing on the loud word after it.
+struct VoiceLevel {
+  float db = 0, gain_db = 0;
+  bool known = false;
+  void Follow(float frame_db, float frame_peak) {
+    if (frame_db >= kVoiceFloorDb) {
+      if (!known) {
+        if (frame_db > kVoiceStartDb) db = frame_db, known = true;
+      } else if (frame_db > db) {
+        db += 0.30f * (frame_db - db);
+      } else {
+        db += (db - frame_db > kVoicePauseDb ? 0.0005f : 0.02f) * (frame_db - db);
+      }
+      if (known) {
+        const float want = std::clamp(kVoiceTargetDb - db, kVoiceGainMinDb, kVoiceGainMaxDb);
+        gain_db = want < gain_db ? want : std::min(want, gain_db + 0.5f);
+      }
+    }
+    if (frame_peak * Gain() > kVoicePeak) gain_db = 20.0f * std::log10(kVoicePeak / frame_peak);
+  }
+  float Gain() const { return std::pow(10.0f, gain_db / 20.0f); }
+};
+
+// The mix's limiter: as it is up to 0.8 of full scale, then bent so that nothing reaches full scale.
+inline float SoftLimit(float v) {
+  constexpr float knee = 0.8f;
+  const float a = std::fabs(v);
+  if (a <= knee) return v;
+  const float out = knee + (1.0f - knee) * std::tanh((a - knee) / (1.0f - knee));
+  return v < 0 ? -out : out;
+}
+
 struct Talker {
   std::string name;
   std::vector<std::pair<uint16_t, std::array<int16_t, kFrame>>> frames;  // a few, in any order (seq wraps)
@@ -354,6 +430,7 @@ struct Talker {
   double last_packet = -10;
   double audible_at = -10;  // the last frame placed within hearing: only then is the name in the speaking list
   float pos[3] = {0, 0, 0};
+  VoiceLevel level;  // its speaking level, for the same loudness from every microphone
   size_t Oldest() const {
     size_t o = 0;
     for (size_t i = 1; i < frames.size(); ++i)
@@ -412,6 +489,10 @@ class Engine {
   Adpcm encoder_;
   double open_until_ = 0;  // open mic: held this long after the last loud frame
   double next_mix_ = 0;
+  float mix_gain_ = 1.0f;  // the mix's limiter (MixFrame): this frame's gain, 1 or less
+  uint16_t broadcast_id_ = 0;  // the last broadcast shown, and when (the host sends each three times)
+  double broadcast_at_ = -1000;
+  int chime_seen_ = 0, chime_pos_ = -1;  // g_chime as last taken; the chime's sample being mixed (-1: none)
   // Voice traffic for the log (a line every 30 s while there is any: players' reports).
   int frames_sent_ = 0, frames_heard_ = 0;
   double follow_at_ = -100;  // BF_DEV_FOLLOW_TEAM
@@ -582,6 +663,26 @@ class Engine {
                       shown_name, shown);
           break;
         }
+        case kBroadcast: {
+          // The host's message to everyone (a game update, a restart, an admin's words): sent three times, shown
+          // once, in the box at the top of the screen for its seconds, with the chime. The profanity filter as for
+          // chat (a community server's admin writes these).
+          const uint16_t id = r.u16();
+          const uint8_t kind = r.u8(), seconds = r.u8();
+          const std::string text = r.text8();
+          if (!r.ok || text.empty()) break;
+          if (id == broadcast_id_ && now - broadcast_at_ < 60) break;
+          broadcast_id_ = id, broadcast_at_ = now;
+          const std::string shown = text_filter::Censor(text);
+          {
+            std::lock_guard lock(g_mutex);
+            g_broadcast.text = shown, g_broadcast.kind = kind <= 2 ? kind : 0, g_broadcast.at = now;
+            g_broadcast.seconds = std::clamp(double(seconds), 3.0, 30.0);
+          }
+          g_chime.fetch_add(1);
+          REXLOG_INFO("BF comms: server broadcast {} ({}): {}", id, kind == 1 ? "game update" : kind == 2 ? "restart" : "message", shown);
+          break;
+        }
         case kVoiceRelay: {
           const uint16_t from = r.u16(), seq = r.u16();
           const float x = r.f32(), y = r.f32(), z = r.f32();
@@ -720,7 +821,9 @@ class Engine {
 
   void Audio(double now) {
     const std::string mode = REXCVAR_GET(bf_voice_mode);
-    if (mode == "off" || !welcomed_) {
+    // A broadcast's chime plays with voice chat off too: the playback stays (or opens) for its two notes.
+    if (g_chime.load() != chime_seen_) chime_seen_ = g_chime.load(), chime_pos_ = 0;
+    if (!welcomed_ || (mode == "off" && chime_pos_ < 0)) {
       CloseAudio();
       g_transmitting = false;
       std::lock_guard lock(g_mutex);
@@ -733,7 +836,7 @@ class Engine {
 #else
     constexpr bool always = false;
 #endif
-    OpenMic(mode == "open" || g_ptt.load() || always, now);
+    OpenMic(mode != "off" && (mode == "open" || g_ptt.load() || always), now);
     // Captured audio, 20 ms at a time.
     if (capture_) {
       int16_t tmp[1600];
@@ -811,7 +914,7 @@ class Engine {
     // Before the listener's own camera is known (loading in), no voice is placed anywhere: silence (comms7 played the
     // first 5 s centred at full volume, from a camera at 0, 0, 0).
     const bool cam_valid = g_cam_valid.load();
-    const float volume = cam_valid ? float(std::clamp(REXCVAR_GET(bf_voice_volume), 0.0, 200.0) / 100.0) : 0.0f;
+    const float volume = cam_valid ? float(std::clamp(REXCVAR_GET(bf_voice_volume), 0.0, 500.0) / 100.0) : 0.0f;
     const float range = float(std::clamp(REXCVAR_GET(bf_voice_range), 10.0, 200.0));
     for (auto it = talkers_.begin(); it != talkers_.end();) {
       Talker& t = it->second;
@@ -843,20 +946,52 @@ class Engine {
       float gain = dist <= 4.0f ? 1.0f : std::max(0.0f, 1.0f - (dist - 4.0f) / (range - 4.0f));
       gain = gain * gain;
       if (cam_valid && gain > 0.0005f) t.audible_at = now;  // within hearing, whatever the voice volume
-      gain *= volume;
+      // The voice at the one speaking level, then the distance and the player's volume.
+      float frame_peak = 0;
+      const float frame_db = FrameDb(frame.data(), kFrame, &frame_peak);
+      t.level.Follow(frame_db, frame_peak);
+      gain *= volume * t.level.Gain();
       float pan = 0;  // -1 left, 1 right
       if (dist > 0.5f) pan = std::clamp((d[0] * right[0] + d[1] * right[1] + d[2] * right[2]) / dist, -1.0f, 1.0f);
       const float angle = (pan + 1.0f) * 0.25f * 3.14159265f;
       const float gl = gain * std::cos(angle) * 1.41421356f, gr = gain * std::sin(angle) * 1.41421356f;
       if (gain > 0.0005f) {
+        // Straight ahead: the voice's own level in each ear (gl and gr are 1 there); to one side, 3 dB over it there.
         for (int i = 0; i < kFrame; ++i) {
           const float s = frame[i] / 32768.0f;
-          mix[i * 2] += s * gl * 0.7071f, mix[i * 2 + 1] += s * gr * 0.7071f;
+          mix[i * 2] += s * gl, mix[i * 2 + 1] += s * gr;
         }
       }
       ++it;
     }
-    for (float& v : mix) v = std::clamp(v, -1.0f, 1.0f);
+    // A server broadcast's chime: two short notes, the second a fourth up, each dying away; as loud as the game's
+    // master volume allows (a test's recording gets it whole: the test runs with the game silent).
+    if (chime_pos_ >= 0) {
+      float level = float(std::clamp(REXCVAR_GET(bf_master_volume), 0.0, 100.0) / 100.0) * 0.30f;
+#if defined(BF_DEV_TOOLS)
+      if (dev_out_) level = 0.30f;
+#endif
+      constexpr int kNote = kRate * 17 / 100, kTotal = kRate * 60 / 100;  // 0.17 s to the second note, 0.6 s in all
+      for (int i = 0; i < kFrame && chime_pos_ < kTotal; ++i, ++chime_pos_) {
+        const bool second = chime_pos_ >= kNote;
+        const float t = float(second ? chime_pos_ - kNote : chime_pos_) / float(kRate);
+        const float tone = std::sin(6.2831853f * (second ? 1174.66f : 880.0f) * t) + 0.35f * std::sin(6.2831853f * (second ? 2349.32f : 1760.0f) * t);
+        const float v = level * tone * std::exp(-t * (second ? 7.0f : 9.0f)) * std::min(1.0f, t * 400.0f);
+        mix[i * 2] += v, mix[i * 2 + 1] += v;
+      }
+      if (chime_pos_ >= kTotal) chime_pos_ = -1;
+    }
+    // The mix's limiter: a frame whose peak would pass kVoicePeak is turned down as a whole, the gain eased in over
+    // the frame from the last one's and let back up by 1 dB a frame; SoftLimit after it for what the easing lets by.
+    float peak = 0;
+    for (const float v : mix) peak = std::max(peak, std::fabs(v));
+    const float want = peak > kVoicePeak ? kVoicePeak / peak : 1.0f;
+    const float to = want < mix_gain_ ? want : std::min(want, mix_gain_ * 1.122f);
+    for (int i = 0; i < kFrame; ++i) {
+      const float m = mix_gain_ + (to - mix_gain_) * float(i + 1) / float(kFrame);
+      mix[i * 2] = SoftLimit(mix[i * 2] * m), mix[i * 2 + 1] = SoftLimit(mix[i * 2 + 1] * m);
+    }
+    mix_gain_ = to;
     if (playback_) SDL_PutAudioStreamData(playback_, mix, sizeof(mix));
 #if defined(BF_DEV_TOOLS)
     if (dev_out_) dev_out_->Write(mix, kFrame);
@@ -880,6 +1015,15 @@ void NoteCamera(const float pos[3], const float right[3], const float back[3]) {
     g_cam[6 + i].store(back[i], std::memory_order_relaxed);
   }
   g_cam_valid.store(true, std::memory_order_release);
+}
+bool Camera(float pos[3], float right[3], float back[3]) {
+  if (!g_cam_valid.load(std::memory_order_acquire)) return false;
+  for (int i = 0; i < 3; ++i) {
+    pos[i] = g_cam[i].load(std::memory_order_relaxed);
+    right[i] = g_cam[3 + i].load(std::memory_order_relaxed);
+    back[i] = g_cam[6 + i].load(std::memory_order_relaxed);
+  }
+  return true;
 }
 void NoteInWorld(bool in_world) { g_in_world.store(in_world, std::memory_order_relaxed); }
 void NoteTeam(int team, int squad) {
@@ -933,6 +1077,16 @@ std::vector<ChatLine> RecentChat(size_t max) {
 void SendChat(Channel channel, const std::string& text) {
   std::lock_guard lock(g_mutex);
   if (g_outbox.size() < 8) g_outbox.emplace_back(channel, text);
+}
+bool CurrentBroadcast(std::string* text, int* kind, double* age, double* seconds) {
+  std::lock_guard lock(g_mutex);
+  const double a = NowS() - g_broadcast.at;
+  if (g_broadcast.text.empty() || a < 0 || a > g_broadcast.seconds) return false;
+  if (text) *text = g_broadcast.text;
+  if (kind) *kind = g_broadcast.kind;
+  if (age) *age = a;
+  if (seconds) *seconds = g_broadcast.seconds;
+  return true;
 }
 std::vector<std::string> Speaking() {
   std::lock_guard lock(g_mutex);

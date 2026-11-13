@@ -80,6 +80,12 @@ bool PlaneMouseActive() {
   std::lock_guard lock(g.mutex);
   return g.active;
 }
+// For look.cpp: the mouse's stick has this seat (a plane, or a seat whose gun has turning parts), as of now.
+bool MouseStickSeat() {
+  SeatInfo seat;
+  if (LocalSeat(seat) && seat.kind == SeatKind::kPlane && REXCVAR_GET(bf_plane_mouse_aim)) return true;
+  return VehicleMouseAxes() != 0;
+}
 // For native_input.cpp: the stick for concepts 6 (roll, or a gun's turn) and 5 (pitch, positive up for a gun and nose
 // down for a plane, as the game has them without its own invert), worked out within 100 ms; axes says which to write.
 bool PlaneMouseConcepts(float& roll6, float& pitch5, unsigned& axes) {

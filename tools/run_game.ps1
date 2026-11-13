@@ -34,7 +34,9 @@ param(
     [string]$SeedCache = "",  # a folder of shader storage files (.xsh, .xpso) copied into the client's shader cache first
     [string]$UserFrom = "",  # a user folder copied in first (TekRantGaming's profile from an earlier interactive run)
     [int]$StopServerAt = 0,  # seconds after start at which the helper processes are stopped (a server going away during a match)
-    [string]$GpuPlugin = ""  # a rexgpu-xenos.dll to use instead of the build's (our SDK copy, sdk\src-bf, for A/B tests)
+    [string]$GpuPlugin = "",  # a rexgpu-xenos.dll to use instead of the build's (our SDK copy, sdk\src-bf, for A/B tests)
+    [switch]$FollowRestart  # the game may start itself again (after an update, or onto a server's own backend: the LAN
+                            # only join): the run goes on with the new process instead of ending with the first
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -190,11 +192,37 @@ if (-not $Interactive) { $launchArgs += "--bf_update_feed=$(if ($env:BF_TEST_UPD
         return
     }
     $waited = 0; $exited = $false
+    # True once the game is gone within $ms. With -FollowRestart a game that started itself again (the same log file
+    # on its command line) takes the first one's place and the wait goes on.
+    $script:followed = @()
+    function Wait-GameExit([int]$ms) {
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($ms)
+        while ($true) {
+            $left = [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds
+            if ($left -le 0) { return $false }
+            if (-not $script:gameProc.WaitForExit($left)) { return $false }
+            if (-not $FollowRestart) { return $true }
+            $mark = '*' + (Join-Path $dir 'bf1943.log') + '*'
+            $next = $null
+            for ($i = 0; $i -lt 12 -and -not $next; $i++) {
+                $next = Get-CimInstance Win32_Process -Filter "Name = 'bf1943.exe'" |
+                    Where-Object { $_.ProcessId -ne $script:gameProc.Id -and $_.CommandLine -like $mark -and $_.CommandLine -notlike '*--server*' } |
+                    Select-Object -First 1
+                if (-not $next) { Start-Sleep -Milliseconds 500 }
+            }
+            if (-not $next) { return $true }
+            $script:followed += "the game started itself again: PID $($next.ProcessId) follows PID $($script:gameProc.Id)"
+            $script:gameProc = Get-Process -Id $next.ProcessId
+            $null = $script:gameProc.Handle
+        }
+    }
+    $script:gameProc = $proc
     $times = @($Shots -split "," | Where-Object { $_ } | ForEach-Object { [int]$_ })
     if ($StopServerAt -gt 0) { $times += $StopServerAt }
     foreach ($t in ($times | Sort-Object -Unique)) {
         if ($t -ge $Seconds) { break }
-        if ($proc.WaitForExit(($t - $waited) * 1000)) { $exited = $true; break }
+        if (Wait-GameExit (($t - $waited) * 1000)) { $exited = $true; break }
+        $proc = $script:gameProc
         $waited = $t
         if ($t -eq $StopServerAt) {
             foreach ($hp in $helperProcs) { if (-not $hp.HasExited) { Stop-Process -Id $hp.Id -Force; "stopped helper PID $($hp.Id) at $t s" } }
@@ -204,7 +232,9 @@ if (-not $Interactive) { $launchArgs += "--bf_update_feed=$(if ($env:BF_TEST_UPD
         try { & (Join-Path $PSScriptRoot "capture_window.ps1") -ProcessId $proc.Id -Out (Join-Path $dir "shot_$t.png"); "shot at $t s" }
         catch { "shot at $t s failed: $_" }
     }
-    if (-not $exited) { $exited = $proc.WaitForExit(($Seconds - $waited) * 1000) }
+    if (-not $exited) { $exited = Wait-GameExit (($Seconds - $waited) * 1000) }
+    $proc = $script:gameProc
+    $script:followed
     if ($exited) { "exited by itself, code $($proc.ExitCode) (0x{0:X8})" -f $proc.ExitCode }
     else {
         "time up after $Seconds s, closing"

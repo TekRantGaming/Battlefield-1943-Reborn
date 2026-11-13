@@ -11,6 +11,8 @@ enum Channel : uint8_t { kAll = 0, kTeam = 1, kSquad = 2 };
 
 // From the game's hooks.
 void NoteCamera(const float pos[3], const float right[3], const float back[3]);  // fov.cpp: the rendered camera
+// The rendered camera as last noted (the pause menu's map: where the player is and looks); false before the first.
+bool Camera(float pos[3], float right[3], float back[3]);
 void NoteInWorld(bool in_world);                                                 // auto_join.cpp: on foot or seated
 void NoteJoined(const std::string& address);                                     // game_menu.cpp: the server joined
 void NoteTeam(int team, int squad);  // the local player's team (1, 2; 0 not known) and squad (0 none)
@@ -28,6 +30,10 @@ struct ChatLine {
 };
 std::vector<ChatLine> RecentChat(size_t max);
 void SendChat(Channel channel, const std::string& text);
+// A server broadcast (the host's message to every player: a game update, a restart, an admin's own words), for the
+// box at the top of the screen (comms_ui.cpp). False when none is up. `kind`: 0 an admin's message, 1 a game
+// update, 2 a server restart; `age` seconds since it arrived, `seconds` how long it stays.
+bool CurrentBroadcast(std::string* text, int* kind, double* age, double* seconds);
 std::vector<std::string> Speaking();  // the players heard now
 bool Transmitting();                  // the local player's voice is going out
 void SetPushToTalk(bool down);

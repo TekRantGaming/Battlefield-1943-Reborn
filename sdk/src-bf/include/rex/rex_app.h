@@ -34,6 +34,21 @@ namespace rex {
 
 class LogCaptureSink;
 
+/// Why the app's event loop ended by itself (ReXApp::OnDestroy), for a subclass's OnShutdown that wants to tell the
+/// player (Battlefield 1943, 13 Nov 2026). kNone while the app is not quitting by itself; a window close never is
+/// (OnClosing hard-exits).
+enum class SelfQuitCause {
+  kNone,
+  kInitFailed,          ///< OnInitialize: the environment, or the window and its presentation
+  kRuntimeSetupFailed,  ///< Runtime::Setup
+  kModuleLaunchFailed,  ///< Runtime::PrepareModuleLaunch: the executable module did not load or prepare
+  kGuestExited,         ///< the guest's main thread ended ("Execution complete")
+};
+SelfQuitCause SelfQuitWhy();
+/// The same in words, as logged (nullptr with kNone), and the exit code the process ends with.
+const char* SelfQuitReason();
+int SelfQuitCode();
+
 /// Content path configuration, passed to OnConfigurePaths().
 /// All paths start with sensible defaults derived from CLI args and cvars.
 /// Subclasses may override any field before Runtime is constructed.

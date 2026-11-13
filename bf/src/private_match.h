@@ -12,7 +12,6 @@ namespace bf1943 {
 
 struct PrivateMatchOptions {
   std::vector<std::string> maps;  // in turn, by key: wake, guadalcanal, iwo, coral
-  bool modern = false;            // the movement and aiming it plays (modern_mode.cpp)
   bool upnp = true;               // ask the router to forward the match's port (UPnP)
   std::string name;               // its name in the backend's list
 };

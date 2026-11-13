@@ -33,6 +33,7 @@ REXCVAR_DEFINE_BOOL(bf_mouse_vehicle_aim, true, "BF1943/Controls",
                     "The mouse turns vehicle guns and turrets (false: only the keys and a controller do)");
 REXCVAR_DEFINE_BOOL(bf_debug_vehicle_mouse, false, "BF1943/Controls",
                     "Log vehicle mouse aim to bf1943.log (the seat's turning parts, the mouse's stick)");
+REXCVAR_DECLARE(bool, bf_mouse_invert_y_vehicle);  // input_settings.cpp
 
 namespace bf1943 {
 int TickRate();       // tick_rate.cpp
@@ -136,6 +137,11 @@ unsigned VehicleMouseAxes() {
   const auto now = Clock::now();
   return (now - g_axis_seen[6] < kFresh ? 1u : 0u) | (now - g_axis_seen[5] < kFresh ? 2u : 0u);
 }
+
+// Invert vehicle (Settings, Controls): the mouse's up and down for guns, turrets and a vehicle's view. Its own switch
+// (upstream 0.4.0's "same as on foot" choice, bf_mouse_vehicle_vertical, is not followed: 13 Nov, one plain invert for
+// each of camera, vehicle and flight).
+bool VehicleMouseInverted() { return REXCVAR_GET(bf_mouse_invert_y_vehicle); }
 
 // For look.cpp: the seat has a gun the mouse turns.
 bool VehicleMouseTurretSeat() { return VehicleMouseAxes() != 0; }

@@ -63,6 +63,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <span>
 #include <string>
@@ -1508,6 +1509,8 @@ void ExecuteResolve(const Command& c) {
   from = HostRect(source->scale, from);
   to = HostRect(target->scale, to);
   bool scaled = source->reduced || aliased;
+  // Into a cube's face, which is square on the host whatever the render scale's axes (targets.cpp): the copy scales.
+  if (cube && (source->scale.x != target->scale.x || source->scale.y != target->scale.y)) scaled = true;
   if (scaled && source->samples > 1) {
     ++g_stats.skipped_resolves;  // reduced targets have no MSAA (NativeXRenderer draws without it)
     return;
@@ -2430,6 +2433,60 @@ void CaptureResolve(const uint8_t* base, const Arguments& a, const PacketScan& s
   c.scene_caller = a.lr == g_profile->scene_resolve_caller &&
                    (!g_profile->scene_resolve_outer_caller || a.outer_lr == g_profile->scene_resolve_outer_caller);
   c.caller = a.lr;
+  // D165: a destination the game reads on the CPU gets defined guest bytes (zeros) now, on the game's thread, before
+  // the game can read them. NXR_RESOLVE_LOG (a diagnosis aid): each caller's resolves by destination size and format,
+  // once, and for the small ones how many found guest bytes that were not zero (what a CPU reader would have got).
+  if (texture) {
+    const uint32_t fetch1 = c.fetch[1], fetch2 = c.fetch[2];
+    const uint32_t format = fetch1 & 0x3F, width = (fetch2 & 0x1FFF) + 1, height = ((fetch2 >> 13) & 0x1FFF) + 1;
+    bool zero = false;
+    for (const Profile::ZeroedResolve& z : g_profile->zeroed_resolves) {
+      zero |= z.caller && z.caller == a.lr && (!z.outer_caller || z.outer_caller == a.outer_lr) &&
+              (!z.width || z.width == width) && (!z.height || z.height == height) &&
+              (z.format < 0 || uint32_t(z.format) == format);
+    }
+    static const bool log = std::getenv("NXR_RESOLVE_LOG") != nullptr;
+    static const bool off = std::getenv("NXR_D165_OFF") != nullptr;  // a diagnosis aid: the game reads what is there
+    if (off) zero = false;
+    if (zero || log) {
+      const uint32_t dimension = (c.fetch[5] >> 9) & 3;
+      const bool cube = dimension == uint32_t(rex::graphics::xenos::DataDimension::kCube);
+      const uint32_t slices = (fetch2 >> 26) + 1, address = GpuAddress(fetch1 & 0xFFFFF000u);
+      const bool flat = dimension == uint32_t(rex::graphics::xenos::DataDimension::k2DOrStacked) || cube;
+      const uint32_t bytes = flat ? ResolveGuestBytes(c.fetch[0], c.fetch[5], format, width, height, slices, cube) : 0;
+      GuestMemory* memory = g_resolved.memory();
+      uint8_t* data = memory && bytes && bytes <= (1u << 20) ? memory->memory().TranslatePhysical<uint8_t*>(address) : nullptr;
+      size_t set = 0;
+      if (data)
+        for (uint32_t i = 0; i < bytes; ++i) set += data[i] != 0;
+      if (log) {
+        struct Seen {
+          uint64_t calls = 0, dirty = 0;
+        };
+        static std::mutex mutex;
+        static std::map<uint64_t, Seen> seen;
+        std::lock_guard lock(mutex);
+        Seen& s = seen[uint64_t(a.lr) << 32 | uint64_t(width & 0xFFF) << 20 | uint64_t(height & 0xFFF) << 8 | format];
+        ++s.calls;
+        s.dirty += set != 0;
+        // Each kind once, then the small ones (what a game would read on the CPU) every 200th call and whenever one
+        // is the first of its kind to hold something.
+        if (s.calls == 1 || (data && width <= 256 && height <= 256 && (s.calls % 200 == 0 || (set && s.dirty == 1))))
+          REXLOG_INFO("[native_x_renderer] resolve from {:#x} < {:#x} to {}x{} guest format {} at {:#x}: call {} of this "
+                      "kind, {} of them found guest bytes not zero (this one {} of {}){}",
+                      a.lr, a.outer_lr, width, height, format, address, s.calls, s.dirty, set, bytes,
+                      zero ? ", zeroed (D165)" : "");
+      }
+      if (zero && data && set) {
+        std::memset(data, 0, bytes);
+        static std::atomic<uint32_t> zeroed{0};
+        if (zeroed.fetch_add(1, std::memory_order_relaxed) == 0)
+          REXLOG_INFO("[native_x_renderer] D165: a resolve destination the game reads on the CPU ({}x{} guest format {} "
+                      "from {:#x}) held {} bytes of another use: set to zero before the game reads it",
+                      width, height, format, a.lr, set);
+      }
+    }
+  }
 }
 
 // BeginTiling(dev, flags, count, tileRects*, clearColor*, Z (f1), stencil): the size of the image the tiles
@@ -2876,9 +2933,10 @@ void OnEnter(Call call, PPCContext& ctx, uint8_t* base, bool nested) {
   g_call.r = {ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32};
   g_call.f1 = ctx.f1.f64;
   g_call.lr = uint32_t(ctx.lr);
-  g_call.outer_lr = call == Call::kResolve && g_profile->scene_resolve_outer_caller
-                        ? OuterReturnAddress(base, ctx.r1.u32)
-                        : 0;
+  static const bool resolve_log = std::getenv("NXR_RESOLVE_LOG") != nullptr;
+  bool outer = g_profile->scene_resolve_outer_caller != 0 || resolve_log;
+  for (const Profile::ZeroedResolve& z : g_profile->zeroed_resolves) outer |= z.caller && z.outer_caller;  // D165
+  g_call.outer_lr = call == Call::kResolve && outer ? OuterReturnAddress(base, ctx.r1.u32) : 0;
   if (call == Call::kPresent) g_front_buffer = ctx.r4.u32;
 }
 

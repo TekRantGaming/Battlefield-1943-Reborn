@@ -178,6 +178,19 @@ struct Profile {
   // out from the depth and multiplied into the scene's colour just before it. Needs the view found from the draws
   // (upscale_resolve_caller). 0: no ambient occlusion.
   uint32_t ao_resolve_caller = 0;
+  // Resolves whose destination the game then reads on the CPU (D165). A resolve stays on the host (D70): its texels
+  // reach guest memory only where a draw reads them as vertices (D140). A CPU reader would get what that memory held
+  // before: zeros in a fresh process, another level's leftovers once the heap has been used again. For a resolve
+  // that matches an entry here (the return address of the Resolve call; its caller's too when the game resolves
+  // through one function of its own, 0: any; the destination's size, 0: any; its guest format, -1: any) the
+  // destination's guest bytes are set to zero as the game makes the call, on its own thread, so the reader finds an
+  // empty picture every time (Battlefield 1943's undergrowth cell masks: its jobs place the game's own undergrowth
+  // from them, and placed plants on roads from a second level on). caller 0: an unused entry.
+  struct ZeroedResolve {
+    uint32_t caller = 0, outer_caller = 0, width = 0, height = 0;
+    int32_t format = -1;
+  };
+  ZeroedResolve zeroed_resolves[4];
   // The game draws its 2D layer after the main 3D view (its HUD; GH Metallica's note highway and notes) with inline
   // vertices whose first two floats are their position in pixels of the output canvas (output_width x output_height).
   // With frame generation those draws' motion comes from their vertices, each draw matched with the last frame's

@@ -113,7 +113,37 @@ void SetGlyphDir(const std::filesystem::path& dir);  // <exe>\glyphs
 // `fit`: King Kong's DrawCover (a shape far from the box's shown whole over itself cropped and dimmed, else cropped);
 // `max_width`: kept no wider than that in the font atlas (0: as it is).
 bool DrawImageFile(ImDrawList* d, const std::filesystem::path& file, ImVec2 a, ImVec2 b, bool stretch = false,
-                   bool fit = false, int max_width = 0);
+                   bool fit = false, int max_width = 0, ImU32 tint = IM_COL32(255, 255, 255, 255));
+// The picture file's size in pixels (0 x 0 while it is not there or not decoded yet).
+ImVec2 ImageFileSize(const std::filesystem::path& file);
+// The picture file's place in the font atlas (the texture coordinates of its whole picture) and its size in pixels,
+// for a caller that draws parts of it with ImGui::GetIO().Fonts->TexRef (the pause menu's map and its icons). False
+// while the file is not there.
+bool ImageFileUv(const std::filesystem::path& file, ImVec2& uv0, ImVec2& uv1, int& w, int& h);
+
+// ---- the game's own menu art and fonts (TekRantGaming, 12 Nov 2026: the player's game files hold the menus' logo, atlases,
+// insignia, portraits, brush strokes and fonts; shader_prep.cpp ExtractMenuArt cuts them into user\cache\extracted\menu
+// after the game is installed, bf_font.cpp reads the fonts). Never shipped; until they are there, the launcher
+// draws with its own fonts and colours.
+void SetMenuArtDir(const std::filesystem::path& dir);  // user\cache\extracted\menu (the user folder is three up)
+const std::filesystem::path& MenuArtDir();
+// A piece of the menu art by its name (logo, backdrop, brush_bar, portrait_us_rifleman, rank_07, glyph_a, flag_us,
+// compass...), drawn to fill a..b (cropped to the box's shape, or with stretch squeezed into it), tinted. False
+// (nothing drawn) until the art is there.
+bool Art(ImDrawList* d, const char* name, ImVec2 a, ImVec2 b, bool stretch = false, ImU32 tint = IM_COL32(255, 255, 255, 255));
+// A piece of art `h` tall at its own shape, its left middle at `at`; returns the width (0 when not there).
+float ArtAt(ImDrawList* d, const char* name, ImVec2 at, float h, ImU32 tint = IM_COL32(255, 255, 255, 255), bool draw = true);
+ImVec2 ArtSize(const char* name);
+// The card paper (the game's own, from its logo cards) over a..b: the plain paper colour until it is there.
+void PaperArt(ImDrawList* d, ImVec2 a, ImVec2 b);
+// The game's fonts: headline_large (Artbrush, headings), headline_medium (rows), normal_large and normal_medium
+// (Eurostile Bold Condensed: buttons, labels), list_header (Century Schoolbook Bold Italic: table headers), list_item,
+// headnumbers. Text with its capitals `cap` pixels high from `at` (the capitals' top left), `track` pixels added after
+// each glyph; until the font is ready, our nearest font (the stencil, Oswald, the typed one). Returns the width.
+enum class GameFont { kHeadline, kHeadlineMedium, kText, kTextMedium, kListHeader, kListItem, kNumbers };
+float GameText(ImDrawList* d, GameFont f, float cap, ImVec2 at, ImU32 col, const std::string& t, float track = 0);
+float GameTextWidth(GameFont f, float cap, const std::string& t, float track = 0);
+bool GameFontReady(GameFont f);
 // An alpha mask (`size` x `size`, one byte a pixel; King Kong's brand marks, steam_icon.inc, discord_icon.inc) drawn
 // into a .. b in `tint`, kept in the font atlas under `key`. False when the atlas has no room for it.
 bool DrawMask(ImDrawList* d, const char* key, const unsigned char* mask, int size, ImVec2 a, ImVec2 b, ImU32 tint);

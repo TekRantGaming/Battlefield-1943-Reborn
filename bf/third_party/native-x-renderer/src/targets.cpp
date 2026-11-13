@@ -526,7 +526,12 @@ ResolvedTexture* ResolvedTextures::GetOrCreate(uint32_t address, uint32_t guest_
   std::string name = std::string(cube ? "NativeXRenderer resolve cube " : "NativeXRenderer resolve ") +
                      std::to_string(width) + "x" + std::to_string(height) + "x" + std::to_string(slices) + " at " +
                      std::to_string(address) + (shadow ? " shadow" : "");
-  const RenderScale& scale = shadow ? shadow_scale_ : scale_;
+  RenderScale scale = shadow ? shadow_scale_ : scale_;
+  // A cube's faces are square: with a render scale per axis (an output of another shape filled, D43 and D166) both
+  // axes take the smaller one, and the resolve scales its copy into the face (renderer.cpp ExecuteResolve). Without
+  // this the texture could not be made at all (Battlefield 1943 at 21:9, 13 Nov 2026: "texture width (258 provided)
+  // must match texture height (192 provided)", its 128x128 cube left as it was).
+  if (cube && scale.x != scale.y) scale.x = scale.y = std::min(scale.x, scale.y);
   desc.Name = name.c_str();
   // A cube is a 2D array of six faces that can also be viewed as a cube (its default view).
   desc.Type = cube ? RESOURCE_DIM_TEX_CUBE : RESOURCE_DIM_TEX_2D_ARRAY;

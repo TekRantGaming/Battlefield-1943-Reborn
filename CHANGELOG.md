@@ -1,21 +1,77 @@
 # Changelog
 
-## 0.4.0 (Unreleased)
+## 0.4.0 (13 November 2026): a new look, ultrawide screens, mouse flying, lettered flags, a map in the pause menu
+
+An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. Earlier versions update to it by
+themselves, and the servers now only let the newest version in.
 
 **New**
-- **Ultrawide screens.** On a 21:9, 32:9 or other wide screen the game fills the screen with a wider view (more to
-  each side, nothing stretched). Settings > Screen > HUD layout: Edges puts the minimap, squad and ammo at the
-  screen's sides, Centered keeps the HUD in 16:9 in the middle. Menus, the deploy screen, the scoreboard and loading
-  screens stay together in the middle with their backgrounds out to the edges; the sniper scope's black fills the
-  screen; flag markers stay on their flags. Aspect ratio: Fill screen (new) or Letterbox 16:9, at the next start.
+- **A new look for every menu.** The main menu, the server browser, Settings, the pause menu and the first start are
+  redrawn with the game's own lettering and artwork. Quick Play joins the busiest server with room.
+- **Lettered capture points.** Every flag has its letter inside it: in the row under the ticket bars, on the markers
+  in the world, on the minimap and on the deploy map. A point keeps its letter in every match, so Wake Island's
+  Airfield is always C. The row now shows the points in order, each in the colour of the team that holds it.
+- **A map in the pause menu.** The whole island with the lettered flags in their owners' colours, what your team can
+  see, and an arrow for where you are and where you look: in an air raid, your bombers. One button changes between
+  the island and the whole battle with the carriers.
+- **Ultrawide screens.** On a 21:9, 32:9 or other wide screen the game fills the screen with a wider view: more to
+  each side, nothing stretched. Settings > Display > HUD layout puts the minimap and ammo at the screen's sides
+  (Edges) or keeps the whole HUD in 16:9 in the middle (Centered). Menus, the deploy screen and loading screens stay
+  together in the middle. Aspect ratio: Fill screen or Letterbox 16:9, at the next start. By ThatZaliaSGuy
+  ([pull request 11](../../pull/11)).
+- **Mouse flying.** In planes the mouse moves the stick: right and left roll, forward and back pitch, and the stick
+  springs back to the centre when the mouse stops. A and D keep the rudder. Which way is up follows Vertical fly
+  (Settings > Controls > Game controls). By ThatZaliaSGuy ([pull request 11](../../pull/11)).
+- **Free look in vehicles.** In a driver's or passenger's seat the mouse turns the view one to one, as on foot; in
+  third person it turns round the vehicle. Only your own view moves. By ThatZaliaSGuy
+  ([pull request 11](../../pull/11)).
+- **Sharper mouse aim in vehicles.** Gun aim and plane steering go straight into the game's own input, not through
+  a controller stick: no dead zone, and a gun stops when the mouse stops. A controller works as before. By
+  ThatZaliaSGuy ([pull request 11](../../pull/11)).
+- **Create Private Match** is back on the main menu: a match on your own PC for you and your friends, who join with
+  Direct connect. Put back by ThatZaliaSGuy ([pull request 11](../../pull/11)).
+- **What's new.** After an update the game shows you that version's notes, once, when its shaders are ready.
+- **Server regions and tick rate.** The server browser shows where each server is, with its flag, and its tick rate
+  in Hz. A region filter is beside the search box.
+- **Server messages.** A server can tell everyone on it about a game update, a restart or anything else: the message
+  shows in a box at the top of the screen for ten seconds, with a sound.
+- **LAN servers.** Direct connect now also reaches a server that runs on its own, off the main server list: type its
+  address, as its host gave it to you.
+- **A new server manager** for hosts: a page in your browser with your servers, their players, the region, LAN
+  only mode, messages to the players with a countdown, and updates that install themselves.
+- **Update needed.** Servers only let the newest version in. An older game gets a message with Update now, which
+  downloads and installs the update and starts the game again.
+- **Voice chat is louder.** Every voice now plays at the same level whatever its microphone, and Voice volume goes up
+  to 500%.
+- **Vehicle field of view** has its own slider, and your weapon and hands widen with the field of view.
+- **Button prompts follow what you use.** Pick up the controller or touch the keyboard and mouse mid match, and the
+  prompts in the menus and the HUD change with you.
+- A message tells you when the game could not start, with where its log is.
 
 **Changed**
-- **0.4 and 0.3 players and servers never meet.** 0.4.0 plays at 60 Hz and 0.3.x at 30 Hz, and a match cannot mix
-  them, so each release only sees and joins servers of its own version: the server browser, Direct connect, Join
-  Match With Friends and Quick Match leave the other version's servers out, and a 0.4 server turns away a player
-  whose game is another version (its log says so). Servers and games now send their version to the backend; one
-  that sends none counts as 0.3. Server hosts: update the server package along with the game. Voice and text chat
-  also moved to a new protocol version (2), so 0.3 and 0.4 chat never connect either.
+- **Classic only.** Modern movement and aiming is gone: every server plays the game as it was, and nothing asks you
+  to choose.
+- **Shaders are prepared at the start**, as a step of the first start and once after each update, never when you
+  join a server.
+- **Graphics presets** are chosen with A or a click; moving over them no longer changes your settings.
+- **GI distance** in Settings goes up to Far. Full is in the F8 panel.
+- Settings sliders can be dragged with the mouse.
+
+**Fixed**
+- **Plants on roads.** From the second map of a session on, grass and black fronds could stand on roads and in
+  yards. Every map now looks as the first one did.
+- **Aim toggle on the keyboard** now stays on until you press it again ([issue 9](../../issues/9)).
+- **Mouse aiming in vehicles** went the wrong way with the game's Vertical look set to Inverted.
+- **Updates that did not start**: when the check at the start got no answer, the main menu now asks again by itself.
+- **Linux: rough lettering.** The chat, the voice list and the performance overlay were drawn in a small pixel font
+  on Linux. They now use a proper one.
+- **Flying with the mouse.** A plane's control surfaces were taken for a gun turret, so the mouse could not fly a
+  plane. By ThatZaliaSGuy ([pull request 11](../../pull/11)).
+- General bug fixes.
+
+**Known issues**
+- Voice chat has no echo cancelling: with Open mic, use headphones.
+- The first person weapon and hands still move 30 times a second at high frame rates.
 
 ## 0.3.0 (12 November 2026): mouse aiming in vehicles, graphics presets, smooth play at low frame rates
 

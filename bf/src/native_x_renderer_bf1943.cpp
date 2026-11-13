@@ -35,6 +35,16 @@ const native_x_renderer::Profile& NativeXRendererProfile() {
     // after the scene's opaque draws, before its water, particles and the first person weapon (drawn after a depth
     // clear), so those are never darkened (run gcrd2: opaque draws to 1645, the depth copy, blended draws from 1647).
     p.ao_resolve_caller = 0x825868A4;
+    // D165: the game's own undergrowth (TekRantGaming, 13 Nov 2026: "the extra vegetation starts to behave strangely
+    // and starts appearing on roads and places it should not be", from a second map on). The game draws a 64 x 64
+    // mask for each undergrowth cell, resolves it, and its jobs read the texture's memory to place plants. The
+    // renderer keeps resolves on the host, so the jobs read what the memory held before: zeros in a first level (no
+    // game undergrowth: the look players know, with our own grass), another level's leftovers from the second one
+    // (run veg1: Wake Island's 300 masks all zero, Guadalcanal's after it 15973 bytes of 16384 set): plants on
+    // roads, in yards, in black. The masks' memory is set to zero as the game resolves them, so every level is as
+    // the first one was. Every resolve goes through the game's own function (the caller here is its, as the scene
+    // copy's): the masks are known by their size and format.
+    p.zeroed_resolves[0] = {0x82586834, 0, 64, 64, 6};
     // D164 (TekRantGaming, 12 Nov 2026: a black outline round the ships against the water, a white glow round palm
     // leaves and buildings): the game's pixel shaders that read their pixel position sample at it plus one texel (the
     // water's depth read at (VPOS + 1) / 1280, run rdship1: two host rows above a landing craft's hull read the hull's

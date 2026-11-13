@@ -1,7 +1,9 @@
 """The server registry's protocol without the game (SERVERS-PLAN.md sections 5 to 7): a local backend with an official
 key; an official server, a community one, an unlisted one and one with a wrong key register through server/gmhost.py.
-Checks the list (official flags, descriptions, next maps, unlisted left out), Direct connect's find, the refusal, the
-reachability probe and the hosts' ping answer, then stops everything it started.
+Checks the list (official flags, descriptions, next maps, regions and tick rates, unlisted left out), Direct connect's
+find, the refusal, the reachability probe and the hosts' ping answer; then a second backend in LAN only mode
+(plasma.py --lan: a server package's own backend), where each player gets the address of the machine it can reach.
+Stops everything it started.
 
     python -I tools/test_registry.py
 """
@@ -23,10 +25,33 @@ def run(args, log):
     return subprocess.Popen([PY, '-I'] + args, cwd=ROOT, stdout=open(log, 'w'), stderr=subprocess.STDOUT)
 
 
-def ask(obj):
-    with socket.create_connection(('127.0.0.1', REG), timeout=5) as s:
+LAN_REG = 18450  # the LAN only backend's registry
+
+
+def ask(obj, host='127.0.0.1', port=REG):
+    with socket.create_connection((host, port), timeout=5) as s:
         s.sendall((json.dumps(obj) + '\n').encode())
         return json.loads(s.makefile().readline())
+
+
+def lan_address():
+    """This machine's address on its network (no packet is sent), or None when it has none."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(('192.0.2.1', 9))
+            ip = s.getsockname()[0]
+    except OSError:
+        return None
+    return None if ip.startswith('127.') or ip == '0.0.0.0' else ip
+
+
+class FakeWriter:
+    """A connection as plasma.own_address reads it: where the player is, and the address of ours it reached."""
+    def __init__(self, peer, local):
+        self.info = {'peername': (peer, 50000), 'sockname': (local, 18250)}
+
+    def get_extra_info(self, name):
+        return self.info[name]
 
 
 def ping(port):
@@ -49,13 +74,22 @@ def main():
     time.sleep(1.5)
     servers = [('Official one', 18360, ['--official-key-file', key, '--maps', 'Iwo Jima,Wake Island', '--map',
                                         'Iwo Jima', '--description', 'Run by TRG Studios']),
-               ('Community one', 18361, ['--description', 'No base camping', '--mode', 'modern']),
+               ('Community one', 18361, ['--description', 'No base camping', '--mode', 'modern', '--region', 'gb',
+                                         '--tick', '60']),
                ('Hidden one', 18362, ['--unlisted']),
                ('Fake official', 18363, ['--official-key-file', bad])]
     for name, port, extra in servers:
         procs.append(run(['server/gmhost.py', '--backend', '127.0.0.1:%d' % REG, '--listen', '0.0.0.0:%d' % port,
                           '--game-server', '127.0.0.1:1', '--name', name, '--status-file',
                           os.path.join(tmp, 'status_%d.json' % port)] + extra, os.path.join(tmp, 'h%d.out' % port)))
+    # The LAN only backend: every address of this machine, a public address set, two servers from this machine.
+    procs.append(run(['server/plasma.py', '--lan', '--host', '0.0.0.0', '--theater-host', '203.0.113.9', '--port', '18441',
+                      '--theater-port', '18446', '--registry-port', str(LAN_REG), '--log',
+                      os.path.join(tmp, 'plasma_lan.log')], os.path.join(tmp, 'pl.out')))
+    time.sleep(1.5)
+    for name, port, extra in (('LAN one', 18465, []), ('LAN hidden', 18466, ['--unlisted'])):
+        procs.append(run(['server/gmhost.py', '--backend', '127.0.0.1:%d' % LAN_REG, '--listen', '0.0.0.0:%d' % port,
+                          '--game-server', '127.0.0.1:1', '--name', name] + extra, os.path.join(tmp, 'h%d.out' % port)))
     time.sleep(8)
     failures = []
 
@@ -84,10 +118,40 @@ def main():
             ok, ms = ping(port)
             check('ping answered by the host on %d (%.1f ms)' % (port, ms), ok)
         st = json.load(open(os.path.join(tmp, 'status_18360.json')))
-        check('status file: registered, official, reachable', st.get('state') == 'registered' and st.get('official')
-              is True and st.get('reachable') is True)
+        check('status file: registered, official, answers on this machine', st.get('state') == 'registered' and st.get('official')
+              is True and st.get('reachable_local') is True)
         st = json.load(open(os.path.join(tmp, 'status_18363.json')))
         check('status file of the wrong key says refused', st.get('state') == 'refused')
+        # Regions and tick rates (the browser's REGION and TICK columns).
+        check('the region and the tick rate a server said arrive',
+              names.get('Community one', {}).get('region') == 'gb' and names.get('Community one', {}).get('tick') == 60)
+        check('a server that said no region has none, and the usual 30 Hz',
+              names.get('Official one', {}).get('region') == '' and names.get('Official one', {}).get('tick') == 30)
+        # LAN only mode: the address each player can reach.
+        local = {s['name']: s for s in ask({'op': 'list'}, port=LAN_REG)['servers']}
+        check('LAN only: a player on this machine gets this machine as it reached it',
+              local.get('LAN one', {}).get('address') == ['127.0.0.1', 18465])
+        check('LAN only: the unlisted server is not listed', 'LAN hidden' not in local)
+        lan = lan_address()
+        if lan:
+            there = {s['name']: s for s in ask({'op': 'list'}, host=lan, port=LAN_REG)['servers']}
+            check('LAN only: a player on the network (%s) gets the network address' % lan,
+                  there.get('LAN one', {}).get('address') == [lan, 18465])
+            found = ask({'op': 'find', 'address': lan, 'port': 18466}, host=lan, port=LAN_REG)
+            check('LAN only: Direct connect finds the unlisted server at the network address',
+                  (found.get('server') or {}).get('name') == 'LAN hidden')
+        else:
+            print('skip  LAN only over the network: this machine has no network address')
+        sys.path.insert(0, os.path.join(ROOT, 'server'))
+        import plasma
+        check('LAN only: a player from the internet gets the public address',
+              plasma.own_address(FakeWriter('8.8.8.8', '192.168.1.20'), '203.0.113.9') == '203.0.113.9')
+        check('LAN only: a player on the network gets the address it reached',
+              plasma.own_address(FakeWriter('192.168.1.50', '192.168.1.20'), '203.0.113.9') == '192.168.1.20')
+        check('LAN only: a player on a carrier or VPN address (100.64/10) gets the address it reached',
+              plasma.own_address(FakeWriter('100.101.1.2', '100.64.0.1'), '203.0.113.9') == '100.64.0.1')
+        check('LAN only: with no public address set, a player from the internet gets the address it reached',
+              plasma.own_address(FakeWriter('8.8.8.8', '95.216.1.1'), '127.0.0.1') == '95.216.1.1')
     finally:
         for p in procs:
             p.kill()

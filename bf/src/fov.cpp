@@ -28,8 +28,12 @@
 
 REXCVAR_DEFINE_DOUBLE(bf_fov, 0.0, "BF1943",
                       "The camera's horizontal field of view at 16:9 in degrees (60 to 120); 0: the game's own, 85.6");
+// Vehicles' own slider (TekRantGaming, 12 Nov 2026): the camera while the local soldier sits in a vehicle.
+REXCVAR_DEFINE_DOUBLE(bf_fov_vehicle, 0.0, "BF1943",
+                      "The camera's horizontal field of view in vehicles, at 16:9 in degrees (60 to 120); 0: the game's own");
 
 namespace bf1943 {
+bool LocalSeatedNow();  // hud_glyphs.cpp: the local soldier sits in a vehicle (from the pad hook)
 // The game's own vertical field of view this frame (radians, before our mapping), zoom included: look.cpp scales the
 // mouse by how far a zoom narrows it.
 std::atomic<float> g_game_fov{0.0f};
@@ -55,24 +59,20 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr uint32_t kCameraFovCaller = 0x82294CB0;  // sub_82294A58's call of setFovY
 constexpr uint32_t kSecondViewCaller = 0x822948E4;  // sub_82294818's call of sub_82623DB8 (at 0x822948E0)
 
+// The slider that applies now: the vehicle's while the soldier sits in one, else the camera's.
+double Chosen() { return bf1943::LocalSeatedNow() ? REXCVAR_GET(bf_fov_vehicle) : REXCVAR_GET(bf_fov); }
+
 double Mapped(double radians) {
-  const double chosen = REXCVAR_GET(bf_fov);
+  const double chosen = Chosen();
   if (chosen <= 0.0 || !(radians > 0.0 && radians < kPi)) return radians;
   const double h = std::clamp(chosen, 60.0, 120.0) * kPi / 180.0;
   const double tan_v = std::tan(h * 0.5) * 9.0 / 16.0;  // the vertical half angle's tangent at 16:9
   const double k = tan_v / std::tan(27.5 * kPi / 180.0);
   return 2.0 * std::atan(k * std::tan(radians * 0.5));
 }
+// The same mapping for a value in degrees (the first person weapon's own projection).
+double MappedDegrees(double degrees) { return Mapped(degrees * kPi / 180.0) * 180.0 / kPi; }
 }  // namespace
-
-namespace bf1943 {
-// The rendered camera's vertical field of view this frame (radians, bf_fov's mapping applied), 0 before the first: the
-// gun marker's place (comms_ui.cpp).
-double RenderedVerticalFov() {
-  const double v = g_game_fov.load(std::memory_order_relaxed);
-  return v > 0.0 ? Mapped(v) : 0.0;
-}
-}  // namespace bf1943
 
 REX_EXTERN(__imp__sub_82583248);
 #if defined(BF_DEV_TOOLS)
@@ -172,4 +172,16 @@ REX_HOOK_RAW(sub_8241B598) {
   const uint32_t out = ctx.r3.u32;
   __imp__sub_8241B598(ctx, base);
   NoteMarker(base, out);
+}
+
+// The first person weapon's own projection (TekRantGaming, 12 Nov 2026: "the FOV slider doesn't take into
+// consideration the first-person weapon ... those stay the same"): sub_821FAAF0(soldier) returns the weapon's render
+// field of view in degrees (SoldierWeaponData.RenderFov, 30, blended toward ZoomRenderFov while aiming; the study's
+// fov_study.md), or -1 when not in first person; its consumers write it into the player's render record and the
+// vehicle seat's view. Mapped the same way as the world's camera after the original, so the hands and the weapon
+// widen with it and keep their place in the picture.
+REX_EXTERN(__imp__sub_821FAAF0);
+REX_HOOK_RAW(sub_821FAAF0) {
+  __imp__sub_821FAAF0(ctx, base);
+  if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) ctx.f1.f64 = MappedDegrees(ctx.f1.f64);
 }
