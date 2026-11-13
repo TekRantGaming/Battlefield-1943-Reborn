@@ -388,7 +388,12 @@ void SmgSights(PPCContext& ctx, uint8_t* base, uint32_t soldier, double fov_degr
   // Only while this game's window is the one in front (the keys are read from the keyboard itself).
   DWORD front_pid = 0;
   GetWindowThreadProcessId(GetForegroundWindow(), &front_pid);
-  if (REXCVAR_GET(bf_smg_sight_tune) && blend > 0.5 && front_pid == GetCurrentProcessId()) {
+#if defined(BF_INTERNAL_TOOLS)  // an internal build's only ("The sliders should be part of our internal build only")
+  const bool tune = REXCVAR_GET(bf_smg_sight_tune);
+#else
+  const bool tune = false;
+#endif
+  if (tune && blend > 0.5 && front_pid == GetCurrentProcessId()) {
     // One step at a press, then repeated while the key is held (from 0.35 s, every 40 ms).
     static std::map<int, std::chrono::steady_clock::time_point> next;
     const auto now = std::chrono::steady_clock::now();

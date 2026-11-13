@@ -3799,6 +3799,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "the rifles and pistols do, without the zoom's blur. Only your view changes: where the "
                           "shots go is the same. Applies at once.",
                           "bf_smg_sights", "Zoom In", "Iron Sight"));
+#if defined(BF_INTERNAL_TOOLS)  // an internal build's only
     rows.push_back(Toggle("HUD", "Sight alignment",
                           "For lining the SMG's sights up yourself. On, with SMG aiming at Iron Sight: aim with an "
                           "SMG in a match and nudge the gun with the keyboard. Arrow keys move it left, right, up "
@@ -3806,6 +3807,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "tilt it, 7 and 9 roll it, 0 resets. Shift makes steps larger, Ctrl smaller. The values "
                           "show on screen and are saved for that gun. Switch it off when you are done.",
                           "bf_smg_sight_tune"));
+#endif
     rows.push_back(Slider("HUD", "HUD scale",
                           "The size of the HUD and the crosshair on foot and in vehicles. 100% is the game's own; the "
                           "three crosshairs over the slider show the size you pick. The minimap has its own size "

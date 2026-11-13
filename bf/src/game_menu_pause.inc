@@ -149,9 +149,17 @@
   // of the map and the report, the match undimmed behind them and the aim held, so the gun is seen moving. Each slider
   // follows the mouse while its button is down; the values are the gun's own and saved (fov.cpp).
   int sight_drag_ = -1;
+  // Whether the sight alignment is being tuned: an internal build's only (BF_INTERNAL_TOOLS; never a release's).
+  bool SightTuning() {
+#if defined(BF_INTERNAL_TOOLS)
+    return Truthy(Cvar("bf_smg_sight_tune")) && Truthy(Cvar("bf_smg_sights"));
+#else
+    return false;
+#endif
+  }
   bool SightSliders(ImDrawList* d, ImGuiIO& io, const Stage& st) {
     double v[6];
-    const std::string gun = Truthy(Cvar("bf_smg_sight_tune")) && Truthy(Cvar("bf_smg_sights")) ? SmgSightTuneGun(v) : std::string();
+    const std::string gun = SightTuning() ? SmgSightTuneGun(v) : std::string();
     g_smg_tune_hold.store(!gun.empty(), std::memory_order_relaxed);
     if (gun.empty()) {
       sight_drag_ = -1;
@@ -218,7 +226,7 @@
     const int count = int(std::size(kPauseRows));
     // The match behind, darkened; the column at the left darker, with a thin rule at its edge.
     double tune_values[6];
-    const bool tuning = Truthy(Cvar("bf_smg_sight_tune")) && Truthy(Cvar("bf_smg_sights")) && !SmgSightTuneGun(tune_values).empty();
+    const bool tuning = SightTuning() && !SmgSightTuneGun(tune_values).empty();
     if (!tuning) d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(6, 7, 5, 120));
     // 0.4.2 (a screen wider than 16:9): the column stands at the screen's left edge and the report at its right edge
     // (lst, rst: the stage moved there), and the map between them takes the room: as large as the height allows.

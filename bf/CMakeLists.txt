@@ -211,6 +211,11 @@ if(BF_NIGHT_OPS)
     target_compile_definitions(bf1943 PRIVATE BF_NIGHT_OPS=1)
 endif()
 
+# Our own builds only (not a release's, not a pull request's): the SMG sight alignment's sliders and keys.
+option(BF_INTERNAL_TOOLS "Build the internal tuning aids (the SMG sight alignment)" OFF)
+if(BF_INTERNAL_TOOLS)
+    target_compile_definitions(bf1943 PRIVATE BF_INTERNAL_TOOLS=1)
+endif()
 if(BF_DEV_TOOLS)
     target_compile_definitions(bf1943 PRIVATE BF_DEV_TOOLS=1)
     # src/dev_renderdoc.cpp: RenderDoc's in-application API header, from our SDK copy.
