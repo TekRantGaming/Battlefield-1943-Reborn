@@ -651,6 +651,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // the settings file is never written from the constructor (King Kong's pitfall 3).
     if (settings_.Get("launcher_setup", "") == "started" && settings_.Get("player_name_chosen", "") == "1")
       settings_.values["launcher_setup"] = "done";
+    // Started again to join a server of the other tick rate (TickPopup, OwnBackendPopup): this run is at it.
+    if (const char* tick = std::getenv("BF_JOIN_TICK"); tick && *tick) SetTickRate(std::atoi(tick));
+    if (const char* address = std::getenv("BF_JOIN_ADDRESS"); address && *address) tick_join_address_ = address;
     // Started again to join a server on its own backend (OwnBackendPopup): this run is on that backend.
     if (const char* own = std::getenv("BF_OWN_BACKEND"); own && *own) {
       UseOwnBackend(own);
@@ -940,6 +943,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (auto_join && !auto_joined_ && page_ == Page::kMain && !list_.servers().empty() && !REXCVAR_GET(bf_dev_no_auto_join))
       auto_joined_ = true, QuickJoin();
     PrivateMatchTick();  // our Create Private Match: its server's state, the join, its end
+    TickRejoinTick();    // the join asked for before a restart at the server's tick rate
     // The server list is wanted (server_list.h Want) by a match being played and the friends page here; the browser
     // and Quick Play ask for it themselves.
     if (!joined_gid_.empty() || page_ == Page::kFriends) list_.Want();
@@ -1059,7 +1063,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // A pop-up over whatever page is up (the version gate's UPDATE NEEDED, AskToUpdate; What's new after an update,
     // WhatsNewTick): that page is drawn without the buttons, the mouse's button, its movement and its wheel, which
     // are the pop-up's (ImGui's IsMouseClicked asks MouseDown first).
-    const bool over_popup = update_popup_ || whats_new_open_ || own_popup_;
+    const bool over_popup = update_popup_ || whats_new_open_ || own_popup_ || tick_popup_;
     const Input popup_in = in;
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
@@ -1099,6 +1103,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       io.MouseDown[0] = popup_down, io.MouseDelta = popup_delta, io.MouseWheel = popup_wheel;
       if (update_popup_) UpdatePopup(d, io, popup_in);
       else if (own_popup_) OwnBackendPopup(d, io, popup_in);
+      else if (tick_popup_) TickPopup(d, io, popup_in);
       else if (whats_new_open_) WhatsNewPopup(d, io, popup_in);
     }
     // The stamp on BF's own menus too: its main menu (and our pages over it) and the pause; never over a match.
@@ -1994,7 +1999,19 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     return best != nullptr;
   }
 
+  // A server of the other tick rate while the game already runs (its rate is fixed at its start): asked, then the
+  // game starts again at that rate and joins (TickRejoinTick below finds it on Home).
+  bool tick_popup_ = false;
+  ServerInfo tick_popup_server_;
+  std::string tick_join_address_;  // after such a restart: the server to join, by its address
+  double tick_join_until_ = 0;
   void Join(const ServerInfo& sv) {
+    if (sv.Tick() != TickRate() && !SetTickRate(sv.Tick())) {
+      tick_popup_ = true, tick_popup_server_ = sv, popup_row_ = 1;
+      REXLOG_INFO("BF join: {} runs at {} Hz and this run at {}: the game must start again to join it (asked)", sv.name,
+                  sv.Tick(), TickRate());
+      return;
+    }
     // The version gate (server_list.h): a game older than the version players need is not let in, and says so with
     // the update pop-up. Asked of the list's last answer first (no round trip), then of the reservation itself.
     std::string needs = list_.required_version();
@@ -2208,6 +2225,46 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     own_popup_ = true, own_popup_server_ = sv, popup_row_ = 1;
     REXLOG_INFO("BF browser: {} is on its own backend at {}: the game must start again to join it (asked)", sv.name, host);
   }
+  void TickPopup(ImDrawList* d, ImGuiIO& io, Input in) {
+    const Stage st = StageOf(io);
+    bool yes = false;
+    if (!Question(d, io, st, "RESTART TO JOIN",
+                  fmt::format("This server runs the game at {} Hz and your game is running at {} Hz. The game starts again "
+                              "at the server's rate and joins it.",
+                              tick_popup_server_.Tick(), TickRate()),
+                  "Cancel", "Restart and join", in, yes))
+      return;
+    tick_popup_ = false;
+    if (!yes) return;
+    const std::string tick = std::to_string(tick_popup_server_.Tick());
+#if defined(_WIN32)
+    _putenv_s("BF_JOIN_TICK", tick.c_str()), _putenv_s("BF_JOIN_ADDRESS", tick_popup_server_.address.c_str());
+    if (!own_backend_.empty()) _putenv_s("BF_OWN_BACKEND", own_backend_.c_str()), _putenv_s("BF_ONLINE_HOST", own_backend_.c_str());
+#else
+    setenv("BF_JOIN_TICK", tick.c_str(), 1), setenv("BF_JOIN_ADDRESS", tick_popup_server_.address.c_str(), 1);
+    if (!own_backend_.empty()) setenv("BF_OWN_BACKEND", own_backend_.c_str(), 1), setenv("BF_ONLINE_HOST", own_backend_.c_str(), 1);
+#endif
+    REXLOG_INFO("BF join: starting again at {} Hz to join {}", tick, tick_popup_server_.name);
+    settings_.Save();
+    if (update::RestartSelf() && quit_) quit_();
+  }
+  // Each frame on Home after such a restart: the join, once the list has the server.
+  void TickRejoinTick() {
+    if (tick_join_address_.empty() || !pre_game_) return;
+    if (tick_join_until_ == 0) tick_join_until_ = ImGui::GetTime() + 25;
+    for (const ServerInfo& sv : list_.servers()) {
+      if (sv.address != tick_join_address_) continue;
+      REXLOG_INFO("BF join: joining {} as asked before the restart ({} Hz)", sv.name, sv.Tick());
+      tick_join_address_.clear();
+      Join(sv);
+      return;
+    }
+    if (ImGui::GetTime() > tick_join_until_) {
+      tick_join_address_.clear();
+      menu_error_ = "That server is not on the list any more. Open the server browser to see what is.";
+      menu_error_at_ = ImGui::GetTime();
+    }
+  }
   void OwnBackendPopup(ImDrawList* d, ImGuiIO& io, Input in) {
     const Stage st = StageOf(io);
     bool yes = false;
@@ -2223,9 +2280,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 #if defined(_WIN32)
     _putenv_s("BF_OWN_BACKEND", direct_host_.c_str()), _putenv_s("BF_OWN_BACKEND_JOIN", port.c_str());
     _putenv_s("BF_ONLINE_HOST", direct_host_.c_str());
+    _putenv_s("BF_JOIN_TICK", std::to_string(own_popup_server_.Tick()).c_str());  // at that server's rate
 #else
     setenv("BF_OWN_BACKEND", direct_host_.c_str(), 1), setenv("BF_OWN_BACKEND_JOIN", port.c_str(), 1);
     setenv("BF_ONLINE_HOST", direct_host_.c_str(), 1);
+    setenv("BF_JOIN_TICK", std::to_string(own_popup_server_.Tick()).c_str(), 1);
 #endif
     REXLOG_INFO("BF browser: starting again on the backend at {} to join the server on port {}", direct_host_, port);
     settings_.Save();

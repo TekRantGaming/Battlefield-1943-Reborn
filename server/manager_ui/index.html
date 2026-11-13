@@ -139,7 +139,7 @@
         </div>
         <div id="official-note" class="hint" style="display:none">This is the official package: this machine runs the main backend itself.</div>
         <label class="field"><span>Region</span><select id="region"></select><small>Shown with its flag in the game's server browser, so players can pick a server near them.</small></label>
-        <label class="field"><span>Tick rate</span><select id="tick-rate"><option value="30">30 Hz (the original)</option><option value="60">60 Hz</option></select><small>How many times a second your servers simulate the game. Players only see and join servers that run their own game's rate, so 60 Hz servers are for players whose game is set to 60 (v0.4.1 and newer).</small></label>
+        <label class="field"><span>Tick rate</span><select id="tick-rate"><option value="60">60 Hz</option><option value="30">30 Hz (the Xbox 360's)</option></select><small>How many times a second your servers simulate the game. A player's game (v0.4.1 and newer) takes your servers' rate when it joins; older games play at 30 only.</small></label>
         <div id="lan-box">
           <label class="field"><span>Public address, for players outside your network (optional)</span><input type="text" id="public-address" placeholder="Found from your router when it allows it" maxlength="64"><small>Players on your network use this machine's network address. Players outside need this address and the ports below opened on your router.</small></label>
         </div>
@@ -488,7 +488,7 @@ function fillForms() {
   const region = $('region');
   region.replaceChildren(h('option', { value: '', text: 'Not said' }), ...state.regions.map(r => h('option', { value: r.code, text: r.name })));
   region.value = c.region;
-  $('tick-rate').value = String(c.tick || 30);
+  $('tick-rate').value = String(c.tick || 60);
   $('public-address').value = c.public_address; $('upnp').checked = c.upnp;
   $('auto-update').checked = c.auto_update;
   const warn = $('warn-minutes');

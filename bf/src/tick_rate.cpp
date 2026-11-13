@@ -36,14 +36,19 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 
-REXCVAR_DEFINE_DOUBLE(bf_tick_rate, 30.0, "BF1943",
-                      "The game's simulation rate, ticks a second: 30 (the original) or 60. Read at the start; every "
-                      "player and server in a match must use the same");
+// 13 Nov 2026: 60 is the default ("60Hz should be default"), and a player's game takes the rate of the server it
+// joins ("automatically toggle between 30Hz and 60Hz depending on what the server is using"): SetTickRate, before the
+// game's timers are made (a join from the launcher); once they are made the rate is the run's, and a server of the
+// other rate is joined by starting the game again at it (game_menu.cpp).
+REXCVAR_DEFINE_DOUBLE(bf_tick_rate, 60.0, "BF1943",
+                      "The game's simulation rate, ticks a second: 60, or 30 (the Xbox 360's). A server runs at it; a "
+                      "player's game starts at it and takes the rate of the server it joins");
 
 namespace {
 constexpr uint32_t kTimerCallers[] = {0x8239709C, 0x823970C8, 0x82370E78};
 constexpr uint32_t kOneThirtieth = 0x820071D4;  // the shared float 1/30
 std::atomic<int> g_rate{0};
+std::atomic<bool> g_timers_made{false};  // the game's timers exist: the rate is fixed for this run
 
 // Four bytes of the game's read-only data written (its page made writable for the write, then put back: a plain write
 // faulted, 13 Nov 00:00). True when written.
@@ -76,6 +81,16 @@ int TickRate() {
   g_rate.store(r, std::memory_order_relaxed);
   return r;
 }
+// The rate for this run, chosen before the game's timers are made (the server about to be joined). False once they
+// are made and the rate asked for is another: this run cannot change it.
+bool SetTickRate(int rate) {
+  rate = rate == 60 ? 60 : 30;
+  if (g_timers_made.load(std::memory_order_acquire)) return TickRate() == rate;
+  if (TickRate() != rate) REXLOG_INFO("BF tick rate: {} ticks a second for this run (the server's)", rate);
+  g_rate.store(rate, std::memory_order_relaxed);
+  return true;
+}
+bool TickRateFixed() { return g_timers_made.load(std::memory_order_acquire); }
 // One tick's time in seconds.
 double TickSeconds() { return 1.0 / TickRate(); }
 }  // namespace bf1943
@@ -87,6 +102,7 @@ REX_HOOK_RAW(sub_822C7270) {
   const int rate = bf1943::TickRate();
   bool ours = false;
   for (uint32_t c : kTimerCallers) ours = ours || lr == c;
+  if (ours) g_timers_made.store(true, std::memory_order_release);
   if (ours && rate != 30 && ctx.r4.u32 == 30) {
     ctx.r4.u64 = uint64_t(rate);
     // The shared 1/30, once.

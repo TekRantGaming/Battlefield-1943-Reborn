@@ -61,6 +61,8 @@ inline std::string ClientFields() {
 }
 
 int TickRate();  // tick_rate.cpp: this game's simulation rate (bf_tick_rate: 30, or 60)
+bool SetTickRate(int rate);  // the rate of the server about to be joined; false when this run cannot change to it
+bool TickRateFixed();        // the game's timers are made: the rate is this run's
 
 struct ServerInfo {
   std::string gid, name, address, map;
@@ -75,7 +77,9 @@ struct ServerInfo {
   int tick_hz = 0;     // its tick rate; 0: not said
   // 0.4.1: a server is only listed, found and joined by a game simulating at its rate (a server that says none runs
   // the game's own 30): a 30 Hz game on a 60 Hz server, or the other way round, is pulled about by every correction.
+  // (13 Nov 2026, later: every server is listed whatever its rate; the game takes the server's when it joins.)
   bool OurTick() const { return (tick_hz > 0 ? tick_hz : 30) == TickRate(); }
+  int Tick() const { return tick_hz == 60 ? 60 : 30; }  // the rate it runs at (one that says none runs 30)
   int ping_ms = -1;  // -1: not measured (an older server does not answer)
   // 13 Nov 2026: hosted from a player's own game (Create Private Match), not a dedicated server: its description
   // begins with kPlayerHostTag (the backend passes descriptions through as they are), taken off here. The browser
@@ -258,7 +262,7 @@ class ServerList {
     const size_t at = reply.find("{\"gid\"");
     if (at == std::string::npos) return false;
     out = Parse(reply.substr(at, JsonEnd(reply, at) - at + 1));
-    return !out.gid.empty() && !out.retired_mode && out.OurTick();
+    return !out.gid.empty() && !out.retired_mode;
   }
 
   // The servers the backend at `host` lists (its registry on port 18250), for Direct connect to a server that runs
@@ -270,7 +274,7 @@ class ServerList {
       const size_t end = JsonEnd(reply, at);
       if (end == std::string::npos) break;
       ServerInfo sv = Parse(reply.substr(at, end - at + 1));
-      if (!sv.retired_mode && sv.OurTick()) out.push_back(std::move(sv));
+      if (!sv.retired_mode) out.push_back(std::move(sv));
       at = reply.find("{\"gid\"", end);
     }
     return reply.find("\"servers\"") != std::string::npos;
@@ -303,7 +307,7 @@ class ServerList {
         const size_t end = JsonEnd(reply, at);
         if (end == std::string::npos) break;
         ServerInfo sv = Parse(reply.substr(at, end - at + 1));
-        if (!sv.retired_mode && sv.OurTick()) found.push_back(std::move(sv));
+        if (!sv.retired_mode) found.push_back(std::move(sv));
         at = reply.find("{\"gid\"", end);
       }
       if (Now() < want_pings_until_) Ping(found);

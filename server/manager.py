@@ -75,7 +75,7 @@ MAPS = [('wake', 'Wake Island', 'Levels/Wake_island_s'), ('guadalcanal', 'Guadal
         ('iwo', 'Iwo Jima', 'Levels/Iwo_Jima_s'), ('coral', 'Coral Sea', 'Levels/Coral_sea')]
 MAP_TITLE = {k: t for k, t, _ in MAPS}
 MAP_LEVEL = {k: l for k, _, l in MAPS}
-BASE_PORT, MAX_SERVERS, WEB_PORT, TICK_HZ = 18300, 16, 18280, 30
+BASE_PORT, MAX_SERVERS, WEB_PORT, TICK_HZ = 18300, 16, 18280, 60  # 60 Hz by default (13 Nov 2026)
 # The dedicated game's own socket: UDP 1003 on its loopback address; Linux moves ports under 1024 up by 30000
 # (bf/src/socket_fixes.cpp HostBindPort).
 GAME_PORT = 1003 if WINDOWS else 31003
@@ -570,10 +570,8 @@ class Manager:
                 '--log_file=' + os.path.join(directory, 'server.log'), '--fullscreen=false', '--window_start=hidden',
                 '--server', '--cl=-dedicated -level ' + MAP_LEVEL[maps[0]], '--bf_map_rotation=' + ','.join(maps),
                 '--bf_round_end_delay=%d' % s['round_end_delay']]
-        # The game simulates at the rate set here (30 is its own default: nothing is passed, so an older game's
-        # program still starts).
-        if self.cfg['tick'] != 30:
-            game.append('--bf_tick_rate=%d' % self.cfg['tick'])
+        # The game simulates at the rate set here.
+        game.append('--bf_tick_rate=%d' % self.cfg['tick'])
         backend = (BACKEND_BIND or '127.0.0.1') if self.own_backend() else self.cfg['backend']
         host = [sys.executable, '-I', os.path.join(HERE, 'gmhost.py'), '--backend', backend + ':18250',
                 '--listen', '0.0.0.0:%d' % s['port'], '--game-server', '%s:%d' % (address, GAME_PORT),

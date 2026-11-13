@@ -22,6 +22,9 @@
 
 REXCVAR_DECLARE(bool, server);
 REXCVAR_DECLARE(std::string, bf_backend_registry);
+namespace bf1943 {
+int TickRate();  // tick_rate.cpp
+}
 REXCVAR_DECLARE(std::string, bf_online_host);
 
 namespace bf1943 {
@@ -158,6 +161,8 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
        << " --fullscreen=false --window_start=hidden --server"
        << " --cl=\"-dedicated -level " << LevelOf(first) << "\""
        << " --bf_map_rotation=" << rotation << " --bf_round_end_delay=45"
+       // At the rate this game runs at: its own game joins it without starting again.
+       << " --bf_tick_rate=" << TickRate()
        << " --bf_gm_backend=" << registry << " --bf_gm_listen=" << (LoopbackOnly() ? "127.0.0.1:" : "0.0.0.0:") << g.port
        << " --bf_gm_name=\"" << Clean(o.name.empty() ? std::string("Private match") : o.name) << "\""
        // Never in a test run: the router is the PC owner's (and a loopback host has nothing to forward).

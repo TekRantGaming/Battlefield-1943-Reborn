@@ -412,7 +412,17 @@
       {  // the name, and NIGHT
         const float cap = st(12);
         d->PushClipRect(ImVec2(ta.x, top), ImVec2(ta.x + colx[1] - st(10), tb.y), true);
-        const float iw = HostIcon(d, st, ImVec2(ta.x + colx[0], y), rh, sv.player_hosted, ink);
+        float iw = HostIcon(d, st, ImVec2(ta.x + colx[0], y), rh, sv.player_hosted, ink);
+        {  // the server's tick rate, after the icon: your game takes it when it joins
+          const std::string hz = std::to_string(sv.Tick()) + " HZ";
+          const float hs = st(7.5f), hw = kit::SpacedWidth(f.ui_bold, hs, hz, st(1)) + st(10), hh = st(14);
+          const ImVec2 h0(ta.x + colx[0] + iw, y + (rh - hh) * 0.5f), h1(h0.x + hw, h0.y + hh);
+          const bool sixty = sv.Tick() == 60;
+          d->AddRectFilled(h0, h1, sel ? IM_COL32(255, 255, 255, 40) : sixty ? IM_COL32(74, 112, 58, 255) : IM_COL32(34, 36, 27, 40));
+          kit::Spaced(d, f.ui_bold, hs, ImVec2(h0.x + st(5), h0.y + (hh - hs * 1.45f) * 0.5f),
+                      sel || sixty ? kit::kCream : kit::kInkSection, hz, st(1));
+          iw += hw + st(8);
+        }
         const float nw = iw + kit::GameText(d, kit::GameFont::kText, cap, ImVec2(ta.x + colx[0] + iw, y + (rh - cap) * 0.5f), ink, sv.name);
         if (sv.night && kNightOps)
           Chip(d, st, ImVec2(ta.x + colx[0] + nw + st(12), y + (rh - st(16)) * 0.5f), st(16), "NIGHT", IM_COL32(40, 46, 88, 255),
