@@ -136,6 +136,8 @@ add_library(native_x_renderer STATIC
     src/framegen.cpp
     src/overlay_motion.cpp
     src/fsr.cpp
+    src/taa.cpp
+    src/xess.cpp
     src/motion.cpp
     src/camera_vote.cpp
     src/glsl.cpp
@@ -245,6 +247,27 @@ if(_nxr_ffx_ok)
 else()
   unset(NATIVE_X_RENDERER_FFX_DLL CACHE)
 endif()
+# Intel XeSS (src/xess.cpp; 13 Nov 2026): the XeSS SDK 3.0.2's headers (thirdparty/xess, MIT) and Intel's libxess.dll
+# (the Intel Simplified Software License, thirdparty/xess/LICENSE.txt), fetched when configuring and checked by its
+# hash, copied next to the game's executable and loaded at run time.
+set(_nxr_xess_dll "${CMAKE_BINARY_DIR}/_deps/xess/libxess.dll")
+if(WIN32 AND NOT EXISTS "${_nxr_xess_dll}")
+  file(DOWNLOAD "https://github.com/intel/xess/raw/v3.0.2/bin/libxess.dll" "${_nxr_xess_dll}.part" STATUS _nxr_xess_status
+       EXPECTED_HASH SHA256=251659DD84A3E84DE67C886A4186E01F3ECA49B00641906FE38BB6B807E5D5B7)
+  list(GET _nxr_xess_status 0 _nxr_xess_code)
+  if(_nxr_xess_code EQUAL 0)
+    file(RENAME "${_nxr_xess_dll}.part" "${_nxr_xess_dll}")
+  else()
+    file(REMOVE "${_nxr_xess_dll}.part")
+    message(WARNING "NativeXRenderer: Intel's libxess.dll could not be downloaded (${_nxr_xess_status}): no XeSS")
+  endif()
+endif()
+if(EXISTS "${_nxr_xess_dll}")
+  target_compile_definitions(native_x_renderer PRIVATE NATIVE_X_RENDERER_XESS=1)
+  set(NATIVE_X_RENDERER_XESS_DLL "${_nxr_xess_dll}" CACHE INTERNAL "Intel's XeSS library")
+else()
+  unset(NATIVE_X_RENDERER_XESS_DLL CACHE)
+endif()
 rexglue_apply_target_settings(native_x_renderer)
 
 # Copies what NativeXRenderer needs at run time next to a game's executable: NVIDIA's DLSS runtime
@@ -259,5 +282,11 @@ function(native_x_renderer_copy_runtime target)
                        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NATIVE_X_RENDERER_FFX_DLL}
                                "$<TARGET_FILE_DIR:${target}>"
                        COMMENT "Copying AMD's FSR libraries for ${target}")
+  endif()
+  if(NATIVE_X_RENDERER_XESS_DLL)
+    add_custom_command(TARGET ${target} POST_BUILD
+                       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NATIVE_X_RENDERER_XESS_DLL}"
+                               "$<TARGET_FILE_DIR:${target}>"
+                       COMMENT "Copying Intel's XeSS library for ${target}")
   endif()
 endfunction()

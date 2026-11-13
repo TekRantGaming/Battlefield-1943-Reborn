@@ -2793,7 +2793,14 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
                           {"fsr_quality", Upscaler::Mode::kQuality, Provider::kFsr},
                           {"fsr_balanced", Upscaler::Mode::kBalanced, Provider::kFsr},
                           {"fsr_performance", Upscaler::Mode::kPerformance, Provider::kFsr},
-                          {"fsr_ultra_performance", Upscaler::Mode::kUltraPerformance, Provider::kFsr}};
+                          {"fsr_ultra_performance", Upscaler::Mode::kUltraPerformance, Provider::kFsr},
+                          // 13 Nov 2026: Intel XeSS 3 (xess.h), on FSR's path.
+                          {"taa", Upscaler::Mode::kDlaa, Provider::kTaa},  // our own (taa.h)
+                          {"xess_native", Upscaler::Mode::kDlaa, Provider::kXess},
+                          {"xess_quality", Upscaler::Mode::kQuality, Provider::kXess},
+                          {"xess_balanced", Upscaler::Mode::kBalanced, Provider::kXess},
+                          {"xess_performance", Upscaler::Mode::kPerformance, Provider::kXess},
+                          {"xess_ultra_performance", Upscaler::Mode::kUltraPerformance, Provider::kXess}};
     for (const auto& entry : kTemporalModes) {
       if (name != entry.name) continue;
       uint32_t guest_width = std::max(profile.output_width, 1u), guest_height = std::max(profile.output_height, 1u);
@@ -2802,7 +2809,11 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
       Upscaler::fsr_generation = name.rfind("fsr4", 0) == 0 ? 4 : 3;
       Upscaler::sharpness = float(REXCVAR_GET(native_x_renderer_upscaler_sharpness));
       g_temporal = g_upscaler.Initialize(device->device(), width, height, entry.mode, entry.provider);
-      const char* provider = entry.provider != Provider::kFsr ? "DLSS" : Upscaler::fsr_generation >= 4 ? "FSR 4" : "FSR 3.1";
+      const char* provider = entry.provider == Provider::kTaa    ? "TAA"
+                             : entry.provider == Provider::kXess ? "XeSS"
+                             : entry.provider != Provider::kFsr  ? "DLSS"
+                             : Upscaler::fsr_generation >= 4     ? "FSR 4"
+                                                                 : "FSR 3.1";
       name = g_temporal ? "off" : "smaa";
       g_object_motion = g_temporal && REXCVAR_GET(native_x_renderer_object_motion);
       g_camera_vote = g_temporal && REXCVAR_GET(native_x_renderer_camera_vote);
@@ -2834,8 +2845,8 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
                                                    g_upscaler.Name(), g_upscaler.input_width(),
                                                    g_upscaler.input_height(), g_reduced_scale.x, g_reduced_scale.y,
                                                    width, height, provider)
-                         : entry.provider == Provider::kFsr
-                             ? fmt::format("{0} Native AA (AMD {0} at the render resolution)", provider)
+                         : entry.provider != Provider::kDlss
+                             ? fmt::format("{0} at the render resolution", provider)
                              : std::string("DLAA (NVIDIA DLSS at the render resolution)");
       REXLOG_INFO("[native_x_renderer] antialiasing: {}{}{}", what,
                   g_temporal ? (g_object_motion ? ", with the motion of objects that move on their own"

@@ -673,8 +673,9 @@ void Antialiasing::Apply(IDeviceContext* context, ITexture* texture, ITextureVie
   ++applied_;
 }
 
+int TestTaaShaders();  // taa.cpp
 int TestUtilityShaders() {
-  int failed = 0;
+  int failed = TestTaaShaders();
   const std::pair<const char*, const char*> shaders[] = {{"CMAA edges", kCmaaEdgesCS},
                                                          {"CMAA arguments", kCmaaArgsCS},
                                                          {"CMAA candidates", kCmaaProcessCS},
@@ -682,7 +683,7 @@ int TestUtilityShaders() {
   for (const auto& [name, body] : shaders)
     if (CompileGlsl(GlslStage::kCompute, std::string(kCmaaCommon) + body, name).empty()) ++failed;
   if (CompileGlsl(GlslStage::kPixel, std::string("#version 450\n") + kCmaaOutputPS, "CMAA output").empty()) ++failed;
-  REXLOG_INFO("[native_x_renderer] utility shader test: {} of 5 failed", failed);
+  REXLOG_INFO("[native_x_renderer] utility shader test: {} of 7 failed", failed);
   return failed;
 }
 

@@ -89,7 +89,8 @@ REXCVAR_DEFINE_DOUBLE(bf_render_scale, 100.0, "BF1943",
 // and its mode, and the antialiasing of the finished picture for when there is none. ApplyUpscaler makes the
 // renderer's one setting (native_x_renderer_antialiasing) of them.
 REXCVAR_DEFINE_STRING(bf_temporal, "off", "BF1943",
-                      "The temporal upscaler: off, fsr4 (AMD FSR 4.1), fsr (AMD FSR 3.1) or dlss (NVIDIA DLSS)");
+                      "The temporal upscaler: off, fsr4 (AMD FSR 4.1), fsr (AMD FSR 3.1), xess (Intel XeSS), dlss "
+                      "(NVIDIA DLSS) or taa (the renderer's own)");
 REXCVAR_DEFINE_STRING(bf_temporal_mode, "native", "BF1943",
                       "The temporal upscaler's mode: native (antialiasing at the display's resolution), quality, "
                       "balanced, performance or ultra_performance");
@@ -211,7 +212,7 @@ std::string g_plain_sharpness = "-1";
 // native_x_renderer_upscaler_sharpness); without one, the antialiasing is the finished picture's (bf_post_aa).
 bool TemporalUpscalerOn() {
   const std::string t = rex::cvar::GetFlagByName("bf_temporal");
-  return t == "fsr4" || t == "fsr" || t == "dlss";
+  return t == "fsr4" || t == "fsr" || t == "dlss" || t == "xess" || t == "taa";
 }
 void ApplyUpscaler(bool log, const std::string& nis_support) {
   const bool temporal = TemporalUpscalerOn();
@@ -219,7 +220,9 @@ void ApplyUpscaler(bool log, const std::string& nis_support) {
     const std::string t = rex::cvar::GetFlagByName("bf_temporal");
     std::string mode = rex::cvar::GetFlagByName("bf_temporal_mode");
     if (mode != "quality" && mode != "balanced" && mode != "performance" && mode != "ultra_performance") mode = "native";
-    const std::string name = t == "dlss" ? (mode == "native" ? std::string("dlaa") : "dlss_" + mode) : t + "_" + mode;
+    const std::string name = t == "taa"    ? std::string("taa")  // at the display's resolution only
+                             : t == "dlss" ? (mode == "native" ? std::string("dlaa") : "dlss_" + mode)
+                                           : t + "_" + mode;
     rex::cvar::SetFlagByName("native_x_renderer_antialiasing", name);
     rex::cvar::SetFlagByName("native_x_renderer_scaling", "bilinear");
     if (log) REXLOG_INFO("BF upscaler: temporal, {} (its own sharpening; no other antialiasing)", name);
@@ -231,7 +234,9 @@ void ApplyUpscaler(bool log, const std::string& nis_support) {
   struct AfterAll {  // the temporal upscaler sharpens: none at presenting, whatever the rows below set
     bool temporal;
     ~AfterAll() {
-      if (temporal) rex::cvar::SetFlagByName("native_x_renderer_sharpness", "0");
+      // (not our TAA: it has none of its own, the Sharpness row's stays)
+      if (temporal && rex::cvar::GetFlagByName("bf_temporal") != "taa")
+        rex::cvar::SetFlagByName("native_x_renderer_sharpness", "0");
     }
   } after{temporal};
   std::string scaling = rex::cvar::GetFlagByName("native_x_renderer_scaling");
@@ -2915,10 +2920,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "Antialiases, and in the modes below Native upscales, with what the last frames showed: the "
                           "steadiest picture. AMD FSR 4 is AMD's newest (Radeon RX 6000 and later with a current "
                           "driver; elsewhere AMD's library picks what the card runs). AMD FSR 3.1 runs on any card. "
-                          "NVIDIA DLSS needs a GeForce RTX. Replaces Antialiasing and the spatial upscaler. Applies at "
+                          "Intel XeSS runs on any recent card. NVIDIA DLSS needs a GeForce RTX. TAA is the game's own plain "
+                          "temporal antialiasing, at your display's resolution only. Replaces Antialiasing and the spatial upscaler. Applies at "
                           "the next start.",
                           "bf_temporal",
-                          {{"Off", "off"}, {"AMD FSR 4", "fsr4"}, {"AMD FSR 3.1", "fsr"}, {"NVIDIA DLSS", "dlss"}}));
+                          {{"Off", "off"}, {"AMD FSR 4", "fsr4"}, {"AMD FSR 3.1", "fsr"}, {"Intel XeSS", "xess"},
+                           {"NVIDIA DLSS", "dlss"}, {"TAA", "taa"}}));
     {
       SettingRow mode = Choice("Upscaling", "Upscaler mode",
                                "Native AA draws the game at your display's resolution and only antialiases. The others "
@@ -2933,8 +2940,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (!temporal) {
         mode.disabled = sharp.disabled = true;
         mode.note = sharp.note = "Choose an upscaler first.";
-      } else if (Cvar("bf_temporal") == "dlss") {
-        sharp.disabled = true, sharp.note = "NVIDIA DLSS has no sharpening of its own here.";
+      } else if (Cvar("bf_temporal") == "taa") {
+        mode.disabled = sharp.disabled = true;
+        mode.note = "TAA works at your display's resolution.";
+        sharp.note = "TAA uses the Sharpness row below.";
+      } else if (Cvar("bf_temporal") == "dlss" || Cvar("bf_temporal") == "xess") {
+        sharp.disabled = true, sharp.note = "Only AMD FSR has a sharpening of its own here.";
       }
       rows.push_back(mode);
       rows.push_back(sharp);
@@ -3001,7 +3012,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       SettingRow sharp = Choice("Image", "Sharpness", "Makes fine detail crisper. Applies at the next start.",
                                 "native_x_renderer_sharpness",
                                 {{"Off", "0.000000"}, {"Low", "0.250000"}, {"Medium", "0.500000"}, {"High", "0.800000"}});
-      if (upscaler || temporal) sharp.disabled = true, sharp.note = "The upscaler sharpens the picture itself.";
+      if (upscaler || (temporal && Cvar("bf_temporal") != "taa"))
+        sharp.disabled = true, sharp.note = "The upscaler sharpens the picture itself.";
       rows.push_back(sharp);
     }
     rows.push_back(Choice("Image", "Texture filtering", "Keeps the ground and distant textures sharp at steep angles.",
