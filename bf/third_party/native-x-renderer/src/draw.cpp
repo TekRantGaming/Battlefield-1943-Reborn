@@ -1599,7 +1599,9 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       // across on a wider output, and down on a taller one (16:10, 4:3), where the box sits in the middle of the
       // height and a marker moved across only sat up to 5 percent of the height off its flag (the review of the
       // pull request, 13 Nov 2026).
-      const double g_cx = ((place.lo + place.hi) * 0.5 + 1.0) * 0.5 * gw;
+      // Every piece of one marker moves by the marker's own place when it is known (13 Nov: a plane's gunsight, drawn
+      // in several pieces around one projected point, came apart and shifted in flight).
+      const double g_cx = place.point_x >= 0 ? place.point_x / 1280.0 * gw : ((place.lo + place.hi) * 0.5 + 1.0) * 0.5 * gw;
       const double g_cy = (1.0 - (place.y_lo + place.y_hi) * 0.5) * 0.5 * gh;
       offset_x = float(g_cx * (target_scale.x - uniform));
       offset_y = float(g_cy * (target_scale.y - uniform));
@@ -2810,11 +2812,14 @@ DrawPath::HudPlace DrawPath::ClassifyHudDraw(std::span<const Copy> copies, uint6
     // Inside a panel drawn before it: where the panel went.
     place = panel->place, result = "in a panel";
     ++(place.align == 0.0f ? t.left : place.align == 1.0f ? t.right : t.middle);
-  } else if (!hud_menu_ && NearHudMarker(((lo + hi) * 0.5 + 1.0) * 640.0, (1.0 - (y_lo + y_hi) * 0.5) * 360.0, 48.0)) {
+  } else if (double marker_x = -1; !hud_menu_ && NearHudMarker(((lo + hi) * 0.5 + 1.0) * 640.0,
+                                                               (1.0 - (y_lo + y_hi) * 0.5) * 360.0, 48.0, &marker_x)) {
     // A world marker (the game's projection noted it, NoteHudMarker): its centre where the 3D view shows that place,
-    // its size the HUD's.
+    // its size the HUD's. Every piece of one marker moves by the marker's own place, not by its own centre (13 Nov:
+    // a plane's gunsight, drawn in several pieces around one projected point, came apart and shifted in flight).
     ++t.middle, ++t.markers, result = "world marker";
     place.mode = HudMode::kPoint;
+    place.point_x = marker_x;
   } else if (prev.valid && prev.place.mode == HudMode::kBox && prev.vertex_shader == vertex_shader &&
              y_lo <= prev.y_hi && y_hi >= prev.y_lo && lo >= prev.lo - 0.02 && lo <= prev.hi + 0.15) {
     // The next glyph of a line, the next part of a bar: where the first went.

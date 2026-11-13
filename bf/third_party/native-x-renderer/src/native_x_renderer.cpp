@@ -179,15 +179,19 @@ bool GameMenuRecently() {
                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(1500)).count();
 }
 
-bool NearHudMarker(double x, double y, double radius) {
+bool NearHudMarker(double x, double y, double radius, double* marker_x) {
   const auto now = std::chrono::steady_clock::now();
   std::lock_guard lock(g_hud_markers_mutex);
+  double best = radius * radius;
+  bool found = false;
   for (const HudMarker& m : g_hud_markers) {
     if (now - m.at > std::chrono::milliseconds(200)) continue;
     const double dx = m.x - x, dy = m.y - y;
-    if (dx * dx + dy * dy <= radius * radius) return true;
+    if (dx * dx + dy * dy > best) continue;
+    best = dx * dx + dy * dy, found = true;
+    if (marker_x) *marker_x = m.x;
   }
-  return false;
+  return found;
 }
 
 void BeginView(const float* scene_view_projection) {

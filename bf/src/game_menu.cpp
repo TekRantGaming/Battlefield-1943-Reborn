@@ -3060,51 +3060,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "Every frame turns the camera on each frame you see, with the stick and the mouse, so turning "
                           "is as smooth as your frame rate. Original turns it 30 times a second, as on the Xbox 360.",
                           "bf_look", "Original", "Every frame"));
-    rows.push_back(Slider("Controller", "Camera sensitivity",
-                          "How fast the right stick turns the camera and moves your aim.", "bf_camera_sensitivity", 25,
-                          300, 5, Percent));
-    rows.push_back(Toggle("Controller", "Camera response",
-                          "Modern turns the camera the same way in every direction, so circles and diagonals feel even. "
-                          "Original passes the stick to the game as the Xbox 360 did.",
-                          "bf_camera_modern", "Original", "Modern"));
-    rows.push_back(Slider("Controller", "Stick deadzone",
-                          "Ignores small stick movements. Raise it if the camera or cursor drifts.", "bf_deadzone", 0,
-                          40, 1, Percent));
-    rows.push_back(Toggle("Controller", "Camera horizontal",
-                          "Which way the camera turns when you push the right stick left or right.", "bf_invert_rs_x",
-                          "Normal", "Inverted"));
-    rows.push_back(Toggle("Controller", "Camera vertical",
-                          "Which way the right stick moves the camera up and down, in every seat. The game's own "
-                          "Vertical look and Vertical fly are under Game controls below.",
-                          "bf_invert_rs_y", "Normal", "Inverted"));
-    {
-      SettingRow ls{"Controller", "Left stick", "Invert the left stick's axes.", {"Normal", "Invert X", "Invert Y", "Both"}};
-      const bool x = Truthy(Cvar("bf_invert_ls_x")), y = Truthy(Cvar("bf_invert_ls_y"));
-      ls.index = x && y ? 3 : x ? 1 : y ? 2 : 0;
-      ls.choose = [this](int i) {
-        SetCvar("bf_invert_ls_x", i == 1 || i == 3 ? "true" : "false");
-        SetCvar("bf_invert_ls_y", i == 2 || i == 3 ? "true" : "false");
-      };
-      rows.push_back(ls);
-    }
-    rows.push_back(Toggle("Controller", "Aim",
-                          "Hold: keep the left trigger held to aim, as on the console. Toggle: press it once to aim and "
-                          "again to stop. Opening the menu stops aiming.",
-                          "bf_toggle_aim", "Hold", "Toggle"));
-    // Aim assist (GitHub issue 4): the game's own, one setting for each device (look.cpp, sub_822B0F40).
-    rows.push_back(Toggle("Controller", "Aim assist",
-                          "The game's own help with aiming at enemies while you aim with a controller. Off, the aim "
-                          "moves only as you move it.",
-                          "bf_aim_assist"));
-    rows.push_back(Toggle("Controller", "Vibration", "Controller rumble.", "bf_vibration"));
-    {
-      SettingRow strength = Slider("Controller", "Vibration strength",
-                                   "How strong the rumble is. Above 100% it is stronger than on the Xbox 360, up to the "
-                                   "controller's full strength.",
-                                   "bf_vibration_strength", 10, 200, 5, Percent);
-      if (!Truthy(Cvar("bf_vibration"))) strength.disabled = true, strength.note = "Switch Vibration on to set its strength.";
-      rows.push_back(strength);
-    }
     const bool mnk = Truthy(Cvar("mnk_mode"));
     const std::string mnk_note = "Used when Keyboard & mouse is on.";
     {
@@ -3153,20 +3108,78 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                               "mnk_mouse");
       if (!mnk) cam.disabled = true, cam.note = mnk_note;
       rows.push_back(cam);
-      SettingRow inv = Toggle("Keyboard & mouse", "Mouse vertical", "Which way moving the mouse up and down moves the camera.",
-                              "bf_mouse_invert_y", "Normal", "Inverted");
+      SettingRow inv = Toggle("Keyboard & mouse", "Invert camera",
+                              "Inverts the mouse's up and down on foot.", "bf_mouse_invert_y", "Normal", "Inverted");
       if (!mnk || !Truthy(Cvar("mnk_mouse"))) inv.disabled = true, inv.note = mnk_note;
       rows.push_back(inv);
-      // Issue #3: vehicles' own, so the soldier and a tank can each be normal or inverted. Same as on foot by default
-      // (TekRantGaming, 12 Nov 2026: 0.3.0's own Normal read as inverted to players who play inverted on foot).
-      SettingRow vinv = Choice("Keyboard & mouse", "Mouse vertical in vehicles",
-                               "Which way moving the mouse up and down aims a tank's gun, a jeep's or a boat's machine "
-                               "gun, other turrets and a vehicle's view. Same as on foot follows the row above; Normal: "
-                               "up aims up.",
-                               "bf_mouse_vehicle_vertical",
-                               {{"Same as on foot", "same"}, {"Normal", "normal"}, {"Inverted", "inverted"}});
+      // Issue #3: vehicles' own, so the soldier and a tank can each be normal or inverted.
+      SettingRow vinv = Toggle("Keyboard & mouse", "Invert vehicle",
+                               "Inverts the mouse's up and down for a tank's gun, mounted machine guns, AA guns and "
+                               "looking around in a vehicle. Normal: up aims up, as on foot.",
+                               "bf_mouse_invert_y_vehicle", "Normal", "Inverted");
       if (!mnk || !Truthy(Cvar("mnk_mouse"))) vinv.disabled = true, vinv.note = mnk_note;
       rows.push_back(vinv);
+      SettingRow finv = Toggle("Keyboard & mouse", "Invert flight",
+                               "Inverts the mouse's up and down in planes. Normal: pulling the mouse back climbs, as a "
+                               "flight stick. Inverted: pushing it forward climbs.",
+                               "bf_mouse_invert_y_flight", "Normal", "Inverted");
+      if (!mnk || !Truthy(Cvar("mnk_mouse"))) finv.disabled = true, finv.note = mnk_note;
+      rows.push_back(finv);
+    }
+    rows.push_back(Slider("Controller", "Camera sensitivity",
+                          "How fast the right stick turns the camera and moves your aim.", "bf_camera_sensitivity", 25,
+                          300, 5, Percent));
+    rows.push_back(Toggle("Controller", "Camera response",
+                          "Modern turns the camera the same way in every direction, so circles and diagonals feel even. "
+                          "Original passes the stick to the game as the Xbox 360 did.",
+                          "bf_camera_modern", "Original", "Modern"));
+    rows.push_back(Slider("Controller", "Stick deadzone",
+                          "Ignores small stick movements. Raise it if the camera or cursor drifts.", "bf_deadzone", 0,
+                          40, 1, Percent));
+    rows.push_back(Toggle("Controller", "Camera horizontal",
+                          "Which way the camera turns when you push the right stick left or right.", "bf_invert_rs_x",
+                          "Normal", "Inverted"));
+    // One invert for each of on foot, vehicles and planes (13 Nov: several "Invert look" rows in different sections).
+    // They are the game's own FlipY settings; the older stick-level Camera vertical is folded into them once.
+    if (Truthy(Cvar("bf_invert_rs_y"))) SetCvar("bf_invert_rs_y", "false");
+    rows.push_back(GameChoice("Controller", "Invert camera",
+                              "Inverts the right stick's up and down on foot, and in gunner and passenger seats.",
+                              "GstInput", {"Scheme1FlipY"}, "0", {{"Normal", "0"}, {"Inverted", "1"}}));
+    rows.push_back(GameChoice("Controller", "Invert vehicle",
+                              "Inverts the right stick's up and down when you drive a tank, a jeep or a boat.",
+                              "GstInput", {"Scheme2FlipY", "Scheme4FlipY"}, "0",
+                              {{"Normal", "0"}, {"Inverted", "1"}}));
+    rows.push_back(GameChoice("Controller", "Invert flight",
+                              "Which way a plane pitches. Normal: pushing the stick up climbs. Inverted: pushing it up "
+                              "dives, as in a real plane.",
+                              "GstInput", {"Scheme3FlipY"}, "1", {{"Normal", "1"}, {"Inverted", "0"}}));
+    {
+      SettingRow ls{"Controller", "Left stick", "Invert the left stick's axes.", {"Normal", "Invert X", "Invert Y", "Both"}};
+      const bool x = Truthy(Cvar("bf_invert_ls_x")), y = Truthy(Cvar("bf_invert_ls_y"));
+      ls.index = x && y ? 3 : x ? 1 : y ? 2 : 0;
+      ls.choose = [this](int i) {
+        SetCvar("bf_invert_ls_x", i == 1 || i == 3 ? "true" : "false");
+        SetCvar("bf_invert_ls_y", i == 2 || i == 3 ? "true" : "false");
+      };
+      rows.push_back(ls);
+    }
+    rows.push_back(Toggle("Controller", "Aim",
+                          "Hold: keep the left trigger held to aim, as on the console. Toggle: press it once to aim and "
+                          "again to stop. Opening the menu stops aiming.",
+                          "bf_toggle_aim", "Hold", "Toggle"));
+    // Aim assist (GitHub issue 4): the game's own, one setting for each device (look.cpp, sub_822B0F40).
+    rows.push_back(Toggle("Controller", "Aim assist",
+                          "The game's own help with aiming at enemies while you aim with a controller. Off, the aim "
+                          "moves only as you move it.",
+                          "bf_aim_assist"));
+    rows.push_back(Toggle("Controller", "Vibration", "Controller rumble.", "bf_vibration"));
+    {
+      SettingRow strength = Slider("Controller", "Vibration strength",
+                                   "How strong the rumble is. Above 100% it is stronger than on the Xbox 360, up to the "
+                                   "controller's full strength.",
+                                   "bf_vibration_strength", 10, 200, 5, Percent);
+      if (!Truthy(Cvar("bf_vibration"))) strength.disabled = true, strength.note = "Switch Vibration on to set its strength.";
+      rows.push_back(strength);
     }
     // The game's own Controls page, row for row, with its names and choices.
     rows.push_back(GameChoice("Game controls", "Soldier controls",
@@ -3180,16 +3193,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     rows.push_back(GameChoice("Game controls", "Plane controls", "The game's own button layouts for flying planes.",
                               "GstInput", {"Scheme3InputType"}, "0",
                               {{"Normal", "0"}, {"Southpaw", "1"}, {"Lefty", "2"}, {"Lefty southpaw", "3"}}));
-    rows.push_back(GameChoice("Game controls", "Vertical look",
-                              "Inverts up and down when you look around on foot, in land vehicles and in boats, as the "
-                              "game's own setting does.",
-                              "GstInput", {"Scheme1FlipY", "Scheme2FlipY", "Scheme4FlipY"}, "0",
-                              {{"Standard", "0"}, {"Inverted", "1"}}));
-    rows.push_back(GameChoice("Game controls", "Vertical fly",
-                              "Which way a plane pitches, as the game's own setting does. Standard (the game's own): "
-                              "pushing the stick up climbs. Inverted: pushing it up dives, as in a real plane.",
-                              "GstInput",
-                              {"Scheme3FlipY"}, "1", {{"Standard", "1"}, {"Inverted", "0"}}));
     rows.push_back(GameSlider("Game controls", "Game sensitivity",
                               "The game's own controller sensitivity, 50% as it starts. Camera sensitivity above works "
                               "on top of it.",

@@ -41,6 +41,7 @@ set(BF1943_SOURCES
     src/plane_mouse.cpp
     src/vehicle_mouse.cpp
     src/native_input.cpp
+    src/tick_rate.cpp
     src/bf_font.cpp
     src/bf_list_shot.cpp
     src/display_modes.cpp
@@ -216,7 +217,7 @@ endif()
 
 # bf1943.exe's file details (src/bf1943_version.rc.in): the release's version, set for a package build
 # (tools/make_packages.ps1 checks it).
-set(BF_VERSION "0.1.11" CACHE STRING "The release version in bf1943.exe's file details (major.minor.patch)")
+set(BF_VERSION "0.4.1" CACHE STRING "The release version in bf1943.exe's file details (major.minor.patch)")
 if(WIN32)
     enable_language(RC)
     string(REGEX MATCH "^([0-9]+)[.]([0-9]+)[.]([0-9]+)" _bf_version_match "${BF_VERSION}")

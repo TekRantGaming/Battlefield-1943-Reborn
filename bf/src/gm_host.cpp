@@ -68,6 +68,7 @@ REXCVAR_DEFINE_INT32(bf_gm_parent_pid, 0, "BF1943",
 
 namespace bf1943 {
 const char* BfVersion();  // pipeline_upload.cpp
+int TickRate();           // tick_rate.cpp: the simulation rate this server runs at (bf_tick_rate)
 std::vector<std::string> RotationTitles();  // server_rotation.cpp: the maps in turn, by title
 std::string CurrentMapTitle();              // server_rotation.cpp: the one running now
 }  // namespace bf1943
@@ -826,7 +827,7 @@ void Serve() {
         "{{\"op\": \"register\", \"name\": {}, \"port\": {}, \"map\": {}, \"max_players\": {}, \"mode\": \"classic\", "
         "\"version\": {}, \"region\": {}, \"tick\": {}, \"description\": {}, \"maps\": [{}], \"listed\": {}",
         JsonQuote(host.name), ntohs(host.public_addr.sin_port), JsonQuote(current), REXCVAR_GET(bf_gm_max_players),
-        JsonQuote(bf1943::BfVersion()), JsonQuote(REXCVAR_GET(bf_gm_region).substr(0, 16)), REXCVAR_GET(bf_gm_tick),
+        JsonQuote(bf1943::BfVersion()), JsonQuote(REXCVAR_GET(bf_gm_region).substr(0, 16)), bf1943::TickRate(),
         JsonQuote(REXCVAR_GET(bf_gm_description).substr(0, 200)), maps, st.listed ? "true" : "false");
     // A host on one address of its own (tests) says where; one on every address is found by the backend.
     if (host.listen.sin_addr.s_addr != htonl(INADDR_ANY)) {

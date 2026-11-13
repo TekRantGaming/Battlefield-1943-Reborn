@@ -95,9 +95,14 @@ bool DevClientUpdate(PPCContext& ctx, uint8_t* base);  // dev_call_rate.cpp: tru
 extern std::atomic<bool> g_in_client_tick;  // vehicle_camera.cpp
 }  // namespace bf1943
 
+namespace bf1943 {
+double TickSeconds();  // tick_rate.cpp
+}  // namespace bf1943
+
 namespace {
 using Clock = std::chrono::steady_clock;
-constexpr double kTick = 1.0 / 30.0;
+// One game tick (tick_rate.cpp: 1/30 or 1/60 s).
+double kTick() { return bf1943::TickSeconds(); }
 constexpr double kMaxStep = 25.0;  // metres in one tick (a plane at 150 m/s makes 5)
 constexpr double kMaxTurn = 0.6;   // radians in one tick
 constexpr uint32_t kSlots = 4096;  // root copies in our guest memory, used in turn (one a skeleton update)
@@ -1797,7 +1802,7 @@ void TickBlendFrame() {
   // at 24 FPS the reset at two ticks put frames back a tick every fifth frame).
   double phase = g_phase.load(std::memory_order_relaxed);
   g_ticked.exchange(false, std::memory_order_relaxed);
-  if (phase > kTick * 0.98) phase = kTick * 0.98;
+  if (phase > kTick() * 0.98) phase = kTick() * 0.98;
   if (g_frame_at != Clock::time_point{})
     phase += std::min(0.25, std::chrono::duration<double>(now - g_frame_at).count());
   g_phase.store(phase, std::memory_order_relaxed);
@@ -1853,12 +1858,12 @@ void TickBlendFrame() {
 // After each client tick (vehicle_camera.cpp's sub_82380600 hook).
 void TickBlendTick() {
   const double p = g_phase.load(std::memory_order_relaxed);
-  g_phase.store(std::max(0.0, p - kTick), std::memory_order_relaxed);  // TickBlendFrame caps what is left over
+  g_phase.store(std::max(0.0, p - kTick()), std::memory_order_relaxed);  // TickBlendFrame caps what is left over
   g_ticked.store(true, std::memory_order_relaxed);
 }
 
 // The game's time since its last tick as a part of a tick, 0 to 1.
-double TickBlendPhase() { return std::clamp(g_phase.load(std::memory_order_relaxed) / kTick, 0.0, 1.0); }
+double TickBlendPhase() { return std::clamp(g_phase.load(std::memory_order_relaxed) / kTick(), 0.0, 1.0); }
 // The phase everything in this frame is placed with: TickBlendPhase taken once, right after the client's update. The
 // live one moves at VdSwap on the render thread, in the middle of the main thread's frame at times, and the trees, the
 // skeletons on the worker threads and the camera must agree.
@@ -2311,7 +2316,8 @@ REX_HOOK_RAW(sub_826E2220) {
 }
 
 namespace bf1943 {
-bool VehicleFreeLook(double& yaw, double& pitch);  // look.cpp
+bool VehicleFreeLook(double& yaw, double& pitch);   // look.cpp
+bool TurretViewOffset(double& yaw, double& pitch);  // vehicle_mouse.cpp
 }  // namespace bf1943
 
 namespace {

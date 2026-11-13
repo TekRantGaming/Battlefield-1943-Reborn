@@ -26,6 +26,10 @@
 REXCVAR_DEFINE_BOOL(bf_smooth_recoil, true, "BF1943",
                     "The weapon's recoil kick eases back on every frame instead of in the game's 30 Hz steps");
 
+namespace bf1943 {
+double TickSeconds();  // tick_rate.cpp
+}  // namespace bf1943
+
 namespace {
 using Clock = std::chrono::steady_clock;
 std::atomic<int64_t> g_tick_us{0};  // the last firing tick (sub_822E3CE8), all firing objects tick together
@@ -45,7 +49,7 @@ void Resample(PPCContext& ctx, const uint8_t* base, uint32_t firing) {
   const double cooldown = LoadF(base, firing + 0x68);
   const int64_t tick = g_tick_us.load(std::memory_order_relaxed);
   if (!(cooldown > 0.0) || !tick) return;
-  const double since = std::clamp(double(NowUs() - tick) / 1e6, 0.0, 1.0 / 30.0);
+  const double since = std::clamp(double(NowUs() - tick) / 1e6, 0.0, bf1943::TickSeconds());
   const double game = ctx.f1.f64;
   ctx.f1.f64 *= std::max(0.0, cooldown - since) / cooldown;
 #if defined(BF_DEV_TOOLS)

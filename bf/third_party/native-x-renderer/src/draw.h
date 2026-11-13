@@ -302,6 +302,7 @@ class DrawPath {
     HudMode mode = HudMode::kBox;
     float align = 0.5f;
     double lo = 0, hi = 0;  // its x extent in clip space, when known
+    double point_x = -1;    // kPoint: the marker's own x (canvas pixels, 1280 wide), below 0 when not known
     double y_lo = 0, y_hi = 0;  // and its y extent (up is +1)
   };
   HudPlace ClassifyHudDraw(std::span<const Copy> copies, uint64_t vertex_shader);

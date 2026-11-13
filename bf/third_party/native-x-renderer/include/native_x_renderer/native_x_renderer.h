@@ -282,7 +282,8 @@ void SetGameAspectBox(bool on);
 // the widened 3D view shows that point, not in the 16:9 box. Any thread; kept 0.2 s.
 void NoteHudMarker(float x, float y);
 // Whether a HUD marker was noted within `radius` pixels of (x, y) in the last 0.2 s.
-bool NearHudMarker(double x, double y, double radius);
+// marker_x, when given, gets the nearest marker's x (canvas pixels).
+bool NearHudMarker(double x, double y, double radius, double* marker_x = nullptr);
 // One of the game's own menu screens is up now (its UI says so about once a second): the 2D layer is a menu, kept
 // together in the middle, not anchored to the edges. Any thread.
 void NoteGameMenu();
