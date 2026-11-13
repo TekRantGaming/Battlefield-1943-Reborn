@@ -321,6 +321,20 @@ REX_EXTERN(__imp__sub_82616750);
 REX_HOOK_RAW(sub_82616750) {
   const std::string name = GuestString(base, ctx.r4.u32);
   __imp__sub_82616750(ctx, base);
+  // Every setting the game asks for by name, once each with its value (13 Nov 2026: which of them are the level of
+  // detail's and the view distance's is not known yet; the log's list says).
+  if (ctx.r3.u32 && !name.empty()) {
+    static std::mutex names_mutex;
+    static std::set<std::string> names;
+    std::lock_guard lock(names_mutex);
+    if (names.size() < 600 && names.insert(name).second) {
+      const uint32_t bits = uint32_t(base[ctx.r3.u32]) << 24 | base[ctx.r3.u32 + 1] << 16 | base[ctx.r3.u32 + 2] << 8 |
+                            base[ctx.r3.u32 + 3];
+      float value;
+      std::memcpy(&value, &bits, 4);
+      REXLOG_INFO("BF game setting: {} = {} (bits {:08X})", name, value, bits);
+    }
+  }
 #if defined(BF_DEV_TOOLS)
   if (ctx.r3.u32 && LogSetting(name)) {
     uint32_t bits = uint32_t(base[ctx.r3.u32]) << 24 | base[ctx.r3.u32 + 1] << 16 | base[ctx.r3.u32 + 2] << 8 |

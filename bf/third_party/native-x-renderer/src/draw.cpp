@@ -45,6 +45,7 @@
 
 REXCVAR_DEFINE_INT32(native_x_renderer_draw_log, 0, "NativeXRenderer",
                      "Bring-up: log the first N draws NativeXRenderer processes (primitive, indices, shaders)");
+REXCVAR_DECLARE(int32_t, anisotropic_override);  // the SDK's: forced anisotropic filtering (textures.cpp)
 REXCVAR_DEFINE_STRING(native_x_renderer_alpha_to_coverage, "auto", "NativeXRenderer",
                       "Alpha to coverage on targets without MSAA (D69, D114): auto (blend on surfaces the game draws "
                       "with MSAA, dither on those it draws at 1x), blend (the color blended by its alpha, depth written "
@@ -1485,6 +1486,22 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   {
     MappedBuffer map(context, fetch_constants_buffer_);
     std::memcpy(map.data(), &regs[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], kFetchConstantsSize);
+    // 13 Nov 2026 ("set a clamp on texture bias with Anisotropic Filtering enabled"): with anisotropic filtering
+    // forced (anisotropic_override 2x and up), a texture's own negative LOD bias (its fetch constant's word 4, bits
+    // 12 to 21, in 1/32 of a level; the translated shaders scale their gradients by it) is taken as none. A game sets
+    // it to sharpen a trilinear picture at 720 lines; anisotropic filtering does that without the sparkle a sharper
+    // level than the screen can show gives in motion. Only the constants this draw's shaders sample as textures: the
+    // same registers hold vertex fetches.
+    if (const int32_t forced = REXCVAR_GET(anisotropic_override); forced >= 2 && forced < 6) {
+      auto* words = reinterpret_cast<uint32_t*>(map.data());
+      for (uint32_t mask = used_texture_mask; mask;) {
+        uint32_t index = 0;
+        while (!(mask & (1u << index))) ++index;
+        mask &= ~(1u << index);
+        uint32_t& word = words[index * 6 + 4];
+        if (word & (1u << 21)) word &= ~(0x3FFu << 12);  // the field's sign bit: a negative bias
+      }
+    }
   }
 
   // Textures and samplers. Drawn at the reduced scale (D49), the samplers take the mip bias for it: log2 of
