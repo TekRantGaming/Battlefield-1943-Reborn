@@ -512,34 +512,40 @@ ITextureView* GuestTextures::GetView(uint32_t fetch_constant, xenos::FetchOpDime
 
 // D149: the HD pack's texture for this game texture's data as it is now, made the first time (kept for the session,
 // by its key), or null. DXT1, DXT3 and DXT5 2D textures whose first level is at least 64 KB.
+// 13 Nov 2026 (Battlefield 1943's menu and HUD pictures): 8_8_8_8 textures too (the pack's block format 0: RGBA8, not
+// compressed), and first levels from 4 KB up; the key is then of the whole first level (of its first 64 KB above).
 ITextureView* GuestTextures::HdView(HostTexture& host_texture) {
   if (!REXCVAR_GET(native_x_renderer_hd_textures)) return nullptr;
   const TextureKey key = host_texture.key();
   const uint32_t format = uint32_t(key.format), w = key.GetWidth(), h = key.GetHeight();
-  if ((format != 18 && format != 19 && format != 20) || key.dimension != xenos::DataDimension::k2DOrStacked ||
-      key.GetDepthOrArraySize() != 1 || host_texture.GetGuestBaseSize() < 65536) {
+  if ((format != 18 && format != 19 && format != 20 && format != 6) ||
+      key.dimension != xenos::DataDimension::k2DOrStacked || key.GetDepthOrArraySize() != 1 ||
+      host_texture.GetGuestBaseSize() < 4096) {
     return nullptr;
   }
+  const size_t hashed = size_t(std::min<uint64_t>(host_texture.GetGuestBaseSize(), 65536));
   HdPack* pack = HdPackOpen();
   if (!pack) return nullptr;
   const uint8_t* guest = memory_.memory().TranslatePhysical<const uint8_t*>(key.base_page << 12);
-  const uint64_t content = XXH3_64bits(guest, 65536) ^ (uint64_t(format) << 56) ^ (uint64_t(w) << 32) ^
+  const uint64_t content = XXH3_64bits(guest, hashed) ^ (uint64_t(format) << 56) ^ (uint64_t(w) << 32) ^
                            (uint64_t(h) << 16);
   if (auto it = hd_textures_.find(content); it != hd_textures_.end())
     return it->second ? it->second->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
   const HdEntry* e = pack->Find(content);
   RefCntAutoPtr<ITexture> texture;
-  if (e && e->width == w && e->height == h && e->mips > 0 && e->mips <= 14 && (e->bc == 1 || e->bc == 3) &&
-      block_compression_) {
+  if (e && e->width == w && e->height == h && e->mips > 0 && e->mips <= 14 &&
+      (e->bc == 0 || ((e->bc == 1 || e->bc == 3) && block_compression_))) {
     std::vector<uint8_t> data;
     if (pack->Read(*e, data)) {
       const uint32_t block = e->bc == 1 ? 8 : 16;
+      const bool plain = e->bc == 0;  // RGBA8, a row after a row
       std::vector<TextureSubResData> levels(e->mips);
       uint64_t at = 0;
       bool fits = true;
       for (uint32_t m = 0; m < e->mips; ++m) {
         const uint32_t mw = std::max(1u, e->hd_width >> m), mh = std::max(1u, e->hd_height >> m);
-        const uint64_t stride = uint64_t((mw + 3) / 4) * block, bytes = stride * ((mh + 3) / 4);
+        const uint64_t stride = plain ? uint64_t(mw) * 4 : uint64_t((mw + 3) / 4) * block;
+        const uint64_t bytes = plain ? stride * mh : stride * ((mh + 3) / 4);
         if (at + bytes > data.size()) {
           fits = false;
           break;
@@ -556,7 +562,7 @@ ITextureView* GuestTextures::HdView(HostTexture& host_texture) {
         desc.Width = e->hd_width;
         desc.Height = e->hd_height;
         desc.MipLevels = e->mips;
-        desc.Format = e->bc == 1 ? TEX_FORMAT_BC1_UNORM : TEX_FORMAT_BC3_UNORM;
+        desc.Format = plain ? TEX_FORMAT_RGBA8_UNORM : e->bc == 1 ? TEX_FORMAT_BC1_UNORM : TEX_FORMAT_BC3_UNORM;
         desc.Usage = USAGE_IMMUTABLE;
         desc.BindFlags = BIND_SHADER_RESOURCE;
         TextureData init{levels.data(), e->mips};

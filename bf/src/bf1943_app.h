@@ -36,6 +36,7 @@ void RaiseTimerResolution();  // frame_rate.cpp
 void ExtractGameArt(const std::filesystem::path& game, const std::filesystem::path& out_dir);  // shader_prep.cpp
 void SetLevelGameRoot(const std::filesystem::path& game);  // shader_prep.cpp: the level's water height for the grass
 void HdExport(const std::filesystem::path& game);          // shader_prep.cpp: developer, the HD pack's source
+void HdExportUi(const std::filesystem::path& game);        // shader_prep.cpp: BF_HD_EXPORT_UI, the menus' and HUD's
 void PrepareShaders(const std::filesystem::path& data_dir, const std::filesystem::path& game,
                     const std::filesystem::path& cache);  // shader_prep.cpp
 std::filesystem::path ExecutableDir();                          // shader_prep.cpp
@@ -268,6 +269,7 @@ class Bf1943App : public rex::ReXApp {
       // The level's water height for the grass, read when the game opens a level (shader_prep.cpp).
       bf1943::SetLevelGameRoot(p.game_data_root);
       bf1943::HdExport(p.game_data_root);  // developer: BF_DEV_HD_EXPORT, the HD pack's source pictures
+      bf1943::HdExportUi(p.game_data_root);  // BF_HD_EXPORT_UI: the menu and HUD pictures for the pack
       // An imported HD texture pack (Settings > Graphics): the renderer reads it when HD textures are on (D149).
       {
         std::error_code ec;

@@ -14,6 +14,13 @@ the largest first, blocks row by row. NativeXRenderer (guest_textures.cpp, D149)
 its first 64 KB in guest memory, xor its guest format << 56, width << 32 and height << 16.
 
 Usage: python tools/hdpack/make_pack.py <export folder> <work folder> <pack file> --esrgan <realesrgan-ncnn-vulkan.exe>
+
+--ui (13 Nov 2026): the menu and HUD pictures (the game's export with BF_HD_EXPORT_UI=<folder>). They are drawn over
+other things, so their transparent parts matter: the colour under them is filled in from the nearest drawn pixel before
+the model sees the picture (it would pull the black or white under them into the edges), and where the alpha is a
+shape's outline (nearly all of it 0 or 255: an icon, a brush stroke, lettering) its upscaled edge is steepened, so the
+shape stays crisp, as if drawn again. An 8888 picture (guest format 6) is stored as RGBA8, not compressed (block
+format 0): menus have few of them and blocks would band their gradients.
 """
 import argparse
 import os
@@ -141,6 +148,31 @@ def mips_of(img):
     return out
 
 
+def bleed(rgba):
+    """The colour of the nearest drawn pixel under every transparent one (an RGB image, h x w x 3)."""
+    from scipy import ndimage
+    a = rgba[..., 3]
+    if a.min() > 8:
+        return rgba[..., :3]
+    drawn = a > 8
+    if not drawn.any():
+        return rgba[..., :3]
+    idx = ndimage.distance_transform_edt(~drawn, return_distances=False, return_indices=True)
+    return rgba[..., :3][idx[0], idx[1]]
+
+
+def crisp_alpha(alpha, src_alpha):
+    """An upscaled alpha (uint8) with its edge steepened where the original's is a shape's outline."""
+    s = np.asarray(src_alpha, np.float32)
+    soft = np.count_nonzero((s > 24) & (s < 231)) / max(1, s.size)
+    drawn = np.count_nonzero(s > 24) / max(1, s.size)
+    if drawn == 0 or soft / max(drawn, 1e-6) > 0.35:  # a gradient or a soft picture: as it is
+        return alpha
+    a = np.asarray(alpha, np.float32) / 255.0
+    a = np.clip((a - 0.5) * 1.8 + 0.5, 0.0, 1.0)
+    return Image.fromarray(np.rint(a * 255.0).astype(np.uint8))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('export')
@@ -149,6 +181,7 @@ def main():
     ap.add_argument('--esrgan', required=True)
     ap.add_argument('--model', default='realesrgan-x4plus')
     ap.add_argument('--limit', type=int, default=0, help='only the first N textures (a test)')
+    ap.add_argument('--ui', action='store_true', help='menu and HUD pictures (see the top)')
     args = ap.parse_args()
 
     rows = []
@@ -168,7 +201,11 @@ def main():
         src = os.path.join(args.work, 'rgb')
         os.makedirs(src, exist_ok=True)
         for r in todo:
-            Image.open(os.path.join(args.export, r[5])).convert('RGB').save(os.path.join(src, r[5]))
+            im = Image.open(os.path.join(args.export, r[5]))
+            if args.ui:
+                Image.fromarray(bleed(np.asarray(im.convert('RGBA')))).save(os.path.join(src, r[5]))
+            else:
+                im.convert('RGB').save(os.path.join(src, r[5]))
         t0 = time.time()
         subprocess.run([args.esrgan, '-i', src, '-o', up, '-n', args.model, '-s', '4', '-f', 'png'], check=True,
                        cwd=os.path.dirname(os.path.abspath(args.esrgan)))
@@ -188,16 +225,18 @@ def main():
             print('no upscaled picture for', name, flush=True)
             continue
         alpha = src.getchannel('A').resize((hw, hh), Image.LANCZOS)
+        if args.ui:
+            alpha = crisp_alpha(alpha, src.getchannel('A'))
         # The model's detail, the original's colour: Real-ESRGAN shifts colours (a warm gravel came out grey), so the
         # broad tones (a blur of 3 pixels at the new size) are taken from the original scaled up, the fine detail
         # from the model.
-        base = src.convert('RGB').resize((hw, hh), Image.BICUBIC)
+        base = (Image.fromarray(bleed(np.asarray(src))) if args.ui else src.convert('RGB')).resize((hw, hh), Image.BICUBIC)
         blur = lambda im: np.asarray(im.filter(ImageFilter.GaussianBlur(3)), np.float32)
         fixed = np.asarray(rgb, np.float32) + blur(base) - blur(rgb)
         img = np.dstack([np.clip(np.rint(fixed), 0, 255).astype(np.uint8), np.asarray(alpha)])
-        bc = 1 if guest_format == 18 else 3
+        bc = 0 if guest_format == 6 else 1 if guest_format == 18 else 3
         levels = mips_of(img)
-        data = b''.join(encode(lv, bc) for lv in levels)
+        data = b''.join(lv.tobytes() if bc == 0 else encode(lv, bc) for lv in levels)
         entries.append((key, guest_format, w, h, hw, hh, len(levels), bc, offset, len(data)))
         blobs.append(data)
         offset += len(data)

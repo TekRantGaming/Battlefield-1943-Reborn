@@ -1782,6 +1782,81 @@ void HdExport(const fs::path& game) {
 void HdExport(const fs::path&) {}
 #endif
 
+// The menu and HUD pictures for an HD pack (BF_HD_EXPORT_UI=<folder>; 13 Nov 2026: "upscale the lower quality imagery
+// (such as character art and spawn menu)"): every XenonTexture under menu/, awards/ and the levels' ui/ in the game's
+// archives, DXT1, DXT3, DXT5 or 8888, its first level at least 4 KB, each written as a PNG with a manifest line as
+// HdExport's (tools\hdpack\make_pack.py --ui makes the pack). The key is NativeXRenderer's: XXH3 of the first level's
+// first 64 KB (all of it when smaller), xor the guest format, width and height.
+// Not the four atlases the game's prompts and flag letters are written into at their own size (hud_glyphs.cpp: an
+// HD copy would show the pictures without them), not fonts, not the minimaps.
+void HdExportUi(const fs::path& game) {
+  const char* v = std::getenv("BF_HD_EXPORT_UI");
+  if (!v || !*v) return;
+  const fs::path out(v);
+  std::thread([game, out] {
+    std::error_code ec;
+    fs::create_directories(out, ec);
+    std::ofstream manifest(out / "manifest.tsv", std::ios::binary | std::ios::trunc);
+    manifest << "key\tguest_format\twidth\theight\tres_format\tpng\tname\n";
+    std::unordered_set<uint64_t> done;
+    size_t written = 0;
+    for (auto it = fs::recursive_directory_iterator(game / "dist" / "xenon", ec); it != fs::recursive_directory_iterator();
+         it.increment(ec)) {
+      if (ec) break;
+      const fs::path p = it->path();
+      if (p.extension() != ".fbrb") continue;
+      std::string ps = p.generic_string();
+      for (char& c : ps) c = char(std::tolower(static_cast<unsigned char>(c)));
+      if (ps.find("/vo/") != std::string::npos) continue;
+      Archive a;
+      if (!LoadArchive(p, a)) continue;
+      for (const auto& [name, at] : a.entries) {
+        if (name.size() < 5 || name.compare(name.size() - 4, 4, ".res") != 0) continue;
+        std::string lower = name;
+        for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+        if (lower.find("menu/") == std::string::npos && lower.find("awards/") == std::string::npos &&
+            lower.find("/ui/") == std::string::npos)
+          continue;
+        bool skip = false;
+        for (const char* k : {"menu_common_textures", "igm_mp_cq_textures", "hud_root_cq_textures", "minimap", "font",
+                              "dummy"})
+          skip = skip || lower.find(k) != std::string::npos;
+        if (skip || size_t(at.first) + at.second > a.data.size() || at.second < 0x5C + 4096) continue;
+        const uint8_t* res = &a.data[at.first];
+        const size_t hdr = std::memcmp(res, "RES", 3) == 0 ? 0x40 : 0;
+        const uint8_t* hd = res + hdr;
+        const uint32_t fmt = Be32(hd + 8), w = Be32(hd + 16), h = Be32(hd + 20);
+        if ((fmt > 2 && fmt != 9) || w < 16 || h < 16 || w > 4096 || h > 4096) continue;
+        const uint64_t base_size = fmt == 9 ? uint64_t(w) * h * 4 : uint64_t(w) * h / (fmt == 0 ? 2 : 1);
+        const size_t hashed = size_t(std::min<uint64_t>(base_size, 65536));
+        if (base_size < 4096 || at.second < hdr + 0x5C + hashed) continue;
+        const uint32_t guest_format = fmt == 9 ? 6 : fmt == 0 ? 18 : fmt == 1 ? 19 : 20;  // Xenos k_8_8_8_8, DXT1, 3, 5
+        const uint64_t key = XXH3_64bits(hd + 0x5C, hashed) ^ (uint64_t(guest_format) << 56) ^ (uint64_t(w) << 32) ^
+                             (uint64_t(h) << 16);
+        if (!done.insert(key).second) continue;
+        std::vector<uint8_t> bytes(res, res + at.second), rgba;
+        int dw = 0, dh = 0;
+        if (!DecodeXenonTexture(bytes, rgba, dw, dh)) continue;
+        size_t png_size = 0;
+        void* png = tdefl_write_image_to_png_file_in_memory_ex(rgba.data(), dw, dh, 4, &png_size, 6, false);
+        if (!png) continue;
+        char file[32];
+        std::snprintf(file, sizeof(file), "%016llx.png", static_cast<unsigned long long>(key));
+        {
+          std::ofstream f(out / file, std::ios::binary | std::ios::trunc);
+          f.write(static_cast<const char*>(png), std::streamsize(png_size));
+        }
+        mz_free(png);
+        manifest << std::string(file, 16) << '\t' << guest_format << '\t' << w << '\t' << h << '\t' << fmt << '\t' << file
+                 << '\t' << name << '\n';
+        ++written;
+      }
+    }
+    manifest.flush();
+    REXLOG_INFO("BF HD export: {} menu and HUD pictures written to {}", written, out.string());
+  }).detach();
+}
+
 void SetLevelGameRoot(const fs::path& game) {
   std::lock_guard lock(g_level_mutex);
   g_level_game_root = game;
