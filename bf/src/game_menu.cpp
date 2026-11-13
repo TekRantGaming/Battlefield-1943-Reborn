@@ -3531,6 +3531,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     rows.push_back(Slider("Controller", "Camera sensitivity",
                           "How fast the right stick turns the camera and moves your aim.", "bf_camera_sensitivity", 25,
                           300, 5, Percent));
+    rows.push_back(Slider("Controller", "Vehicle camera sensitivity",
+                          "How fast the right stick turns the camera and the guns in a vehicle's or a boat's seats, "
+                          "apart from the sensitivity on foot. Planes keep the game's own. Applies at once.",
+                          "bf_vehicle_camera_sensitivity", 25, 300, 5, Percent, 100));
     rows.push_back(Toggle("Controller", "Camera response",
                           "Modern turns the camera the same way in every direction, so circles and diagonals feel even. "
                           "Original passes the stick to the game as the Xbox 360 did.",

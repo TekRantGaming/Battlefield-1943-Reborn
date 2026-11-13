@@ -64,6 +64,9 @@ REXCVAR_DEFINE_BOOL(bf_look_motion, true, "BF1943/Controls",
                     "Walking on every frame: the first person view and gun move on between the game's 30 Hz ticks "
                     "along the soldier's own movement (false: they step 30 times a second, as on the Xbox 360)");
 REXCVAR_DECLARE(double, bf_camera_sensitivity);  // input_settings.cpp
+namespace bf1943 {
+double VehicleCameraGain();  // input_settings.cpp: the controller's camera gain in a vehicle's seat, 0 on foot
+}
 REXCVAR_DECLARE(bool, bf_mouse_invert_y);
 REXCVAR_DECLARE(bool, bf_mouse_invert_y_vehicle);
 REXCVAR_DECLARE(bool, mnk_mode);
@@ -174,7 +177,12 @@ double AngleDiff(double to, double from) {  // to - from, the short way round
   return d;
 }
 
-double CameraGain() { return std::clamp(REXCVAR_GET(bf_camera_sensitivity), 25.0, 300.0) / 100.0; }
+// The controller's turn scale: the soldier's on foot; in a vehicle's seat the vehicle's own above 100% (under it the
+// stick itself is scaled, input_settings.cpp), so the soldier's setting does not reach vehicles.
+double CameraGain() {
+  if (const double vehicle = bf1943::VehicleCameraGain(); vehicle > 0.0) return std::max(vehicle, 1.0);
+  return std::clamp(REXCVAR_GET(bf_camera_sensitivity), 25.0, 300.0) / 100.0;
+}
 
 #if defined(BF_DEV_TOOLS)
 bool DevLog() {
