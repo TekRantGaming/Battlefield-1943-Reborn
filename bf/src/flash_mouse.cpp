@@ -286,23 +286,39 @@ void SpawnMousePad(uint8_t* gamepad, bool allowed, bool out_of_world) {
   // A spawn point asked for by a click (see the top): one call of the screen's script at a time, each after the
   // screen has told the game where it is now.
   if (g.want >= 0) {
+    static const char* const kScreen = "_root.contentMC.loader1";
     if (g.spawn == g.want) {
       g.want = -1;
     } else if (now >= g.want_at) {
-      const bool stuck = g.want_steps > 0 && g.spawn == g.want_from;  // the last step did not move the choice
-      if ((stuck || g.want_steps >= g.want_count) && g.want_toggles < 1) {
-        FlashCall("_root.contentMC.loader1.toggleSpawnMode");  // frontline (auto-spawn) to flag spawn
+      if (g.spawn < 0 && g.want_toggles == 0) {
+        // The screen is on squad spawn (it sends no point): to flag spawn first.
+        FlashCall(std::string(kScreen) + ".toggleSpawnMode");
         ++g.want_toggles, g.want_steps = 0, g.want_from = -2;
         g.want_at = now + std::chrono::milliseconds(300);
-        REXLOG_INFO("BF spawn mouse: the choice does not move: the screen set to flag spawn");
-      } else if (stuck || g.want_steps >= g.want_count) {
-        REXLOG_INFO("BF spawn mouse: spawn point {} not reached (the screen stays on {})", g.want, g.spawn);
+        REXLOG_INFO("BF spawn mouse: the screen set from squad spawn to flag spawn");
+      } else if (g.spawn < 0) {
+        // The change of mode led to squad spawn: it was on flag spawn already. Back, and no more.
+        FlashCall(std::string(kScreen) + ".toggleSpawnMode");
+        REXLOG_INFO("BF spawn mouse: spawn point {} not reached: the screen's list has no other point", g.want);
         g.want = -1;
       } else {
-        g.want_from = g.spawn;
-        FlashCall(g.want_down ? "_root.contentMC.loader1.onSpawnDown" : "_root.contentMC.loader1.onSpawnUp");
-        ++g.want_steps;
-        g.want_at = now + std::chrono::milliseconds(220);
+        const bool stuck = g.want_steps > 0 && g.spawn == g.want_from;  // the last step did not move the choice
+        if ((stuck || g.want_steps >= g.want_count) && g.want_toggles < 1) {
+          FlashCall(std::string(kScreen) + ".toggleSpawnMode");  // frontline (auto-spawn) to flag spawn
+          ++g.want_toggles, g.want_steps = 0, g.want_from = -2;
+          g.want_at = now + std::chrono::milliseconds(300);
+          REXLOG_INFO("BF spawn mouse: the choice does not move: the screen's spawn mode changed");
+        } else if (stuck || g.want_steps >= g.want_count) {
+          REXLOG_INFO("BF spawn mouse: spawn point {} not reached (the screen stays on {})", g.want, g.spawn);
+          g.want = -1;
+        } else {
+          // A method of the screen's, run on the screen itself (auto_join.cpp "method:": as a queued call its `this`
+          // was the root, and the step changed nothing).
+          g.want_from = g.spawn;
+          FlashCall(std::string("method:") + kScreen + (g.want_down ? "|onSpawnDown" : "|onSpawnUp"));
+          ++g.want_steps;
+          g.want_at = now + std::chrono::milliseconds(220);
+        }
       }
     }
   }
