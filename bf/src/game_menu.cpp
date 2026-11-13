@@ -721,6 +721,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }
     page_ = Page::kMain, row_ = 0, from_pause_ = false, lost_ = false;
     main_cursor_ = 0;  // BF's own list, (re)entered, is on its first row
+    // 0.4.2 ("upon exiting a LAN game, the game should reconnect to the master server instead of staying on
+    // 127.0.0.1"): a match on a server's own backend is over. The game itself signs in once a run, so the game starts
+    // again, on the main servers (OwnBackendLeaveTick, from our draw: this runs under the menu driver's lock).
+    if (own_match_joined_ && !own_backend_.empty() && !failed_) own_leave_ = true;
   }
   void ShowLost() { open_ = true, page_ = Page::kLeaving, lost_ = true; }  // the server went away during the match
   void ShowPause() {
@@ -944,6 +948,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       auto_joined_ = true, QuickJoin();
     PrivateMatchTick();  // our Create Private Match: its server's state, the join, its end
     TickRejoinTick();    // the join asked for before a restart at the server's tick rate
+    OwnBackendLeaveTick();  // a LAN match is over: back on the main servers
+    HostLanAtStartTick();   // a LAN match asked for before a restart
     if (team_suicide_at_ > 0 && ImGui::GetTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
       team_suicide_at_ = -1;
       REXLOG_INFO("BF pause: the game's suicide after the change of team, to spawn at the new base");
@@ -1412,8 +1418,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // Run the game, the startup videos, our main menu (TekRantGaming, 10 Nov 2026): the game's own startup cards and logo
     // music, extracted from the player's files (shader_prep.cpp ExtractGameArt), played by us before anything else;
     // the setting Startup cards off (bf_startup_cards = false) skips them.
+    const char* restarted = std::getenv("BF_RESTARTED");  // started again by itself: no startup cards twice
     if (fs::exists(UserDir() / "cache" / "extracted" / "startup" / "card5.png") &&
-        settings_.Get("bf_startup_cards", "true") != "false") {
+        settings_.Get("bf_startup_cards", "true") != "false" && !(restarted && *restarted == '1')) {
       page_ = Page::kIntro, intro_at_ = -1;
       return;
     }
@@ -2069,6 +2076,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       return;
     }
     pw_passed_.clear();
+    if (!own_backend_.empty()) own_match_joined_ = true;
     if (sv.Tick() != TickRate() && !SetTickRate(sv.Tick())) {
       tick_popup_ = true, tick_popup_server_ = sv, popup_row_ = 1;
       REXLOG_INFO("BF join: {} runs at {} Hz and this run at {}: the game must start again to join it (asked)", sv.name,
@@ -2266,6 +2274,46 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   double own_join_until_ = 0;
   bool own_popup_ = false;
   ServerInfo own_popup_server_;
+  bool own_match_joined_ = false;  // a match was joined on a server's own backend in this run
+  bool own_leave_ = false;         // that match is over: back to the main servers (OwnBackendLeaveTick)
+  static void SetEnv(const char* name, const char* value) {
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    if (*value) setenv(name, value, 1);
+    else unsetenv(name);
+#endif
+  }
+  // The game started again without anything of a server's own backend: the launcher's Home, on the main servers
+  // (no startup cards again: BF_RESTARTED).
+  void OwnBackendLeaveTick() {
+    if (!own_leave_) return;
+    own_leave_ = false;
+    REXLOG_INFO("BF browser: the match on the backend at {} is over: starting again on the main servers", own_backend_);
+    bf1943::StopPrivateMatch();
+    for (const char* name : {"BF_OWN_BACKEND", "BF_OWN_BACKEND_JOIN", "BF_ONLINE_HOST", "BF_JOIN_TICK", "BF_JOIN_ADDRESS"})
+      SetEnv(name, "");
+    SetEnv("BF_RESTARTED", "1");
+#if defined(BF_DEV_TOOLS)
+    for (const char* name : {"BF_MENU_STEPS", "BF_PAUSE_TEST", "BF_SPAWN_PRESSES", "BF_WALK_TEST"}) SetEnv(name, "");  // a test's script is not run twice
+#endif
+    settings_.Save();
+    if (update::RestartSelf() && quit_) quit_();
+  }
+  // A LAN match asked for while the game already ran (the first start after an update makes its shaders with the
+  // game running): the game started again (HostPrivateMatch), and the match is hosted from Home, before the game.
+  void HostLanAtStartTick() {
+    const char* v = std::getenv("BF_HOST_LAN_AT_START");
+    if (!v || *v != '1' || page_ != Page::kHome) return;
+    SetEnv("BF_HOST_LAN_AT_START", "");
+    REXLOG_INFO("BF private match: the LAN match asked for before the restart is hosted now (the game {})",
+                pre_game_ ? "has not started" : "runs already");
+    page_ = Page::kPrivateMatch, pm_error_.clear();
+    LoadPrivateMatchChoices();
+    pm_row_ = kPmHost;
+    if (pre_game_) HostPrivateMatch();
+    else pm_error_ = "The LAN match could not be started. Close the game, start it again and host it first.";
+  }
   void UseOwnBackend(const std::string& host) {
     own_backend_ = host;
     rex::cvar::SetFlagByName("bf_online_host", host);

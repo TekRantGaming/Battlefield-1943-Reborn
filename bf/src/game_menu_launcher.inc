@@ -2254,8 +2254,12 @@
       // The game signs in to the match's own backend, which it can only choose before it starts (once it runs it is
       // signed in to the main one).
       if (!pre_game_ && own_backend_ != "127.0.0.1") {
-        pm_error_ = "A LAN match is started from here before the game itself runs: close the game, start it again and "
-                    "host the LAN match first.";
+        // 0.4.2: no refusal; the game starts again and hosts the match from Home (game_menu.cpp HostLanAtStartTick).
+        REXLOG_INFO("BF private match: a LAN match with the game already running: starting again to host it");
+        SavePrivateMatchChoices();
+        SetEnv("BF_HOST_LAN_AT_START", "1"), SetEnv("BF_RESTARTED", "1");
+        if (update::RestartSelf() && quit_) quit_();
+        else pm_error_ = "The game could not start again. Close it, start it again and host the LAN match first.";
         return;
       }
       UseOwnBackend("127.0.0.1");
@@ -2697,6 +2701,7 @@
     if (MenuDriverStage() != 2) return false;
     const std::string direct = REXCVAR_GET(bf_dev_auto_direct);
     if (REXCVAR_GET(bf_dev_auto_host)) {
+      LoadPrivateMatchChoices();  // the test profile's: LAN or online, tick rate, password
       pm_upnp_ = false;
       page_ = Page::kPrivateMatch, pm_row_ = kPmHost;
       HostPrivateMatch();
