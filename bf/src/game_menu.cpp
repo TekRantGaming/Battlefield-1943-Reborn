@@ -3215,13 +3215,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                               "bf_mouse_toggle_aim", "Hold", "Toggle");
       if (!mnk) aim.disabled = true, aim.note = mnk_note;
       rows.push_back(aim);
-      SettingRow assist = Toggle("Keyboard & mouse", "Aim assist",
-                                 "The game's own help with aiming at enemies, made for controllers, while you aim with "
-                                 "the mouse. Off, the aim moves only as you move the mouse. The controller has its own "
-                                 "choice.",
-                                 "bf_aim_assist_mouse");
-      if (!mnk) assist.disabled = true, assist.note = mnk_note;
-      rows.push_back(assist);
+// (No Aim assist row here since 13 Nov 2026: the mouse never has it.)
       SettingRow cam = Toggle("Keyboard & mouse", "Mouse camera",
                               "Turn the camera with the mouse. Off, it turns with the keys bound to the right stick.",
                               "mnk_mouse");
@@ -3291,6 +3285,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "The game's own help with aiming at enemies while you aim with a controller. Off, the aim "
                           "moves only as you move it.",
                           "bf_aim_assist"));
+    rows.push_back(Slider("Controller", "Aim assist strength",
+                          "How strongly the aim assist pulls your aim. 100% is the console's.", "bf_aim_assist_strength",
+                          0, 100, 5, Percent));
     rows.push_back(Toggle("Controller", "Vibration", "Controller rumble.", "bf_vibration"));
     {
       SettingRow strength = Slider("Controller", "Vibration strength",

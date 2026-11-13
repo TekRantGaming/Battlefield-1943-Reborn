@@ -39,6 +39,7 @@
 
 #include <native_x_renderer/native_x_renderer.h>
 #include <rex/cvar.h>
+#include "seat_info.h"
 #include <rex/hook.h>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/logging.h>
@@ -486,7 +487,9 @@ void LookPad(uint8_t* gamepad, bool seated) {
         std::chrono::duration<double>(now - g.vehicle_moved).count() > 0.25)
       g.stick_moved = now;
   }
-  const bool mouse_active = MouseLook() && !comms::Typing();
+  // Not in the air raid's bombers (13 Nov 2026): the mouse neither steers them nor turns their view, in the bomb
+  // sight or behind them; the keys and the controller steer.
+  const bool mouse_active = MouseLook() && !comms::Typing() && !BomberSeat();
   // A seat where the soldier's own aim update runs (a landing boat's gunner: its gun follows the soldier's look): the
   // mouse turns that aim itself on every frame, as on foot (LookFrame and the aim hook), so it is no vehicle seat for
   // the mouse here. (The pull request took every seat: LookFrame then handed the aim hook no turn, and the hook, which
@@ -770,8 +773,13 @@ REX_HOOK_RAW(sub_822B0B18) {
 // the device that aimed last (the mouse moved after the right stick was pushed: the mouse) is off; the aim is then
 // the player's alone. Other soldiers (a server's) keep the game's.
 REXCVAR_DEFINE_BOOL(bf_aim_assist, true, "BF1943/Controls", "Aim assist with a controller (the game's own)");
-REXCVAR_DEFINE_BOOL(bf_aim_assist_mouse, true, "BF1943/Controls",
-                    "Aim assist with the mouse (Keyboard & mouse): the game's own, made for controllers");
+// 13 Nov 2026 ("disable aim-assist from mouse and keyboard controls, and slightly reduce the strength of aim-assist
+// for controllers"): the mouse never has it (this setting is no longer read; it stays so an old settings file loads),
+// and a controller's pull is scaled: the aim's turn by the game's assist in a tick, times bf_aim_assist_strength.
+REXCVAR_DEFINE_BOOL(bf_aim_assist_mouse, false, "BF1943/Controls",
+                    "Not used: the mouse has no aim assist (it was the game's own, made for controllers)");
+REXCVAR_DEFINE_DOUBLE(bf_aim_assist_strength, 75.0, "BF1943/Controls",
+                      "A controller's aim assist, 0 to 100 (% of the console's pull on the aim)");
 namespace {
 struct AssistStats {
   uint64_t calls = 0, armed = 0, cleared = 0;  // the local soldier's calls, with input+0x54 set, and the flag cleared
@@ -789,7 +797,7 @@ REX_HOOK_RAW(sub_822B0F40) {
     if (mine) {
       ++g_assist.calls;
       if (input && base[input + 0x54]) ++g_assist.armed;
-      const bool on = mouse ? REXCVAR_GET(bf_aim_assist_mouse) : REXCVAR_GET(bf_aim_assist);
+      const bool on = !mouse && REXCVAR_GET(bf_aim_assist);
       if (!on && (ctx.r5.u32 & 0xFF)) ctx.r5.u64 = 0, ++g_assist.cleared;
       // A line a minute while it acts or is turned off: how often the game would have pulled the aim.
       const auto now = Clock::now();
@@ -798,12 +806,24 @@ REX_HOOK_RAW(sub_822B0F40) {
           REXLOG_INFO("BF aim assist: {} ticks in the last minute, {} with the game's assist armed, {} turned off by "
                       "the settings (aiming with the {}; controller {}, mouse {})",
                       g_assist.calls, g_assist.armed, g_assist.cleared, mouse ? "mouse" : "controller",
-                      REXCVAR_GET(bf_aim_assist) ? "on" : "off", REXCVAR_GET(bf_aim_assist_mouse) ? "on" : "off");
+                      REXCVAR_GET(bf_aim_assist) ? "on" : "off", "never");
         g_assist = AssistStats{};
       }
     }
   }
+  // A controller's assist at less than the console's strength: what the call turned the aim by, scaled.
+  const double strength = std::clamp(REXCVAR_GET(bf_aim_assist_strength), 0.0, 100.0) / 100.0;
+  const bool scale = mine && !mouse && strength < 0.999 && (ctx.r5.u32 & 0xFF);
+  const float yaw0 = scale ? LoadF(base, aim + 8) : 0.0f, pitch0 = scale ? LoadF(base, aim + 0xC) : 0.0f;
   __imp__sub_822B0F40(ctx, base);
+  if (scale) {
+    const float yaw1 = LoadF(base, aim + 8), pitch1 = LoadF(base, aim + 0xC);
+    const double dyaw = std::remainder(double(yaw1) - yaw0, 6.283185307179586), dpitch = double(pitch1) - pitch0;
+    if (dyaw != 0.0 || dpitch != 0.0) {
+      StoreF(base, aim + 8, float(Wrap(yaw0 + dyaw * strength)));
+      StoreF(base, aim + 0xC, float(pitch0 + dpitch * strength));
+    }
+  }
 }
 
 namespace {

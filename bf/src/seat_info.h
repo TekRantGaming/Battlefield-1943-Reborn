@@ -12,6 +12,10 @@ enum class SeatKind {
   kPlane,    // a plane's pilot (scheme 3)
   kDriver,   // a land vehicle's or a boat's driver (the seat binds the throttle)
   kGunner,   // any other seat: a gunner or a passenger
+  // The air raid's bombers, flown from the bunker (13 Nov 2026, the bomber run's log: scheme 3 like a plane, class
+  // 820036D0, no throttle; it binds only the left stick's X to steer, fire, the camera and the menu). The mouse has
+  // no part in it: "Bomber run should only have left/right movement on keyboard or controller".
+  kBomber,
 };
 
 struct SeatInfo {
@@ -30,4 +34,6 @@ struct SeatInfo {
 // The seat as of a mapping within 200 ms; false when there was none (a menu, loading).
 bool LocalSeat(SeatInfo& out);
 const char* SeatKindName(SeatKind kind);
+// The local player is flying the air raid's bombers now.
+bool BomberSeat();
 }  // namespace bf1943

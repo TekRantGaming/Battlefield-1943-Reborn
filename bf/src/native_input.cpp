@@ -79,12 +79,17 @@ bool LocalSeat(SeatInfo& out) {
   out = g_info;
   return true;
 }
+bool BomberSeat() {
+  SeatInfo seat;
+  return LocalSeat(seat) && seat.kind == SeatKind::kBomber;
+}
 const char* SeatKindName(SeatKind kind) {
   switch (kind) {
     case SeatKind::kSoldier: return "on foot";
     case SeatKind::kPlane: return "plane pilot";
     case SeatKind::kDriver: return "driver";
     case SeatKind::kGunner: return "gunner or passenger";
+    case SeatKind::kBomber: return "air raid bombers";
     default: return "unknown";
   }
 }
@@ -232,7 +237,8 @@ REX_HOOK_RAW(sub_822BDB90) {
     // 13 Nov calibration run: planes are scheme 3, drivers scheme 2 (the boat's too), and a gunner's or passenger's
     // seat is scheme 1 like a soldier on foot, but with a vehicle (an AA gun is a vehicle of one seat). Bits 4 to 7 of
     // the bound concepts are always set, so they say nothing of a seat's weapon.
-    s.kind = s.scheme == 3                   ? bf1943::SeatKind::kPlane
+    s.kind = s.scheme == 3 && !s.throttle    ? bf1943::SeatKind::kBomber  // the air raid: a plane without a throttle
+             : s.scheme == 3                 ? bf1943::SeatKind::kPlane
              : !s.vehicle                    ? bf1943::SeatKind::kSoldier
              : s.scheme == 2 || s.throttle   ? bf1943::SeatKind::kDriver
                                              : bf1943::SeatKind::kGunner;
