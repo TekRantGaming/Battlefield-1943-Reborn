@@ -36,9 +36,9 @@ other machines.
 
 ## Updates
 
-Servers only let the newest version of the game in, so a server has to be on the newest release too. The manager
-looks for a new release by itself, tells the players on your servers with a countdown, installs it and starts the
-servers again. Your `server.json`, your game files and your logs stay.
+Players' games are always on the newest release (the main backend lets no older one in), so keep your servers on it
+too. The manager looks for a new release by itself, tells the players on your servers with a countdown, installs it
+and starts the servers again. Your `server.json`, your game files and your logs stay.
 
 ## Ports
 
