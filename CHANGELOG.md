@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.4.1 (13 November 2026): the mouse in every vehicle seat, Custom Match with LAN, more antialiasing and upscalers, Enhancements, players on the pause map
+
+An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. Earlier versions update to it by
+themselves, and the servers only let the newest version in.
+
+**New**
+- **Settings > Enhancements.** A new page for what Reborn adds to the game. Lettered flags is its first row: turn it
+  off and every map and the HUD show the game's own plain flags again.
+- **Mouse buttons 4 and 5 can be bound.** Settings > Controls > Keyboard bindings now takes the mouse's side buttons,
+  and its middle button, which it could not take before. The HUD's prompts show them too ([issue 14](../../issues/14)).
+- **EU Central.** Servers can now say they are in EU Central, with the European Union's flag in the server browser.
+  The official servers move to it.
+- **Mouse and keyboard in every vehicle seat.** Tank guns, turrets and AA guns turn with the mouse as planes fly:
+  the mouse's speed is the gun's speed, and a still mouse leaves the gun still (this also fixes the AA gun of
+  [issue 13](../../issues/13)). The game knows your seat from the game itself, and drivers without a gun look around
+  freely. Settings > Controls has plain Invert camera, Invert vehicle and Invert flight switches; your 0.4.0 settings
+  are carried over. By ThatZaliaSGuy ([pull request 16](../../pull/16)).
+- **Custom Match** (was Create Private Match): a name, the map, the tick rate, Online or LAN, Show in browser, UPnP or
+  a port of your own. A LAN match needs no internet: your PC answers the sign-in and the match list, and the match is
+  on the server browser's new LAN tab. By ThatZaliaSGuy ([pull request 16](../../pull/16)).
+- **Bindings with two keys and two mouse buttons** for each action, the mouse wheel too; hold Esc to clear one. By
+  ThatZaliaSGuy ([pull request 16](../../pull/16)).
+- **More antialiasing and upscalers.** SMAA (four presets) and Intel CMAA 2 beside FXAA, and an Upscaling section with
+  AMD FSR 4 and FSR 3.1, Intel XeSS, NVIDIA DLSS and a TAA. By ThatZaliaSGuy ([pull request 16](../../pull/16)).
+- **HUD scale and minimap size**, **Change Team** in the pause menu, and **the deploy screen with the mouse** (kits,
+  buttons and spawn points to click). By ThatZaliaSGuy ([pull request 16](../../pull/16)).
+- **Experimental 60 Hz servers.** A server can now run at 60 ticks a second (75 and 100 are there too). They are
+  experimental: joining one from the server browser warns you first, and Quick Play never picks one. Your game takes
+  the server's rate when it joins. The rate itself by ThatZaliaSGuy ([pull request 16](../../pull/16)).
+- **Players on the pause menu's map.** Your team mates are blue arrows (your squad green) pointing the way each one
+  faces, also in an air raid's bomber view. An enemy is a red arrow, only while the game itself shows him on your
+  map.
+
+**Changed**
+- **Mouse flying**: Normal is now a flight stick, pull back to climb (as a flight sim's), the other way round from
+  0.4.0; Invert flight turns it round. The air raid's bombers steer left and right only.
+- **Aim assist** is never applied with the mouse; a controller's is at 75% by default, with a slider.
+- **Graphics settings wait for Apply.** On the Graphics page your changes take effect with Apply settings, beside
+  Restore defaults; Controls opens Keyboard bindings and Button remapping with buttons. By ThatZaliaSGuy
+  ([pull request 16](../../pull/16)).
+- **Distant textures a little softer, without the sparkle,** whenever anisotropic filtering is on (every preset but
+  Low): the game's own sharpening of far textures is left out, as anisotropic filtering does that job. By
+  ThatZaliaSGuy ([pull request 16](../../pull/16)).
+- **Larger text in the menus.** The small captions and the rows' text are easier to read on every screen.
+- **Less CPU for the same frames**, from a lock the game takes thousands of times a frame: about 5% less on Linux (a
+  ROG Ally), and a little less on Windows.
+
+**Fixed**
+- **A crash on dedicated servers**: a read of an empty memory address on one of the game's threads no longer closes
+  a server, as it has not closed the game since 0.3.0.
+- **Sights on ultrawide screens**: a sniper scope's crosshair and mil dots and a plane's gunsight stay in one piece and
+  in place, and a world marker never takes pieces of the HUD with it. By ThatZaliaSGuy
+  ([pull request 16](../../pull/16)).
+
 ## 0.4.0 (13 November 2026): a new look, ultrawide screens, mouse flying, lettered flags, a map in the pause menu
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. Earlier versions update to it by

@@ -180,8 +180,9 @@ Everything is in our Settings menu, from the main menu and the pause menu.
 EA's servers for Battlefield 1943 are gone. Reborn brings online play back with its own main backend, which every
 player logs in to and which lists every server.
 
-- **Official servers** are run by TekRantGaming: eight with Wake Island, Guadalcanal and Iwo Jima in turn, one each
-  for Wake Island, Guadalcanal and Iwo Jima around the clock, and Air Superiority on Coral Sea.
+- **Official servers** are run by TekRantGaming, in EU Central: eight with Wake Island, Guadalcanal and Iwo Jima in
+  turn, one each for Wake Island, Guadalcanal and Iwo Jima around the clock, Air Superiority on Coral Sea, and an
+  experimental 60 Hz test server with all four maps in turn.
 - **Community servers**: anyone can host dedicated servers with `BF1943-Reborn-Server-<version>-windows.zip`, from a
   manager page in the browser. Each server has its own name, description, maps, players and pause between rounds,
   and shows in everyone's server browser under Community with its region; LAN only keeps it off the list. See

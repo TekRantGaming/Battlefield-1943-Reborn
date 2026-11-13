@@ -9,8 +9,9 @@ that only the official machine holds, which is never in a download.
 
 - **The main backend**: login, the list of every server (official and community), stats. Players' games find it
   through one setting, `bf_online_host`, which the release packages carry.
-- **Twelve servers**, 24 players each: eight with Wake Island, Guadalcanal and Iwo Jima in turn, one each for Wake
-  Island, Guadalcanal and Iwo Jima around the clock, and Air Superiority on Coral Sea.
+- **Thirteen servers** in EU Central, 24 players each: eight with Wake Island, Guadalcanal and Iwo Jima in turn, one
+  each for Wake Island, Guadalcanal and Iwo Jima around the clock, Air Superiority on Coral Sea, and an experimental
+  60 Hz test server with all four maps in turn.
 
 ## Versions
 
