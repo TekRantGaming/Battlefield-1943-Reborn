@@ -295,6 +295,10 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 
 Every download includes the full licence texts in its `licences` folder.
 
+> [!NOTE]
+> **AI disclosure:** this port was made almost entirely with Claude Code (Anthropic). The repository owner directed
+> and tested the work; the AI did the analysis, code, tools and documentation.
+
 ## Legal
 
 Battlefield and Battlefield 1943 are trademarks of Electronic Arts Inc. All rights to the game belong to their owners.
