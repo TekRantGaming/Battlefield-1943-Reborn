@@ -229,9 +229,17 @@ class ServerList {
     return required_version_;
   }
 
+  // 13 Nov 2026 ("The Game shouldn't try to connect to the master server unless they go to the server browser or
+  // click Quick Play"): the list is asked for only while something wants it, and for 12 s after: the server browser,
+  // Quick Play, the friends page, a match being played. Until then nothing is sent to the backend from here, and
+  // asked() is false (the menus say so instead of "not reachable"). A test that joins by itself (BF_AUTO_JOIN) always
+  // wants it.
+  void Want() { wanted_until_ = Now() + 12.0; }
+  bool asked() const { return answers_.load() > 0; }
+  uint64_t answers() const { return answers_.load(); }  // the list's answers so far (a count)
   // The browser is open: ping the servers (until 3 s after it closes); RefreshNow fetches the list again now.
-  void WantPings() { want_pings_until_ = Now() + 3.0; }
-  void RefreshNow() { refresh_now_ = true; }
+  void WantPings() { want_pings_until_ = Now() + 3.0, Want(); }
+  void RefreshNow() { Want(), refresh_now_ = true; }
 
   // Direct connect: the server at host:port (a name is looked up first) if the backend knows it: the game's own
   // backend, or the one whose registry is `registry` (host:port; a server on a backend of its own).
@@ -282,10 +290,16 @@ class ServerList {
 
  private:
   void Run() {
+    const char* always = std::getenv("BF_AUTO_JOIN");
     while (!stop_) {
+      if (!(always && *always == '1') && Now() >= wanted_until_.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        continue;
+      }
       std::string reply;
       std::vector<ServerInfo> found;
       reachable_ = RegistryRequest("{\"op\": \"list\", " + ClientFields() + "}", reply);
+      answers_.fetch_add(1);
       for (size_t at = reply.find("{\"gid\""); at != std::string::npos;) {
         const size_t end = JsonEnd(reply, at);
         if (end == std::string::npos) break;
@@ -319,6 +333,8 @@ class ServerList {
     }
   }
 
+  std::atomic<double> wanted_until_{0.0};
+  std::atomic<uint64_t> answers_{0};
   static double Now() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   }

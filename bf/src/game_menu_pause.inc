@@ -240,7 +240,7 @@
     } else if (pause_confirm_ >= 0) {
       const bool exit = pause_confirm_ == kPauseExit;
       const int r = PauseCard(d, io, st, in, clicked >= 0, exit ? "EXIT GAME" : "SUICIDE", exit ? "LEAVE THIS MATCH?" : "END THIS LIFE?",
-                              exit ? (pm_hosting_ ? "You go back to the main menu, and your private match ends for everyone in it."
+                              exit ? (pm_hosting_ ? "You go back to the main menu, and your custom match ends for everyone in it."
                                                   : "You go back to the main menu. Your score in this round stays with the server.")
                                    : "Your soldier dies and you pick a new spawn point. It counts as a death.",
                               "YES", kit::Button::kA, "NO", kit::Button::kB);

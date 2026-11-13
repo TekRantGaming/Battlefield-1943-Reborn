@@ -1578,6 +1578,7 @@
       const bool up = list_.reachable();
       const std::string t = up ? fmt::format("{} PLAYERS  /  {} {}", list_.players_online(), servers.size(),
                                              servers.size() == 1 ? "SERVER ONLINE" : "SERVERS ONLINE")
+                        : !list_.asked() ? "NOT CONNECTED"
                                : "SERVERS NOT REACHABLE";
       const float tw = kit::SpacedWidth(f.typed, st(13), t, st(2));
       const float tx = st.P(1240, 0).x - tw, ty = st.P(0, 96).y;  // under the soldier's card
@@ -2244,8 +2245,8 @@
       UseOwnBackend("127.0.0.1");
     }
     const std::string me = settings_.Get("player_name", "");
-    o.name = !pm_name_.empty() ? pm_name_ : me.empty() ? "Private match" : me + "'s match";
-    o.listed = pm_listed_ && !pm_lan_;
+    o.name = !pm_name_.empty() ? pm_name_ : me.empty() ? "Custom match" : me + "'s match";
+    o.listed = !pm_lan_;  // always in the browser: Community for an Online match (a LAN match is on the LAN tab)
     if (PmPortTyped()) {
       const int port = std::atoi(pm_port_text_.c_str());
       if (port < 1024 || port > 65535) {
@@ -2304,7 +2305,7 @@
     ServerInfo sv;
     sv.gid = pm_status_.gid;
     const std::string me = settings_.Get("player_name", "");
-    sv.name = me.empty() ? "Private match" : me + "'s match";
+    sv.name = me.empty() ? "Custom match" : me + "'s match";
     sv.address = pm_status_.address;
     sv.map = pm_map_ < 4 ? kPmMapTitles[pm_map_] : "Wake Island";
     sv.max_players = 24;
@@ -2332,7 +2333,7 @@
     d->AddRectFilled(ra, rb, IM_COL32(13, 15, 11, 204));
     d->AddRect(ra, rb, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
     kit::Spaced(d, f.typed, st(8), ImVec2(ra.x + st(24), ra.y + st(18)), kit::kKhakiDim, "HOSTED ON THIS PC", st(2));
-    kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(ra.x + st(24), ra.y + st(32)), kit::kCream, "PRIVATE MATCH");
+    kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(ra.x + st(24), ra.y + st(32)), kit::kCream, "CUSTOM MATCH");
     d->AddRectFilled(ImVec2(ra.x, ra.y + st(76)), ImVec2(rb.x, ra.y + st(77)), IM_COL32(241, 234, 211, 30));
     const float rows_y = ra.y + st(77);
     // ---- the picture card at the right: the chosen map from the air, the paper band under it
@@ -2360,7 +2361,7 @@
     // UPnP and the port as a smaller pair under Network type, and no UPnP at all for a LAN match).
     std::vector<int> order = {kPmName, kPmMap, kPmNet};
     if (!pm_lan_) order.push_back(kPmUpnp);
-    order.insert(order.end(), {kPmPort, kPmListed, kPmHost});
+    order.insert(order.end(), {kPmPort, kPmHost});
     {
       int at = 0;
       for (int k = 0; k < int(order.size()); ++k)
@@ -2447,7 +2448,7 @@
         d->AddRectFilled(f0, f1, sel ? IM_COL32(34, 36, 27, 22) : IM_COL32(0, 0, 0, 70));
         d->AddRect(f0, f1, sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
         const bool empty = pm_name_.empty();
-        const std::string shown = !empty ? pm_name_ + (sel ? caret : "") : sel ? caret : me.empty() ? "Private match" : me + "'s match";
+        const std::string shown = !empty ? pm_name_ + (sel ? caret : "") : sel ? caret : me.empty() ? "Custom match" : me + "'s match";
         d->PushClipRect(f0, f1, true);
         d->AddText(f.ui_bold, st(11), ImVec2(f0.x + st(9), f0.y + (f1.y - f0.y - st(11) * 1.45f) * 0.5f),
                    empty && !sel ? IM_COL32(241, 234, 211, 110) : sel ? kit::kInk : kit::kKhaki, shown.c_str());
@@ -2459,18 +2460,16 @@
       } else if (i == kPmListed) {
         value_text(pm_lan_ ? "ON YOUR NETWORK" : pm_listed_ ? "YES" : "NO", true, pm_lan_);
       } else if (i == kPmUpnp) {
-        // A box to tick: the router is asked to open the port.
-        const float bx = st(12);
-        const ImVec2 b0(right - bx, mid - bx * 0.5f), b1(b0.x + bx, b0.y + bx);
-        const ImU32 line = sel ? kit::kInk : kit::kKhaki;
-        d->AddRect(b0, b1, line, 0, 0, st(1.5f));
-        if (pm_upnp_) {
-          d->AddLine(ImVec2(b0.x + bx * 0.2f, b0.y + bx * 0.55f), ImVec2(b0.x + bx * 0.42f, b0.y + bx * 0.78f), line, st(2));
-          d->AddLine(ImVec2(b0.x + bx * 0.42f, b0.y + bx * 0.78f), ImVec2(b0.x + bx * 0.82f, b0.y + bx * 0.22f), line, st(2));
-        }
-        const std::string said = pm_upnp_ ? "ASK THE ROUTER" : "I OPEN IT MYSELF";
-        const float sw = kit::SpacedWidth(f.typed, st(7.5f), said, st(1.5f));
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2(b0.x - st(8) - sw, mid - st(5)), dim, said, st(1.5f));
+        // An on/off switch: on, the router is asked to open the port.
+        const float sw = st(26), sh2 = st(13);
+        const ImVec2 s0(right - sw, mid - sh2 * 0.5f), s1(right, mid + sh2 * 0.5f);
+        const ImU32 track = pm_upnp_ ? kit::kGreen : IM_COL32(120, 116, 100, 140);
+        d->AddRectFilled(s0, s1, track, sh2 * 0.5f);
+        const float knob = sh2 * 0.5f - st(2);
+        d->AddCircleFilled(ImVec2(pm_upnp_ ? s1.x - sh2 * 0.5f : s0.x + sh2 * 0.5f, mid), knob, kit::kCream, 20);
+        const std::string said = pm_upnp_ ? "ON" : "OFF";
+        const float tw = kit::SpacedWidth(f.typed, st(7.5f), said, st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2(s0.x - st(8) - tw, mid - st(5)), dim, said, st(1.5f));
       } else if (i == kPmPort) {
         // The port's field: typed when it is the player's to choose, greyed (Automatic) while the router is asked.
         const bool off = !PmPortTyped();
@@ -2488,14 +2487,14 @@
       static constexpr const char* kAbout[] = {
           "The map your match plays. All four in turn: the next map after each round, as on the official servers.",
           "The match's name in the server browser. Type it with the keyboard; left empty it is your name's match.",
-          "Online: friends anywhere join through the main servers. LAN: for the PCs of your own network, with no "
-          "internet needed; your PC answers the sign-in and the match list itself. Friends find it on the browser's "
-          "LAN tab, or type your PC's network address in Direct connect.",
+          "Online: your match is on everybody's server browser, on the Community tab. LAN: for the PCs of your own "
+          "network, with no internet needed; your PC answers the sign-in and the match list itself, and the match is "
+          "on their browser's LAN tab (or they type your PC's network address in Direct connect).",
           "Yes: everybody sees your match on the server browser's Community tab and can join. No: only friends you "
           "give the address to (Direct connect). A LAN match is always found by the PCs of your network.",
-          "Ticked, your router is asked to open the match's port (UPnP) and the port is chosen for you. Not ticked, "
-          "you open the port below on your router yourself.",
-          "The UDP port players reach your match on, when UPnP is not ticked or the match is a LAN one: 18300 unless "
+          "On, your router is asked to open the match's port (UPnP) and the port is chosen for you. Off, you open "
+          "the port below on your router yourself.",
+          "The UDP port players reach your match on, when UPnP is off or the match is a LAN one: 18300 unless "
           "you want another. For an Online match, open it on your router for friends outside your home.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
           "server browser: the pause copies the address for you. The match ends when you leave it."};
@@ -2514,7 +2513,7 @@
       if (clicked == kPmHost) HostPrivateMatch();
       else change(clicked, 1);
     }
-    if (in.back) BackToMenu(kRowPrivateMatch, MainRowOf("CREATE PRIVATE MATCH")), pm_error_.clear();  // back to the menu
+    if (in.back) BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
   }
 
   // While our server starts: its steps in the rail (ra..rb under the heading), the wait on the band (band..hb), then
@@ -2525,6 +2524,9 @@
     const double t = ImGui::GetTime() - pm_started_at_;
     std::string error;
     if (!status.running && t > 3) error = "Your server stopped. Its log: user\\private_match\\server.log.";
+    else if (status.state == "no backend" && pm_lan_)
+      error = "The LAN match could not start its own services: another program on this PC already uses TCP 18241, 18246 "
+              "or 18250 (another match, or a test backend: the test launcher runs one). Close it and host again.";
     else if (status.state == "no backend") error = "The main backend does not answer. Check your internet connection.";
     else if (status.state == "port in use")
       error = fmt::format("UDP {} is in use on this PC: another server runs here.", status.port);
@@ -2584,7 +2586,7 @@
     d->AddRectFilled(ca, ImVec2(ca.x + 6 * u, cb.y), kit::kStamp);
     kit::Spaced(d, f.typed, 16 * u, ImVec2(ca.x + 30 * u, ca.y + 22 * u), kit::kKhakiDim,
                 fmt::format("HOSTED ON THIS PC  /  {} {}", st.players, st.players == 1 ? "PLAYER" : "PLAYERS"), 3 * u);
-    kit::Spaced(d, f.ui_bold, 30 * u, ImVec2(ca.x + 30 * u, ca.y + 48 * u), kit::kCream, "YOUR PRIVATE MATCH", 3 * u);
+    kit::Spaced(d, f.ui_bold, 30 * u, ImVec2(ca.x + 30 * u, ca.y + 48 * u), kit::kCream, "YOUR CUSTOM MATCH", 3 * u);
     const std::string reach = st.reachable == "true"  ? "Friends outside your home can reach it."
                               : st.reachable == "false" ? fmt::format("Friends outside your home cannot reach it yet: "
                                                                       "open UDP {} on your router.", st.port)

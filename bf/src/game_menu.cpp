@@ -387,7 +387,7 @@ void PlaySoundOnce(const std::filesystem::path& wav);
 }  // namespace bf1943
 #if defined(BF_DEV_TOOLS)
 REXCVAR_DEFINE_BOOL(bf_dev_auto_host, false, "BF1943",
-                    "Tests (BF_AUTO_JOIN=1): host our Create Private Match at the main menu");
+                    "Tests (BF_AUTO_JOIN=1): host our Custom Match at the main menu");
 REXCVAR_DEFINE_STRING(bf_dev_auto_direct, "", "BF1943",
                       "Tests (BF_AUTO_JOIN=1): join this address by Direct connect at the main menu");
 #endif
@@ -940,6 +940,23 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (auto_join && !auto_joined_ && page_ == Page::kMain && !list_.servers().empty() && !REXCVAR_GET(bf_dev_no_auto_join))
       auto_joined_ = true, QuickJoin();
     PrivateMatchTick();  // our Create Private Match: its server's state, the join, its end
+    // The server list is wanted (server_list.h Want) by a match being played and the friends page here; the browser
+    // and Quick Play ask for it themselves.
+    if (!joined_gid_.empty() || page_ == Page::kFriends) list_.Want();
+    // Quick Play before the list was ever asked for: the join once its first answer is in (QuickPlay).
+    if (quick_waiting_ > 0) {
+      if (list_.answers() > quick_asked_at_) {
+        quick_waiting_ = 0;
+        if (!QuickJoin()) {
+          menu_error_ = list_.reachable() ? "No server has room right now. Try again in a moment, or open the server browser."
+                                         : "The servers do not answer. Check your internet connection.";
+          menu_error_at_ = ImGui::GetTime();
+        }
+      } else if (ImGui::GetTime() > quick_waiting_) {
+        quick_waiting_ = 0;
+        menu_error_ = "The servers do not answer. Check your internet connection.", menu_error_at_ = ImGui::GetTime();
+      }
+    }
 
     PauseTest();
     MenuSteps();
@@ -1665,7 +1682,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   static constexpr ListItem kMainItems[] = {
       {"QUICK MATCH", 0, Does::kOurs},          {"SERVER BROWSER", -1, Does::kOurs},
       {"JOIN MATCH WITH FRIENDS", 1, Does::kScreenThenOk},
-      {"CREATE PRIVATE MATCH", -1, Does::kOurs},
+      {"CUSTOM MATCH", -1, Does::kOurs},
       {"STATS & AWARDS", 3, Does::kScreen},
       {"PC SETTINGS", -1, Does::kOurs},         {"ACHIEVEMENTS", 5, Does::kNothing},
       {"LEADERBOARDS", 6, Does::kScreen},       {"HELP", -1, Does::kOurs},
@@ -1810,7 +1827,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         {"QUICK MATCH", "Straight into the busiest server with room."},
         {"SERVER BROWSER", "Every official and community server: maps, players and ping."},
         {"JOIN MATCH WITH FRIENDS", "The game's own friends list and invitations."},
-        {"CREATE PRIVATE MATCH", "Host a match on this PC for you and your friends: pick the map, then play. Friends "
+        {"CUSTOM MATCH", "Host a match on this PC for you and your friends: pick the map, then play. Friends "
                                  "join it by Direct connect."},
         {"STATS & AWARDS", "Your service record: rank, awards and best rounds."},
         {"HELP & OPTIONS", "The game's controls, its own settings and how to play."},
@@ -1836,7 +1853,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const auto servers = list_.servers();
     int players = 0;
     for (const auto& sv : servers) players += sv.players;
-    const std::string online = !list_.reachable() ? "SERVERS NOT REACHABLE"
+    const std::string online = !list_.asked()       ? "NOT CONNECTED"
+                               : !list_.reachable() ? "SERVERS NOT REACHABLE"
                                : fmt::format("{} {}  /  {} {}", servers.size(), servers.size() == 1 ? "SERVER" : "SERVERS",
                                              players, players == 1 ? "PLAYER" : "PLAYERS");
     const float ow = kit::SpacedWidth(f.typed, 18 * u, online, 3 * u);
@@ -1873,7 +1891,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       page_ = Page::kHelp, help_row_ = 0;
       return;
     }
-    if (name == "CREATE PRIVATE MATCH") {  // ours (PrivateMatchPage): our own server on this PC, then joined
+    if (name == "CUSTOM MATCH") {  // ours (PrivateMatchPage): our own server on this PC, then joined
       page_ = Page::kPrivateMatch, pm_row_ = 0, pm_error_.clear();
       LoadPrivateMatchChoices();
       return;
@@ -1965,6 +1983,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // The busiest server with room; false when there is none. (Until v0.4.0 the busiest that played the player's
   // movement. TekRantGaming, 13 Nov 2026: "we are dropping support for modern and going full in on classic being the
   // default": every server plays the game's own movement and aiming now, and there is nothing to choose.)
+  double quick_waiting_ = 0;      // Quick Play waits for the list's first answer until this time (ImGui's)
+  uint64_t quick_asked_at_ = 0;   // the list's answers when it began to wait
   bool QuickJoin() {
     const auto servers = list_.servers();
     const ServerInfo* best = nullptr;
@@ -4146,7 +4166,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       Text(d, f.stencil, 54 * u, ImVec2(ca.x + 38 * u, ca.y + 64 * u), kit::kInk,
            exit ? "LEAVE THIS MATCH?" : "END THIS LIFE?");
       kit::Wrapped(d, f.typed, 20 * u, ImVec2(ca.x + 40 * u, ca.y + 140 * u), kit::kInkSoft,
-                   exit ? (pm_hosting_ ? "You go back to the main menu, and your private match ends for everyone in it."
+                   exit ? (pm_hosting_ ? "You go back to the main menu, and your custom match ends for everyone in it."
                                        : "You go back to the main menu. Your score in this round stays with the server.")
                         : "Your soldier dies and you pick a new spawn point. It counts as a death.",
                    w - 80 * u);
@@ -4493,7 +4513,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       stats_sent_at_start_ = true;
       bool any = std::atof(settings_.Get("match_seconds", "0").c_str()) > 0;
       for (const auto& [key, value] : settings_.values) any = any || key.rfind("stat.", 0) == 0;
-      if (any) SendLeaderboard("saved totals at the start");
+      // (Not at the start any more, 13 Nov 2026: nothing goes to the backend until the player goes online. The
+      // totals are sent with the next score, in a match.)
+      (void)any;
     }
     if (ImGui::GetTime() - stats_taken_at_ > 10) {
       stats_taken_at_ = ImGui::GetTime();

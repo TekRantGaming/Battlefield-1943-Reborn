@@ -14,7 +14,7 @@
   // (TekRantGaming, 12 Nov 2026 18:10: "drop join friends and replace it with the unlockables button".)
   // Create Private Match is back (TekRantGaming, 13 Nov 2026, on pull request 11: "merge all of it"; it had left
   // the menu on 11 Nov): our own server on this PC, joined at once, friends by Direct connect (PrivateMatchPage).
-  static constexpr MenuRow kMenuRows[] = {{"QUICK PLAY", false},  {"SERVER BROWSER", false}, {"CREATE PRIVATE MATCH", false},
+  static constexpr MenuRow kMenuRows[] = {{"QUICK PLAY", false},  {"SERVER BROWSER", false}, {"CUSTOM MATCH", false},
                                           {"UNLOCKABLES", false},
                                           {"STATS & AWARDS", false}, {"LEADERBOARDS", false}, {"ACHIEVEMENTS", false},
                                           {"SETTINGS", false},    {"HELP", false},           {"UPDATE", true},
@@ -104,6 +104,10 @@
     ok = list_.reachable();
     // On a server's own backend (Direct connect to a LAN only server): said, since its list is not the main one.
     const std::string where = own_backend_.empty() ? std::string() : "BACKEND " + Upper(own_backend_) + " \xC2\xB7 ";
+    if (!list_.asked()) {  // nothing has been asked of the servers yet (server_list.h Want)
+      ok = true;
+      return where + "NOT CONNECTED \xC2\xB7 QUICK PLAY OR THE SERVER BROWSER GOES ONLINE";
+    }
     if (!ok) return where + "SERVERS NOT REACHABLE";
     return where + fmt::format("{} {} ONLINE \xC2\xB7 {} {}", list_.players_online(), list_.players_online() == 1 ? "PLAYER" : "PLAYERS",
                                servers.size(), servers.size() == 1 ? "SERVER" : "SERVERS");
@@ -151,6 +155,12 @@
 
   void QuickPlay() {
     REXLOG_INFO("BF menu: Quick Play");
+    if (!list_.asked() || list_.servers().empty()) {  // the list first: the join follows its answer (OnDraw)
+      quick_asked_at_ = list_.answers(), quick_waiting_ = ImGui::GetTime() + 8.0;
+      list_.RefreshNow();
+      menu_error_ = "Looking for a server...", menu_error_at_ = ImGui::GetTime();
+      return;
+    }
     if (QuickJoin()) return;
     menu_error_ = "No server has room right now. Try again in a moment, or open the server browser.";
     menu_error_at_ = ImGui::GetTime();

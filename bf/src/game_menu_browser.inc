@@ -637,7 +637,7 @@
     kit::GameText(d, kit::GameFont::kHeadline, st(30), ImVec2(x, y), kit::kInk, "DIRECT CONNECT");
     y += st(30) + st(14);
     y += kit::Wrapped(d, f.ui, st(11.5f), ImVec2(x, y), kit::kInkFaint,
-                      "For a server that is not listed, such as a friend's private match or a LAN server. Ask its host for the "
+                      "For a server that is not listed, such as a friend's custom match or a LAN server. Ask its host for the "
                       "address.",
                       st(440)) +
          st(16);
