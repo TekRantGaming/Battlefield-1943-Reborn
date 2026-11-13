@@ -233,6 +233,12 @@ def clean_config(raw):
     out['servers'] = servers
     region = str(raw.get('region') or '').lower()
     out['region'] = region if region in {c for c, _, _ in REGIONS} else ''
+    # The servers' simulation rate (13 Nov 2026, the game's v0.4.1): 30, the original, or 60. Every player in a match
+    # must run the server's rate, and a game only lists and joins servers of its own (bf_tick_rate in the game).
+    tick = TICK_HZ
+    with contextlib.suppress(TypeError, ValueError):
+        tick = int(raw.get('tick') or TICK_HZ)
+    out['tick'] = tick if tick in (30, 60) else TICK_HZ
     out['lan_only'] = raw.get('lan_only') is True
     out['public_address'] = clean_text(raw.get('public_address'), 64)
     out['upnp'] = raw.get('upnp') is not False
@@ -564,6 +570,10 @@ class Manager:
                 '--log_file=' + os.path.join(directory, 'server.log'), '--fullscreen=false', '--window_start=hidden',
                 '--server', '--cl=-dedicated -level ' + MAP_LEVEL[maps[0]], '--bf_map_rotation=' + ','.join(maps),
                 '--bf_round_end_delay=%d' % s['round_end_delay']]
+        # The game simulates at the rate set here (30 is its own default: nothing is passed, so an older game's
+        # program still starts).
+        if self.cfg['tick'] != 30:
+            game.append('--bf_tick_rate=%d' % self.cfg['tick'])
         backend = (BACKEND_BIND or '127.0.0.1') if self.own_backend() else self.cfg['backend']
         host = [sys.executable, '-I', os.path.join(HERE, 'gmhost.py'), '--backend', backend + ':18250',
                 '--listen', '0.0.0.0:%d' % s['port'], '--game-server', '%s:%d' % (address, GAME_PORT),
@@ -571,7 +581,7 @@ class Manager:
                 '--maps', ','.join(MAP_TITLE[m] for m in maps),
                 '--map-file', os.path.join(directory, 'user', 'current_map.txt'),
                 '--status-file', os.path.join(directory, 'status.json'), '--log', os.path.join(directory, 'host.log'),
-                '--max-players', str(s['max_players']), '--tick', str(TICK_HZ),
+                '--max-players', str(s['max_players']), '--tick', str(self.cfg['tick']),
                 '--broadcast-file', os.path.join(directory, 'broadcast.json')]
         if self.cfg['region']:
             host += ['--region', self.cfg['region']]
@@ -1081,7 +1091,7 @@ class Manager:
                 'addresses': {'lan': lan_addresses(), 'public': self.public_address(), 'upnp': self.ports_note},
                 'regions': [{'code': c, 'name': n} for c, n, _ in REGIONS],
                 'maps': [{'key': k, 'title': t} for k, t, _ in MAPS],
-                'presets': PRESETS, 'tick': TICK_HZ, 'data': DATA, 'root': ROOT, 'max_servers': MAX_SERVERS,
+                'presets': PRESETS, 'tick': self.cfg['tick'], 'data': DATA, 'root': ROOT, 'max_servers': MAX_SERVERS,
                 'backend_ports': list(BACKEND_PORTS), 'now': int(time.time()),
                 'autostart': autostart_enabled(),
             }
@@ -1091,7 +1101,7 @@ class Manager:
         its maps, the region, the mode) applies when it is started again: the page says so."""
         with self.lock:
             merged = dict(self.cfg)
-            for key in ('servers', 'region', 'lan_only', 'public_address', 'upnp', 'auto_update',
+            for key in ('servers', 'region', 'tick', 'lan_only', 'public_address', 'upnp', 'auto_update',
                         'update_warning_minutes', 'start_servers', 'version_gate', 'required_version', 'web_remote'):
                 if key in new:
                     merged[key] = new[key]

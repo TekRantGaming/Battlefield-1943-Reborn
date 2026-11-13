@@ -139,6 +139,7 @@
         </div>
         <div id="official-note" class="hint" style="display:none">This is the official package: this machine runs the main backend itself.</div>
         <label class="field"><span>Region</span><select id="region"></select><small>Shown with its flag in the game's server browser, so players can pick a server near them.</small></label>
+        <label class="field"><span>Tick rate</span><select id="tick-rate"><option value="30">30 Hz (the original)</option><option value="60">60 Hz</option></select><small>How many times a second your servers simulate the game. Players only see and join servers that run their own game's rate, so 60 Hz servers are for players whose game is set to 60 (v0.4.1 and newer).</small></label>
         <div id="lan-box">
           <label class="field"><span>Public address, for players outside your network (optional)</span><input type="text" id="public-address" placeholder="Found from your router when it allows it" maxlength="64"><small>Players on your network use this machine's network address. Players outside need this address and the ports below opened on your router.</small></label>
         </div>
@@ -487,6 +488,7 @@ function fillForms() {
   const region = $('region');
   region.replaceChildren(h('option', { value: '', text: 'Not said' }), ...state.regions.map(r => h('option', { value: r.code, text: r.name })));
   region.value = c.region;
+  $('tick-rate').value = String(c.tick || 30);
   $('public-address').value = c.public_address; $('upnp').checked = c.upnp;
   $('auto-update').checked = c.auto_update;
   const warn = $('warn-minutes');
@@ -521,7 +523,7 @@ function openEdit(n) {
   $('e-delay').replaceChildren(...[30, 45, 60, 90, 120].map(m => h('option', { value: m, text: m + ' seconds' })));
   if (![30, 45, 60, 90, 120].includes(sv.round_end_delay)) $('e-delay').append(h('option', { value: sv.round_end_delay, text: sv.round_end_delay + ' seconds' }));
   $('e-delay').value = sv.round_end_delay;
-  $('e-tick').value = state.tick + ' Hz (the game\'s own rate)';
+  $('e-tick').value = state.tick + ' Hz (set for every server under Network)';
   $('e-listed').checked = sv.listed; $('e-night').checked = sv.night; $('e-autostart').checked = sv.autostart;
   $('e-night-box').style.display = state.night_ops ? '' : 'none';
   $('e-remove').style.display = fresh || state.config.servers.length < 2 ? 'none' : '';
@@ -572,7 +574,7 @@ $('stop-all').onclick = () => { if (confirm('Stop every server? Players on them 
 document.querySelectorAll('input[name=lan]').forEach(r => r.addEventListener('change', renderNetwork));
 $('save-network').onclick = async () => {
   const lan = document.querySelector('input[name=lan][value="1"]').checked;
-  const r = await saveConfig({ lan_only: lan, region: $('region').value, public_address: $('public-address').value.trim(), upnp: $('upnp').checked }, 'Saved');
+  const r = await saveConfig({ lan_only: lan, region: $('region').value, tick: parseInt($('tick-rate').value, 10), public_address: $('public-address').value.trim(), upnp: $('upnp').checked }, 'Saved');
   if (r) $('network-note').textContent = state.servers.some(x => x.wanted) ? 'Restart your servers for this to take hold.' : '';
 };
 $('firewall').onclick = () => act('/api/firewall', {}, 'Windows asks for permission on this machine\'s screen');
