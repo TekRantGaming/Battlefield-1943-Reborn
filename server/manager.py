@@ -238,7 +238,7 @@ def clean_config(raw):
     tick = TICK_HZ
     with contextlib.suppress(TypeError, ValueError):
         tick = int(raw.get('tick') or TICK_HZ)
-    out['tick'] = tick if tick in (30, 60) else TICK_HZ
+    out['tick'] = tick if tick in (30, 60, 75, 100) else TICK_HZ  # 75 and 100: experimental
     out['lan_only'] = raw.get('lan_only') is True
     out['public_address'] = clean_text(raw.get('public_address'), 64)
     out['upnp'] = raw.get('upnp') is not False

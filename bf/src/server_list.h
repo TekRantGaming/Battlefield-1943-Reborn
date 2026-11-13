@@ -79,7 +79,8 @@ struct ServerInfo {
   // the game's own 30): a 30 Hz game on a 60 Hz server, or the other way round, is pulled about by every correction.
   // (13 Nov 2026, later: every server is listed whatever its rate; the game takes the server's when it joins.)
   bool OurTick() const { return (tick_hz > 0 ? tick_hz : 30) == TickRate(); }
-  int Tick() const { return tick_hz == 60 ? 60 : 30; }  // the rate it runs at (one that says none runs 30)
+  // The rate it runs at: 30, 60, or the experimental 75 or 100 (one that says none, or another, runs 30).
+  int Tick() const { return tick_hz == 60 || tick_hz == 75 || tick_hz == 100 ? tick_hz : 30; }
   int ping_ms = -1;  // -1: not measured (an older server does not answer)
   // 13 Nov 2026: hosted from a player's own game (Create Private Match), not a dedicated server: its description
   // begins with kPlayerHostTag (the backend passes descriptions through as they are), taken off here. The browser

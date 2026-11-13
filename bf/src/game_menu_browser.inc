@@ -417,7 +417,7 @@
           const std::string hz = std::to_string(sv.Tick()) + " HZ";
           const float hs = st(7.5f), hw = kit::SpacedWidth(f.ui_bold, hs, hz, st(1)) + st(10), hh = st(14);
           const ImVec2 h0(ta.x + colx[0] + iw, y + (rh - hh) * 0.5f), h1(h0.x + hw, h0.y + hh);
-          const bool sixty = sv.Tick() == 60;
+          const bool sixty = sv.Tick() >= 60;  // 60 and the experimental 75 and 100: green
           d->AddRectFilled(h0, h1, sel ? IM_COL32(255, 255, 255, 40) : sixty ? IM_COL32(74, 112, 58, 255) : IM_COL32(34, 36, 27, 40));
           kit::Spaced(d, f.ui_bold, hs, ImVec2(h0.x + st(5), h0.y + (hh - hs * 1.45f) * 0.5f),
                       sel || sixty ? kit::kCream : kit::kInkSection, hz, st(1));

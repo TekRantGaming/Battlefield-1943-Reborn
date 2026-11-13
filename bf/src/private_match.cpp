@@ -162,7 +162,7 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
        << " --cl=\"-dedicated -level " << LevelOf(first) << "\""
        << " --bf_map_rotation=" << rotation << " --bf_round_end_delay=45"
        // At the rate this game runs at: its own game joins it without starting again.
-       << " --bf_tick_rate=" << TickRate()
+       << " --bf_tick_rate=" << (o.tick ? o.tick : TickRate())
        << " --bf_gm_backend=" << registry << " --bf_gm_listen=" << (LoopbackOnly() ? "127.0.0.1:" : "0.0.0.0:") << g.port
        << " --bf_gm_name=\"" << Clean(o.name.empty() ? std::string("Private match") : o.name) << "\""
        // Never in a test run: the router is the PC owner's (and a loopback host has nothing to forward).

@@ -41,8 +41,9 @@
 // game's timers are made (a join from the launcher); once they are made the rate is the run's, and a server of the
 // other rate is joined by starting the game again at it (game_menu.cpp).
 REXCVAR_DEFINE_DOUBLE(bf_tick_rate, 60.0, "BF1943",
-                      "The game's simulation rate, ticks a second: 60, or 30 (the Xbox 360's). A server runs at it; a "
-                      "player's game starts at it and takes the rate of the server it joins");
+                      "The game's simulation rate, ticks a second: 60, 30 (the Xbox 360's), or 75 or 100 "
+                      "(experimental). A server runs at it; a player's game starts at it and takes the rate of the "
+                      "server it joins");
 
 namespace {
 constexpr uint32_t kTimerCallers[] = {0x8239709C, 0x823970C8, 0x82370E78};
@@ -72,19 +73,25 @@ bool WriteReadOnly(uint8_t* host, uint32_t bits) {
 }  // namespace
 
 namespace bf1943 {
-// The rate in use: 30 or 60, fixed at the first read.
+// The rates there are: 30 (the Xbox 360's), 60 (the default), and 75 and 100, experimental (13 Nov 2026: "Can we add
+// experimental 75Hz and 100Hz tickrates too?"; the game's timers and time step take any rate, but only 30 and 60
+// have been played). Anything else is `otherwise`.
+int ValidTickRate(long rate, int otherwise) {
+  return rate == 30 || rate == 60 || rate == 75 || rate == 100 ? int(rate) : otherwise;
+}
+// The rate in use, fixed once the game's timers are made.
 int TickRate() {
   int r = g_rate.load(std::memory_order_relaxed);
   if (r) return r;
   const double v = REXCVAR_GET(bf_tick_rate);
-  r = std::isfinite(v) && std::lround(v) == 60 ? 60 : 30;
+  r = std::isfinite(v) ? ValidTickRate(std::lround(v), 60) : 60;
   g_rate.store(r, std::memory_order_relaxed);
   return r;
 }
 // The rate for this run, chosen before the game's timers are made (the server about to be joined). False once they
 // are made and the rate asked for is another: this run cannot change it.
 bool SetTickRate(int rate) {
-  rate = rate == 60 ? 60 : 30;
+  rate = ValidTickRate(rate, 30);
   if (g_timers_made.load(std::memory_order_acquire)) return TickRate() == rate;
   if (TickRate() != rate) REXLOG_INFO("BF tick rate: {} ticks a second for this run (the server's)", rate);
   g_rate.store(rate, std::memory_order_relaxed);

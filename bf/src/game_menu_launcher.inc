@@ -2195,7 +2195,11 @@
   // 13 Nov 2026: Network type (Online, or LAN: the match's own backend, this network's players, no internet).
   // Later that day: the match's name, whether the server browser shows it, and the router port as a box to tick
   // (UPnP) with the port typed when it is not ticked.
-  static constexpr int kPmMap = 0, kPmName = 1, kPmNet = 2, kPmListed = 3, kPmUpnp = 4, kPmPort = 5, kPmHost = 6, kPmRows = 7;
+  static constexpr int kPmMap = 0, kPmName = 1, kPmNet = 2, kPmListed = 3, kPmUpnp = 4, kPmPort = 5, kPmHost = 6, kPmTick = 7,
+                       kPmRows = 8;
+  // The match's tick rate: 60 by default, 30 the console's, 75 and 100 experimental.
+  static constexpr int kPmTicks[] = {30, 60, 75, 100};
+  int pm_tick_ = 60;
   bool pm_lan_ = false, pm_listed_ = false;
   std::string pm_name_, pm_port_text_ = "18300";
   // The row takes typing now: the name, or the port when it is the player's to choose.
@@ -2217,6 +2221,8 @@
     pm_listed_ = settings_.Get("private_match_listed", "0") == "1";
     pm_name_ = settings_.Get("private_match_name", "");
     pm_port_text_ = settings_.Get("private_match_port", "18300");
+    pm_tick_ = std::atoi(settings_.Get("private_match_tick", "60").c_str());
+    if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 60;
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
@@ -2225,6 +2231,7 @@
     settings_.values["private_match_listed"] = pm_listed_ ? "1" : "0";
     settings_.values["private_match_name"] = pm_name_;
     settings_.values["private_match_port"] = pm_port_text_;
+    settings_.values["private_match_tick"] = std::to_string(pm_tick_);
     settings_.Save();
   }
 
@@ -2246,6 +2253,10 @@
     }
     const std::string me = settings_.Get("player_name", "");
     o.name = !pm_name_.empty() ? pm_name_ : me.empty() ? "Custom match" : me + "'s match";
+    o.tick = pm_tick_;
+    // The host's own game runs at the match's rate: set now when the game has not started; a game already running at
+    // another is asked to start again when it joins (Join).
+    SetTickRate(pm_tick_);
     o.listed = !pm_lan_;  // always in the browser: Community for an Online match (a LAN match is on the LAN tab)
     if (PmPortTyped()) {
       const int port = std::atoi(pm_port_text_.c_str());
@@ -2361,7 +2372,7 @@
     Prompts(d, st, st.P(48, 662), cues, in, 15);
     // The rows in the panel's order (13 Nov 2026, after the first look at it: the name first with its field under it,
     // UPnP and the port as a smaller pair under Network type, and no UPnP at all for a LAN match).
-    std::vector<int> order = {kPmName, kPmMap, kPmNet};
+    std::vector<int> order = {kPmName, kPmMap, kPmTick, kPmNet};
     if (!pm_lan_) order.push_back(kPmUpnp);
     order.insert(order.end(), {kPmPort, kPmHost});
     {
@@ -2389,6 +2400,12 @@
     }
     auto change = [&](int row, int step) {
       if (row == kPmMap) pm_map_ = (pm_map_ + 5 + step) % 5;
+      if (row == kPmTick) {
+        int at = 1;
+        for (int k = 0; k < 4; ++k)
+          if (kPmTicks[k] == pm_tick_) at = k;
+        pm_tick_ = kPmTicks[(at + 4 + step) % 4];
+      }
       if (row == kPmNet) pm_lan_ = !pm_lan_;
       if (row == kPmListed && !pm_lan_) pm_listed_ = !pm_listed_;
       if (row == kPmUpnp && !pm_lan_) pm_upnp_ = !pm_upnp_;
@@ -2398,7 +2415,7 @@
     if (in.right && pm_row_ != kPmHost) change(pm_row_, 1);
     // ---- the rows, as the main menu's. By the row's own number (kPm...): its title, and its help in the band.
     static constexpr const char* kTitles[] = {"MAP",  "SERVER NAME", "NETWORK TYPE",  "SHOW IN BROWSER",
-                                              "UPNP", "PORT",        "HOST THE MATCH"};
+                                              "UPNP", "PORT",        "HOST THE MATCH", "TICK RATE"};
     int clicked = -1;
     float y = rows_y;
     int number = 0;
@@ -2457,6 +2474,9 @@
         d->PopClipRect();
       } else if (i == kPmMap) {
         value_text(kPmMapNames[pm_map_], true, false);
+      } else if (i == kPmTick) {
+        value_text(std::to_string(pm_tick_) + (pm_tick_ > 60 ? " HZ \xC2\xB7 EXPERIMENTAL" : pm_tick_ == 30 ? " HZ \xC2\xB7 XBOX 360" : " HZ"),
+                   true, false);
       } else if (i == kPmNet) {
         value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
       } else if (i == kPmListed) {
@@ -2499,7 +2519,10 @@
           "The UDP port players reach your match on, when UPnP is off or the match is a LAN one: 18300 unless "
           "you want another. For an Online match, open it on your router for friends outside your home.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
-          "server browser: the pause copies the address for you. The match ends when you leave it."};
+          "server browser: the pause copies the address for you. The match ends when you leave it.",
+          "How many times a second the match is simulated. 60 is the default; 30 is the Xbox 360's. 75 and 100 are "
+          "experimental: untested, and they ask more of your PC and of every player's connection. A player's game "
+          "takes the match's rate when it joins."};
       kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, kTitles[pm_row_], st(2));
       kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
                     kPmMapNames[pm_map_]);
