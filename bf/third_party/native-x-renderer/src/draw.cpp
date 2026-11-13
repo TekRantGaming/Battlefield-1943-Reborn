@@ -1588,8 +1588,17 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   place.align = aspect_align_;
   const bool hud_scaling = hud_scale_ != 1.0f || minimap_scale_ != 1.0f;
   bool hud_placed = false;
-  if (hud_classify_ && ((aspect_box_ && target_scale.x != target_scale.y) || hud_scaling))
+  if (hud_classify_ && ((aspect_box_ && target_scale.x != target_scale.y) || hud_scaling)) {
+    hud_sheet_w_ = hud_sheet_h_ = hud_sheet_format_ = 0;
+    if (const uint32_t pixel_mask = pixel_shader ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0) {
+      uint32_t first = 0;
+      while (!(pixel_mask & (1u << first))) ++first;
+      const auto fetch = regs.GetTextureFetch(first);
+      hud_sheet_w_ = fetch.size_2d.width + 1, hud_sheet_h_ = fetch.size_2d.height + 1;
+      hud_sheet_format_ = uint32_t(fetch.format);
+    }
     place = ClassifyHudDraw(copies, vertex_program.hash), hud_placed = true;
+  }
   if (aspect_box_ && place.mode != HudMode::kStretch && target_scale.x != target_scale.y) {
     float uniform = std::min(target_scale.x, target_scale.y);
     const float gw = float(sized->guest_width), gh = float(sized->guest_height);
@@ -2830,6 +2839,12 @@ DrawPath::HudPlace DrawPath::ClassifyHudDraw(std::span<const Copy> copies, uint6
     ++(place.align == 0.0f ? t.left : place.align == 1.0f ? t.right : t.middle);
   } else if (double marker_x = -1;
              !hud_menu_ &&
+             // 13 Nov 2026 ("separate world markers ... so they don't interfere with player HUD elements"): what a
+             // draw is drawn from tells them apart where its place cannot. The game's crosshairs, gunsights and scope
+             // marks are on a sheet of their own (Battlefield 1943: menu/hud_crosshair_textures, 256 x 256, 8_8_8_8),
+             // and nothing on it marks a place in the world: a draw from it is never a world marker, however near
+             // one it passes.
+             !(hud_sheet_format_ == 6 && hud_sheet_w_ == 256 && hud_sheet_h_ == 256) &&
              // Only a draw the size and shape of a marker's icon or of a letter of its label (6 to 44 canvas pixels
              // each way, not a line). The middle of the screen is where whatever the game projects as the aim moves
              // passes, and a sight drawn there in pieces was taken apart piece by piece as each came within reach of

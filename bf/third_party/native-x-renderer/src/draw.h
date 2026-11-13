@@ -296,6 +296,9 @@ class DrawPath {
   float aspect_align_ = 0.5f;
   bool hud_classify_ = false, hud_edges_ = false, hud_debug_ = false;
   float hud_scale_ = 1.0f, minimap_scale_ = 1.0f;
+  // The texture the HUD draw being placed samples (its first: width, height, guest format), 0 without one. A draw
+  // from the game's crosshair sheet is never a world marker (ClassifyHudDraw).
+  uint32_t hud_sheet_w_ = 0, hud_sheet_h_ = 0, hud_sheet_format_ = 0;
   struct HudTally {
     uint64_t draws = 0, stretched = 0, left = 0, right = 0, middle = 0, unknown = 0, markers = 0, menu_frames = 0;
     std::string samples;
