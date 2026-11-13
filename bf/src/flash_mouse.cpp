@@ -1,0 +1,263 @@
+// The mouse on the game's deploy screen (0.4.1): a free pointer that picks a kit, a spawn point and the screen's
+// buttons.
+//
+// The game's menus are Flash movies with no pointer input at all (the research of 13 Nov: the runtime never raises a
+// mouse event, and no movie has mouse code). So this is our own layer over the screen: the pointer is freed as for our
+// own menu, and a click is turned into what the screen already understands, the controller's buttons and sticks, put
+// into the pad the game reads (auto_join.cpp's pad hook):
+//   - a kit card: d-pad left or right until that card is the chosen one (the screen's onKitLeft adds one to its kit
+//     index, onKitRight takes one off, round the three; the cards stand Rifleman 1, Infantry 0, Scout 2);
+//   - Set to flag spawn, Enter battle, Back: Y, A, B;
+//   - the map: for now the right stick pushed the way the click lies from the map's middle, which moves the choice to
+//     the next spawn point that way (the screen's own gotoNextSpawnPoint). A click on the exact point needs to know
+//     which of the screen's spawn indices is which place and how the map is scaled: bf_debug_spawn_mouse logs what
+//     the screen sends (selectKit, selectSpawnPoint), the level's capture points and the map's icons, to work it out.
+// Where things are on the screen was measured from a screenshot of it (13 Nov, 1280 x 720 stage units).
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include <imgui.h>
+
+#include <rex/cvar.h>
+#include <rex/hook.h>
+#include <rex/logging.h>
+#include <rex/ui/imgui_dialog.h>
+#include <rex/ui/imgui_drawer.h>
+
+#include "capture_points.h"
+
+REXCVAR_DEFINE_BOOL(bf_spawn_mouse, true, "BF1943/Controls",
+                    "On the deploy screen the mouse is a free pointer: click a kit, the map and the buttons (false: the "
+                    "mouse pushes the right stick there, as before)");
+REXCVAR_DEFINE_BOOL(bf_debug_spawn_mouse, false, "BF1943/Controls",
+                    "Log the deploy screen's commands, the capture points and the map's icons (bf1943.log)");
+
+namespace bf1943 {
+void FlashCall(const std::string& path);  // auto_join.cpp ("probe:<path>" logs whether a script path resolves)
+
+namespace {
+using Clock = std::chrono::steady_clock;
+
+// XInput's buttons, as the pad hook has them.
+constexpr uint16_t kDpadLeft = 0x0004, kDpadRight = 0x0008, kA = 0x1000, kB = 0x2000, kY = 0x8000;
+
+struct Action {
+  uint16_t buttons = 0;
+  float rx = 0, ry = 0;  // the right stick, -1 to 1 (up is +1)
+  int hold_ms = 120, gap_ms = 140;
+};
+
+struct State {
+  std::mutex mutex;
+  bool active = false;        // the deploy screen is up and the pointer is ours
+  Clock::time_point seen{};   // the pad hook last said the screen may be up
+  Clock::time_point since{};  // and since when, without a break
+  std::deque<Action> actions;
+  Action now;
+  Clock::time_point now_until{}, gap_until{};
+  int kit = -1;    // the screen's kit index as it last told the game (0 Infantry, 1 Rifleman, 2 Scout); -1 not known
+  int spawn = -1;  // its spawn point index, as last told
+  int icons_logged = 0;
+  bool probed = false;
+} g;
+std::atomic<bool> g_active{false};
+
+uint32_t Load32(const uint8_t* base, uint32_t a) {
+  const uint8_t* p = base + a;
+  return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
+}
+float LoadF(const uint8_t* base, uint32_t a) {
+  const uint32_t v = Load32(base, a);
+  float f;
+  std::memcpy(&f, &v, 4);
+  return f;
+}
+bool Guest(uint32_t a) { return a >= 0x10000 && a < 0xF0000000; }
+
+// The screen in stage units (1280 x 720).
+struct Box {
+  float x0, y0, x1, y1;
+  bool Has(float x, float y) const { return x >= x0 && x < x1 && y >= y0 && y < y1; }
+};
+constexpr Box kKitCards[3] = {{102, 217, 251, 497}, {257, 217, 406, 497}, {412, 217, 561, 497}};
+constexpr int kKitOfCard[3] = {1, 0, 2};  // Rifleman, Infantry, Scout
+constexpr Box kSpawnMode{94, 529, 330, 568}, kEnter{94, 572, 280, 607}, kBack{94, 611, 210, 644};
+constexpr Box kMap{623, 119, 1180, 497};
+
+void Queue(const Action& a) {
+  if (g.actions.size() < 8) g.actions.push_back(a);
+}
+
+class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
+ public:
+  explicit SpawnMouseOverlay(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
+
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    if (!g_active.load(std::memory_order_relaxed)) return;
+    if (io.DisplaySize.x < 16 || io.DisplaySize.y < 16) return;
+    // The stage: 16:9 in the middle of the picture (the renderer keeps a menu there on wider and taller screens).
+    const float s = std::min(io.DisplaySize.x / 1280.0f, io.DisplaySize.y / 720.0f);
+    const float ox = (io.DisplaySize.x - 1280.0f * s) * 0.5f, oy = (io.DisplaySize.y - 720.0f * s) * 0.5f;
+    const float mx = (io.MousePos.x - ox) / s, my = (io.MousePos.y - oy) / s;
+    const bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    auto outline = [&](const Box& b) {
+      dl->AddRect(ImVec2(ox + b.x0 * s, oy + b.y0 * s), ImVec2(ox + b.x1 * s, oy + b.y1 * s),
+                  IM_COL32(255, 236, 170, 220), 3.0f * s, 0, 2.5f * s);
+    };
+    std::lock_guard lock(g.mutex);
+    for (int card = 0; card < 3; ++card) {
+      if (!kKitCards[card].Has(mx, my)) continue;
+      outline(kKitCards[card]);
+      if (!click) break;
+      const int want = kKitOfCard[card];
+      if (g.kit < 0 || g.kit > 2) {
+        // Not known yet (the screen has not told the game a kit): one step toward that side shows which it was.
+        Queue({card == 0 ? kDpadLeft : kDpadRight});
+        REXLOG_INFO("BF spawn mouse: kit card {} clicked, the chosen kit not known yet: one step", card);
+      } else {
+        const int left = ((want - g.kit) % 3 + 3) % 3;  // d-pad left adds one
+        if (left == 1) Queue({kDpadLeft});
+        if (left == 2) Queue({kDpadRight});
+        REXLOG_INFO("BF spawn mouse: kit card {} clicked (kit {}, was {})", card, want, g.kit);
+      }
+      break;
+    }
+    const struct {
+      const Box& box;
+      uint16_t button;
+      const char* name;
+    } buttons[] = {{kSpawnMode, kY, "spawn mode"}, {kEnter, kA, "enter battle"}, {kBack, kB, "back"}};
+    for (const auto& b : buttons) {
+      if (!b.box.Has(mx, my)) continue;
+      outline(b.box);
+      if (click) {
+        Queue({b.button});
+        REXLOG_INFO("BF spawn mouse: {} clicked", b.name);
+      }
+    }
+    if (kMap.Has(mx, my) && click) {
+      const float cx = (kMap.x0 + kMap.x1) * 0.5f, cy = (kMap.y0 + kMap.y1) * 0.5f;
+      const float dx = mx - cx, dy = cy - my, l = std::sqrt(dx * dx + dy * dy);
+      if (l > 12.0f) {
+        Action a;
+        a.rx = dx / l, a.ry = dy / l, a.hold_ms = 160, a.gap_ms = 200;
+        Queue(a);
+      }
+      REXLOG_INFO("BF spawn mouse: map clicked at stage {:.0f}, {:.0f} (in the map {:.3f}, {:.3f}); spawn index {}",
+                  mx, my, (mx - kMap.x0) / (kMap.x1 - kMap.x0), (my - kMap.y0) / (kMap.y1 - kMap.y0), g.spawn);
+    }
+  }
+};
+}  // namespace
+
+bool SpawnMouseActive() { return g_active.load(std::memory_order_relaxed); }
+
+// From the pad hook (auto_join.cpp), at each of the game's pad reads: whether the deploy screen may be up (a level is
+// loaded, the player is in no seat and not on foot, our own menu is closed), and the pad as the game will read it
+// (X_INPUT_GAMEPAD, big endian: buttons at +0, the right stick at +8 and +10). The queued presses are put in.
+void SpawnMousePad(uint8_t* gamepad, bool may_be_up) {
+  const auto now = Clock::now();
+  std::lock_guard lock(g.mutex);
+  const bool on = may_be_up && REXCVAR_GET(bf_spawn_mouse);
+  if (on) {
+    if (now - g.seen > std::chrono::milliseconds(300)) g.since = now;
+    g.seen = now;
+  }
+  // Up for 0.7 s without a break (a moment out of the world between two seats is not the deploy screen).
+  const bool active = on && now - g.since > std::chrono::milliseconds(700);
+  if (active != g.active) {
+    g.active = active;
+    g_active.store(active, std::memory_order_relaxed);
+    g.actions.clear();
+    g.now = {}, g.now_until = {}, g.gap_until = {};
+    g.icons_logged = 0;
+    REXLOG_INFO("BF spawn mouse: the pointer is {}", active ? "free (deploy screen)" : "the game's again");
+    if (active && REXCVAR_GET(bf_debug_spawn_mouse)) {
+      for (const CapturePoint& p : CapturePoints())
+        REXLOG_INFO("BF spawn mouse: capture point {} index {} letter {} at x {:.1f} z {:.1f}, owner {}, shown {}",
+                    p.name, p.index, p.letter < 0 ? '-' : char('A' + p.letter), p.x, p.z, p.owner, p.shown);
+      if (!g.probed) {
+        g.probed = true;
+        for (const char* path :
+             {"_root.contentMC.loader1.onKitLeft", "_root.contentMC.loader1.onSpawnUp", "_root.contentMC.loader1.spawnmap",
+              "_root.contentMC.loader1.setKitInfo", "_root.onKitLeft", "_root.contentMC.onKitLeft",
+              "_root.contentMC.loader1.content.onKitLeft", "_root.contentMC.loader1.m_currentSpawnPointIdx",
+              "_root.contentMC.loader1.spawnmap.sp0", "_root.contentMC.loader1.gotoNextSpawnPoint"})
+          FlashCall(std::string("probe:") + path);
+      }
+    }
+  }
+  if (!active) return;
+  if (now >= g.now_until && now >= g.gap_until && !g.actions.empty()) {
+    g.now = g.actions.front();
+    g.actions.pop_front();
+    g.now_until = now + std::chrono::milliseconds(g.now.hold_ms);
+    g.gap_until = g.now_until + std::chrono::milliseconds(g.now.gap_ms);
+  }
+  if (now < g.now_until) {
+    const uint16_t buttons = uint16_t(gamepad[0] << 8 | gamepad[1]) | g.now.buttons;
+    gamepad[0] = uint8_t(buttons >> 8), gamepad[1] = uint8_t(buttons);
+    auto put = [](uint8_t* p, float v) {
+      const int i = std::clamp(int(std::lround(v * 32767.0f)), -32768, 32767);
+      p[0] = uint8_t(uint16_t(i) >> 8), p[1] = uint8_t(i);
+    };
+    if (g.now.rx != 0 || g.now.ry != 0) put(gamepad + 8, g.now.rx), put(gamepad + 10, g.now.ry);
+  }
+}
+
+// From the game command hook (auto_join.cpp): what the deploy screen tells the game.
+void SpawnMouseCommand(const char* name, const char* args) {
+  if (!name) return;
+  const bool kit = std::strcmp(name, "selectKit") == 0, spawn = std::strcmp(name, "selectSpawnPoint") == 0;
+  if (!kit && !spawn && std::strcmp(name, "selectSquadSpawn") != 0 && std::strcmp(name, "doSpawn") != 0 &&
+      std::strcmp(name, "selectWeapon") != 0)
+    return;
+  std::lock_guard lock(g.mutex);
+  if (args && *args) {
+    char* end = nullptr;
+    const long v = std::strtol(args, &end, 10);
+    if (end != args) {
+      if (kit) g.kit = int(v);
+      if (spawn) g.spawn = int(v);
+    }
+  }
+  if (REXCVAR_GET(bf_debug_spawn_mouse)) REXLOG_INFO("BF spawn mouse: the screen sent {} ({})", name, args ? args : "");
+}
+
+void CreateSpawnMouseOverlay(rex::ui::ImGuiDrawer* drawer) {
+  new SpawnMouseOverlay(drawer);  // lives for the rest of the session
+}
+}  // namespace bf1943
+
+// sub_8241FA58(map, r4 a vector, r5 the item, r6 the picture's rectangle, ...): one icon drawn on a map of the game's
+// (capture_points.cpp: the item's place in the world is at item - 0x30 with the item at r5 + 160). Logged while the
+// deploy screen is up (bf_debug_spawn_mouse), to find how its map places the world on the screen.
+REX_EXTERN(__imp__sub_8241FA58);
+REX_HOOK_RAW(sub_8241FA58) {
+  using namespace bf1943;
+  if (g_active.load(std::memory_order_relaxed) && REXCVAR_GET(bf_debug_spawn_mouse)) {
+    const uint32_t map = ctx.r3.u32, vec = ctx.r4.u32, item = ctx.r5.u32, rect = ctx.r6.u32;
+    std::lock_guard lock(g.mutex);
+    if (g.icons_logged < 60 && Guest(vec) && Guest(item) && Guest(rect)) {
+      ++g.icons_logged;
+      REXLOG_INFO("BF spawn mouse: map {:08X} icon: vector {:.2f} {:.2f} {:.2f} {:.2f}, world x {:.1f} z {:.1f}, picture "
+                  "{:.3f} {:.3f} {:.3f} {:.3f}, r7 {:08X} r8 {}",
+                  map, LoadF(base, vec), LoadF(base, vec + 4), LoadF(base, vec + 8), LoadF(base, vec + 12),
+                  LoadF(base, item + 112), LoadF(base, item + 120), LoadF(base, rect), LoadF(base, rect + 4),
+                  LoadF(base, rect + 8), LoadF(base, rect + 12), ctx.r7.u32, ctx.r8.u32);
+    }
+  }
+  __imp__sub_8241FA58(ctx, base);
+}

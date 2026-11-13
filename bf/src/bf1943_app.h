@@ -53,6 +53,7 @@ std::string StartupGpuPlugin(const std::filesystem::path& user_dir);      // gam
 void HideServerWindows();                                                // server_mode.cpp
 void CreatePerfOverlay(rex::ui::ImGuiDrawer* drawer);                    // perf_overlay.cpp
 void CreateCommsOverlay(rex::ui::ImGuiDrawer* drawer);                  // comms_ui.cpp
+void CreateSpawnMouseOverlay(rex::ui::ImGuiDrawer* drawer);             // flash_mouse.cpp
 void CreateGraphicsPanel(rex::ui::ImGuiDrawer* drawer, rex::ui::Window* window);  // f8_panel.cpp
 void InstallHudGlyphs();                                                     // hud_glyphs.cpp
 void InstallLook(rex::ui::Window* window);                               // look.cpp
@@ -325,6 +326,7 @@ class Bf1943App : public rex::ReXApp {
         [this] { return window(); }, [this] { return paths_.game_data_root; });
     if (!AbOff("overlay")) bf1943::CreatePerfOverlay(drawer);  // Settings > Gameplay > Performance metrics, F2
     if (!REXCVAR_GET(server)) bf1943::CreateCommsOverlay(drawer);  // text chat top left, voice chat (comms_ui.cpp)
+    if (!REXCVAR_GET(server)) bf1943::CreateSpawnMouseOverlay(drawer);  // the deploy screen's pointer
     if (!REXCVAR_GET(server)) bf1943::CreateGraphicsPanel(drawer, window());  // F8 (f8_panel.cpp)
     if (!REXCVAR_GET(server)) bf1943::InstallHudGlyphs();  // the game's prompts in the chosen style (hud_glyphs.cpp)
     bf1943::InstallLook(window());  // the camera and look system (look.cpp)

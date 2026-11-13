@@ -82,6 +82,7 @@ namespace bf1943 {
 bool GameMenuOpen();  // game_menu.cpp
 void NoteMatchDevice(bool keyboard);  // game_menu.cpp: the device used in the match, for the HUD's prompts
 uint64_t ClientTicks();  // vehicle_camera.cpp: the client ticks run so far
+bool SpawnMouseActive();   // flash_mouse.cpp: the deploy screen's free pointer
 void ResetVehicleMouse();  // vehicle_mouse.cpp
 void ResetPlaneMouse();    // plane_mouse.cpp
 bool PlaneMouse(uint8_t* gamepad, double dx, double dy);  // plane_mouse.cpp
@@ -265,7 +266,9 @@ double Density(const State& s) {
 class Listener : public rex::ui::WindowInputListener {
  public:
   void OnMouseMove(rex::ui::MouseEvent& e) override {
-    if ((e.dx() == 0.0f && e.dy() == 0.0f) || !MouseLook() || bf1943::GameMenuOpen() || bf1943::comms::Typing()) return;
+    if ((e.dx() == 0.0f && e.dy() == 0.0f) || !MouseLook() || bf1943::GameMenuOpen() || bf1943::SpawnMouseActive() ||
+        bf1943::comms::Typing())
+      return;
     // A move of two counts or more is the player's (a hand resting on the mouse jitters by one): the HUD's prompts
     // show keys (game_menu.cpp NoteMatchDevice).
     if (std::fabs(e.dx()) + std::fabs(e.dy()) >= 2.0f) bf1943::NoteMatchDevice(true);
@@ -325,7 +328,8 @@ void LookFrame() {
   g.frame_valid = true;
   g.frame_id++;
   // Our menu takes the mouse back from the game (the pointer is free to pick rows), and gives it back on closing.
-  const bool menu = GameMenuOpen();
+  // So does the deploy screen's pointer (flash_mouse.cpp).
+  const bool menu = GameMenuOpen() || SpawnMouseActive();
   if (menu != g.menu_mouse_off) {
     g.menu_mouse_off = menu;
     g.pad_moves.clear();
@@ -524,7 +528,12 @@ void LookPad(uint8_t* gamepad, bool seated) {
     return;
   }
   g_free_at.store(0);
-  // Not seated (dead, watching), or a seat without a gun the 0.3 way: the mouse to the right stick, as before.
+  // Not seated (dead, watching), or a seat without a gun the 0.3 way: the mouse to the right stick, as before. Not on
+  // the deploy screen with its pointer free (flash_mouse.cpp): there the mouse points and clicks.
+  if (SpawnMouseActive()) {
+    g.pad_moves.clear();
+    return;
+  }
   double dx = 0, dy = 0;
   for (const auto& m : g.pad_moves) dx += m.dx, dy += m.dy;
   if (dx == 0 && dy == 0) return;
