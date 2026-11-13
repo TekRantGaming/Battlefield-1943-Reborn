@@ -8,11 +8,15 @@
 //   - a kit card: d-pad left or right until that card is the chosen one (the screen's onKitLeft adds one to its kit
 //     index, onKitRight takes one off, round the three; the cards stand Rifleman 1, Infantry 0, Scout 2);
 //   - Set to flag spawn, Enter battle, Back: Y, A, B;
-//   - the map: for now the right stick pushed the way the click lies from the map's middle, which moves the choice to
-//     the next spawn point that way (the screen's own gotoNextSpawnPoint). A click on the exact point needs to know
-//     which of the screen's spawn indices is which place and how the map is scaled: bf_debug_spawn_mouse logs what
-//     the screen sends (selectKit, selectSpawnPoint), the level's capture points and the map's icons, to work it out.
-// Where things are on the screen was measured from a screenshot of it (13 Nov, 1280 x 720 stage units).
+//   - a spawn point on the map: the screen's own onSpawnUp or onSpawnDown (its spawn index less or plus one, the
+//     display following), called until the index it tells the game (selectSpawnPoint) is that point's. The index is
+//     the capture point's Index in the level file (run of 13 Nov 03:20: the Axis carrier, Index 6, was sent as 6).
+// Where things are on the screen was measured from a screenshot of it (13 Nov, 1280 x 720 stage units). The map: a
+// least squares fit of Wake Island's five flags in that screenshot to their places in the world put every one within
+// a unit, and the carrier's marker too: 0.332 units a metre, turned 20 degrees, the world's origin at 920, 358. Other
+// levels are taken to be drawn the same way (not yet checked: bf_debug_spawn_mouse logs the clicks).
+// The screen's script is reached at _root.contentMC.loader1 (probed 13 Nov: onKitLeft, onSpawnUp, setKitInfo,
+// gotoNextSpawnPoint and spawnmap.sp0 all resolve there).
 
 #include <algorithm>
 #include <atomic>
@@ -68,7 +72,9 @@ struct State {
   int kit = -1;    // the screen's kit index as it last told the game (0 Infantry, 1 Rifleman, 2 Scout); -1 not known
   int spawn = -1;  // its spawn point index, as last told
   int icons_logged = 0;
-  bool probed = false;
+  int want_spawn = -1;  // the spawn index a click asked for, stepped to in the pad hook
+  int want_steps = 0;
+  Clock::time_point want_step_at{};
 } g;
 std::atomic<bool> g_active{false};
 
@@ -93,6 +99,10 @@ constexpr Box kKitCards[3] = {{102, 217, 251, 497}, {257, 217, 406, 497}, {412, 
 constexpr int kKitOfCard[3] = {1, 0, 2};  // Rifleman, Infantry, Scout
 constexpr Box kSpawnMode{94, 529, 330, 568}, kEnter{94, 572, 280, 607}, kBack{94, 611, 210, 644};
 constexpr Box kMap{623, 119, 1180, 497};
+// The map: a place in the world (x, z in metres) in stage units.
+constexpr float kMapA = 0.311910f, kMapB = -0.113804f, kMapX = 920.03f, kMapY = 358.16f;
+ImVec2 OnMap(float wx, float wz) { return ImVec2(kMapA * wx - kMapB * wz + kMapX, kMapB * wx + kMapA * wz + kMapY); }
+constexpr float kPointReach = 30.0f;  // a click this near a point (stage units) is a click on it
 
 void Queue(const Action& a) {
   if (g.actions.size() < 8) g.actions.push_back(a);
@@ -147,16 +157,27 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
         REXLOG_INFO("BF spawn mouse: {} clicked", b.name);
       }
     }
-    if (kMap.Has(mx, my) && click) {
-      const float cx = (kMap.x0 + kMap.x1) * 0.5f, cy = (kMap.y0 + kMap.y1) * 0.5f;
-      const float dx = mx - cx, dy = cy - my, l = std::sqrt(dx * dx + dy * dy);
-      if (l > 12.0f) {
-        Action a;
-        a.rx = dx / l, a.ry = dy / l, a.hold_ms = 160, a.gap_ms = 200;
-        Queue(a);
+    if (kMap.Has(mx, my)) {
+      // The capture point nearest the pointer, where the map shows it.
+      const std::vector<CapturePoint> points = CapturePoints();
+      const CapturePoint* near_point = nullptr;
+      float best = kPointReach * kPointReach;
+      ImVec2 at{};
+      for (const CapturePoint& p : points) {
+        const ImVec2 m = OnMap(p.x, p.z);
+        const float d2 = (m.x - mx) * (m.x - mx) + (m.y - my) * (m.y - my);
+        if (d2 < best && kMap.Has(m.x, m.y)) best = d2, near_point = &p, at = m;
       }
-      REXLOG_INFO("BF spawn mouse: map clicked at stage {:.0f}, {:.0f} (in the map {:.3f}, {:.3f}); spawn index {}",
-                  mx, my, (mx - kMap.x0) / (kMap.x1 - kMap.x0), (my - kMap.y0) / (kMap.y1 - kMap.y0), g.spawn);
+      if (near_point) {
+        const ImVec2 c(ox + at.x * s, oy + at.y * s);
+        dl->AddCircle(c, 17.0f * s, IM_COL32(0, 0, 0, 170), 32, 4.5f * s);
+        dl->AddCircle(c, 17.0f * s, IM_COL32(255, 236, 170, 235), 32, 2.5f * s);
+      }
+      if (click) {
+        if (near_point) g.want_spawn = near_point->index, g.want_steps = 0, g.want_step_at = {};
+        REXLOG_INFO("BF spawn mouse: map clicked at stage {:.0f}, {:.0f}: {} (index {}); the screen's spawn index {}", mx,
+                    my, near_point ? near_point->name : "no point there", near_point ? near_point->index : -1, g.spawn);
+      }
     }
   }
 };
@@ -188,18 +209,26 @@ void SpawnMousePad(uint8_t* gamepad, bool may_be_up) {
       for (const CapturePoint& p : CapturePoints())
         REXLOG_INFO("BF spawn mouse: capture point {} index {} letter {} at x {:.1f} z {:.1f}, owner {}, shown {}",
                     p.name, p.index, p.letter < 0 ? '-' : char('A' + p.letter), p.x, p.z, p.owner, p.shown);
-      if (!g.probed) {
-        g.probed = true;
-        for (const char* path :
-             {"_root.contentMC.loader1.onKitLeft", "_root.contentMC.loader1.onSpawnUp", "_root.contentMC.loader1.spawnmap",
-              "_root.contentMC.loader1.setKitInfo", "_root.onKitLeft", "_root.contentMC.onKitLeft",
-              "_root.contentMC.loader1.content.onKitLeft", "_root.contentMC.loader1.m_currentSpawnPointIdx",
-              "_root.contentMC.loader1.spawnmap.sp0", "_root.contentMC.loader1.gotoNextSpawnPoint"})
-          FlashCall(std::string("probe:") + path);
-      }
     }
+    g.want_spawn = -1;
   }
   if (!active) return;
+  // A spawn point asked for by a click: the screen's own step up (its index less one) or down (plus one), one at a
+  // time, each after the screen has told the game its new index, until it is the one asked for. A point the team may
+  // not spawn at is not taken by the screen: the steps then end.
+  if (g.want_spawn >= 0) {
+    if (g.spawn == g.want_spawn) {
+      g.want_spawn = -1;
+    } else if (g.want_steps >= 10) {
+      REXLOG_INFO("BF spawn mouse: spawn index {} not reached (the screen stays on {})", g.want_spawn, g.spawn);
+      g.want_spawn = -1;
+    } else if (now >= g.want_step_at) {
+      FlashCall(g.spawn >= 0 && g.want_spawn < g.spawn ? "_root.contentMC.loader1.onSpawnUp"
+                                                         : "_root.contentMC.loader1.onSpawnDown");
+      ++g.want_steps;
+      g.want_step_at = now + std::chrono::milliseconds(200);
+    }
+  }
   if (now >= g.now_until && now >= g.gap_until && !g.actions.empty()) {
     g.now = g.actions.front();
     g.actions.pop_front();
