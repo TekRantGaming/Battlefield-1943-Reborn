@@ -67,7 +67,9 @@ std::string CurrentMapTitle();              // server_rotation.cpp: the one runn
 }  // namespace bf1943
 
 namespace {
+using bf1943::BfVersion;
 using bf1943::JsonField;
+using bf1943::VersionLine;
 using Clock = std::chrono::steady_clock;
 using Bytes = std::string;  // binary data
 
@@ -227,6 +229,7 @@ Socket UdpSocket(const sockaddr_in& address) {
 struct Player {
   uint32_t pid = 0;
   std::string name, ticket;
+  std::string version;  // the player's game, from the backend's join notice (none: 0.3)
   uint64_t xuid = 0;
   Bytes address;  // its XNADDR (36 bytes)
   Clock::time_point expected_at{};
@@ -338,11 +341,12 @@ class Host {
   void Note(const std::string& text) const { REXLOG_INFO("BF GM host: {}", text); }
 
   void Expect(const std::string& ticket, uint32_t player_pid, const std::string& player_name, uint64_t player_xuid,
-              const std::string& address_b64) {
+              const std::string& address_b64, const std::string& player_version) {
     Bytes address = Base64Decode(address_b64).substr(0, 36);
     if (address.size() != 36) address = XnAddr(0);
     Player p;
     p.pid = player_pid, p.name = player_name, p.xuid = player_xuid, p.address = address, p.ticket = ticket;
+    p.version = player_version;
     p.expected_at = Clock::now();
     players[ticket] = p;
   }
@@ -560,6 +564,13 @@ void Peer::Message(const Bytes& m) {
     auto it = host->players.find(ticket);
     if (it == host->players.end()) {
       Note("hello with unknown ticket " + ticket);
+      return;
+    }
+    // 0.4 plays at 60 Hz, 0.3 at 30 Hz: a match never mixes them (the backend lists servers by version too).
+    if (VersionLine(it->second.version) != VersionLine(BfVersion())) {
+      REXLOG_WARN("BF GM host: refused {} (PID {}): their game is version {}, this server {}", it->second.name,
+                  it->second.pid, VersionLine(it->second.version), VersionLine(BfVersion()));
+      host->players.erase(it);
       return;
     }
     player = it->second;
@@ -817,9 +828,10 @@ void Serve() {
     const std::string mode = REXCVAR_GET(bf_modern_mode) ? "modern" : "classic";
     std::string reg = fmt::format(
         "{{\"op\": \"register\", \"name\": {}, \"port\": {}, \"map\": {}, \"max_players\": {}, \"mode\": \"{}\", "
-        "\"description\": {}, \"maps\": [{}], \"listed\": {}",
+        "\"description\": {}, \"maps\": [{}], \"listed\": {}, \"version\": {}",
         JsonQuote(host.name), ntohs(host.public_addr.sin_port), JsonQuote(current), REXCVAR_GET(bf_gm_max_players),
-        mode, JsonQuote(REXCVAR_GET(bf_gm_description).substr(0, 200)), maps, st.listed ? "true" : "false");
+        mode, JsonQuote(REXCVAR_GET(bf_gm_description).substr(0, 200)), maps, st.listed ? "true" : "false",
+        JsonQuote(BfVersion()));
     // A host on one address of its own (tests) says where; one on every address is found by the backend.
     if (host.listen.sin_addr.s_addr != htonl(INADDR_ANY)) {
       char ip[32] = {};
@@ -913,7 +925,7 @@ void Serve() {
           } else if (op == "join") {
             host.Expect(JsonField(line, "ticket"), uint32_t(std::strtoul(JsonField(line, "pid").c_str(), nullptr, 10)),
                         JsonField(line, "name"), std::strtoull(JsonField(line, "xuid").c_str(), nullptr, 10),
-                        JsonField(line, "xnaddr"));
+                        JsonField(line, "xnaddr"), JsonField(line, "version"));
             host.Note(fmt::format("backend: {} joins (PID {})", JsonField(line, "name"), JsonField(line, "pid")));
           }
         }

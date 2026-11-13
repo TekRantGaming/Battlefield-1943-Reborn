@@ -40,6 +40,10 @@ const native_x_renderer::Profile& NativeXRendererProfile() {
     // water's depth read at (VPOS + 1) / 1280, run rdship1: two host rows above a landing craft's hull read the hull's
     // depth and drew the water black), so with a render scale they get the host pixel's centre less one guest pixel.
     p.param_gen_texel_centre = true;
+    // Ultrawide (0.4.0): the 3D view fills a screen of any shape, its cameras widened by AspectFactor() (fov.cpp's
+    // setAspect hook), and the HUD drawn after the composite kept at 16:9 in the middle (D43, D162's frame order).
+    p.widens_cameras = true;
+    p.box_2d_after_composite = true;
     native_x_renderer::DeviceLayout& d = p.device;
     // XDK 2.0.7978 (Guitar Hero: Metallica's): six dirty masks from +0 (VS constants, PS constants, register groups
     // and the program, fetch slots with slot 0 in bit 31, the 0x2300/0x2380 groups, the tile dependent state).

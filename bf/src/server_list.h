@@ -117,7 +117,27 @@ inline std::string JsonField(const std::string& obj, const char* key) {
   return obj.substr(at, end - at);
 }
 
-inline bool RegistryRequest(const std::string& request, std::string& reply) {
+const char* BfVersion();  // pipeline_upload.cpp
+
+// "0.4" of "0.4.0": the part of a version that must match to list and join (0.4 plays at 60 Hz, 0.3 at 30 Hz). None
+// or anything else is 0.3, the releases before the version gate, which sent none.
+inline std::string VersionLine(const std::string& version) {
+  const char* s = version.c_str();
+  char* end = nullptr;
+  const long major = std::strtol(s, &end, 10);
+  if (end == s || *end != '.') return "0.3";
+  const char* minor_at = end + 1;
+  const long minor = std::strtol(minor_at, &end, 10);
+  if (end == minor_at || major < 0 || minor < 0) return "0.3";
+  return std::to_string(major) + "." + std::to_string(minor);
+}
+
+// Every request carries our version: the backend only lists, finds and reserves servers of our major.minor, and
+// tells a server which version each joiner has (server/plasma.py, Registry).
+inline bool RegistryRequest(const std::string& request_in, std::string& reply, bool loopback_only = false) {
+  std::string request = request_in;
+  if (!request.empty() && request.back() == '}')
+    request.insert(request.size() - 1, std::string(", \"version\": \"") + BfVersion() + "\"");
   std::string target = REXCVAR_GET(bf_backend_registry);
   if (target.empty()) target = REXCVAR_GET(bf_online_host) + ":18250";
   const size_t colon = target.rfind(':');
@@ -127,6 +147,10 @@ inline bool RegistryRequest(const std::string& request, std::string& reply) {
   hints.ai_socktype = SOCK_STREAM;
   if (getaddrinfo(target.substr(0, colon).c_str(), target.substr(colon + 1).c_str(), &hints, &found) || !found)
     return false;
+  if (loopback_only && (ntohl(reinterpret_cast<const sockaddr_in*>(found->ai_addr)->sin_addr.s_addr) >> 24) != 127) {
+    freeaddrinfo(found);
+    return false;
+  }
   auto s = socket(found->ai_family, found->ai_socktype, found->ai_protocol);
   bool ok = false;
 #if defined(_WIN32)
@@ -209,7 +233,9 @@ class ServerList {
       return false;
     const size_t at = reply.find("{\"gid\"");
     if (at == std::string::npos) return false;
-    out = Parse(reply.substr(at, JsonEnd(reply, at) - at + 1));
+    const std::string obj = reply.substr(at, JsonEnd(reply, at) - at + 1);
+    if (VersionLine(JsonField(obj, "version")) != VersionLine(BfVersion())) return false;
+    out = Parse(obj);
     return !out.gid.empty();
   }
 
@@ -228,7 +254,9 @@ class ServerList {
       for (size_t at = reply.find("{\"gid\""); at != std::string::npos;) {
         const size_t end = JsonEnd(reply, at);
         if (end == std::string::npos) break;
-        found.push_back(Parse(reply.substr(at, end - at + 1)));
+        const std::string obj = reply.substr(at, end - at + 1);
+        // Only servers of our major.minor (an older backend lists every server, with no version: 0.3).
+        if (VersionLine(JsonField(obj, "version")) == VersionLine(BfVersion())) found.push_back(Parse(obj));
         at = reply.find("{\"gid\"", end);
       }
       if (Now() < want_pings_until_) Ping(found);

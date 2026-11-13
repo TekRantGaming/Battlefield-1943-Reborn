@@ -26,6 +26,18 @@ CONTROL, LINK, VOICE = 7, 1, 0
 INIT, CONN, UNREL, DATA = 1, 2, 0x80, 0x100
 KIND_STREAM, KIND_DATAGRAM, KIND_SYNC = 6, 7, 0x40
 RESEND_SECONDS = 0.3
+# This release (keep it equal to BF_VERSION in bf/CMakeLists.txt). Players of another major.minor are refused at
+# their hello: 0.4 plays at 60 Hz, 0.3 at 30 Hz, and a match never mixes them.
+VERSION = '0.4.0'
+
+
+def major_minor(version):
+    """(major, minor) of a "0.4.0" version; none or anything else: (0, 3), the releases before the version gate."""
+    try:
+        parts = str(version).split('.')
+        return int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        return 0, 3
 
 
 PING, PROBE, PONG = b'BF43PING', b'BF43PRBE', b'BF43PONG'
@@ -147,8 +159,9 @@ def player_blob(pid, slot, name, xuid, address, port, stamp):
 
 
 class Player:
-    def __init__(self, pid, name, xuid, address, ticket):
+    def __init__(self, pid, name, xuid, address, ticket, version=None):
         self.pid, self.name, self.xuid, self.address, self.ticket = pid, name, xuid, address, ticket
+        self.version = version  # the player's game, from the backend's join notice (none: 0.3)
 
 
 # ---- voice and text chat (bf/src/comms.cpp is the other end; docs/COMMS-PLAN.md)
@@ -157,7 +170,7 @@ class Player:
 # same IP. Client to host: HELLO, STATE (every half second: team, squad, in the world, where), CHAT, VOICE, BYE.
 # Host to client: WELCOME (its id), REFUSED, CHAT_RELAY, ROSTER (every 5 s), VOICE_RELAY (a VOICE's body as sent).
 C_HELLO, C_WELCOME, C_STATE, C_CHAT_RELAY, C_CHAT, C_ROSTER, C_VOICE, C_VOICE_RELAY, C_BYE, C_REFUSED = range(1, 11)
-COMMS_PROTOCOL = 1
+COMMS_PROTOCOL = 2  # bf/src/comms.cpp kProtocol: 2 from 0.4.0
 CHAT_ALL, CHAT_TEAM, CHAT_SQUAD = 0, 1, 2
 # metres: a listener further from the speaker gets nothing (the client fades out sooner). BF_DEV_VOICE_RANGE (tests
 # only): another range, so two test players far apart on the map still hear each other.
@@ -477,6 +490,12 @@ class Peer:
             if not self.player:
                 self.note('hello with unknown ticket %s' % ticket)
                 return
+            if major_minor(self.player.version) != major_minor(VERSION):
+                self.note('refused %s (PID %d): their game is version %d.%d, this server %d.%d (60 Hz and 30 Hz '
+                          'matches never mix)' % (self.player.name, self.player.pid,
+                                                   *major_minor(self.player.version), *major_minor(VERSION)))
+                self.player = None
+                return
             self.note('hello from %s (PID %d)' % (self.player.name, self.player.pid))
             self.send_roster()
         elif t == 4:  # roster ack
@@ -580,7 +599,7 @@ class GameHost(asyncio.DatagramProtocol):
             self.log.write(line + '\n')
             self.log.flush()
 
-    def expect(self, ticket, pid, name, xuid, address_b64):
+    def expect(self, ticket, pid, name, xuid, address_b64, version=None):
         import base64
         try:
             address = base64.b64decode(address_b64)[:36]
@@ -588,7 +607,7 @@ class GameHost(asyncio.DatagramProtocol):
             address = b''
         if len(address) != 36:
             address = xnaddr('0.0.0.0')
-        self.players[ticket] = Player(int(pid), name, int(xuid or 0), address, ticket)
+        self.players[ticket] = Player(int(pid), name, int(xuid or 0), address, ticket, version)
         self.players[ticket].expected_at = time.monotonic()
 
     def connection_made(self, transport):
@@ -688,7 +707,8 @@ async def serve(args):
         # --public only when given (older packages and tests).
         reg = {'op': 'register', 'name': args.name, 'port': public[1], 'map': args.map,
                'max_players': args.max_players, 'mode': args.mode, 'description': args.description[:200],
-               'maps': [m for m in args.maps.split(',') if m], 'listed': not args.unlisted, 'night': args.night}
+               'maps': [m for m in args.maps.split(',') if m], 'listed': not args.unlisted, 'night': args.night,
+               'version': VERSION}
         # A host on one address of its own (tests: 127.0.0.2) says where; one on every address (the packages: 0.0.0.0)
         # is found by the backend.
         if args.public or listen[0] not in ('0.0.0.0', '::'):
@@ -764,7 +784,7 @@ async def serve(args):
                              'is not checked from there' if m.get('ok') is None
                         else 'players cannot reach this server', m.get('address', '?')))
                 elif m.get('op') == 'join':
-                    host.expect(m['ticket'], m['pid'], m['name'], m['xuid'], m['xnaddr'])
+                    host.expect(m['ticket'], m['pid'], m['name'], m['xuid'], m['xnaddr'], m.get('version'))
                     host.note('backend: %s joins (PID %s)' % (m['name'], m['pid']))
         except (ConnectionError, ValueError) as e:
             host.note('backend link lost (%s)' % type(e).__name__)

@@ -6,6 +6,10 @@
 
 #include <native_x_renderer/hooks.h>
 #include <native_x_renderer/native_x_renderer.h>
+#include <vector>
+#include <mutex>
+#include <cmath>
+#include <chrono>
 
 #include <rex/logging.h>
 
@@ -146,6 +150,48 @@ void NightModels(const NightModelLamps* models, uint32_t count) { renderer::Nigh
 
 void SetGameAspectBox(bool on) {
   if (g_renderer) renderer::SetGameAspectBox(on);
+}
+
+namespace {
+struct HudMarker {
+  float x, y;
+  std::chrono::steady_clock::time_point at;
+};
+std::mutex g_hud_markers_mutex;
+std::vector<HudMarker> g_hud_markers;
+}  // namespace
+
+void NoteHudMarker(float x, float y) {
+  if (!std::isfinite(x) || !std::isfinite(y)) return;
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard lock(g_hud_markers_mutex);
+  std::erase_if(g_hud_markers, [&](const HudMarker& m) { return now - m.at > std::chrono::milliseconds(200); });
+  if (g_hud_markers.size() < 1024) g_hud_markers.push_back({x, y, now});
+}
+
+std::atomic<int64_t> g_game_menu_at{0};
+void NoteGameMenu() {
+  g_game_menu_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
+}
+bool GameMenuRecently() {
+  const int64_t at = g_game_menu_at.load(std::memory_order_relaxed);
+  return at && std::chrono::steady_clock::now().time_since_epoch().count() - at <
+                   std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(1500)).count();
+}
+
+bool NearHudMarker(double x, double y, double radius, double* marker_x) {
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard lock(g_hud_markers_mutex);
+  double best = radius * radius;
+  bool found = false;
+  for (const HudMarker& m : g_hud_markers) {
+    if (now - m.at > std::chrono::milliseconds(200)) continue;
+    const double dx = m.x - x, dy = m.y - y;
+    if (dx * dx + dy * dy > best) continue;
+    best = dx * dx + dy * dy, found = true;
+    if (marker_x) *marker_x = m.x;
+  }
+  return found;
 }
 
 void BeginView(const float* scene_view_projection) {

@@ -31,7 +31,7 @@ REXCVAR_DEFINE_BOOL(mnk_mouse, true, "Input",
                     "Use the mouse for the right stick. Off means the right stick comes "
                     "from the keybind_rstick_* keys only");
 REXCVAR_DEFINE_DOUBLE(mnk_sensitivity, 1.0, "Input", "Mouse sensitivity for right stick")
-    .range(0.01, 10.0);
+    .range(0.0, 10.0);
 
 REXCVAR_DEFINE_STRING(keybind_a, "Space", "Input/Keybinds/Controller", "A button: jump (vehicles: change seat)");
 REXCVAR_DEFINE_STRING(keybind_b, "E", "Input/Keybinds/Controller", "B button: enter, use, pick up (vehicles: exit)");

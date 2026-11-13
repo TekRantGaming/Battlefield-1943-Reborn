@@ -1160,15 +1160,22 @@
       "Sergeant Major",   "Warrant Officer",     "Chief Warrant Officer", "Second Lieutenant", "First Lieutenant",
       "Captain",          "Major",               "Lieutenant Colonel",   "Colonel",            "Brigadier General",
       "Major General",    "Lieutenant General",  "General"};
-  int Rank() {
+  int Rank(const Settings& record, double seconds) {
+    const std::string value = record.Get("rank", "");
+    const char* end = value.data() + value.size();
+    int requested = 0;
+    const auto parsed = std::from_chars(value.data(), end, requested);
+    if (parsed.ec == std::errc{} && parsed.ptr == end && requested >= 1 && requested <= int(std::size(kRanks)))
+      return requested;
     static constexpr int kMinutes[] = {0,   10,  25,  45,  70,   100,  140,  190,  250,  320,  400, 500,
                                        620, 760, 920, 1100, 1300, 1550, 1850, 2200, 2600, 3100, 3700};
-    const double minutes = std::atof(settings_.Get("match_seconds", "0").c_str()) / 60.0;
+    const double minutes = seconds / 60.0;
     int rank = 1;
     for (int i = 0; i < int(std::size(kMinutes)); ++i)
       if (minutes >= kMinutes[i]) rank = i + 1;
     return rank;
   }
+  int Rank() { return Rank(settings_, std::atof(settings_.Get("match_seconds", "0").c_str())); }
   std::string RankLine() {
     const int r = Rank();
     return "Rank " + std::to_string(r) + ", " + kRanks[r - 1];
@@ -1743,6 +1750,15 @@
   // Stats & Awards, ours (in place of the game's screen, docs/MENUS-PLAN.md): the soldier's rank and time in matches,
   // and every kind of score event the player has had (auto_join.cpp counts them from the game's own HUD events; the
   // settings file keeps them as stat.<label> = events,points).
+  Settings test_profile_;
+  bool test_profile_active_ = false;
+
+  void LoadTestProfile() {
+    test_profile_ = Settings{settings_.path.parent_path() / "bf1943-test-profile.txt", {}};
+    test_profile_.Load();
+    test_profile_active_ = test_profile_.Get("enabled", "false") == "true";
+  }
+
   void StatsPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
     const ImVec2 sz = io.DisplaySize;
     const Stage st = StageOf(io);
@@ -1752,16 +1768,20 @@
     const float cx0 = st.P(40, 0).x, cx1 = cx0 + st(400);
     d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(15, 17, 13, 226));
     d->AddRectFilled(ImVec2(cx1, 0), ImVec2(cx1 + st(1.4f), sz.y), IM_COL32(201, 183, 122, 110));
-    kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim, "STATS & AWARDS", st(3));
+    kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim,
+                test_profile_active_ ? "STATS & AWARDS / TEST PROFILE" : "STATS & AWARDS", st(3));
     Text(d, f.stencil, st(40), ImVec2(cx0 - st(2), st.P(0, 66).y), kit::kCream, "SERVICE RECORD");
     d->AddRectFilled(st.P(40, 120), st.P(80, 124), kit::kStamp);
     // The soldier.
     const std::string name = settings_.Get("player_name", "Soldier");
-    RankBadge(d, st, st.P(62, 172), Rank());
+    const Settings& record = test_profile_active_ ? test_profile_ : settings_;
+    const double raw_seconds = std::atof(record.Get("match_seconds", "0").c_str());
+    const double seconds = std::isfinite(raw_seconds) ? std::clamp(raw_seconds, 0.0, 2147483647.0) : 0.0;
+    const int rank_number = Rank(record, seconds);
+    RankBadge(d, st, st.P(62, 172), rank_number);
     d->AddText(f.ui_bold, st(26), st.P(96, 150), kit::kCream, name.c_str());
-    const std::string rank = "RANK " + std::to_string(Rank()) + " \xC2\xB7 " + Upper(kRanks[Rank() - 1]);
+    const std::string rank = "RANK " + std::to_string(rank_number) + " \xC2\xB7 " + Upper(kRanks[rank_number - 1]);
     d->AddText(f.typed, st(14), st.P(96, 184), kit::kKhakiText, rank.c_str());
-    const double seconds = std::atof(settings_.Get("match_seconds", "0").c_str());
     // The totals, from the stat.<label> lines.
     struct Line {
       std::string label;
@@ -1770,10 +1790,16 @@
     };
     std::vector<Line> lines;
     double total = 0;
-    for (const auto& [key, value] : settings_.values) {
+    for (const auto& [key, value] : record.values) {
       if (key.rfind("stat.", 0) != 0) continue;
       const size_t comma = value.find(',');
-      const Line l{key.substr(5), std::atoi(value.c_str()), comma == std::string::npos ? 0 : std::atof(value.c_str() + comma + 1)};
+      const char* count_end = value.data() + std::min(comma, value.size());
+      int events = 0;
+      const auto count = std::from_chars(value.data(), count_end, events);
+      if (count.ec != std::errc{} || count.ptr != count_end || events < 0) continue;
+      const double points = comma == std::string::npos ? 0 : std::atof(value.c_str() + comma + 1);
+      if (!std::isfinite(points)) continue;
+      const Line l{key.substr(5), events, points};
       total += l.points;
       lines.push_back(l);
     }
@@ -1817,7 +1843,7 @@
       ly += st(44);
     }
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, in_copy_ = in, 15);
-    if (in.back) page_ = Page::kMain, row_ = 4;  // back on the main menu's Stats & Awards row
+    if (in.back) page_ = Page::kMain, row_ = MainRowOf("STATS & AWARDS");
   }
   Input in_copy_;
   // Achievements, ours (in place of the Xbox screen the game opened): the game's own list from its title data, with
@@ -1831,14 +1857,25 @@
     d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 186));
     std::vector<rex::system::AchievementInfo> list;
     int unlocked = 0, score = 0, total = 0;
-    if (auto* k = REX_KERNEL_STATE()) {
+    auto* k = REX_KERNEL_STATE();
+    const std::string default_state = test_profile_.Get("achievements", "actual");
+    auto is_unlocked = [&](uint32_t id) {
+      if (test_profile_active_) {
+        const std::string state = test_profile_.Get("achievement." + std::to_string(id), default_state);
+        if (state == "unlocked") return true;
+        if (state == "locked") return false;
+      }
+      return k && k->achievements().IsUnlocked(id);
+    };
+    if (k) {
       list = k->achievements().ListAchievements();
       for (const auto& a : list) {
         total += int(a.gamerscore);
-        if (k->achievements().IsUnlocked(a.id)) ++unlocked, score += int(a.gamerscore);
+        if (is_unlocked(a.id)) ++unlocked, score += int(a.gamerscore);
       }
     }
-    kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim, "BATTLEFIELD 1943", st(3));
+    kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim,
+                test_profile_active_ ? "BATTLEFIELD 1943 / TEST PROFILE" : "BATTLEFIELD 1943", st(3));
     Text(d, f.stencil, st(40), ImVec2(st.P(40, 0).x - st(2), st.P(0, 66).y), kit::kCream, "ACHIEVEMENTS");
     d->AddRectFilled(st.P(40, 120), st.P(80, 124), kit::kStamp);
     const std::string head = fmt::format("{} OF {} UNLOCKED  /  {} OF {} POINTS", unlocked, list.size(), score, total);
@@ -1856,8 +1893,7 @@
                    "The game's achievements are not loaded in this session.", x1 - x0);
     for (int i = ach_scroll_ * per; i < int(list.size()) && i < (ach_scroll_ + 1) * per; ++i) {
       const auto& a = list[size_t(i)];
-      auto* k = REX_KERNEL_STATE();
-      const bool got = k && k->achievements().IsUnlocked(a.id);
+      const bool got = is_unlocked(a.id);
       const ImVec2 ra(x0, y), rb(x1, y + st(62));
       d->AddRectFilled(ra, rb, IM_COL32(15, 17, 13, got ? 226 : 180));
       d->AddRectFilled(ra, ImVec2(ra.x + st(4), rb.y), got ? kit::kStamp : IM_COL32(201, 183, 122, 60));
@@ -1865,7 +1901,9 @@
                  a.label.c_str());
       const std::string& desc = got || a.unachieved_description.empty() ? a.description : a.unachieved_description;
       d->AddText(f.typed, st(13), ImVec2(ra.x + st(24), ra.y + st(36)), got ? kit::kKhakiText : kit::kKhakiDim, desc.c_str());
-      const std::string pts = fmt::format("{}{}", a.gamerscore, got ? "  UNLOCKED" : "");
+      const std::string pts = test_profile_active_
+          ? fmt::format("ID {}  /  {}{}", a.id, a.gamerscore, got ? "  UNLOCKED" : "")
+          : fmt::format("{}{}", a.gamerscore, got ? "  UNLOCKED" : "");
       d->AddText(f.typed, st(14), ImVec2(rb.x - st(24) - kit::TextWidth(f.typed, st(14), pts), ra.y + st(22)),
                  got ? kit::kGreenBright : kit::kKhakiDim, pts.c_str());
       y += st(68);
@@ -1877,7 +1915,7 @@
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, cue, 15);
     if (in.back) {  // back where it was opened: the pause, or the main menu's Achievements row
       if (ach_from_pause_) page_ = Page::kPause, pause_row_ = kPauseAchievements, ach_from_pause_ = false;
-      else page_ = Page::kMain, row_ = 6;
+      else page_ = Page::kMain, row_ = MainRowOf("ACHIEVEMENTS");
     }
   }
   // Leaderboards, ours (in place of the game's EA screen, docs/MENUS-PLAN.md): every player's own totals as their
@@ -1895,7 +1933,11 @@
   std::atomic<bool> lb_busy_{false};
   bool lb_from_pause_ = false;  // opened from the pause: B goes back there
 
-  void SendLeaderboard() {
+  // Posted at the start (the totals saved in the profile, which before went out only with the next score event in a
+  // match) and after each save of new score events. Tried up to four times (now, then 5, 15 and 30 s later) and each
+  // outcome logged, as nothing showed whether a post had arrived.
+  bool stats_sent_at_start_ = false;
+  void SendLeaderboard(const char* why = "new score events") {
     double total = 0;
     int captures = 0;
     for (const auto& [key, value] : settings_.values) {
@@ -1908,12 +1950,44 @@
     for (char c : settings_.Get("player_name", ""))
       if (std::isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_') name += c;
     if (name.empty()) return;
-    const std::string req = fmt::format(
-        "{{\"op\": \"stats_put\", \"name\": \"{}\", \"score\": {:.0f}, \"seconds\": {:.0f}, \"captures\": {}}}", name,
+    const bool test = settings_.Get("test_progression", "") == "1";
+    std::string req = fmt::format(
+        "{{\"op\": \"stats_put\", \"name\": \"{}\", \"score\": {:.0f}, \"seconds\": {:.0f}, \"captures\": {}", name,
         total, std::atof(settings_.Get("match_seconds", "0").c_str()), captures);
-    std::thread([req] {
-      std::string reply;
-      RegistryRequest(req, reply);
+    if (test) {
+      req += fmt::format(", \"rank\": {}, \"achievements\": [", Rank());
+      bool first = true;
+      if (auto* k = REX_KERNEL_STATE()) {
+        for (const auto& a : k->achievements().ListAchievements()) {
+          if (!k->achievements().IsUnlocked(a.id)) continue;
+          req += (first ? "" : ",") + std::to_string(a.id);
+          first = false;
+        }
+      }
+      req += "]";
+    }
+    req += "}";
+    const double seconds = std::atof(settings_.Get("match_seconds", "0").c_str());
+    std::thread([req, test, name, total, seconds, why] {
+      static constexpr int kWait[] = {0, 5, 15, 30};
+      for (int attempt = 0; attempt < int(std::size(kWait)); ++attempt) {
+        if (kWait[attempt]) std::this_thread::sleep_for(std::chrono::seconds(kWait[attempt]));
+        std::string reply;
+        const bool answered = RegistryRequest(req, reply, test);
+        const bool ok = answered && reply.find("\"ok\": true") != std::string::npos;
+        if (ok) {
+          REXLOG_INFO("BF leaderboard: stats posted for {} ({}: score {:.0f}, {:.0f} s played{})", name, why, total,
+                      seconds, test ? ", test profile, local backend only" : "");
+          return;
+        }
+        if (answered) {  // the backend refused it: sending the same again will not help
+          REXLOG_WARN("BF leaderboard: stats for {} refused by the backend ({}): {}", name, why,
+                      reply.substr(0, 200));
+          return;
+        }
+        REXLOG_WARN("BF leaderboard: no answer from the backend posting stats for {} ({}), try {} of {}", name, why,
+                    attempt + 1, std::size(kWait));
+      }
     }).detach();
   }
 
@@ -1990,7 +2064,7 @@
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, cue, 15);
     if (in.back) {
       if (lb_from_pause_) page_ = Page::kPause, pause_row_ = kPauseLeaderboards, lb_from_pause_ = false;
-      else page_ = Page::kMain, row_ = 7;  // back on the main menu's Leaderboards row
+      else page_ = Page::kMain, row_ = MainRowOf("LEADERBOARDS");
     }
   }
   // Join Match With Friends, ours (in place of the game's Xbox friends screen, docs/MENUS-PLAN.md): the players signed
@@ -2083,7 +2157,7 @@
           return;
         }
     }
-    if (in.back) page_ = Page::kMain, row_ = 2;  // back on the main menu's Join Match With Friends row
+    if (in.back) page_ = Page::kMain, row_ = MainRowOf("JOIN MATCH WITH FRIENDS");
   }
   // The pause's Scoreboard, ours (in place of the game's, docs/MENUS-PLAN.md): every player on this server by score,
   // as their games send it to our backend (op match_score from MatchScoreTick), asked every 3 s on a worker.
@@ -2344,7 +2418,7 @@
       if (clicked == kPmHost) HostPrivateMatch();
       else change(clicked, 1);
     }
-    if (in.back) page_ = Page::kMain, row_ = 3, pm_error_.clear();  // back on the main menu's Create Private Match row
+    if (in.back) page_ = Page::kMain, row_ = MainRowOf("CREATE PRIVATE MATCH"), pm_error_.clear();
   }
 
   // While our server starts: its steps, then the join (PrivateMatchTick); B ends it.
@@ -3096,7 +3170,7 @@
     }
     return true;
   }
-  // ---- Updates (update.cpp, King Kong's way; always on, TekRantGaming): checked at the start and every 6 hours while Home
+  // ---- Updates (update.cpp): when configured, checked at the start and every 6 hours while Home
   // is open; a newer release downloads by itself, and installs at once from the update page while Home is showing.
   std::string UpdateNote() {
     auto& u = update::Get();
@@ -3110,6 +3184,7 @@
     switch (state) {
       case update::State::kIdle:
       case update::State::kChecking: return "CHECKING \xC2\xB7 " + v;
+      case update::State::kDisabled: return "UPDATES OFF \xC2\xB7 " + v;
       case update::State::kNone: {
         std::lock_guard lock(u.mutex);
         return (u.message == "Up to date" ? "UP TO DATE \xC2\xB7 " : "NOT CHECKED \xC2\xB7 ") + v;

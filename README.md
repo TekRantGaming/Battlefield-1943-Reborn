@@ -41,8 +41,8 @@ no game files: you need your own copy of the Xbox 360 game (Xbox Live Arcade, ti
    own (for example `~/Games/BF1943-Reborn`): its `game` and `user` folders go beside it.
 2. Make it runnable (`chmod +x` on the file, or Allow executing in its properties) and start it.
 
-Its name is the same in every release. Updates install themselves; to update by hand, put the new file over the old one
-(not in Downloads), so your settings, game files and Steam shortcut stay.
+Its name is the same in every release. To update by hand, put the new file over the old one in the game folder
+to keep your settings, game files and Steam shortcut.
 
 **Then, on both**
 1. The first time, select your own Battlefield 1943 (Xbox 360) package: the single file in `5841097E\000D0000` from
@@ -54,11 +54,8 @@ Its name is the same in every release. Updates install themselves; to update by 
 
 Your settings, logs and crash reports stay in the folder `user` next to the game.
 
-**Updates install themselves.** At every start the game looks at this page's latest release; a newer one is downloaded,
-checked against the release's `SHA256SUMS.txt`, installed and started. On Windows only the files that changed are
-replaced, and if any of them cannot be, every one is put back; on Linux the AppImage replaces itself. Your `game` and
-`user` folders are never touched. Builds before 0.2.0 cannot update themselves: download the latest build once and
-unzip it over your folder (Windows), or put the AppImage in place of the old one (Linux).
+**This fork defaults to manual updates.** Setting `bf_update_feed` in `bf1943.toml` to a GitHub releases API endpoint
+enables automatic updates from that feed and first-start file repair on Windows. Use an empty feed to disable both.
 
 If Windows says *"rexruntime.dll is either not designed to run on Windows or it contains an error"* (Bad Image,
 0xc0e90002), it is not a broken download: the builds are not code signed yet, and Windows 11's Smart App Control has
@@ -111,7 +108,7 @@ not cleared this build's files.
   your squad (T, Y, U), with a profanity filter.
 - Performance metrics in the corner (off unless you turn them on; F2: off, FPS only or full), and crash and hang
   reports in `user\crashes`.
-- Updates that install themselves (see [Download and play](#download-and-play)).
+- Optional automatic updates from a configured release feed (see [Download and play](#download-and-play)).
 - Add to Steam from the launcher's Home, with the game's artwork.
 
 ## Controls
@@ -212,7 +209,7 @@ Report anything else on [Discord](https://discord.gg/8eakYSvBZS), with the files
   players to it. A dedicated server is the game itself, run as a server with no window.
 - **Our menus.** The first start setup, main menu, server browser, pause menu and settings are this project's own,
   drawn over the game, which keeps its own HUD.
-- **Updates.** The game reads this repository's latest release through GitHub's API. The Windows download carries a
+- **Updates.** When configured, the game reads the selected feed through GitHub's API. The Windows download carries a
   list of every file with its hash (`bf-files.txt`) and of files earlier builds had that it does not
   (`bf-retired.txt`): an update installs exactly those, removes a retired file only while it is unchanged, and checks
   the folder again at the first start of the new version.
@@ -255,15 +252,29 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 
 ## Privacy
 
-- **Share graphics data** (on by default, Settings > Gameplay > Sharing) sends the graphics pipelines your game builds
-  (render settings and shader numbers: no game files, no name, nothing about you) to our server, at most every 15
-  minutes and only when something new was built, so the next update has them ready and everyone gets less stutter.
+- **Share graphics data** defaults to Off under Settings > Gameplay > Sharing. Uploads also require a
+  `bf_pipelines_url` endpoint in `bf1943.toml`. When enabled, the upload contains graphics pipeline state,
+  shader hashes, a random persistent install ID, the build version, the renderer API and levels played this session.
 - Playing online, the backend sees the name you chose and your IP address, as any game server does.
 - **Voice and text chat** go through the server you play on: your voice only to the players near you, and only
   while you hold push to talk (or speak, with Open mic); the game opens your microphone only when you first use
   it. Servers keep a log of text chat for moderation; voice is passed on, never recorded.
 - The game's own Telemetry setting changes nothing: its reports went to EA's servers, which are gone.
 - Settings, logs and crash reports stay on your PC, in the folder `user`.
+
+## Test profiles
+
+Copy [the test profile example](docs/bf1943-test-profile.example.txt) to `user/bf1943-test-profile.txt` beside
+the fork's executable. Edit the rank, match time, score events and achievement states, then reopen Stats & Awards
+or Achievements to preview the changes. The preview reads the game's achievement list and displays the IDs to
+use for individual overrides. The test file is separate from saved progression and leaderboard submissions.
+
+To test persistence on Windows, run `python tools/test_progression.py --launch` from the source checkout
+after building the fork and SDK. The tool imports the editable fixture from the build's `user` directory
+into a separate `test-user` save, seeds a loopback leaderboard and launches the game against it. The
+fixture's `enabled` flag controls preview mode only. Close the test game before re-importing, since each import
+replaces the test stats and applies the requested achievement states. Run without `--launch` to save and submit
+the fixture without opening the game.
 
 ## Credits and licences
 

@@ -5144,3 +5144,28 @@ nadenight2, Guadalcanal's spawn 5 m from a lamppost, looking down: the view's me
 off, nadenight3). A lamp's light now rolls off with its own strength (lamps / (1 + 1.5 * its brightest channel)), and
 the surface's colour for a light takes less of the day's sun (lin * 0.5 / (luma + 0.2), was 0.6 / (luma + 0.3)): the
 same view 89 (nadenight4), a warm pool rather than the day; light seen from afar is weak enough to keep its strength.
+
+## D165 — Ultrawide without hooks round the 2D views: the HUD placed draw by draw (2026-11-12, Claude for Battlefield 1943)
+
+**Decision:** `Profile::box_2d_after_composite` (with `widens_cameras`, D43) for a game whose frame is the scene's copy, a
+bloom chain into smaller targets, one composite of the output's size, then the 2D layer. After the composite every
+draw of the output's size is a 2D draw, and each is placed on its own (`DrawPath::SetHudClassify`, `ClassifyHudDraw`):
+- Its place comes from its inline quad (Battlefield 1943: corners -1..1, or the canvas's pixels) and its vertex shader's
+  constants, tried as two rows (x' = r.(x, y, 0, 1)) or a column major matrix; a transform with no x or y term is none.
+- Across the whole canvas: stretched with the 3D view. Past both edges (a quad larger than the screen): drawn twice,
+  stretched then boxed (`kOversize`). From one canvas edge (and wider than 0.15): from the screen's edge to where its
+  inner edge is in the box, the canvas's edge pinned to the screen's (`kExtendLeft` / `kExtendRight`).
+- A mesh from vertex buffers with a 3D matrix (third row not (0, 0, 1, 0), the scope's mask): drawn as the 3D view.
+- A point the game projected to its HUD (`NoteHudMarker`, from the game's world-to-HUD functions) in the last 0.2 s:
+  its centre where the full width puts it, its size the box's (`kPoint`).
+- Inside an edge-anchored panel drawn before it: where the panel went. The next glyph or part of a line (same shader,
+  same row, starting where the last ended): where the last went. Otherwise, with `native_x_renderer_hud_layout` edges,
+  its centre beyond 0.4 of the canvas: boxed against that edge; else in the middle box.
+- A menu frame (a backdrop over exactly the canvas, or the game's `NoteGameMenu` in the last 1.5 s, and no 3D overlay):
+  no edges, no markers. A frame with no scene's copy (a loading screen) is placed the same way.
+`native_x_renderer_debug_hud` logs the decisions every 10 s.
+
+**Why:** the 0.4.0 ultrawide work (12 Nov 2026), played at 3440x1440: a boxed 16:9 HUD was asked for, then the HUD at the edges. Every
+Battlefield 1943 HUD element is the same 6-vertex quad placed by its constants (run 12 Nov 20:17), so the raw vertices
+said nothing; the scope's mask is a 3D mesh; the flags' markers are projected by the game with the widened camera into
+its 1280x720 HUD; the in-game HUD draws a large invisible container, so area was no sign of a menu.

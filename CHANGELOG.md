@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 (Unreleased)
+
+**New**
+- **Ultrawide screens.** On a 21:9, 32:9 or other wide screen the game fills the screen with a wider view (more to
+  each side, nothing stretched). Settings > Screen > HUD layout: Edges puts the minimap, squad and ammo at the
+  screen's sides, Centered keeps the HUD in 16:9 in the middle. Menus, the deploy screen, the scoreboard and loading
+  screens stay together in the middle with their backgrounds out to the edges; the sniper scope's black fills the
+  screen; flag markers stay on their flags. Aspect ratio: Fill screen (new) or Letterbox 16:9, at the next start.
+
+**Changed**
+- **0.4 and 0.3 players and servers never meet.** 0.4.0 plays at 60 Hz and 0.3.x at 30 Hz, and a match cannot mix
+  them, so each release only sees and joins servers of its own version: the server browser, Direct connect, Join
+  Match With Friends and Quick Match leave the other version's servers out, and a 0.4 server turns away a player
+  whose game is another version (its log says so). Servers and games now send their version to the backend; one
+  that sends none counts as 0.3. Server hosts: update the server package along with the game. Voice and text chat
+  also moved to a new protocol version (2), so 0.3 and 0.4 chat never connect either.
+
 ## 0.3.0 (12 November 2026): mouse aiming in vehicles, graphics presets, smooth play at low frame rates
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. 0.2.0 to 0.2.3 installs update

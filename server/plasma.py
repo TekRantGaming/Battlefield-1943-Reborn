@@ -38,13 +38,37 @@ MULTI_LIMIT = 8064   # packets larger than this go as multi part (the client say
 MULTI_CHUNK = 6000   # raw payload bytes per part
 MULTI = (0xB0000000, 0xF0000000)  # multi part response, request
 RESERVATIONS = {}  # player IP -> (GID, time): the server picked in our menu, for the next Quick Match
+# player IP -> (major, minor) of its game, from its last registry request: its Quick Match and its joins only find
+# servers of the same major.minor (0.4 plays at 60 Hz, 0.3 at 30 Hz: they never mix).
+CLIENT_VERSIONS = {}
+
+
+def major_minor(version):
+    """(major, minor) of a "0.4.0" version; none or anything else: (0, 3), the releases before the version gate,
+    which sent none."""
+    try:
+        parts = str(version).split('.')
+        return int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        return 0, 3
+
+
+def fits(g, version):
+    """A game a player of this (major, minor) may list and join. A game with no version is a --game or
+    --dedicated server from this backend's own command line (tests): any player."""
+    return g.get('version') is None or g['version'] == version
+
+
+def client_version(peer):
+    """The (major, minor) of the game at this address, from its registry requests; (0, 3) when it sent none."""
+    return CLIENT_VERSIONS.get(peer.split(':')[0], (0, 3))
 NAMES = {}  # a name, lower case -> (player id, held until: None while its player is online), see free_name
 LEADERBOARD = {}  # a name, lower case -> {'name', 'score', 'seconds', 'captures', 'at'}: the players' own totals
 MATCH_SCORES = {}  # a game's GID -> {name, lower case -> {'name', 'score', 'at'}}: the scoreboard, from the players' games
 LEADERBOARD_FILE = None  # where it is kept (--leaderboard), loaded at the start
 
 
-def leaderboard_put(m):
+def leaderboard_put(m, test_progression=False):
     """A player's totals from their game (our Stats & Awards): kept by name, the newest wins, at most 5,000 names."""
     name = ''.join(c for c in str(m.get('name', '')) if c.isalnum() or c in ' _')[:15].strip()
     if not name:
@@ -52,8 +76,15 @@ def leaderboard_put(m):
     try:
         entry = {'name': name, 'score': int(float(m.get('score', 0))), 'seconds': int(float(m.get('seconds', 0))),
                  'captures': int(float(m.get('captures', 0))), 'at': int(time.time())}
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
+    if test_progression and ('rank' in m or 'achievements' in m):
+        rank, achievements = m.get('rank'), m.get('achievements')
+        if (type(rank) is not int or not 1 <= rank <= 23 or not isinstance(achievements, list)
+                or len(achievements) > 256
+                or any(type(i) is not int or not 0 < i <= 0xffffffff for i in achievements)):
+            return False
+        entry.update(rank=rank, achievements=sorted(set(achievements)))
     if len(LEADERBOARD) >= 5000 and name.lower() not in LEADERBOARD:
         return False
     LEADERBOARD[name.lower()] = entry
@@ -328,11 +359,14 @@ class Client:
             status = {'TXN': 'Status', 'id.id': session_id, 'id.partition': partition, 'sessionState': 'COMPLETE'}
             # An unlisted server (a private match, Direct connect only) never takes a Quick Match the player did not
             # pick in our menu (its reservation below still joins it).
+            version = client_version(self.peer)
             games = [g for g in GAMES.values()
-                     if (g.get('TYPE') != 'P' or self.args.list_private) and g.get('listed', True)]
+                     if (g.get('TYPE') != 'P' or self.args.list_private) and g.get('listed', True) and
+                     fits(g, version)]
             # A server picked in our menu's server browser (Registry "reserve", by the player's address).
             reserved = RESERVATIONS.get(self.peer.split(':')[0])
-            if reserved and time.time() - reserved[1] < 300 and reserved[0] in GAMES:
+            if reserved and time.time() - reserved[1] < 300 and reserved[0] in GAMES and \
+                    fits(GAMES[reserved[0]], version):
                 games = [GAMES[reserved[0]]]
             if games:
                 status.update({'props.{}': 3, 'props.{resultType}': 'JOIN', 'props.{avgFit}': '1.0',
@@ -404,7 +438,7 @@ class TheaterClient(Client):
                  'HU': self.uid, 'HN': self.name, 'N': f.get('NAME', self.name), 'TYPE': f.get('TYPE', 'P'),
                  'JOIN': f.get('JOIN', 'O'), 'MAX-PLAYERS': f.get('MAX-PLAYERS', '16'), 'AP': 0,
                  'UGID': f.get('UGID') or 'NOGUID', 'SECRET': f.get('SECRET') or 'NOSECRET',
-                 'B-version': f.get('B-version', ''), 'host': self,
+                 'B-version': f.get('B-version', ''), 'host': self, 'version': client_version(self.peer),
                  'XNKID': base64.b64encode(os.urandom(8)).decode(), 'XNKEY': base64.b64encode(os.urandom(16)).decode()}
             for k, v in f.items():
                 if k.startswith('B-') and k not in g:
@@ -447,7 +481,11 @@ class TheaterClient(Client):
                 # GameManager host for a --dedicated server learns the player first; the client's hello names
                 # the ticket.
                 if g.get('gmhost'):
-                    g['gmhost'].expect(ticket, pid, self.name, self.xuid, self.xnaddr)
+                    version = client_version(self.peer)
+                    if not fits(g, version):
+                        self.note('%s (version %d.%d) enters game %s of version %d.%d: its server refuses them' % (
+                            self.name, *version, g['GID'], *g['version']))
+                    g['gmhost'].expect(ticket, pid, self.name, self.xuid, self.xnaddr, version='%d.%d' % version)
                 await self.send_egeg(g, pid, ticket)
         elif kind in ('PENT', 'PLVT'):
             # Player entered (or left) the host's game; the host looks the player up by the PID in the reply
@@ -486,16 +524,20 @@ class RemoteHost:
     def __init__(self, writer):
         self.writer = writer
 
-    def expect(self, ticket, pid, name, xuid, xnaddr_b64):
-        self.writer.write((json.dumps({'op': 'join', 'ticket': ticket, 'pid': int(pid), 'name': name,
-                                       'xuid': str(xuid), 'xnaddr': xnaddr_b64}) + '\n').encode())
+    def expect(self, ticket, pid, name, xuid, xnaddr_b64, version=None):
+        join = {'op': 'join', 'ticket': ticket, 'pid': int(pid), 'name': name, 'xuid': str(xuid), 'xnaddr': xnaddr_b64}
+        if version:
+            join['version'] = version  # the joiner's major.minor: the server refuses another one's hello
+        self.writer.write((json.dumps(join) + '\n').encode())
 
 
 class Registry:
     """Dedicated servers register here (server/gmhost.py run by the server package) and stay listed while their
     connection lasts. One JSON object per line:
       server:  {"op": "register", "name", "port", "map", "max_players", "mode", "description", "maps", "listed",
-                "official"?, "address"?, "night"?}
+                "official"?, "address"?, "night"?, "version"?}
+      Every request also carries the sender's "version" (0.4.0 on; none: 0.3). A player only lists, finds,
+      reserves and joins servers of its own major.minor (60 Hz 0.4 and 30 Hz 0.3 never mix).
                mode: "classic" or "modern", the movement and aiming the server plays (default classic)
                night: true for a Night Ops server (its maps drawn at night in players' games; default false)
                the address: the one the registration came from (a loopback one: this backend's --theater-host);
@@ -509,7 +551,7 @@ class Registry:
                the machine's incoming firewall, so whether players outside reach it cannot be told from here
       backend: {"op": "refused", "why"}                     an official code that does not check
       server:  {"op": "status", "players", "map", "next_map"}   every few seconds
-      backend: {"op": "join", "ticket", "pid", "name", "xuid", "xnaddr"}   before the joiner gets EGEG
+      backend: {"op": "join", "ticket", "pid", "name", "xuid", "xnaddr", "version"}   before the joiner gets EGEG
       anyone:  {"op": "list"} -> {"op": "servers", "servers": [...]}   for a server browser (listed servers only)
       anyone:  {"op": "find", "address", "port"} -> {"op": "found", "server"|null}   Direct connect
       player:  {"op": "reserve", "gid"} -> {"op": "reserved"}  the player's next Quick Match joins that game
@@ -522,6 +564,7 @@ class Registry:
     def __init__(self, log, args=None):
         self.log = log
         self.public = getattr(args, 'theater_host', '127.0.0.1') if args else '127.0.0.1'
+        self.test_progression = getattr(args, 'test_progression', False)
         self.key = None
         if args and getattr(args, 'official_key_file', ''):
             self.key = gmhost.read_key(args.official_key_file)
@@ -606,6 +649,9 @@ class Registry:
                     break
                 m = json.loads(line)
                 op = m.get('op')
+                version = major_minor(m.get('version'))
+                if op != 'register' and not gid:  # a player's game (a server's own link sends status)
+                    CLIENT_VERSIONS[peer.split(':')[0]] = version
                 if op == 'register' and not gid:
                     name = ''.join(c for c in str(m.get('name', 'Server')) if c.isprintable())[:48] or 'Server'
                     official = 'official' in m and self.official(m['official'], m.get('name', 'Server'))
@@ -635,14 +681,17 @@ class Registry:
                                                          if c.isprintable())[:200],
                                   'maps': [str(x)[:32] for x in m.get('maps', []) if isinstance(x, str)][:8],
                                   'next_map': '', 'official': official, 'listed': bool(m.get('listed', True)),
+                                  'version': version,
+                                  'version_text': ''.join(c for c in str(m.get('version', '0.3'))
+                                                          if c.isdigit() or c == '.')[:16] or '0.3',
                                   'XNADDR': base64.b64encode(gmhost.xnaddr(host)).decode(),
                                   'XNKID': base64.b64encode(os.urandom(8)).decode(),
                                   'XNKEY': base64.b64encode(os.urandom(16)).decode()}
                     writer.write((json.dumps({'op': 'registered', 'gid': gid, 'uid': uid, 'pid': pid,
                                               'official': official, 'listed': GAMES[gid]['listed'],
                                               'address': '%s:%d' % (host, int(port))}) + '\n').encode())
-                    self.note('%s registered "%s" at %s:%s as game %s%s%s' % (
-                        peer, name, host, port, gid, ' (official)' if official else '',
+                    self.note('%s registered "%s" (version %s) at %s:%s as game %s%s%s' % (
+                        peer, name, GAMES[gid]['version_text'], host, port, gid, ' (official)' if official else '',
                         '' if GAMES[gid]['listed'] else ' (not listed)'))
                     asyncio.get_running_loop().create_task(self.probe(writer, host, int(port), local))
                 elif op == 'status' and gid in GAMES:
@@ -667,6 +716,9 @@ class Registry:
                         if persona in hosts:
                             continue
                         g = where.get(persona.lower())
+                        if g and not fits(g, version):  # where they play, with no way in from another version
+                            rows.append({'name': persona, 'gid': '', 'server': g.get('N', ''), 'map': g.get('map', '')})
+                            continue
                         if g and not g.get('listed', True):
                             rows.append({'name': persona, 'gid': '', 'server': 'Private match', 'map': ''})
                             continue
@@ -696,11 +748,19 @@ class Registry:
                     rows.sort(key=lambda e: (-e['score'], e['name'].lower()))
                     writer.write((json.dumps({'op': 'scoreboard', 'rows': rows[:64]}) + '\n').encode())
                 elif op == 'stats_put':
-                    ok = leaderboard_put(m)
+                    local_test = (self.test_progression and
+                                  writer.get_extra_info('peername')[0].startswith('127.'))
+                    ok = leaderboard_put(m, test_progression=local_test)
                     writer.write((json.dumps({'op': 'stats_put', 'ok': ok}) + '\n').encode())
                 elif op == 'leaderboard':
                     rows, total = leaderboard_top()
                     writer.write((json.dumps({'op': 'leaderboard', 'rows': rows, 'total': total}) + '\n').encode())
+                elif op == 'reserve' and m.get('gid') in GAMES and not fits(GAMES[m['gid']], version):
+                    g = GAMES[m['gid']]
+                    writer.write((json.dumps({'op': 'refused', 'why': 'this server runs version %d.%d, your game %d.%d'
+                                              % (*g['version'], *version)}) + '\n').encode())
+                    self.note('%s (version %d.%d) refused game %s of version %d.%d' % (
+                        peer, *version, m['gid'], *g['version']))
                 elif op == 'reserve' and m.get('gid') in GAMES:
                     RESERVATIONS[peer.split(':')[0]] = (m['gid'], time.time())
                     writer.write((json.dumps({'op': 'reserved', 'gid': m['gid']}) + '\n').encode())
@@ -722,11 +782,14 @@ class Registry:
                 elif op == 'find':
                     want = (str(m.get('address', '')), int(m.get('port', 18300) or 18300))
                     hit = [g for g in GAMES.values() if g.get('TYPE') == 'G' and (g['I'], g['P']) == want]
-                    writer.write((json.dumps({'op': 'found', 'server': listing(hit[0]) if hit else None}) +
-                                  '\n').encode())
+                    found = {'op': 'found', 'server': listing(hit[0]) if hit and fits(hit[0], version) else None}
+                    if hit and not fits(hit[0], version):
+                        found['why'] = 'this server runs version %d.%d, your game %d.%d' % (*hit[0]['version'], *version)
+                    writer.write((json.dumps(found) + '\n').encode())
                 elif op == 'list':
                     # The address goes to the game (its ping and its join need it); the browser never shows it.
-                    servers = [listing(g) for g in GAMES.values() if g.get('TYPE') == 'G' and g.get('listed', True)]
+                    servers = [listing(g) for g in GAMES.values()
+                               if g.get('TYPE') == 'G' and g.get('listed', True) and fits(g, version)]
                     # The players signed in now, for the launcher's Home (PLAYERS ONLINE): every open FESL persona but
                     # the servers' own.
                     hosts = {g.get('HN') for g in GAMES.values()}
@@ -749,13 +812,15 @@ def listing(g):
     return {'gid': g['GID'], 'name': g['N'], 'address': [g['I'], g['P']], 'map': g.get('map', ''),
             'players': g['AP'], 'max_players': g['MAX-PLAYERS'], 'mode': g.get('mode', 'classic'),
             'description': g.get('description', ''), 'official': bool(g.get('official')),
-            'next_map': g.get('next_map', ''), 'maps': g.get('maps', []), 'night': bool(g.get('night'))}
+            'next_map': g.get('next_map', ''), 'maps': g.get('maps', []), 'night': bool(g.get('night')),
+            'version': g.get('version_text') or ('%d.%d' % g['version'] if g.get('version') else '')}
 
 
 def public(g):
     """A game's fields without our own bookkeeping."""
     return {k: v for k, v in g.items()
-            if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night')}
+            if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night', 'version',
+                         'version_text')}
 
 
 async def http_client(reader, writer, log):
@@ -818,8 +883,14 @@ async def main():
                     help='official.key: servers registering with a code from it are official (TekRantGaming only)')
     ap.add_argument('--log', default='runs/plasma.log')
     ap.add_argument('--leaderboard', default='', help="a file keeping the players' totals (our Leaderboards)")
+    ap.add_argument('--test-progression', action='store_true',
+                    help='store rank and achievement IDs submitted by local test clients')
     ap.add_argument('--seconds', type=int, default=0, help='stop after this many seconds (0: run until stopped)')
+    ap.add_argument('--stop-on-stdin-eof', action='store_true', help='stop when the launcher closes its input pipe')
     args = ap.parse_args()
+    if args.test_progression and (args.host != '127.0.0.1' or
+                                  args.registry_host not in ('', '127.0.0.1')):
+        ap.error('--test-progression requires a loopback backend and registry')
     global LEADERBOARD_FILE
     LEADERBOARD_FILE = args.leaderboard or None
     if LEADERBOARD_FILE and os.path.exists(LEADERBOARD_FILE):
@@ -860,11 +931,14 @@ async def main():
                                                       args.registry_port))
             log.write('%s server registry on %s:%d\n' % (time.strftime('%H:%M:%S'), args.registry_host or args.host,
                                                           args.registry_port))
+            log.flush()
         if args.http_port:
             servers.append(await asyncio.start_server(lambda r, w: http_client(r, w, log), args.host, args.http_port))
             log.write('%s HTTP on %s:%d\n' % (time.strftime('%H:%M:%S'), args.host, args.http_port))
         if args.seconds:
             await asyncio.sleep(args.seconds)
+        elif args.stop_on_stdin_eof:
+            await asyncio.to_thread(sys.stdin.buffer.read)
         else:
             await asyncio.gather(*(srv.serve_forever() for srv in servers))
 

@@ -67,6 +67,18 @@ REX_HOOK_RAW(sub_82380600) {
   __imp__sub_82380600(ctx, base);
   bf1943::g_in_client_tick.store(false, std::memory_order_relaxed);
   g_ticks.fetch_add(1, std::memory_order_relaxed);
+  {  // The client's ticks a second, every 30 s (tick_rate.cpp: 30 or 60), to compare with the server's own line.
+    static auto since = std::chrono::steady_clock::now();
+    static uint64_t from = 0;
+    const auto now = std::chrono::steady_clock::now();
+    const double s = std::chrono::duration<double>(now - since).count();
+    if (s >= 30.0) {
+      const uint64_t t = g_ticks.load(std::memory_order_relaxed);
+      REXLOG_INFO("BF client ticks: {:.1f} a second over {:.0f} s (tick {:.4f} s)", double(t - from) / s, s,
+                  ctx.f1.f64);
+      since = now, from = t;
+    }
+  }
   bf1943::TickBlendTick();
   bf1943::TickBlendAfterTick(base);
 }

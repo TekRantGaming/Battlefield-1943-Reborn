@@ -78,7 +78,7 @@ const Clock::time_point kStart = Clock::now();
 
 constexpr char kMagic[8] = {'B', 'F', '4', '3', 'C', 'O', 'M', 'M'};
 enum : uint8_t { kHello = 1, kWelcome, kState, kChatRelay, kChat, kRoster, kVoice, kVoiceRelay, kBye, kRefused };
-constexpr uint8_t kProtocol = 1;
+constexpr uint8_t kProtocol = 2;  // 2 from 0.4.0 (60 Hz): server/gmhost.py COMMS_PROTOCOL
 constexpr int kRate = 16000, kFrame = 320;  // 20 ms
 constexpr uint8_t kCodecAdpcm = 1;
 

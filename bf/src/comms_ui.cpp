@@ -34,7 +34,30 @@ bool InMatch();               // auto_join.cpp
 ImFont* MenuFont(int which);  // game_menu.cpp: 0 bold, 1 semibold
 float PerfOverlayBottom();    // perf_overlay.cpp
 
+bool TurretViewOffset(double& yaw, double& pitch);  // vehicle_mouse.cpp
+double RenderedVerticalFov();                       // fov.cpp
+
 namespace {
+// The gun marker (bf_turret_camera_lead): with the view turned to where the mouse aims, a ring where the gun points now,
+// until it catches up. The gun is off the view's centre by the lead, negated; on screen by the tangent of that over the
+// tangent of half the field of view (the horizontal one the vertical times the screen's aspect: Hor+).
+void DrawGunMarker(ImGuiIO& io) {
+  double yaw = 0, pitch = 0;
+  if (!TurretViewOffset(yaw, pitch)) return;
+  if (std::fabs(yaw) < 0.004 && std::fabs(pitch) < 0.004) return;  // on target: the game's own crosshair
+  const double v = RenderedVerticalFov();
+  if (!(v > 0.05 && v < 3.0) || io.DisplaySize.y < 1.0f) return;
+  const double tv = std::tan(v * 0.5), th = tv * io.DisplaySize.x / io.DisplaySize.y;
+  const double gx = -yaw, gy = -pitch;
+  if (std::fabs(gx) > 1.45 || std::fabs(gy) > 1.45) return;
+  const float x = float(io.DisplaySize.x * 0.5 * (1.0 + std::tan(gx) / th));
+  const float y = float(io.DisplaySize.y * 0.5 * (1.0 - std::tan(gy) / tv));
+  const float s = io.DisplaySize.y / 1080.0f, r = 11.0f * s;
+  ImDrawList* dl = ImGui::GetForegroundDrawList();
+  dl->AddCircle(ImVec2(x, y), r, IM_COL32(0, 0, 0, 170), 24, 4.0f * s);
+  dl->AddCircle(ImVec2(x, y), r, IM_COL32(255, 236, 170, 230), 24, 2.0f * s);
+  dl->AddCircleFilled(ImVec2(x, y), 1.8f * s, IM_COL32(255, 236, 170, 230));
+}
 
 using comms::Channel;
 
@@ -130,6 +153,7 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
       comms::SetPushToTalk(false);
       return;
     }
+    DrawGunMarker(io);
     const bool typing = comms::Typing();
     comms::SetPushToTalk(!typing && REXCVAR_GET(bf_voice_mode) == "push" && BindDown(REXCVAR_GET(keybind_push_to_talk)));
     if (!typing && REXCVAR_GET(bf_text_chat)) {
