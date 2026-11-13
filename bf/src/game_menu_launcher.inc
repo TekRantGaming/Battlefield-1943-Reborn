@@ -2475,7 +2475,7 @@
       } else if (i == kPmMap) {
         value_text(kPmMapNames[pm_map_], true, false);
       } else if (i == kPmTick) {
-        value_text(std::to_string(pm_tick_) + " HZ \xC2\xB7" + (pm_tick_ > 60 ? " EXPERIMENTAL" : pm_tick_ == 30 ? " ORIGINAL" : " DEFAULT"),
+        value_text(std::to_string(pm_tick_) + (pm_tick_ > 60 ? "Hz - Experimental" : pm_tick_ == 30 ? "Hz - Original" : "Hz - Default"),
                    true, false);
       } else if (i == kPmNet) {
         value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
@@ -2534,13 +2534,17 @@
       // An experimental tick rate chosen: said in a red strip over the picture's foot, whatever row is chosen (13 Nov
       // 2026: "a warning disclaimer ... when Tick Rate is changed to 75 or 100").
       if (pm_tick_ > 60) {
-        const ImVec2 w0(band.x, band.y - st(46)), w1(hb.x, band.y);
-        d->AddRectFilled(w0, w1, IM_COL32(150, 38, 30, 235));
-        kit::Spaced(d, f.ui_bold, st(9), ImVec2(w0.x + st(20), w0.y + st(8)), kit::kCream,
+        // Red words on the page's own paper (the first strip was red with pale words; the words alone in red read
+        // better, and "Not tested." went: the same day).
+        const ImVec2 w0(band.x, band.y - st(44)), w1(hb.x, band.y);
+        d->AddRectFilled(w0, w1, IM_COL32(241, 234, 211, 244));
+        d->AddRectFilled(w0, ImVec2(w0.x + st(5), w1.y), kit::kStamp);
+        const ImU32 red = IM_COL32(168, 30, 22, 255);
+        kit::Spaced(d, f.ui_bold, st(9), ImVec2(w0.x + st(20), w0.y + st(7)), red,
                     fmt::format("WARNING \xC2\xB7 {} HZ IS EXPERIMENTAL", pm_tick_), st(1.5f));
-        kit::Wrapped(d, f.ui, st(10.5f), ImVec2(w0.x + st(20), w0.y + st(22)), kit::kCream,
-                     "Not tested. Weapons, vehicles and timers may behave oddly, your PC and every player's connection "
-                     "work harder, and players on older versions cannot join. Use 60 Hz for a normal match.",
+        kit::Wrapped(d, f.ui_bold, st(10.5f), ImVec2(w0.x + st(20), w0.y + st(21)), red,
+                     "Weapons, vehicles and timers may behave oddly, your PC and every player's connection work harder, "
+                     "and players on older versions cannot join. Use 60 Hz for a normal match.",
                      w1.x - w0.x - st(40));
       }
     }
