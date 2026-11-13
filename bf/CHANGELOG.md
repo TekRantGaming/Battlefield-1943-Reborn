@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.1 (13 November 2026): mouse and keyboard in every vehicle seat, and a 60 Hz option
+
+**New**
+- **Turrets, tank guns and AA guns turn with the mouse as planes fly.** The mouse's speed is the gun's speed, the
+  view stays on the gun's sight (so the sight's zoom works), and a still mouse leaves the gun still. The aim before
+  it shook on guns with several moving parts (the AA gun), and came back wrong after leaving a gun and getting in
+  again.
+- **The game knows your seat from the game itself.** On foot, pilot, driver, gunner or passenger comes from the
+  seat's own control scheme, not from guessing at the vehicle, so a boat is no longer taken for a plane and a plane
+  is no longer lost in flight.
+- **Drivers without a gun look around freely.** A jeep's and a landing boat's driver turn the view with the mouse,
+  and it stays where you leave it.
+- **60 Hz simulation, as an option (`bf_tick_rate = 60`).** The game and a server started from it simulate 60 times
+  a second. 30 stays the default. A server tells the browser its rate, and a game only lists, finds and joins
+  servers at its own rate.
+
+**Changed**
+- **Settings > Controls: keyboard and mouse first, then the controller**, each with three plain switches: Invert
+  camera, Invert vehicle, Invert flight. The mouse's switches are its own: the controller's no longer turn the
+  mouse's pitch round in planes and at guns.
+
+**Fixed**
+- A plane's gunsight no longer comes apart or shifts on ultrawide screens.
+
 ## 0.4.0 (13 November 2026): a new look, ultrawide screens, mouse flying, lettered flags, a map in the pause menu
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. Earlier versions update to it by
