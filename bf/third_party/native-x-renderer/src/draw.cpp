@@ -2812,8 +2812,17 @@ DrawPath::HudPlace DrawPath::ClassifyHudDraw(std::span<const Copy> copies, uint6
     // Inside a panel drawn before it: where the panel went.
     place = panel->place, result = "in a panel";
     ++(place.align == 0.0f ? t.left : place.align == 1.0f ? t.right : t.middle);
-  } else if (double marker_x = -1; !hud_menu_ && NearHudMarker(((lo + hi) * 0.5 + 1.0) * 640.0,
-                                                               (1.0 - (y_lo + y_hi) * 0.5) * 360.0, 48.0, &marker_x)) {
+  } else if (double marker_x = -1;
+             !hud_menu_ &&
+             // Through a scope only a draw the size and shape of a marker's icon (10 to 72 canvas pixels each way, not
+             // a line): the sight's crosshair and mil dots lie in the middle, where whatever the game projects as the
+             // aim moves over the map passes within reach, and taken for markers they left their places (13 Nov:
+             // "aiming at different areas of the map causes the scope mesh crosshair and mildots displace").
+             (!hud_scope_ || [&] {
+               const double w = (hi - lo) * 640.0, h = (y_hi - y_lo) * 360.0;
+               return w >= 10.0 && w <= 72.0 && h >= 10.0 && h <= 72.0 && w <= h * 2.5 && h <= w * 2.5;
+             }()) &&
+             NearHudMarker(((lo + hi) * 0.5 + 1.0) * 640.0, (1.0 - (y_lo + y_hi) * 0.5) * 360.0, 48.0, &marker_x)) {
     // A world marker (the game's projection noted it, NoteHudMarker): its centre where the 3D view shows that place,
     // its size the HUD's. Every piece of one marker moves by the marker's own place, not by its own centre (13 Nov:
     // a plane's gunsight, drawn in several pieces around one projected point, came apart and shifted in flight).

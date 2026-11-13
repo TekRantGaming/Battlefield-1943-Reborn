@@ -20,12 +20,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -74,6 +76,7 @@ struct State {
   int icons_logged = 0;
   int want_spawn = -1;  // the spawn index a click asked for, stepped to in the pad hook
   int want_steps = 0;
+  Clock::time_point quiet_until{};  // the screen's sounds are not passed on until then (a later step of one click)
   Clock::time_point want_step_at{};
 } g;
 std::atomic<bool> g_active{false};
@@ -97,15 +100,25 @@ struct Box {
 };
 constexpr Box kKitCards[3] = {{102, 217, 251, 497}, {257, 217, 406, 497}, {412, 217, 561, 497}};
 constexpr int kKitOfCard[3] = {1, 0, 2};  // Rifleman, Infantry, Scout
-// The three buttons are black brush strokes, each a little off the level (rising to the right): a slanted band from
-// x0 to x1, its middle at y0 on the left and y1 on the right, h high (measured from the same screenshot).
+// The three buttons are black brush strokes, each a little off the level with ragged ends: its outline as a polygon,
+// traced from a screenshot of the screen (13 Nov: the highlight "doesn't trace the outline of the black brush stroke").
 struct Stroke {
-  float x0, x1, y0, y1, h;
-  float Mid(float x) const { return y0 + (y1 - y0) * (x - x0) / (x1 - x0); }
-  bool Has(float x, float y) const { return x >= x0 && x < x1 && std::fabs(y - Mid(x)) <= h * 0.5f; }
+  const ImVec2* points;
+  int count;
+  bool Has(float x, float y) const {  // inside the outline (crossings of a ray to the right)
+    bool in = false;
+    for (int i = 0, j = count - 1; i < count; j = i++) {
+      const ImVec2 &a = points[i], &b = points[j];
+      if ((a.y > y) != (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x) in = !in;
+    }
+    return in;
+  }
 };
-constexpr Stroke kSpawnMode{89, 325, 547.5f, 538.0f, 40}, kEnter{89, 264, 592.0f, 585.0f, 35},
-    kBack{92, 193, 630.0f, 625.0f, 32};
+constexpr ImVec2 kSpawnModePoints[] = {{92.0f, 540.0f}, {129.0f, 534.5f}, {195.5f, 528.0f}, {254.0f, 523.5f}, {315.5f, 520.5f}, {319.0f, 529.5f}, {324.0f, 544.5f}, {320.5f, 553.5f}, {254.0f, 559.5f}, {179.0f, 564.5f}, {129.0f, 568.0f}, {95.0f, 569.0f}, {90.5f, 554.5f}};
+constexpr ImVec2 kEnterPoints[] = {{90.5f, 576.0f}, {129.0f, 572.0f}, {195.5f, 568.0f}, {254.0f, 566.0f}, {258.0f, 567.0f}, {264.0f, 591.0f}, {261.5f, 596.0f}, {195.5f, 602.0f}, {129.0f, 607.0f}, {97.5f, 609.0f}, {90.5f, 603.0f}, {90.0f, 589.5f}};
+constexpr ImVec2 kBackPoints[] = {{89.0f, 616.0f}, {129.0f, 612.0f}, {169.0f, 607.5f}, {185.5f, 606.0f}, {189.0f, 609.5f}, {190.5f, 636.0f}, {187.5f, 642.5f}, {129.0f, 645.5f}, {91.5f, 647.5f}, {88.0f, 632.0f}};
+constexpr Stroke kSpawnMode{kSpawnModePoints, int(std::size(kSpawnModePoints))},
+    kEnter{kEnterPoints, int(std::size(kEnterPoints))}, kBack{kBackPoints, int(std::size(kBackPoints))};
 constexpr Box kMap{623, 119, 1180, 497};
 // The map: a place in the world (x, z in metres) in stage units.
 constexpr float kMapA = 0.311910f, kMapB = -0.113804f, kMapX = 920.03f, kMapY = 358.16f;
@@ -160,14 +173,12 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
     for (const auto& b : buttons) {
       const Stroke& k = b.stroke;
       if (!k.Has(mx, my)) continue;
-      // The highlight lies along the stroke: its slant, a little larger than it, a warm wash and an edge.
-      const float e = 3.0f, half = k.h * 0.5f + e;
-      const ImVec2 quad[4] = {ImVec2(ox + (k.x0 - e) * s, oy + (k.Mid(k.x0 - e) - half) * s),
-                              ImVec2(ox + (k.x1 + e) * s, oy + (k.Mid(k.x1 + e) - half) * s),
-                              ImVec2(ox + (k.x1 + e) * s, oy + (k.Mid(k.x1 + e) + half) * s),
-                              ImVec2(ox + (k.x0 - e) * s, oy + (k.Mid(k.x0 - e) + half) * s)};
-      dl->AddQuadFilled(quad[0], quad[1], quad[2], quad[3], IM_COL32(255, 236, 170, 46));
-      dl->AddQuad(quad[0], quad[1], quad[2], quad[3], IM_COL32(255, 236, 170, 230), 2.5f * s);
+      // The highlight is the stroke's own outline: a warm wash over it and an edge round it.
+      ImVec2 outline_points[16];
+      const int n = std::min(k.count, 16);
+      for (int i = 0; i < n; ++i) outline_points[i] = ImVec2(ox + k.points[i].x * s, oy + k.points[i].y * s);
+      dl->AddConvexPolyFilled(outline_points, n, IM_COL32(255, 236, 170, 46));
+      dl->AddPolyline(outline_points, n, IM_COL32(255, 236, 170, 230), ImDrawFlags_Closed, 2.0f * s);
       if (click) {
         Queue({b.button});
         REXLOG_INFO("BF spawn mouse: {} clicked", b.name);
@@ -241,6 +252,9 @@ void SpawnMousePad(uint8_t* gamepad, bool may_be_up) {
     } else if (now >= g.want_step_at) {
       FlashCall(g.spawn >= 0 && g.want_spawn < g.spawn ? "_root.contentMC.loader1.onSpawnUp"
                                                          : "_root.contentMC.loader1.onSpawnDown");
+      // One click, one sound (13 Nov: "clicking a spawn point plays multiple successive audio clips"): the first
+      // step's is heard, the later steps' are kept from the game (SpawnMouseCommand).
+      if (g.want_steps > 0) g.quiet_until = now + std::chrono::milliseconds(260);
       ++g.want_steps;
       g.want_step_at = now + std::chrono::milliseconds(200);
     }
@@ -262,14 +276,26 @@ void SpawnMousePad(uint8_t* gamepad, bool may_be_up) {
   }
 }
 
-// From the game command hook (auto_join.cpp): what the deploy screen tells the game.
-void SpawnMouseCommand(const char* name, const char* args) {
-  if (!name) return;
+// From the game command hook (auto_join.cpp): what the deploy screen tells the game. True: not to be passed on (a
+// sound of a later step of one click).
+bool SpawnMouseCommand(const char* name, const char* args) {
+  if (!name) return false;
   const bool kit = std::strcmp(name, "selectKit") == 0, spawn = std::strcmp(name, "selectSpawnPoint") == 0;
-  if (!kit && !spawn && std::strcmp(name, "selectSquadSpawn") != 0 && std::strcmp(name, "doSpawn") != 0 &&
-      std::strcmp(name, "selectWeapon") != 0)
-    return;
+  const bool ours = kit || spawn || std::strcmp(name, "selectSquadSpawn") == 0 || std::strcmp(name, "doSpawn") == 0 ||
+                    std::strcmp(name, "selectWeapon") == 0;
   std::lock_guard lock(g.mutex);
+  if (!ours) {
+    if (!g.active || Clock::now() >= g.quiet_until) return false;
+    // A sound's command, by its name (any letter case): "sound", "sfx", "audio".
+    std::string lower(name);
+    for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+    const bool sound = lower.find("sound") != std::string::npos || lower.find("sfx") != std::string::npos ||
+                       lower.find("audio") != std::string::npos;
+    if (REXCVAR_GET(bf_debug_spawn_mouse))
+      REXLOG_INFO("BF spawn mouse: during a step the screen sent {} ({}){}", name, args ? args : "",
+                  sound ? ": a sound, not passed on" : "");
+    return sound;
+  }
   if (args && *args) {
     char* end = nullptr;
     const long v = std::strtol(args, &end, 10);
@@ -279,6 +305,7 @@ void SpawnMouseCommand(const char* name, const char* args) {
     }
   }
   if (REXCVAR_GET(bf_debug_spawn_mouse)) REXLOG_INFO("BF spawn mouse: the screen sent {} ({})", name, args ? args : "");
+  return false;
 }
 
 void CreateSpawnMouseOverlay(rex::ui::ImGuiDrawer* drawer) {

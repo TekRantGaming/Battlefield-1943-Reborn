@@ -2317,6 +2317,7 @@ REX_HOOK_RAW(sub_826E2220) {
 
 namespace bf1943 {
 bool VehicleFreeLook(double& yaw, double& pitch);   // look.cpp
+int FirstPersonView();  // fov.cpp: 1 first person, 0 an outside view, -1 not known
 bool TurretViewOffset(double& yaw, double& pitch);  // vehicle_mouse.cpp
 }  // namespace bf1943
 
@@ -2354,7 +2355,20 @@ Xf FreeLookTurn(const Xf& in, double yaw, double pitch) {
     if (own.valid && bf1943::ClientTicks() - own.tick <= 4) {
       double v2 = 0;
       for (int c = 0; c < 3; ++c) v2 += (own.rows[3][c] - rows[3][c]) * (own.rows[3][c] - rows[3][c]);
-      if (v2 > 3.0 * 3.0 && v2 < 40.0 * 40.0)
+      // Outside or not is the game's own word where it gives one (fov.cpp FirstPersonView: in the landing boat the
+      // driver sits well over 3 m from the boat's root, and the first person view went round the boat too, 13 Nov);
+      // else the camera over 3 m from the root.
+      const int first = bf1943::FirstPersonView();
+      static int logged = -2;
+      if (first != logged) {
+        logged = first;
+        REXLOG_INFO("BF free look: the view is {} (camera {:.1f} m from the vehicle's root)",
+                    first == 1 ? "first person: turns in place" : first == 0 ? "an outside one: goes round the vehicle"
+                                                                              : "not told by the game: by distance",
+                    std::sqrt(v2));
+      }
+      const bool outside = first == 0 || (first < 0 && v2 > 3.0 * 3.0);
+      if (outside && v2 < 40.0 * 40.0)
         for (int c = 0; c < 3; ++c) pivot[c] = own.rows[3][c];
     }
   }

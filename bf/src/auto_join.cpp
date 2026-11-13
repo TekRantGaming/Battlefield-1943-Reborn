@@ -70,7 +70,7 @@ bool TickBlendNearestTree(uint32_t parts, const float from[3], float out[3], dou
 // game_menu.cpp
 bool GameMenuOpen();
 void SpawnMousePad(uint8_t* gamepad, bool may_be_up);          // flash_mouse.cpp: the pointer on the deploy screen
-void SpawnMouseCommand(const char* name, const char* args);    // flash_mouse.cpp
+bool SpawnMouseCommand(const char* name, const char* args);    // flash_mouse.cpp: true, not to be passed on
 bool GameMenuEnabled();
 void GameMenuPad(uint16_t buttons, int16_t lx, int16_t ly);
 void ShowGameMenu();
@@ -590,8 +590,9 @@ REX_HOOK_RAW(sub_826B6628) {
     if (!noisy.count(name) && lines.fetch_add(1) < 3000)
       REXLOG_INFO("BF menu command {} ({}) lr {:08X}", name, args, uint32_t(ctx.lr));
   }
-  bf1943::SpawnMouseCommand(ctx.r3.u32 ? reinterpret_cast<const char*>(base + ctx.r3.u32) : nullptr,
-                            ctx.r4.u32 ? reinterpret_cast<const char*>(base + ctx.r4.u32) : nullptr);
+  if (bf1943::SpawnMouseCommand(ctx.r3.u32 ? reinterpret_cast<const char*>(base + ctx.r3.u32) : nullptr,
+                                ctx.r4.u32 ? reinterpret_cast<const char*>(base + ctx.r4.u32) : nullptr))
+    return;
   __imp__sub_826B6628(ctx, base);
 }
 

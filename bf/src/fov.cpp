@@ -14,6 +14,7 @@
 // own (RenderFov, 30 degrees), which this leaves alone.
 
 #include <atomic>
+#include <chrono>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -42,6 +43,17 @@ std::atomic<float> g_game_fov{0.0f};
 // (sub_82294A58(mgr), whose r31 holds the manager when it calls setFovY; the controller is *(mgr + 0xE0)): look.cpp's
 // zoom is the view narrower than the camera's own.
 std::atomic<float> g_fov_now_deg{0.0f}, g_fov_own_deg{0.0f};
+// The game's last answer to "the first person weapon's field of view" (sub_821FAAF0: -1 when the view is not a first
+// person one) and when: 1 first person, 0 not, -1 not asked within a quarter second.
+std::atomic<int> g_first_person{0};
+std::atomic<int64_t> g_first_person_at{0};
+int FirstPersonView() {
+  const int64_t at = g_first_person_at.load(std::memory_order_relaxed);
+  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  if (!at || now - at > std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(250)).count())
+    return -1;
+  return g_first_person.load(std::memory_order_relaxed);
+}
 }  // namespace bf1943
 
 namespace {
@@ -196,5 +208,9 @@ REX_HOOK_RAW(sub_8241B598) {
 REX_EXTERN(__imp__sub_821FAAF0);
 REX_HOOK_RAW(sub_821FAAF0) {
   __imp__sub_821FAAF0(ctx, base);
+  // Its answer also says whether the view is a first person one (tick_blend.cpp's free look: a first person view
+  // turns in place, an outside one goes round the vehicle).
+  bf1943::g_first_person.store(ctx.f1.f64 > 0.0 ? 1 : 0, std::memory_order_relaxed);
+  bf1943::g_first_person_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
   if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) ctx.f1.f64 = MappedDegrees(ctx.f1.f64, WeaponMapWeight());
 }

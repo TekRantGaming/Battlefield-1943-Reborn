@@ -4052,53 +4052,73 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     return -1;
   }
 
-  // Joining and leaving a match in the new look (as the main menu and our private match page): the map from the air
-  // behind the column, a typed caption, the map's name stencilled, the server's name, and the steps with a turning
-  // marker on the one under way. Opaque, so the game's own screens changing underneath never show.
+  // Joining and leaving a match as the main menu is drawn (13 Nov 2026: "this screen also needs to follow the same
+  // theming"): the menu's backdrop and chrome, the dark rail at the left with the caption, the heading in the game's
+  // own lettering and the steps as its rows (the one under way on paper with the red tab and a turning marker), and
+  // at the right the map's picture over a paper band. Opaque, so the game's own screens changing underneath never
+  // show. Sizes are the Stage's (720 lines).
   void TransitPage(ImDrawList* d, ImGuiIO& io, int map, const std::string& caption, const std::string& heading,
                    const std::string& sub, const std::vector<std::string>& steps, int at, const std::string& error) {
-    const ImVec2 sz = io.DisplaySize;
+    const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    const float u = sz.y / 1080.0f;
-    MainBackdrop(d, sz, map);
-    const float cx0 = sz.x * 0.05f, cx1 = cx0 + 680 * u;
-    d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(15, 17, 13, 226));
-    d->AddRectFilled(ImVec2(cx1, 0), ImVec2(cx1 + 2 * u, sz.y), IM_COL32(201, 183, 122, 110));
-    kit::Brand(d, ImVec2(cx0, 58 * u), u * 0.9f);
-    const float hy = 150 * u;
-    kit::Spaced(d, f.typed, 20 * u, ImVec2(cx0, hy), kit::kKhakiDim, Upper(caption), 4 * u);
-    // The heading at its size, smaller when it would not fit the column (a long server name as the heading).
-    float hs = 78 * u;
-    while (hs > 40 * u && kit::TextWidth(f.stencil, hs, Upper(heading)) > cx1 - cx0 - 30 * u) hs -= 4 * u;
-    Text(d, f.stencil, hs, ImVec2(cx0 - 4 * u, hy + 24 * u + (78 * u - hs) * 0.5f), kit::kCream, Upper(heading));
-    d->AddRectFilled(ImVec2(cx0, hy + 120 * u), ImVec2(cx0 + 64 * u, hy + 126 * u), kit::kStamp);
-    float y = hy + 150 * u;
-    if (!sub.empty()) {
-      kit::Spaced(d, f.ui_bold, 26 * u, ImVec2(cx0, y), kit::kKhakiText, Upper(sub), 3 * u);
-      y += 56 * u;
-    }
-    const float rh = 58 * u;
+    MenuBackdrop(d, io.DisplaySize, st);
+    bool online_ok = false;
+    const std::string status = OnlineStatus(online_ok);
+    MenuChrome(d, io, st, status, online_ok);
+    MenuFoot(d, st);
+    // ---- the rail: the caption, the heading, the steps
+    const ImVec2 ra = st.P(48, 93), rb = st.P(400, 620);
+    d->AddRectFilled(ra, rb, IM_COL32(13, 15, 11, 204));
+    d->AddRect(ra, rb, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
+    kit::Spaced(d, f.typed, st(8), ImVec2(ra.x + st(24), ra.y + st(18)), kit::kKhakiDim, Upper(caption), st(2));
+    // The heading at its size, smaller when it would not fit the rail (a long server name as the heading).
+    float hs = st(26);
+    const float room = rb.x - ra.x - st(48);
+    while (hs > st(13) && kit::GameTextWidth(kit::GameFont::kHeadline, hs, Upper(heading)) > room) hs -= st(1);
+    kit::GameText(d, kit::GameFont::kHeadline, hs, ImVec2(ra.x + st(24), ra.y + st(32) + (st(26) - hs) * 0.5f), kit::kCream,
+                  Upper(heading));
+    d->AddRectFilled(ImVec2(ra.x, ra.y + st(76)), ImVec2(rb.x, ra.y + st(77)), IM_COL32(241, 234, 211, 30));
+    const float h = st(41);
     for (size_t i = 0; i < steps.size(); ++i) {
-      const float ry = y + rh * float(i);
+      const ImVec2 r0(ra.x, ra.y + st(77) + h * float(i)), r1(rb.x, r0.y + h);
       const bool done = int(i) < at, now = int(i) == at && error.empty();
-      const ImVec2 c(cx0 + 10 * u, ry + rh * 0.5f);
-      if (done) d->AddCircleFilled(c, 8 * u, kit::kGreenBright);
-      else if (now) d->AddCircle(c, 8 * u, kit::kGold, 0, 2.5f * u);
-      else d->AddCircle(c, 8 * u, IM_COL32(169, 154, 104, 120), 0, 2 * u);
+      if (now) {
+        kit::PaperArt(d, r0, r1);
+        d->AddRectFilled(r0, ImVec2(r0.x + st(5), r1.y), kit::kStamp);
+      }
+      d->AddRectFilled(ImVec2(r0.x, r1.y - 1), ImVec2(r1.x, r1.y), IM_COL32(241, 234, 211, 20));
+      const ImVec2 c(r0.x + st(30), r0.y + h * 0.5f);
+      if (done) d->AddCircleFilled(c, st(5), kit::kGreenBright);
+      else d->AddCircle(c, st(5), now ? kit::kInk : kit::kKhakiDim, 0, st(1.5f));
       if (now) {  // a turning arc over the step under way
         const float a0 = float(ImGui::GetTime()) * 5.0f;
-        d->PathArcTo(c, 14 * u, a0, a0 + 2.2f, 16);
-        d->PathStroke(kit::kStamp, 0, 3 * u);
+        d->PathArcTo(c, st(9), a0, a0 + 2.2f, 16);
+        d->PathStroke(kit::kStamp, 0, st(2));
       }
-      kit::Spaced(d, f.ui_bold, 26 * u, ImVec2(cx0 + 40 * u, ry + 15 * u),
-                  done ? kit::kKhakiText : now ? kit::kCream : kit::kKhakiDim, Upper(steps[i]), 3 * u);
+      float cap = st(16);
+      const std::string label = Upper(steps[i]);
+      while (cap > st(10) && kit::GameTextWidth(kit::GameFont::kHeadlineMedium, cap, label) > rb.x - r0.x - st(70)) cap -= st(1);
+      kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(r0.x + st(52), r0.y + (h - cap) * 0.5f),
+                    now ? kit::kInk : done ? kit::kKhaki : kit::kKhakiDim, label);
     }
-    if (!error.empty()) {
-      kit::Wrapped(d, f.typed, 20 * u, ImVec2(cx0, y + rh * float(steps.size()) + 24 * u), kit::kStamp, Upper(error),
-                   cx1 - cx0 - 40 * u);
-      const float py = sz.y - 64 * u;
-      const float gw = kit::Glyph(d, PromptStyle(), kit::Button::kB, "Esc", ImVec2(cx0, py), 34 * u);
-      kit::Spaced(d, f.ui_bold, 24 * u, ImVec2(cx0 + gw + 10 * u, py - 14 * u), kit::kKhakiText, "BACK", 3 * u);
+    // ---- the picture card at the right: the map from the air, the paper band under it
+    static constexpr const char* kMapTitles[] = {"Wake Island", "Guadalcanal", "Iwo Jima", "Coral Sea"};
+    const ImVec2 ha = st.P(427, 93), hb = st.P(1232, 380);
+    const ImVec2 band(ha.x, hb.y - st(110));
+    d->PushClipRect(ha, hb, true);
+    MapPicture(d, st.u * 1.5f, ha, ImVec2(hb.x, band.y), map >= 0 && map < 4 ? kMapTitles[map] : "Wake Island");
+    d->PopClipRect();
+    kit::PaperArt(d, band, hb);
+    kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, Upper(caption), st(2));
+    float bs = st(26);
+    while (bs > st(13) && kit::GameTextWidth(kit::GameFont::kHeadline, bs, Upper(heading)) > hb.x - band.x - st(40)) bs -= st(1);
+    kit::GameText(d, kit::GameFont::kHeadline, bs, ImVec2(band.x + st(20), band.y + st(29)), kit::kInk, Upper(heading));
+    kit::Wrapped(d, f.ui, st(11.5f), ImVec2(band.x + st(20), band.y + st(66)), error.empty() ? kit::kInkFaint : kit::kRed,
+                 error.empty() ? sub : error, hb.x - band.x - st(40));
+    if (!error.empty()) {  // the callers act on B; the strip shows it (a click on it is not taken here)
+      Input none;
+      std::vector<Cue> cues = {{kit::Button::kB, "BACK"}};
+      Prompts(d, st, st.P(48, 662), cues, none, 15);
     }
   }
 
