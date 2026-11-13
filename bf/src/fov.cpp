@@ -62,16 +62,29 @@ constexpr uint32_t kSecondViewCaller = 0x822948E4;  // sub_82294818's call of su
 // The slider that applies now: the vehicle's while the soldier sits in one, else the camera's.
 double Chosen() { return bf1943::LocalSeatedNow() ? REXCVAR_GET(bf_fov_vehicle) : REXCVAR_GET(bf_fov); }
 
-double Mapped(double radians) {
+// `weight`: how much of the mapping applies (1 all of it, 0 none: the value as the game has it).
+double Mapped(double radians, double weight = 1.0) {
   const double chosen = Chosen();
   if (chosen <= 0.0 || !(radians > 0.0 && radians < kPi)) return radians;
   const double h = std::clamp(chosen, 60.0, 120.0) * kPi / 180.0;
   const double tan_v = std::tan(h * 0.5) * 9.0 / 16.0;  // the vertical half angle's tangent at 16:9
-  const double k = tan_v / std::tan(27.5 * kPi / 180.0);
+  const double k = 1.0 + (tan_v / std::tan(27.5 * kPi / 180.0) - 1.0) * std::clamp(weight, 0.0, 1.0);
   return 2.0 * std::atan(k * std::tan(radians * 0.5));
 }
 // The same mapping for a value in degrees (the first person weapon's own projection).
-double MappedDegrees(double degrees) { return Mapped(degrees * kPi / 180.0) * 180.0 / kPi; }
+double MappedDegrees(double degrees, double weight) { return Mapped(degrees * kPi / 180.0, weight) * 180.0 / kPi; }
+// How much of the mapping the first person weapon's projection takes: all of it unzoomed, none through a scope. A
+// scope's black mask is part of the weapon's picture, and widened with the camera it shrank on the screen (13 Nov
+// 2026: "player FOV should not affect the sniper's scope mesh. Right now at high FOV, it shrinks the scope mesh").
+// The zoom is the view's field of view now against the camera's own, in tangents (1 unzoomed): the mapping fades out
+// from 0.9 (the start of aiming) to 0.5 (a scope is well under that), so iron sights keep part of it.
+double WeaponMapWeight() {
+  const double now = bf1943::g_fov_now_deg.load(std::memory_order_relaxed);
+  const double own = bf1943::g_fov_own_deg.load(std::memory_order_relaxed);
+  if (!(now > 1.0 && own > 1.0 && now < 179.0 && own < 179.0)) return 1.0;
+  const double zoom = std::tan(now * kPi / 360.0) / std::tan(own * kPi / 360.0);
+  return std::clamp((zoom - 0.5) / (0.9 - 0.5), 0.0, 1.0);
+}
 }  // namespace
 
 REX_EXTERN(__imp__sub_82583248);
@@ -179,9 +192,9 @@ REX_HOOK_RAW(sub_8241B598) {
 // field of view in degrees (SoldierWeaponData.RenderFov, 30, blended toward ZoomRenderFov while aiming; the study's
 // fov_study.md), or -1 when not in first person; its consumers write it into the player's render record and the
 // vehicle seat's view. Mapped the same way as the world's camera after the original, so the hands and the weapon
-// widen with it and keep their place in the picture.
+// widen with it and keep their place in the picture; not through a scope (WeaponMapWeight).
 REX_EXTERN(__imp__sub_821FAAF0);
 REX_HOOK_RAW(sub_821FAAF0) {
   __imp__sub_821FAAF0(ctx, base);
-  if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) ctx.f1.f64 = MappedDegrees(ctx.f1.f64);
+  if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) ctx.f1.f64 = MappedDegrees(ctx.f1.f64, WeaponMapWeight());
 }
