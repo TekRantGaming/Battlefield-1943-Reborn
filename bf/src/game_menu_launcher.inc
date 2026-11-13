@@ -2356,8 +2356,20 @@
     // The prompts first: a click on one is that button's press for the rest of the frame.
     std::vector<Cue> cues = {{kit::Button::kA, pm_row_ == kPmHost ? "HOST" : "CHANGE"}, {kit::Button::kB, "BACK"}};
     Prompts(d, st, st.P(48, 662), cues, in, 15);
-    if (in.up) pm_row_ = (pm_row_ + kPmRows - 1) % kPmRows;
-    if (in.down) pm_row_ = (pm_row_ + 1) % kPmRows;
+    // The rows in the panel's order (13 Nov 2026, after the first look at it: the name first with its field under it,
+    // UPnP and the port as a smaller pair under Network type, and no UPnP at all for a LAN match).
+    std::vector<int> order = {kPmName, kPmMap, kPmNet};
+    if (!pm_lan_) order.push_back(kPmUpnp);
+    order.insert(order.end(), {kPmPort, kPmListed, kPmHost});
+    {
+      int at = 0;
+      for (int k = 0; k < int(order.size()); ++k)
+        if (order[size_t(k)] == pm_row_) at = k;
+      if (std::find(order.begin(), order.end(), pm_row_) == order.end()) pm_row_ = kPmNet, at = 2;  // UPnP went with LAN
+      const int n = int(order.size());
+      if (in.up) pm_row_ = order[size_t((at + n - 1) % n)];
+      if (in.down) pm_row_ = order[size_t((at + 1) % n)];
+    }
     if (PmTyping()) {  // the keyboard types straight into the row (as the browser's address)
       ImGuiContext& g = *ImGui::GetCurrentContext();
       g.PlatformImeData.WantTextInput = true;
@@ -2381,14 +2393,18 @@
     };
     if (in.left && pm_row_ != kPmHost) change(pm_row_, -1);
     if (in.right && pm_row_ != kPmHost) change(pm_row_, 1);
-    // ---- the rows, as the main menu's
-    static constexpr const char* kTitles[] = {"MAP",  "SERVER NAME", "NETWORK TYPE",  "SHOW IN SERVER BROWSER",
+    // ---- the rows, as the main menu's. By the row's own number (kPm...): its title, and its help in the band.
+    static constexpr const char* kTitles[] = {"MAP",  "SERVER NAME", "NETWORK TYPE",  "SHOW IN BROWSER",
                                               "UPNP", "PORT",        "HOST THE MATCH"};
     int clicked = -1;
     float y = rows_y;
-    for (int i = 0; i < kPmRows; ++i) {
-      if (i == kPmHost) y += st(12);  // a rule's worth of air before the action
-      const float h = st(41);
+    int number = 0;
+    const std::string me = settings_.Get("player_name", "");
+    for (const int i : order) {
+      const bool sub = i == kPmUpnp || i == kPmPort;  // the smaller pair under Network type
+      if (i == kPmHost) y += st(12);                  // a rule's worth of air before the action
+      const float h = i == kPmName ? st(74) : sub ? st(29) : st(41);
+      const float title_h = i == kPmName ? st(38) : h;
       const ImVec2 r0(ra.x, y), r1(rb.x, y + h);
       const bool hover = ImGui::IsMouseHoveringRect(r0, r1);
       if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) pm_row_ = i;
@@ -2398,51 +2414,72 @@
         kit::PaperArt(d, r0, r1);
         d->AddRectFilled(r0, ImVec2(r0.x + st(5), r1.y), kit::kStamp);
       }
-      d->AddRectFilled(ImVec2(r0.x, r1.y - 1), ImVec2(r1.x, r1.y), IM_COL32(241, 234, 211, 20));
-      kit::Spaced(d, f.typed, st(8), ImVec2(r0.x + st(24), r0.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
-                  fmt::format("{:02d}", i + 1), st(1.5f));
-      const float cap = st(19);
-      kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(r0.x + st(52), r0.y + (h - cap) * 0.5f),
-                    sel ? kit::kInk : kit::kKhaki, kTitles[i]);
+      // No rule between Network type and its pair, nor inside the pair: they read as one block.
+      const bool block = i == kPmNet || (i == kPmUpnp);
+      if (!block) d->AddRectFilled(ImVec2(r0.x, r1.y - 1), ImVec2(r1.x, r1.y), IM_COL32(241, 234, 211, 20));
+      const ImU32 dim = sel ? kit::kInkSection : kit::kKhakiDim;
+      if (!sub)
+        kit::Spaced(d, f.typed, st(8), ImVec2(r0.x + st(24), r0.y + title_h * 0.5f - st(5)), dim,
+                    fmt::format("{:02d}", ++number), st(1.5f));
+      if (sub) {
+        // A short tick joins the pair to Network type above it.
+        d->AddRectFilled(ImVec2(r0.x + st(58), r0.y - st(2)), ImVec2(r0.x + st(59), r0.y + h * 0.5f), IM_COL32(241, 234, 211, sel ? 0 : 60));
+        d->AddRectFilled(ImVec2(r0.x + st(58), r0.y + h * 0.5f - 1), ImVec2(r0.x + st(68), r0.y + h * 0.5f), IM_COL32(241, 234, 211, sel ? 0 : 60));
+        kit::Spaced(d, f.typed, st(8.5f), ImVec2(r0.x + st(76), r0.y + h * 0.5f - st(5.5f)), sel ? kit::kInk : kit::kKhaki,
+                    kTitles[i], st(2));
+      } else {
+        const float cap = st(19);
+        kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(r0.x + st(52), r0.y + (title_h - cap) * 0.5f),
+                      sel ? kit::kInk : kit::kKhaki, kTitles[i]);
+      }
+      const float right = r1.x - st(18), mid = r0.y + title_h * 0.5f;
+      auto value_text = [&](std::string value, bool arrows, bool off) {
+        if (arrows && sel && !off) value = "<  " + value + "  >";
+        const float vw = kit::SpacedWidth(f.typed, st(7.5f), value, st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2(right - vw, mid - st(5)), off ? IM_COL32(120, 116, 100, 150) : dim, value, st(1.5f));
+      };
+      const std::string caret = std::fmod(ImGui::GetTime(), 1.0) < 0.5 ? "_" : " ";
       if (i == kPmHost) {
-        if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(r1.x - st(18) - st(20), r0.y + h * 0.5f), st(20));
-      } else {  // its value, typed at the right (between arrows on the chosen row)
-        const std::string me = settings_.Get("player_name", "");
-        const bool typed = i == kPmName || i == kPmPort;
-        const bool off = (pm_lan_ && (i == kPmListed || i == kPmUpnp)) || (i == kPmPort && !PmPortTyped());
-        std::string value = i == kPmMap      ? std::string(kPmMapNames[pm_map_])
-                            : i == kPmName   ? (!pm_name_.empty() ? pm_name_ : sel ? std::string() : Upper(me.empty() ? "Private match" : me + "'s match"))
-                            : i == kPmNet    ? std::string(pm_lan_ ? "LAN" : "ONLINE")
-                            : i == kPmListed ? std::string(pm_lan_ ? "ON YOUR NETWORK" : pm_listed_ ? "YES" : "NO")
-                            : i == kPmPort   ? (PmPortTyped() ? pm_port_text_ : std::string("AUTOMATIC"))
-                                             : std::string();
-        if (i == kPmUpnp) {
-          // A box to tick: the router is asked to open the port (not for a LAN match, which no router stands before).
-          const float b = st(13);
-          const ImVec2 b0(r1.x - st(18) - b, r0.y + (h - b) * 0.5f), b1(b0.x + b, b0.y + b);
-          const ImU32 line = off ? IM_COL32(120, 116, 100, 120) : sel ? kit::kInk : kit::kKhaki;
-          d->AddRect(b0, b1, line, 0, 0, st(1.5f));
-          if (pm_upnp_ && !pm_lan_) {
-            d->AddLine(ImVec2(b0.x + b * 0.2f, b0.y + b * 0.55f), ImVec2(b0.x + b * 0.42f, b0.y + b * 0.78f), line, st(2));
-            d->AddLine(ImVec2(b0.x + b * 0.42f, b0.y + b * 0.78f), ImVec2(b0.x + b * 0.82f, b0.y + b * 0.22f), line, st(2));
-          }
-          const std::string said = pm_lan_ ? "NOT NEEDED" : pm_upnp_ ? "ASK THE ROUTER" : "I OPEN IT MYSELF";
-          const float sw = kit::SpacedWidth(f.typed, st(7.5f), said, st(1.5f));
-          kit::Spaced(d, f.typed, st(7.5f), ImVec2(b0.x - st(8) - sw, r0.y + h * 0.5f - st(5)),
-                      off ? IM_COL32(120, 116, 100, 150) : sel ? kit::kInkSection : kit::kKhakiDim, said, st(1.5f));
-        } else {
-          if (typed && sel && !off) value += std::fmod(ImGui::GetTime(), 1.0) < 0.5 ? "_" : " ";
-          else if (sel && !typed && !off) value = "<  " + value + "  >";
-          const float vw = kit::SpacedWidth(f.typed, st(7.5f), value, st(1.5f));
-          const float vx = r1.x - st(18) - vw;
-          if (typed) {  // a field's frame, greyed where it is not the player's to type
-            const float fw = i == kPmName ? st(170) : st(62);
-            const ImVec2 f0(r1.x - st(12) - fw, r0.y + st(9)), f1(r1.x - st(12), r1.y - st(9));
-            d->AddRect(f0, f1, off ? IM_COL32(120, 116, 100, 90) : sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
-          }
-          kit::Spaced(d, f.typed, st(7.5f), ImVec2(vx, r0.y + h * 0.5f - st(5)),
-                      off ? IM_COL32(120, 116, 100, 150) : sel ? kit::kInkSection : kit::kKhakiDim, value, st(1.5f));
+        if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(right - st(20), mid), st(20));
+      } else if (i == kPmName) {
+        // The name's field: a box the row's width, under the title.
+        const ImVec2 f0(r0.x + st(52), r0.y + st(40)), f1(r1.x - st(18), r1.y - st(9));
+        d->AddRectFilled(f0, f1, sel ? IM_COL32(34, 36, 27, 22) : IM_COL32(0, 0, 0, 70));
+        d->AddRect(f0, f1, sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
+        const bool empty = pm_name_.empty();
+        const std::string shown = !empty ? pm_name_ + (sel ? caret : "") : sel ? caret : me.empty() ? "Private match" : me + "'s match";
+        d->PushClipRect(f0, f1, true);
+        d->AddText(f.ui_bold, st(11), ImVec2(f0.x + st(9), f0.y + (f1.y - f0.y - st(11) * 1.45f) * 0.5f),
+                   empty && !sel ? IM_COL32(241, 234, 211, 110) : sel ? kit::kInk : kit::kKhaki, shown.c_str());
+        d->PopClipRect();
+      } else if (i == kPmMap) {
+        value_text(kPmMapNames[pm_map_], true, false);
+      } else if (i == kPmNet) {
+        value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
+      } else if (i == kPmListed) {
+        value_text(pm_lan_ ? "ON YOUR NETWORK" : pm_listed_ ? "YES" : "NO", true, pm_lan_);
+      } else if (i == kPmUpnp) {
+        // A box to tick: the router is asked to open the port.
+        const float bx = st(12);
+        const ImVec2 b0(right - bx, mid - bx * 0.5f), b1(b0.x + bx, b0.y + bx);
+        const ImU32 line = sel ? kit::kInk : kit::kKhaki;
+        d->AddRect(b0, b1, line, 0, 0, st(1.5f));
+        if (pm_upnp_) {
+          d->AddLine(ImVec2(b0.x + bx * 0.2f, b0.y + bx * 0.55f), ImVec2(b0.x + bx * 0.42f, b0.y + bx * 0.78f), line, st(2));
+          d->AddLine(ImVec2(b0.x + bx * 0.42f, b0.y + bx * 0.78f), ImVec2(b0.x + bx * 0.82f, b0.y + bx * 0.22f), line, st(2));
         }
+        const std::string said = pm_upnp_ ? "ASK THE ROUTER" : "I OPEN IT MYSELF";
+        const float sw = kit::SpacedWidth(f.typed, st(7.5f), said, st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2(b0.x - st(8) - sw, mid - st(5)), dim, said, st(1.5f));
+      } else if (i == kPmPort) {
+        // The port's field: typed when it is the player's to choose, greyed (Automatic) while the router is asked.
+        const bool off = !PmPortTyped();
+        const ImVec2 f0(right - st(70), r0.y + st(5)), f1(right, r1.y - st(5));
+        d->AddRect(f0, f1, off ? IM_COL32(120, 116, 100, 90) : sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
+        const std::string shown = off ? "AUTOMATIC" : pm_port_text_ + (sel ? caret : "");
+        const float vw = kit::SpacedWidth(f.typed, st(7.5f), shown, st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2((f0.x + f1.x - vw) * 0.5f, mid - st(5)),
+                    off ? IM_COL32(120, 116, 100, 150) : dim, shown, st(1.5f));
       }
       y += h;
     }
@@ -2458,8 +2495,8 @@
           "give the address to (Direct connect). A LAN match is always found by the PCs of your network.",
           "Ticked, your router is asked to open the match's port (UPnP) and the port is chosen for you. Not ticked, "
           "you open the port below on your router yourself.",
-          "The UDP port players reach your match on, when UPnP is not ticked: 18300 unless you want another. Open "
-          "it on your router for friends outside your home.",
+          "The UDP port players reach your match on, when UPnP is not ticked or the match is a LAN one: 18300 unless "
+          "you want another. For an Online match, open it on your router for friends outside your home.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
           "server browser: the pause copies the address for you. The match ends when you leave it."};
       kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, kTitles[pm_row_], st(2));
