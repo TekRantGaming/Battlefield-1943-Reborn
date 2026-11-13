@@ -88,6 +88,9 @@ REXCVAR_DEFINE_DOUBLE(bf_render_scale, 100.0, "BF1943",
 // enabled, they follow their own sharpness slider and disable other anti-aliasing options"): the temporal upscaler
 // and its mode, and the antialiasing of the finished picture for when there is none. ApplyUpscaler makes the
 // renderer's one setting (native_x_renderer_antialiasing) of them.
+REXCVAR_DEFINE_BOOL(bf_wheel_bindable, false, "BF1943/Controls",
+                    "The mouse wheel presses what the bindings name it for (WheelUp, WheelDown among a binding's keys); "
+                    "false, as before the bindings had mouse columns: Toggle Weapon on foot");
 REXCVAR_DEFINE_STRING(bf_temporal, "off", "BF1943",
                       "The temporal upscaler: off, fsr4 (AMD FSR 4.1), fsr (AMD FSR 3.1), xess (Intel XeSS), dlss "
                       "(NVIDIA DLSS) or taa (the renderer's own)");
@@ -2436,6 +2439,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     std::function<void()> activate;  // a row that opens a page or does something
     bool disabled = false;
     std::string note;  // why it is greyed
+    // A binding's row (13 Nov 2026): its four slots (two keys, two mouse buttons; empty: none), the slot the
+    // controller or the arrow keys are on, the one waiting for a press (-1: none), and a click on one. `nudge`: left
+    // and right on any row that wants them (-1, 1).
+    std::vector<std::string> slots;
+    int slot_cursor = 0, slot_capture = -1;
+    std::function<void(int)> slot_click;
+    std::function<void(int)> nudge;
     std::string start_key;  // a setting taken only at the start ("cvar.<name>" or a settings key): NEXT START if changed
   };
 
@@ -3382,14 +3392,43 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         {"keybind_chat_all", "Chat to everyone"},
         {"keybind_chat_team", "Chat to your team"},
         {"keybind_chat_squad", "Chat to your squad"}};
+    // 13 Nov 2026 ("Mouse and Keyboard keybinds should be available for remapping any key (except mouse look) with a
+    // primary and second key for both a keyboard column and a mouse column. Click on a bind and holding Escape
+    // should clear that bind slot"): a binding is the SDK's list of keys, any of which presses it; here its first two
+    // keyboard keys and its first two mouse buttons, each a slot of its own. The wheel's notches are mouse buttons
+    // for the bindings that are a button (look.cpp WheelNotch); the first visit puts the wheel where it was, on Toggle
+    // Weapon.
+    if (!REXCVAR_GET(bf_wheel_bindable)) {
+      bool named = false;
+      for (const auto& [cvar, label] : kBinds) named = named || Cvar(cvar).find("Wheel") != std::string::npos;
+      if (!named) {
+        const std::string now = Cvar("keybind_right_shoulder");
+        SetCvar("keybind_right_shoulder", now.empty() ? "WheelUp,WheelDown" : now + ",WheelUp,WheelDown");
+      }
+      SetCvar("bf_wheel_bindable", "true");
+    }
     std::vector<SettingRow> rows;
+    int index = 0;
     for (const auto& [cvar, label] : kBinds) {
-      SettingRow r{"Keyboard bindings", label,
-                   "Select, then press the key or mouse button for it. Esc keeps what it has. The mouse wheel toggles "
-                   "the weapon on foot."};
-      r.value = capture_ == cvar ? "Press a key" : Cvar(cvar);
+      SettingRow r{"Keyboard and mouse bindings", label,
+                   "Two keys and two mouse buttons for each action: any of them does it. Click a slot (or A on it), "
+                   "then press the key or the mouse button; the mouse columns also take the side buttons and, for the "
+                   "button actions, a wheel notch. Esc keeps what it has; hold Esc to clear the slot."};
       const std::string name = cvar;
-      r.activate = [this, name] { capture_ = name; };
+      const bool chosen = index++ == row_;
+      const std::array<std::string, 4> slots = BindSlots(Cvar(cvar));
+      r.slots.assign(slots.begin(), slots.end());
+      r.slot_cursor = chosen ? std::clamp(slot_cursor_, 0, 3) : -1;
+      r.slot_capture = capture_ == cvar ? capture_slot_ : -1;
+      r.slot_click = [this, name](int slot) { capture_ = name, capture_slot_ = slot_cursor_ = std::clamp(slot, 0, 3); };
+      r.activate = [this, name] { capture_ = name, capture_slot_ = std::clamp(slot_cursor_, 0, 3); };
+      r.nudge = [this](int by) { slot_cursor_ = std::clamp(slot_cursor_ + by, 0, 3); };
+      // The older panel (the pause menu's) shows the slots as text, the chosen one in brackets.
+      for (int s = 0; s < 4; ++s) {
+        std::string shown = r.slot_capture == s ? "PRESS" : slots[size_t(s)].empty() ? "-" : slots[size_t(s)];
+        if (chosen && r.slot_cursor == s) shown = "[" + shown + "]";
+        r.value += (s == 0 ? "" : s == 2 ? "   |   " : "  ") + shown;
+      }
       rows.push_back(r);
     }
     SettingRow reset{"Reset", "Reset bindings", "Every key back to its default."};
@@ -3438,7 +3477,19 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
   // A key or mouse button for the Keyboard bindings, in the SDK's names (keybind_* values, sdk ui/keybinds.cpp), from
   // ImGui's presses. Esc cancels (SettingsPanel); F2 is the metrics key.
-  static std::string CapturedKey() {
+  // 13 Nov 2026: `mouse` true gives only a mouse button (the side buttons too; a wheel notch where `wheel`), false
+  // only a key: the bindings' slots are of one kind each.
+  static std::string CapturedKey(bool mouse, bool wheel) {
+    if (mouse) {
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return "LMB";
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) return "RMB";
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) return "MMB";
+      if (ImGui::IsMouseClicked(3)) return "Mouse4";
+      if (ImGui::IsMouseClicked(4)) return "Mouse5";
+      if (wheel && ImGui::GetIO().MouseWheel > 0) return "WheelUp";
+      if (wheel && ImGui::GetIO().MouseWheel < 0) return "WheelDown";
+      return {};
+    }
     for (int k = ImGuiKey_A; k <= ImGuiKey_Z; ++k)
       if (ImGui::IsKeyPressed(ImGuiKey(k))) return std::string(1, char('A' + (k - ImGuiKey_A)));
     for (int k = ImGuiKey_0; k <= ImGuiKey_9; ++k)
@@ -3464,11 +3515,71 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         {ImGuiKey_F12, "F12"}};
     for (const auto& [k, name] : kNamed)
       if (ImGui::IsKeyPressed(k)) return name;
-    // Mouse buttons, from the second frame of the capture (the click that started it is not taken).
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return "LMB";
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) return "RMB";
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) return "MMB";
     return {};
+  }
+
+  // A binding's keys as its four slots: its first two keyboard keys, then its first two mouse buttons.
+  static bool MouseKeyName(const std::string& k) {
+    return k == "LMB" || k == "RMB" || k == "MMB" || k == "Mouse4" || k == "Mouse5" || k == "WheelUp" || k == "WheelDown";
+  }
+  static std::array<std::string, 4> BindSlots(const std::string& value) {
+    std::array<std::string, 4> slots;
+    int keys = 0, buttons = 0;
+    for (size_t at = 0; at <= value.size();) {
+      size_t comma = value.find(',', at);
+      if (comma == std::string::npos) comma = value.size();
+      std::string k = value.substr(at, comma - at);
+      at = comma + 1;
+      while (!k.empty() && k.front() == ' ') k.erase(k.begin());
+      while (!k.empty() && k.back() == ' ') k.pop_back();
+      if (k.empty()) continue;
+      if (MouseKeyName(k)) {
+        if (buttons < 2) slots[size_t(2 + buttons++)] = k;
+      } else if (keys < 2) {
+        slots[size_t(keys++)] = k;
+      }
+    }
+    return slots;
+  }
+  // A slot's key set (empty: cleared); the same key in the binding's other slot of its kind goes.
+  void StoreBindSlot(const std::string& cvar, int slot, const std::string& key) {
+    std::array<std::string, 4> slots = BindSlots(Cvar(cvar));
+    slot = std::clamp(slot, 0, 3);
+    const int other = slot ^ 1;
+    if (!key.empty() && slots[size_t(other)] == key) slots[size_t(other)].clear();
+    slots[size_t(slot)] = key;
+    std::string joined;
+    for (const std::string& s : slots)
+      if (!s.empty()) joined += (joined.empty() ? "" : ",") + s;
+    REXLOG_INFO("BF bindings: {} slot {} -> {} (now \"{}\")", cvar, slot + 1, key.empty() ? "cleared" : key, joined);
+    SetCvar(cvar, joined);
+  }
+  // The binding waiting for a press (capture_, capture_slot_): the next key or mouse button of its slot's kind goes
+  // in. Esc let go at once keeps what the slot has; Esc held for 0.6 s clears it. True while it waits (the page gets
+  // no input meanwhile).
+  bool CaptureBind() {
+    if (capture_.empty()) return false;
+    const bool mouse = capture_slot_ >= 2;
+    // A wheel notch only for the bindings that are a button (the wheel cannot hold a trigger or a direction).
+    const bool wheel = capture_.find("trigger") == std::string::npos && capture_.find("stick_up") == std::string::npos &&
+                       capture_.find("stick_down") == std::string::npos && capture_.find("stick_left") == std::string::npos &&
+                       capture_.find("stick_right") == std::string::npos && capture_.find("chat") == std::string::npos &&
+                       capture_.find("talk") == std::string::npos;
+    if (ImGui::IsKeyDown(ImGuiKey_Escape)) {
+      if (esc_held_since_ < 0) esc_held_since_ = ImGui::GetTime();
+      if (ImGui::GetTime() - esc_held_since_ >= 0.6) {
+        StoreBindSlot(capture_, capture_slot_, "");
+        capture_.clear();
+        esc_held_since_ = -1;
+      }
+    } else if (esc_held_since_ >= 0) {  // let go before that: the slot keeps what it has
+      esc_held_since_ = -1;
+      capture_.clear();
+    } else if (const std::string key = CapturedKey(mouse, wheel); !key.empty()) {
+      StoreBindSlot(capture_, capture_slot_, key);
+      capture_.clear();
+    }
+    return true;
   }
 
   // The settings from the main menu: BF's dialog over its scene.
@@ -3505,15 +3616,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const float bar = 52 * s;
     BfDialog(d, a, b, bar);
     // Keyboard bindings: the next key goes to the row being bound.
-    if (focused && !capture_.empty()) {
-      if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-        capture_.clear();
-      } else if (const std::string key = CapturedKey(); !key.empty()) {
-        SetCvar(capture_, key);
-        capture_.clear();
-      }
-      in = {};
-    }
+    if (focused && CaptureBind()) in = {};
     if (sub_ == kSubNone) {
       if (in.prev_tab) tab_ = (tab_ + kTabCount - 1) % kTabCount, row_ = 0, scroll_ = 0;
       if (in.next_tab) tab_ = (tab_ + 1) % kTabCount, row_ = 0, scroll_ = 0;
@@ -3613,6 +3716,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       }
       if (!sel || it.disabled) continue;
       // Each change logged, for the player's log and the tests.
+      if (it.nudge && (in.left || in.right)) it.nudge(in.left ? -1 : 1);
       if (it.activate && (in.accept || clicked)) {
         REXLOG_INFO("BF settings: {} / {} opened", kTabNames[tab_], it.name);
         it.activate();
@@ -4460,6 +4564,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   Sub sub_ = kSubNone;   // a page under Controls
   float scroll_ = 0;     // the settings' rows scrolled up by
   std::string capture_;  // the keybind_* setting waiting for a key
+  int capture_slot_ = 0;  // its slot (0, 1 keys; 2, 3 mouse buttons)
+  double esc_held_since_ = -1;  // Esc down while a slot waits (ImGui's time; -1: it is up)
+  int slot_cursor_ = 0;   // the slot left and right are on, in the bindings' chosen row
   std::function<rex::ui::Window*()> window_;
   std::vector<DisplayMode> modes_;  // the monitor's fullscreen modes, listed once per monitor
   std::vector<MonitorInfo> displays_;

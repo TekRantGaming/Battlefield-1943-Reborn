@@ -1219,15 +1219,7 @@
   // True when B leaves it. `tabs`: Home's Settings (LB and RB switch the tab); else one setup page.
   bool FrSettings(ImDrawList* d, ImGuiIO& io, const Stage& st, float top, Input& in, bool tabs) {
     const kit::Fonts& f = kit::GetFonts();
-    if (!capture_.empty()) {  // Keyboard bindings: the next key goes to the row being bound
-      if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-        capture_.clear();
-      } else if (const std::string key = CapturedKey(); !key.empty()) {
-        SetCvar(capture_, key);
-        capture_.clear();
-      }
-      in = {};
-    }
+    if (CaptureBind()) in = {};  // the bindings: the next key or mouse button goes to the slot that waits
     if (tabs && sub_ == kSubNone) {
       if (in.prev_tab) tab_ = (tab_ + kTabCount - 1) % kTabCount, row_ = 0, scroll_ = 0;
       if (in.next_tab) tab_ = (tab_ + 1) % kTabCount, row_ = 0, scroll_ = 0;

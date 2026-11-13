@@ -85,12 +85,19 @@ bool BindDown(const std::string& bind) {
     if (k == "LMB") return ImGui::IsMouseDown(ImGuiMouseButton_Left);
     if (k == "RMB") return ImGui::IsMouseDown(ImGuiMouseButton_Right);
     if (k == "MMB") return ImGui::IsMouseDown(ImGuiMouseButton_Middle);
+    if (k == "Mouse4") return ImGui::IsMouseDown(3);
+    if (k == "Mouse5") return ImGui::IsMouseDown(4);
     const ImGuiKey key = KeyFromName(k);
     return key != ImGuiKey_None && ImGui::IsKeyDown(key);
   });
 }
 bool BindPressed(const std::string& bind) {
   return AnyKey(bind, [](const std::string& k) {
+    if (k == "LMB") return ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    if (k == "RMB") return ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+    if (k == "MMB") return ImGui::IsMouseClicked(ImGuiMouseButton_Middle);
+    if (k == "Mouse4") return ImGui::IsMouseClicked(3);
+    if (k == "Mouse5") return ImGui::IsMouseClicked(4);
     const ImGuiKey key = KeyFromName(k);
     return key != ImGuiKey_None && ImGui::IsKeyPressed(key, false);
   });

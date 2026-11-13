@@ -91,8 +91,30 @@ bool LocalOnFoot();  // below
 // A notch of the mouse wheel: on foot, BF's Toggle Weapon (the right bumper; BF's own Help & Options > Controls, run
 // help3: Y is Draw Knife). In a vehicle the right bumper fires the second weapon or drops bombs (run helpveh1), so the
 // wheel does nothing there.
-void WheelNotch() {
-  if (LocalOnFoot()) PulseButton(0x0200, 120);
+// 13 Nov 2026 (the bindings' mouse columns): a notch up or down presses each button whose binding names it (WheelUp,
+// WheelDown, among the keys of a keybind_* setting: the keyboard driver itself does not know them). The right
+// bumper's only on foot, as before. Until the bindings page has put the wheel in the bindings (bf_wheel_bindable),
+// the wheel is what it was: Toggle Weapon on foot.
+void WheelNotch(int direction) {
+  static const std::pair<const char*, uint16_t> kBinds[] = {
+      {"keybind_a", 0x1000},          {"keybind_b", 0x2000},           {"keybind_x", 0x4000},
+      {"keybind_y", 0x8000},          {"keybind_left_shoulder", 0x0100}, {"keybind_right_shoulder", 0x0200},
+      {"keybind_lstick_press", 0x0040}, {"keybind_rstick_press", 0x0080}, {"keybind_back", 0x0020},
+      {"keybind_start", 0x0010},      {"keybind_dpad_up", 0x0001},     {"keybind_dpad_down", 0x0002},
+      {"keybind_dpad_left", 0x0004},  {"keybind_dpad_right", 0x0008}};
+  if (rex::cvar::GetFlagByName("bf_wheel_bindable") != "true") {
+    if (LocalOnFoot()) PulseButton(0x0200, 120);
+    return;
+  }
+  const std::string token = direction > 0 ? "WheelUp" : "WheelDown";
+  uint16_t press = 0;
+  for (const auto& [bind, bit] : kBinds) {
+    const std::string keys = "," + rex::cvar::GetFlagByName(bind) + ",";
+    if (keys.find("," + token + ",") == std::string::npos) continue;
+    if (bit == 0x0200 && !LocalOnFoot()) continue;  // in a vehicle the right bumper fires the second weapon
+    press |= bit;
+  }
+  if (press) PulseButton(press, 120);
 }
 extern std::atomic<float> g_game_fov;       // fov.cpp: the game's vertical field of view this frame (radians)
 extern std::atomic<float> g_fov_now_deg, g_fov_own_deg;  // fov.cpp: the field of view controller's now and own
@@ -282,7 +304,7 @@ class Listener : public rex::ui::WindowInputListener {
   // Keyboard & mouse: the wheel toggles the weapon, a notch a press (WheelNotch).
   void OnMouseWheel(rex::ui::MouseEvent& e) override {
     if (!e.scroll_y() || !MouseLook() || bf1943::GameMenuOpen() || bf1943::comms::Typing()) return;
-    bf1943::WheelNotch();
+    bf1943::WheelNotch(e.scroll_y() > 0 ? 1 : -1);
   }
 };
 Listener g_listener;

@@ -34,14 +34,7 @@
 
   // Keyboard bindings: the next key goes to the row being bound (Esc leaves it); the page gets no input meanwhile.
   void CaptureKeyInto(Input& in) {
-    if (capture_.empty()) return;
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-      capture_.clear();
-    } else if (const std::string key = CapturedKey(); !key.empty()) {
-      SetCvar(capture_, key);
-      capture_.clear();
-    }
-    in = {};
+    if (CaptureBind()) in = {};
   }
 
   // The Graphics preset strip (TekRantGaming, 13 Nov 2026: "if you navigate them it changes the below settings can we
@@ -81,7 +74,7 @@
     float top = pa.y + st(6);
     if (sub_ != kSubNone) {  // a page under Controls: its name over its rows
       kit::Spaced(d, f.typed, st(8), ImVec2(pa.x + st(18), pa.y + st(14)), kit::kInkSection,
-                  sub_ == kSubRemap ? "CONTROLS \xC2\xB7 BUTTON REMAPPING" : "CONTROLS \xC2\xB7 KEYBOARD BINDINGS", st(2));
+                  sub_ == kSubRemap ? "CONTROLS \xC2\xB7 BUTTON REMAPPING" : "CONTROLS \xC2\xB7 KEYBOARD AND MOUSE BINDINGS", st(2));
       top = pa.y + st(32);
     }
     const float list_bottom = pb.y - st(6), rh = st(33), sh = st(28), strip_h = st(58);
@@ -115,6 +108,12 @@
         section = it.section;
         kit::Spaced(d, f.typed, st(8), ImVec2(tx0, y - sh + st(9)), kit::kInkSection, Upper(section), st(2));
         d->AddLine(ImVec2(tx0, y - st(3)), ImVec2(tx1, y - st(3)), kit::kRule, 1.0f);
+        if (!it.slots.empty()) {  // the bindings' columns: two keys, two mouse buttons
+          const float bw = st(82), gap = st(6), pair = st(14);
+          const float mouse_x = tx1 - 2 * bw - gap, keys_x = mouse_x - pair - 2 * bw - gap;
+          kit::Spaced(d, f.typed, st(8), ImVec2(keys_x, y - sh + st(9)), kit::kInkSection, "KEYBOARD", st(2));
+          kit::Spaced(d, f.typed, st(8), ImVec2(mouse_x, y - sh + st(9)), kit::kInkSection, "MOUSE", st(2));
+        }
       }
       if (y + h < top || y > list_bottom) continue;
       const ImVec2 r0(x0, y), r1(x1, y + h);
@@ -194,6 +193,34 @@
       const ImU32 ink = sel ? kit::kCream : it.disabled ? kit::kInkFaint : kit::kInk;
       const float ty = y + (rh - size * 1.45f) * 0.5f;
       d->AddText(f.ui, size, ImVec2(tx0, ty), ink, it.name.c_str());
+      if (!it.slots.empty()) {
+        // A binding: its four slots as boxes (13 Nov 2026). A click on one, or A on the one left and right are on,
+        // makes it wait for a press; the waiting one is red.
+        const float bw = st(82), gap = st(6), pair = st(14);
+        const int n = int(it.slots.size());
+        for (int k = 0; k < n; ++k) {
+          const float right = tx1 - float(n - 1 - k) * (bw + gap) - (k < 2 ? pair : 0.0f);
+          const ImVec2 b0(right - bw, y + st(5)), b1(right, y + rh - st(5));
+          const bool over = hover && ImGui::IsMouseHoveringRect(b0, b1);
+          const bool waiting = it.slot_capture == k, cursor = sel && it.slot_cursor == k;
+          d->AddRectFilled(b0, b1, waiting ? kit::kStamp : cursor || over ? kit::kPaperLight : kit::kPaperDim);
+          d->AddRect(b0, b1, cursor ? kit::kStamp : kit::kBorder, 0, 0, cursor ? st(2.0f) : 1.0f);
+          const std::string label = waiting ? "PRESS..." : it.slots[size_t(k)].empty() ? "-" : it.slots[size_t(k)];
+          const float lw = kit::TextWidth(f.ui_bold, st(12), label);
+          d->AddText(f.ui_bold, st(12), ImVec2((b0.x + b1.x - lw) * 0.5f, b0.y + (b1.y - b0.y - st(12) * 1.45f) * 0.5f),
+                     waiting ? kit::kCream : it.slots[size_t(k)].empty() ? kit::kInkFaint : kit::kInk, label.c_str());
+          if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && it.slot_click && capture_.empty()) {
+            row_ = i;
+            REXLOG_INFO("BF settings: {} / {} slot {} waits for a press", kTabNames[tab_], it.name, k + 1);
+            it.slot_click(k);
+          }
+        }
+        if (sel && !it.disabled && capture_.empty()) {
+          if (it.nudge && (in.left || in.right)) it.nudge(in.left ? -1 : 1);
+          if (it.activate && in.accept) it.activate();
+        }
+        continue;
+      }
       std::string shown = it.slider ? (it.format ? it.format(it.val) : std::to_string(it.val))
                           : it.options.empty() ? it.value
                                                : it.options[size_t(std::clamp(it.index, 0, int(it.options.size()) - 1))];

@@ -964,7 +964,7 @@ void DevTypesTick(const uint8_t* base);  // dev_types.cpp: BF_DEV_TYPES
 void ModernModeTick(uint8_t* base);  // modern_mode.cpp
 uint16_t PulsedButtons();             // input_settings.cpp: our presses on the player's pad
 bool TakeEscapePress();               // game_menu.cpp: the keyboard's Esc with our menu closed
-void WheelNotch();                    // look.cpp: a notch of the mouse wheel
+void WheelNotch(int direction);                    // look.cpp: a notch of the mouse wheel
 void PressEscapeForTest();            // game_menu.cpp: the keyboard's Esc, for the match script
 #if defined(BF_DEV_TOOLS) && defined(_WIN32)
 void TriggerRenderDocCapture();       // dev_renderdoc.cpp: the match script's "rdoc"
@@ -1752,7 +1752,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
         static std::vector<double> turned;
         if (std::find(turned.begin(), turned.end(), in.at) == turned.end()) {
           turned.push_back(in.at);
-          bf1943::WheelNotch();
+          bf1943::WheelNotch(1);
           REXLOG_INFO("BF match script: wheel notch");
         }
         continue;
