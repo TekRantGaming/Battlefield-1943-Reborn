@@ -22,6 +22,8 @@
 #include <rex/cvar.h>
 #include <rex/hook.h>
 
+#include <native_x_renderer/native_x_renderer.h>
+
 #include "comms.h"
 
 REXCVAR_DEFINE_DOUBLE(bf_fov, 0.0, "BF1943",
@@ -100,8 +102,65 @@ REX_HOOK_RAW(sub_82583248) {
   __imp__sub_82583248(ctx, base);
 }
 
+// Ultrawide (0.4.0, NativeXRenderer D43: Profile::widens_cameras): a 16:9 view's aspect ratio widened by
+// AspectFactor() (the screen's shape over 16:9), so the 3D view fills the screen with more on each side (Hor+): the
+// vertical field of view, bf_fov's mapping and a zoom's ratio stay as they were. Only views of the game's 16:9 (its main
+// and second camera, aspect 1280/720 from sub_823CD748); square views (cube and shadow maps, 1.0) and other shapes are
+// left alone. 1 on a 16:9 screen or with native_x_renderer_fill_screen off.
+namespace {
+double Widened(double aspect) {
+  const double factor = native_x_renderer::AspectFactor();
+  if (factor == 1.0 || !(std::fabs(aspect - 16.0 / 9.0) < 0.02)) return aspect;
+  return aspect * factor;
+}
+}  // namespace
+
+// setAspect, sub_825832B8(view, f1 = aspect): writes the view's +0x20 and its horizontal estimate +0x10 (+0x0C times
+// the aspect), so the game's culling sees the wider view too.
+REX_EXTERN(__imp__sub_825832B8);
+REX_HOOK_RAW(sub_825832B8) {
+  ctx.f1.f64 = Widened(ctx.f1.f64);
+  __imp__sub_825832B8(ctx, base);
+}
+
+// The perspective projection, sub_82623DB8(out, f1 = vertical field of view, f2 = aspect, f3 near, f4 far): a view whose
+// aspect was set before the renderer knew the screen (still 16:9) is widened here as well.
 REX_EXTERN(__imp__sub_82623DB8);
 REX_HOOK_RAW(sub_82623DB8) {
   if (uint32_t(ctx.lr) == kSecondViewCaller) ctx.f1.f64 = Mapped(ctx.f1.f64);
+  ctx.f2.f64 = Widened(ctx.f2.f64);
   __imp__sub_82623DB8(ctx, base);
+}
+
+// HUD world markers on an ultrawide screen (0.4.0): the game projects capture flags, name tags and objective icons
+// to its 1280x720 HUD in a few functions (research 12 Nov 2026, side note): sub_8241B770(r4 position, r5 world
+// matrix, r6 view-projection, r7 out float2 pixels; r3 = in front), sub_8241D038 (the same with a margin test, out in
+// r7) and sub_8241B598(r3 out, r5 position, r6 view, r7 projection). Each point is noted for NativeXRenderer, which then
+// places the HUD draw on it where the widened 3D view shows that point (HudMode::kPoint), not in the 16:9 box.
+namespace {
+void NoteMarker(const uint8_t* base, uint32_t out) {
+  if (!out || native_x_renderer::AspectFactor() == 1.0) return;
+  native_x_renderer::NoteHudMarker(LoadF(base, out), LoadF(base, out + 4));
+}
+}  // namespace
+
+REX_EXTERN(__imp__sub_8241B770);
+REX_HOOK_RAW(sub_8241B770) {
+  const uint32_t out = ctx.r7.u32;
+  __imp__sub_8241B770(ctx, base);
+  NoteMarker(base, out);
+}
+
+REX_EXTERN(__imp__sub_8241D038);
+REX_HOOK_RAW(sub_8241D038) {
+  const uint32_t out = ctx.r7.u32;
+  __imp__sub_8241D038(ctx, base);
+  NoteMarker(base, out);
+}
+
+REX_EXTERN(__imp__sub_8241B598);
+REX_HOOK_RAW(sub_8241B598) {
+  const uint32_t out = ctx.r3.u32;
+  __imp__sub_8241B598(ctx, base);
+  NoteMarker(base, out);
 }

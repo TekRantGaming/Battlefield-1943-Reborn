@@ -37,7 +37,9 @@ set(BF1943_SOURCES
     src/f8_panel.cpp
     src/hud_glyphs.cpp
     src/game_music.cpp
+    src/plane_mouse.cpp
     src/vehicle_mouse.cpp
+    src/native_input.cpp
     src/bf_font.cpp
     src/bf_list_shot.cpp
     src/display_modes.cpp

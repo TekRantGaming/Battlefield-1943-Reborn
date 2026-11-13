@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0 (Unreleased)
+
+**New**
+- **Ultrawide screens.** On a 21:9, 32:9 or other wide screen the game fills the screen with a wider view (more to
+  each side, nothing stretched). Settings > Screen > HUD layout: Edges puts the minimap, squad and ammo at the
+  screen's sides, Centered keeps the HUD in 16:9 in the middle. Menus, the deploy screen, the scoreboard and loading
+  screens stay together in the middle with their backgrounds out to the edges; the sniper scope's black fills the
+  screen; flag markers stay on their flags. Aspect ratio: Fill screen (new) or Letterbox 16:9, at the next start.
+- **Mouse flying.** In planes the mouse moves the stick directly: right and left roll, back and forward pitch, and the
+  stick springs back to the centre when the mouse stops, so a flick gives a short, firm turn and a steady pull holds
+  it. A and D keep the rudder and work together with the mouse. Settings: `bf_plane_mouse_sensitivity`.
+- **Free look in vehicles.** In a driver's or passenger's seat the mouse turns the view one to one, as on foot, and it
+  stays where you leave it; in third person it turns round the vehicle. Only your own view moves.
+- **Native mouse input in vehicles.** Plane steering and gun aim are written straight into the game's own input for
+  each tick (what the server receives), not given as a controller's stick: no dead zone, no stick rounding. A seat
+  whose gun follows the soldier's look (a boat's, a jeep's) is aimed the same way. A controller still works as before
+  and takes over while its sticks are used.
+- **Create Private Match** on the main menu.
+
+**Changed**
+- Settings sliders and arrows answer the mouse: click on a slider's track to set it, on its arrows to step it.
+
+**Fixed**
+- A plane's control surfaces were taken for a turret, so gun aim and plane steering wrote the same inputs and the
+  plane could not be flown with the mouse.
+
 ## 0.3.0 (12 November 2026): mouse aiming in vehicles, graphics presets, smooth play at low frame rates
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. 0.2.0 to 0.2.3 installs update

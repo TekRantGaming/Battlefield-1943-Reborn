@@ -1817,7 +1817,7 @@
       ly += st(44);
     }
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, in_copy_ = in, 15);
-    if (in.back) page_ = Page::kMain, row_ = 4;  // back on the main menu's Stats & Awards row
+    if (in.back) page_ = Page::kMain, row_ = MainRowOf("STATS & AWARDS");
   }
   Input in_copy_;
   // Achievements, ours (in place of the Xbox screen the game opened): the game's own list from its title data, with
@@ -1877,7 +1877,7 @@
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, cue, 15);
     if (in.back) {  // back where it was opened: the pause, or the main menu's Achievements row
       if (ach_from_pause_) page_ = Page::kPause, pause_row_ = kPauseAchievements, ach_from_pause_ = false;
-      else page_ = Page::kMain, row_ = 6;
+      else page_ = Page::kMain, row_ = MainRowOf("ACHIEVEMENTS");
     }
   }
   // Leaderboards, ours (in place of the game's EA screen, docs/MENUS-PLAN.md): every player's own totals as their
@@ -1990,7 +1990,7 @@
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, cue, 15);
     if (in.back) {
       if (lb_from_pause_) page_ = Page::kPause, pause_row_ = kPauseLeaderboards, lb_from_pause_ = false;
-      else page_ = Page::kMain, row_ = 7;  // back on the main menu's Leaderboards row
+      else page_ = Page::kMain, row_ = MainRowOf("LEADERBOARDS");
     }
   }
   // Join Match With Friends, ours (in place of the game's Xbox friends screen, docs/MENUS-PLAN.md): the players signed
@@ -2083,7 +2083,7 @@
           return;
         }
     }
-    if (in.back) page_ = Page::kMain, row_ = 2;  // back on the main menu's Join Match With Friends row
+    if (in.back) page_ = Page::kMain, row_ = MainRowOf("JOIN MATCH WITH FRIENDS");
   }
   // The pause's Scoreboard, ours (in place of the game's, docs/MENUS-PLAN.md): every player on this server by score,
   // as their games send it to our backend (op match_score from MatchScoreTick), asked every 3 s on a worker.
@@ -2344,7 +2344,7 @@
       if (clicked == kPmHost) HostPrivateMatch();
       else change(clicked, 1);
     }
-    if (in.back) page_ = Page::kMain, row_ = 3, pm_error_.clear();  // back on the main menu's Create Private Match row
+    if (in.back) page_ = Page::kMain, row_ = MainRowOf("CREATE PRIVATE MATCH"), pm_error_.clear();
   }
 
   // While our server starts: its steps, then the join (PrivateMatchTick); B ends it.

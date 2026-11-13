@@ -2,6 +2,8 @@
 
 #include "draw.h"
 
+#include <native_x_renderer/native_x_renderer.h>
+
 #include "blit.h"
 
 #include "device.h"
@@ -34,6 +36,7 @@
 #include <mutex>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -1314,7 +1317,8 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     uint8_t* out = map.data();
     const rg::Shader::ConstantRegisterMap& constants = shader->constant_register_map();
     uint32_t first = stage ? rg::XE_GPU_REG_SHADER_CONSTANT_256_X : rg::XE_GPU_REG_SHADER_CONSTANT_000_X;
-    bool keep = !stage && (object_motion_on_ || camera_vote_on_ || tick_interpolation_ || model_lamp_counts_);
+    bool keep = !stage && (object_motion_on_ || camera_vote_on_ || tick_interpolation_ || model_lamp_counts_ ||
+                           (hud_classify_ && aspect_box_));
     uint8_t* const mapped_start = out;
     // A constant that holds the size of a resolved texture the shader samples, as the game wrote it for the guest
     // texture: its host size instead (D93).
@@ -1580,11 +1584,39 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   // offset that centers the target's guest area in its host size.
   const RenderScale& target_scale = sized->scale;
   float scale_x = target_scale.x, scale_y = target_scale.y, offset_x = 0.0f, offset_y = 0.0f;
-  if (aspect_box_ && target_scale.x != target_scale.y) {
+  HudPlace place;
+  place.align = aspect_align_;
+  if (aspect_box_ && hud_classify_ && target_scale.x != target_scale.y)
+    place = ClassifyHudDraw(copies, vertex_program.hash);
+  if (aspect_box_ && place.mode != HudMode::kStretch && target_scale.x != target_scale.y) {
     float uniform = std::min(target_scale.x, target_scale.y);
-    offset_x = float(sized->guest_width) * (target_scale.x - uniform) * 0.5f;
-    offset_y = float(sized->guest_height) * (target_scale.y - uniform) * 0.5f;
+    const float gw = float(sized->guest_width), gh = float(sized->guest_height);
+    offset_x = gw * (target_scale.x - uniform) * place.align;
+    offset_y = gh * (target_scale.y - uniform) * 0.5f;
     scale_x = scale_y = uniform;
+    if (place.mode == HudMode::kPoint) {
+      // Its centre where the full width puts it (the game placed it from the widened camera), its size the box's.
+      const double g_c = ((place.lo + place.hi) * 0.5 + 1.0) * 0.5 * gw;
+      offset_x = float(g_c * (target_scale.x - uniform));
+    }
+    if (place.mode == HudMode::kExtendLeft || place.mode == HudMode::kExtendRight) {
+      // From the screen's edge to where its inner edge is in the middle box: the guest's x to host x linearly.
+      const float box_offset = gw * (target_scale.x - uniform) * 0.5f;
+      // The canvas's edge (not a part off it) is pinned to the screen's: a menu's backing that starts off the canvas
+      // (12 Nov 21:00: "Set to flag spawn") was cut by the scissor at a canvas edge mapped into the screen.
+      const float g_lo = std::max(0.0f, float((place.lo + 1.0) * 0.5) * gw);
+      const float g_hi = std::min(gw, float((place.hi + 1.0) * 0.5) * gw);
+      if (g_hi - g_lo > 0.5f) {
+        if (place.mode == HudMode::kExtendLeft) {
+          scale_x = (box_offset + g_hi * uniform) / (g_hi - g_lo);
+          offset_x = -g_lo * scale_x;
+        } else {
+          const float inner = box_offset + g_lo * uniform;
+          scale_x = (gw * target_scale.x - inner) / (g_hi - g_lo);
+          offset_x = inner - g_lo * scale_x;
+        }
+      }
+    }
   }
   // As RenderScale::HostX/HostY outside a box.
   auto host_x = [&](int64_t x) { return int32_t(std::floor(double(offset_x) + double(x) * scale_x + 0.5)); };
@@ -1640,6 +1672,22 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   Rect scissor_rect{host_x(scissor.offset[0]), host_y(scissor.offset[1]),
                     host_x(int64_t(scissor.offset[0]) + scissor.extent[0]),
                     host_y(int64_t(scissor.offset[1]) + scissor.extent[1])};
+  // HudMode::kOversize: its first pass stretched with the 3D view (no box).
+  const bool oversize = place.mode == HudMode::kOversize;
+  Viewport stretched_viewport = viewport;
+  Rect stretched_scissor = scissor_rect;
+  if (oversize) {
+    const float sx = target_scale.x, sy = target_scale.y;
+    stretched_viewport.TopLeftX = float(viewport_info.xy_offset[0]) * sx;
+    stretched_viewport.TopLeftY = float(viewport_info.xy_offset[1]) * sy;
+    stretched_viewport.Width = float(viewport_info.xy_extent[0]) * sx;
+    stretched_viewport.Height = float(viewport_info.xy_extent[1]) * sy;
+    auto sxp = [&](int64_t x) { return int32_t(std::floor(double(x) * sx + 0.5)); };
+    auto syp = [&](int64_t y) { return int32_t(std::floor(double(y) * sy + 0.5)); };
+    stretched_scissor = Rect{sxp(scissor.offset[0]), syp(scissor.offset[1]),
+                             sxp(int64_t(scissor.offset[0]) + scissor.extent[0]),
+                             syp(int64_t(scissor.offset[1]) + scissor.extent[1])};
+  }
   // Set when they change (D81): DiligentCore records them on every call.
   if (!viewport_valid_ || std::memcmp(&viewport, &viewport_, sizeof(viewport))) {
     context->SetViewports(1, &viewport, 0, 0);
@@ -1682,14 +1730,25 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       ++stats_.failed;
       return false;
   }
-  if (index_buffer) {
-    context->SetIndexBuffer(index_buffer, index_offset, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-    DrawIndexedAttribs attribs{primitives.host_draw_vertex_count, index_type, DRAW_FLAG_NONE};
-    context->DrawIndexed(attribs);
-  } else {
-    DrawAttribs attribs{primitives.host_draw_vertex_count, DRAW_FLAG_NONE};
-    context->Draw(attribs);
+  if (index_buffer) context->SetIndexBuffer(index_buffer, index_offset, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  auto issue = [&] {
+    if (index_buffer) {
+      DrawIndexedAttribs attribs{primitives.host_draw_vertex_count, index_type, DRAW_FLAG_NONE};
+      context->DrawIndexed(attribs);
+    } else {
+      DrawAttribs attribs{primitives.host_draw_vertex_count, DRAW_FLAG_NONE};
+      context->Draw(attribs);
+    }
+  };
+  if (oversize) {
+    // Stretched first (its black reaches the screen's edges), then in the box over it (its hole round).
+    context->SetViewports(1, &stretched_viewport, 0, 0);
+    context->SetScissorRects(1, &stretched_scissor, 0, 0);
+    issue();
+    context->SetViewports(1, &viewport, 0, 0);
+    context->SetScissorRects(1, &scissor_rect, 0, 0);
   }
+  issue();
   // D163: a model with lamps (a jeep's body, by its index count): its world matrix for the night's lights, in the
   // registers given with it (rigid rows, the position in their fourth floats); taken only when rigid.
   if (model_lamp_counts_ && model_lamp_report_ && index_buffer && output_sized && state.depth_write) {
@@ -2621,6 +2680,190 @@ void DrawPath::CaptureTerrain(const rg::RegisterFile& regs, const rg::SpirvShade
   if (logged++ < 3)
     REXLOG_INFO("[native_x_renderer] grass prototype: terrain draw VS {:016X}, heightmap fetch {} ({} texels, view {})",
                 t.vertex_shader, binding.fetch_constant, t.height_size, t.valid ? "found" : "missing");
+}
+
+// SetHudClassify: one boxed draw's place. Its inline vertices' first two floats (big endian) are a quad's corners in the
+// quad's own space (Battlefield 1943: -1..1, run 12 Nov 20:17); the vertex shader places it with its constants. Tried
+// in turn: each pair of consecutive used registers as rows (x' = r.(x, y, 0, 1), y' = (r+1).(x, y, 0, 1)), then each
+// four as a column major matrix (x' = r.x x + (r+1).x y + (r+3).x). The first that puts every corner in clip space
+// (within 1.5) is the draw's place. Unknown: boxed in the middle.
+DrawPath::HudPlace DrawPath::ClassifyHudDraw(std::span<const Copy> copies, uint64_t vertex_shader) {
+  HudPlace place;
+  HudTally& t = hud_tally_;
+  ++t.draws;
+  const uint32_t initiator = registers_->values[rg::XE_GPU_REG_VGT_DRAW_INITIATOR];
+  const uint32_t count = initiator >> 16;
+  float cx[4] = {}, cy[4] = {};  // the quad's extent's corners
+  bool have_quad = false;
+  if (copies.size() == 1 && count && copies[0].data) {
+    const uint32_t stride = copies[0].size / count;
+    if (stride >= 8) {
+      float lo_x = 1e30f, hi_x = -1e30f, lo_y = 1e30f, hi_y = -1e30f;
+      for (uint32_t v = 0; v < count; ++v) {
+        float xy[2];
+        for (int i = 0; i < 2; ++i) {
+          uint32_t word;
+          std::memcpy(&word, copies[0].data + size_t(v) * stride + i * 4, 4);
+          word = rex::byte_swap(word);
+          std::memcpy(&xy[i], &word, 4);
+        }
+        if (!std::isfinite(xy[0]) || !std::isfinite(xy[1])) continue;
+        lo_x = std::min(lo_x, xy[0]), hi_x = std::max(hi_x, xy[0]);
+        lo_y = std::min(lo_y, xy[1]), hi_y = std::max(hi_y, xy[1]);
+      }
+      if (lo_x <= hi_x) {
+        const float xs[4] = {lo_x, hi_x, lo_x, hi_x}, ys[4] = {lo_y, lo_y, hi_y, hi_y};
+        std::memcpy(cx, xs, sizeof(cx)), std::memcpy(cy, ys, sizeof(cy));
+        have_quad = true;
+      }
+    }
+  }
+  auto reg = [&](size_t i) {  // the i-th used register's four floats
+    const float* f = reinterpret_cast<const float*>(vertex_constants_.data() + i * 16);
+    return f;
+  };
+  const size_t used = std::min(vertex_registers_.size(), vertex_constants_.size() / 16);
+  double lo = 1e30, hi = -1e30, y_lo = 1e30, y_hi = -1e30;  // the placed quad's extent in clip space
+  std::string how = "none";
+  auto try_place = [&](auto&& fx, auto&& fy) {
+    double l = 1e30, h = -1e30, yl = 1e30, yh = -1e30;
+    for (int k = 0; k < 4; ++k) {
+      const double x = fx(cx[k], cy[k]), y = fy(cx[k], cy[k]);
+      if (!std::isfinite(x) || !std::isfinite(y) || std::fabs(x) > 6.0 || std::fabs(y) > 6.0) return false;
+      l = std::min(l, x), h = std::max(h, x), yl = std::min(yl, y), yh = std::max(yh, y);
+    }
+    // A quad of some size placed by it (a row with no x or y term, such as (0, 0, 1, 0), puts every corner at one
+    // point: not a transform, 12 Nov 20:40's text batches).
+    if (h - l < 1e-4 || yh - yl < 1e-4) return false;
+    lo = l, hi = h, y_lo = yl, y_hi = yh;
+    return true;
+  };
+  if (have_quad) {
+    for (size_t i = 0; i + 1 < used && how == "none"; ++i) {
+      if (vertex_registers_[i + 1] != vertex_registers_[i] + 1) continue;
+      const float *a = reg(i), *b = reg(i + 1);
+      if (try_place([&](float x, float y) { return double(a[0]) * x + a[1] * y + a[3]; },
+                    [&](float x, float y) { return double(b[0]) * x + b[1] * y + b[3]; }))
+        how = fmt::format("rows c{}", vertex_registers_[i]);
+    }
+    for (size_t i = 0; i + 3 < used && how == "none"; ++i) {
+      if (vertex_registers_[i + 3] != vertex_registers_[i] + 3) continue;
+      const float *a = reg(i), *b = reg(i + 1), *d = reg(i + 3);
+      if (try_place([&](float x, float y) { return double(a[0]) * x + b[0] * y + d[0]; },
+                    [&](float x, float y) { return double(a[1]) * x + b[1] * y + d[1]; }))
+        how = fmt::format("columns c{}", vertex_registers_[i]);
+    }
+  }
+  const char* result = "middle";
+  HudPrev& prev = hud_prev_;
+  // A mesh from vertex buffers with a 3D matrix (its third row not the 2D layer's (0, 0, 1, 0)): an overlay projected by
+  // the game's camera, which the ultrawide hook already widened (12 Nov 21:10: the sniper scope's black mask, drawn
+  // after the composite, boxed as "unknown"): drawn as the 3D view is, not boxed.
+  bool mesh_3d = false;
+  if (!have_quad && used >= 3) {
+    const float* r2 = reg(2);
+    mesh_3d = std::fabs(r2[0]) > 1e-4f || std::fabs(r2[1]) > 1e-4f || std::fabs(r2[3]) > 1e-3f;
+  }
+  if (how == "none" && mesh_3d) {
+    ++t.stretched, result = "3D mesh, as the view";
+    place.mode = HudMode::kStretch;
+    hud_mesh_ = true;
+  } else if (how == "none") {
+    // Not placed by a transform we know (a text batch): as the draw before it in this frame, the rest of its widget.
+    ++t.unknown, result = "unknown";
+    if (prev.valid && prev.place.mode == HudMode::kBox) place = prev.place, result = "unknown, as the last";
+  } else if (lo < -1.02 && hi > 1.02) {
+    // Past both edges (a scope's mask: a round hole in black larger than the screen): drawn twice, stretched to reach
+    // the screen's edges, then in the middle so its hole stays round (DrawInternal).
+    ++t.stretched, result = "oversize, twice";
+    place.mode = HudMode::kOversize;
+  } else if (hi - lo >= 1.8) {  // across the whole width (clip space is 2 wide)
+    ++t.stretched, result = "stretched";
+    place.mode = HudMode::kStretch;
+  } else if (lo <= -0.97 && hi - lo >= 0.15) {  // from the canvas's left edge: from the screen's (not a small icon)
+    ++t.left, result = "to the left edge";
+    place.mode = HudMode::kExtendLeft;
+  } else if (hi >= 0.97 && hi - lo >= 0.15) {
+    ++t.right, result = "to the right edge";
+    place.mode = HudMode::kExtendRight;
+  } else if (const HudPanel* panel = [&]() -> const HudPanel* {
+               for (auto it = hud_panels_.rbegin(); it != hud_panels_.rend(); ++it)
+                 if (lo >= it->lo - 0.005 && hi <= it->hi + 0.005 && y_lo >= it->y_lo - 0.005 && y_hi <= it->y_hi + 0.005)
+                   return &*it;
+               return nullptr;
+             }()) {
+    // Inside a panel drawn before it: where the panel went.
+    place = panel->place, result = "in a panel";
+    ++(place.align == 0.0f ? t.left : place.align == 1.0f ? t.right : t.middle);
+  } else if (!hud_menu_ && NearHudMarker(((lo + hi) * 0.5 + 1.0) * 640.0, (1.0 - (y_lo + y_hi) * 0.5) * 360.0, 48.0)) {
+    // A world marker (the game's projection noted it, NoteHudMarker): its centre where the 3D view shows that place,
+    // its size the HUD's.
+    ++t.middle, ++t.markers, result = "world marker";
+    place.mode = HudMode::kPoint;
+  } else if (prev.valid && prev.place.mode == HudMode::kBox && prev.vertex_shader == vertex_shader &&
+             y_lo <= prev.y_hi && y_hi >= prev.y_lo && lo >= prev.lo - 0.02 && lo <= prev.hi + 0.15) {
+    // The next glyph of a line, the next part of a bar: where the first went.
+    place = prev.place, result = "as the last";
+    ++(place.align == 0.0f ? t.left : place.align == 1.0f ? t.right : t.middle);
+  } else if (hud_edges_ && !hud_menu_ && (lo + hi) * 0.5 <= -0.4) {
+    ++t.left, result = "left";
+    place.align = 0.0f;
+  } else if (hud_edges_ && !hud_menu_ && (lo + hi) * 0.5 >= 0.4) {
+    ++t.right, result = "right";
+    place.align = 1.0f;
+  } else {
+    ++t.middle;
+  }
+  if (how != "none") {
+    if (lo <= -0.99 && hi >= 0.99 && y_lo <= -0.99 && y_hi >= 0.99 && hi <= 1.01 && lo >= -1.01) hud_backdrop_ = true;
+    place.lo = lo, place.hi = hi;
+    prev = {true, vertex_shader, lo, hi, y_lo, y_hi, place};
+    if (place.mode == HudMode::kBox && y_hi - y_lo < 1.9) hud_area_ += (hi - lo) * (y_hi - y_lo);
+    // Only a panel anchored to an edge passes its place on (a minimap's icons stay in it as it turns): a large
+    // container in the middle took every widget into the middle with it (12 Nov 21:30, unzoomed).
+    if (place.mode == HudMode::kBox && place.align != 0.5f && hi - lo >= 0.12 && y_hi - y_lo >= 0.2 &&
+        y_hi - y_lo < 1.9)
+      hud_panels_.push_back({lo, hi, y_lo, y_hi, place});
+    // Moved since the last frame at the same order and size: a world marker for the next 3 s (90 frames at 30).
+    const size_t index = hud_seen_.size();
+    const HudSeen seen{(lo + hi) * 0.5, (y_lo + y_hi) * 0.5, hi - lo, y_hi - y_lo};
+    if (index < hud_seen_last_.size()) {
+      const HudSeen& last = hud_seen_last_[index];
+      const bool same_size = std::fabs(last.w - seen.w) < 0.002 && std::fabs(last.h - seen.h) < 0.002;
+      const bool moved = std::fabs(last.cx - seen.cx) > 0.003 || std::fabs(last.cy - seen.cy) > 0.003;
+      if (hud_moved_frames_.size() <= index) hud_moved_frames_.resize(index + 1, 0);
+      uint8_t& run = hud_moved_frames_[index];
+      // Three frames in a row: a line added to the HUD shifts the draws after it once, a marker moves on and on.
+      run = same_size && moved && std::string_view(result) != "in a panel" ? uint8_t(std::min(run + 1, 3)) : 0;
+      if (run >= 3) {
+        if (hud_moving_until_.size() <= index) hud_moving_until_.resize(index + 1, 0);
+        hud_moving_until_[index] = hud_frame_ + 180;
+      }
+    }
+    if (hud_seen_.size() < 4096) hud_seen_.push_back(seen);
+  }
+  if (hud_debug_ && t.sampled < 12) {
+    ++t.sampled;
+    std::string regs_text;
+    for (size_t i = 0; i < std::min<size_t>(used, 6); ++i) {
+      const float* f = reg(i);
+      regs_text += fmt::format(" c{}({:.3f} {:.3f} {:.3f} {:.3f})", vertex_registers_[i], f[0], f[1], f[2], f[3]);
+    }
+    t.samples += fmt::format(" [quad {} x {:.2f}..{:.2f} y {:.2f}..{:.2f}; {}: x {:.2f}..{:.2f} -> {}{};{}]",
+                             have_quad ? count : 0, cx[0], cx[1], cy[0], cy[2], how, lo, hi, result,
+                             hud_menu_ ? " (menu)" : "", regs_text);
+  }
+  return place;
+}
+
+std::string DrawPath::TakeHudLog() {
+  HudTally& t = hud_tally_;
+  std::string s = fmt::format("{} draws ({} stretched full width, {} left, {} right, {} middle, {} place unknown; {} "
+                              "world markers; {} menu frames);{}",
+                              t.draws, t.stretched, t.left, t.right, t.middle, t.unknown, t.markers, t.menu_frames,
+                              t.samples);
+  t = {};
+  return s;
 }
 
 }  // namespace native_x_renderer

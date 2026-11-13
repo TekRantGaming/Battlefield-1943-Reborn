@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <native_x_renderer/native_x_renderer.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
 
 #include <array>
@@ -118,7 +119,25 @@ class DrawPath {
   // The address of a depth resolve whose words (D64) the draws since the last call read, 0 if none (D113).
   uint32_t TakePackedRead();
   // The next draws are a 2D layer kept at the game's aspect ratio (native_x_renderer::SetGameAspectBox, D43).
-  void SetAspectBox(bool on) { aspect_box_ = on; }
+  // align: where the box sits on the wider axis, 0 its start (left), 0.5 the middle, 1 its end (right): a HUD
+  // anchored to the screen's edges (Profile::box_2d_after_composite, native_x_renderer_hud_layout).
+  void SetAspectBox(bool on, float align = 0.5f) { aspect_box_ = on, aspect_align_ = align; }
+  // The boxed draws are a HUD of small inline quads placed by their vertex shader's constants (Battlefield 1943): each
+  // one's place on screen is worked out from the quad and the constants: one across the whole width is stretched, and
+  // with `edges` one in the left or right third is boxed against that edge. debug: a log of the decisions.
+  void SetHudClassify(bool on, bool edges, bool debug) { hud_classify_ = on, hud_edges_ = edges, hud_debug_ = debug; }
+  // The decisions' tallies and a sample, for the renderer's periodic log; cleared.
+  std::string TakeHudLog();
+  // At the frame's end: whether it was a menu (its boxed area), and the frame's run state cleared.
+  void EndHudFrame() {
+    hud_menu_ = (hud_backdrop_ || GameMenuRecently()) && !hud_mesh_;
+    hud_tally_.menu_frames += hud_menu_;
+    hud_area_ = 0, hud_prev_ = {}, hud_mesh_ = false, hud_backdrop_ = false;
+    hud_seen_last_.swap(hud_seen_);
+    hud_seen_.clear();
+    hud_panels_.clear();
+    ++hud_frame_;
+  }
   // The next draws are the main 3D view's (D47): those into targets of this guest size are shifted by the
   // jitter, in host pixels.
   // The depth range of the last jittered draw's viewport (z of the near plane, of the far plane): reversed
@@ -269,6 +288,51 @@ class DrawPath {
   rex::graphics::RegisterFile* registers_ = nullptr;
   RenderScale scale_;  // D37
   bool aspect_box_ = false;  // D43
+  float aspect_align_ = 0.5f;
+  bool hud_classify_ = false, hud_edges_ = false, hud_debug_ = false;
+  struct HudTally {
+    uint64_t draws = 0, stretched = 0, left = 0, right = 0, middle = 0, unknown = 0, markers = 0, menu_frames = 0;
+    std::string samples;
+    int sampled = 0;
+  } hud_tally_;
+  // One HUD draw's place (ClassifyHudDraw): stretched with the 3D view, boxed (at an alignment), or reaching from the
+  // screen's edge to the boxed place of its inner edge (a scope's side bars, a menu's backing that runs off the canvas).
+  enum class HudMode { kBox, kStretch, kExtendLeft, kExtendRight, kOversize, kPoint };
+  struct HudPlace {
+    HudMode mode = HudMode::kBox;
+    float align = 0.5f;
+    double lo = 0, hi = 0;  // its x extent in clip space, when known
+  };
+  HudPlace ClassifyHudDraw(std::span<const Copy> copies, uint64_t vertex_shader);
+  // Within a frame: the last placed draw (a line of text's glyphs follow their first), and the frame's covered area.
+  struct HudPrev {
+    bool valid = false;
+    uint64_t vertex_shader = 0;
+    double lo = 0, hi = 0, y_lo = 0, y_hi = 0;
+    HudPlace place;
+  } hud_prev_;
+  double hud_area_ = 0;    // this frame's boxed area (clip space units, full screen 4), overlays of full height left out
+  bool hud_menu_ = false;  // the last frame's was a menu's (over 0.3 of the screen): no edges, all in the middle
+  bool hud_mesh_ = false;  // this frame drew a 3D overlay (a scope's mask): never a menu
+  // This frame drew a backdrop over exactly the whole canvas (a menu's: the spawn screen, the scoreboard, 12 Nov
+  // 21:00 logs). The in-game HUD draws none; its covered area was no sign (a large invisible container there made
+  // every frame a menu, 12 Nov 22:08).
+  bool hud_backdrop_ = false;
+  // World markers (HudMode::kPoint): the frame's placed draws in order, matched with the last frame's by their order and
+  // size; one whose place changed while the same size moves with the world (a flag's marker as the camera turns).
+  struct HudSeen {
+    double cx = 0, cy = 0, w = 0, h = 0;
+  };
+  std::vector<HudSeen> hud_seen_, hud_seen_last_;
+  std::vector<uint64_t> hud_moving_until_;  // by order: the frame until which it counts as a world marker
+  std::vector<uint8_t> hud_moved_frames_;   // by order: frames in a row it moved (3 make a world marker)
+  uint64_t hud_frame_ = 0;
+  // Panels: this frame's larger boxed draws; a draw inside one goes where it went (a minimap's icons, a menu's items).
+  struct HudPanel {
+    double lo, hi, y_lo, y_hi;
+    HudPlace place;
+  };
+  std::vector<HudPanel> hud_panels_;
   bool wait_for_pipelines_ = false;  // D101
   double wait_budget_ms_ = 0.0;      // D128: for this draw, 0 none
   double frame_waited_ms_ = 0.0;     // D128: the waits since the last TakeStats (once a frame)

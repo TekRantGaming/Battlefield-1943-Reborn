@@ -137,6 +137,11 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_aspect, 0.0, "NativeXRenderer",
                       "With native_x_renderer_fill_screen, the image's aspect ratio (read at startup, D104): 0 = the "
                       "output's, which it fills; another (2.3889 for 21:9, 3.5556 for 32:9) renders the game at that "
                       "ratio, with bars where the output is narrower or wider");
+REXCVAR_DEFINE_STRING(native_x_renderer_hud_layout, "edges", "NativeXRenderer",
+                      "With Profile::box_2d_after_composite on a wider output: edges = the HUD's left and right thirds "
+                      "at the screen's edges, the rest in the middle; centered = all of it in a 16:9 box in the middle");
+REXCVAR_DEFINE_BOOL(native_x_renderer_debug_hud, false, "NativeXRenderer",
+                    "Log the 2D layer's draws after the composite every 10 s (Profile::box_2d_after_composite)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_raise_priority, false, "NativeXRenderer",
                     "The renderer's thread and the guest GPU's command processor thread one step above normal "
                     "priority (read at startup, D136): the game waits on both, and its own threads spin while they "
@@ -290,6 +295,9 @@ bool g_queries_on = false;
 RenderScale g_scale;  // host pixels per guest pixel (D37), per axis when filling the output (D43)
 double g_aspect_factor = 1.0;  // g_scale.x / g_scale.y: how much wider the image is than the game's
 bool g_aspect_box = false;     // the draws are a 2D layer kept at the game's aspect ratio (D43)
+// Profile::box_2d_after_composite: 0 before the scene's copy, 1 after it (the composite next), 2 after the composite.
+int g_hud_phase = 0;
+bool g_scene_copied_this_frame = false, g_scene_copied_last_frame = true;
 // DLSS or FSR 3.1 (D47, D49, D116): on when native_x_renderer_antialiasing is dlaa, a DLSS mode, fsr_native or an FSR
 // mode, and the provider is available. Between BeginView with a matrix and EndViewGeometry the draws into targets of
 // the game's output size are the main 3D view's: jittered, and their color and depth targets kept for the upscaler.
@@ -706,6 +714,15 @@ void CarryColorIntoDepth(const GuestSurface& surface, HostTarget* depth) {
   }
 }
 
+void LogHudStats() {
+  static auto at = std::chrono::steady_clock::now();
+  if (!g_draw || !REXCVAR_GET(native_x_renderer_debug_hud) ||
+      std::chrono::steady_clock::now() - at < std::chrono::seconds(10))
+    return;
+  at = std::chrono::steady_clock::now();
+  REXLOG_INFO("[native_x_renderer] HUD draws after the composite: {}", g_draw->TakeHudLog());
+}
+
 void ExecuteDraw(const Command& c) {
   RendererTime time(&g_phase.draws);
   if (!g_draw) {
@@ -750,7 +767,20 @@ void ExecuteDraw(const Command& c) {
     g_draw->SetWaitForPipelines(offscreen,
                                 new_target ? 0.0 : std::max(0.0, REXCVAR_GET(native_x_renderer_pipeline_wait_budget_ms)));
   }
-  g_draw->SetAspectBox(g_aspect_box);
+  // Profile::box_2d_after_composite: the HUD's draws (and a frame without a 3D view) into the aspect box.
+  bool box = g_aspect_box;
+  float align = 0.5f;
+  bool composite = false, hud = false;
+  if (g_profile->box_2d_after_composite && g_aspect_factor != 1.0 && targets[0] &&
+      targets[0]->guest_width == g_profile->output_width && targets[0]->guest_height == g_profile->output_height) {
+    if (g_hud_phase == 1) composite = true;
+    else if (g_hud_phase == 2) box = hud = true;
+    else if (!g_scene_copied_this_frame && !g_scene_copied_last_frame) box = hud = true;
+  }
+  g_draw->SetAspectBox(box, align);
+  // The HUD's draws are placed one by one from their vertex shader's constants (DrawPath::SetHudClassify).
+  g_draw->SetHudClassify(hud, REXCVAR_GET(native_x_renderer_hud_layout) == "edges",
+                         REXCVAR_GET(native_x_renderer_debug_hud));
   // The main view's draws: their targets kept for the upscaler, and jittered (a view found from the draws only after a
   // frame whose view reached the upscale point, D119).
   bool scene = g_scene_view && (g_temporal || g_gtao_on || g_ssgi_on);
@@ -777,6 +807,7 @@ void ExecuteDraw(const Command& c) {
   g_draw->Draw(c.programs[0] ? *c.programs[0] : StateTracker::kNoProgram,
                c.programs[1] ? *c.programs[1] : StateTracker::kNoProgram, std::span(copies.data(), c.copy_count),
                targets, g_tiling);
+  if (composite) g_hud_phase = 2;
   // D162: the night on the game's composite, the first draw into a target of the output size after the scene's copy
   // (Battlefield 1943: its bloom chain draws only smaller targets in between): the picture with the game's bloom and
   // exposure, before the HUD drawn over it.
@@ -1610,6 +1641,12 @@ void ExecuteResolve(const Command& c) {
     g_aa.Apply(g_device->context(), target->texture, target_view);
     g_scene_antialiased = true;
   }
+  // Profile::box_2d_after_composite: the scene's copy; the composite comes next, then the HUD.
+  if (g_profile->box_2d_after_composite && c.scene_caller && slice == 0 &&
+      target->guest_width == g_profile->output_width && target->guest_height == g_profile->output_height) {
+    g_hud_phase = 1;
+    g_scene_copied_this_frame = true;
+  }
   // Night (D162): the scene's copy arms it; it runs after the game's composite (ExecuteDraw). Graded here, before the
   // bloom chain, the game's automatic exposure (its 1x1 luminance) brightened it back (runs night_wake2, night_gc2).
   if (REXCVAR_GET(native_x_renderer_night) && c.scene_caller && slice == 0 &&
@@ -2187,6 +2224,11 @@ void ExecutePresent(const Command& c) {
   if (with_swap) PresentPending(true);  // room for this frame
   RendererTime time(&g_phase.present);
   g_aspect_box = false;
+  g_hud_phase = 0;
+  LogHudStats();
+  if (g_draw) g_draw->EndHudFrame();
+  g_scene_copied_last_frame = g_scene_copied_this_frame;
+  g_scene_copied_this_frame = false;
   PromoteReduced(nullptr);  // a view without EndViewGeometry (D49)
   g_scene_view = false;
   g_auto_upscaled_last_frame = g_auto_view_done;

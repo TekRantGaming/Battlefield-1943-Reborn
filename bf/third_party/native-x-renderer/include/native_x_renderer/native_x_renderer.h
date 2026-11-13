@@ -190,6 +190,12 @@ struct Profile {
   // The game's hooks widen its 16:9 cameras by AspectFactor() (D43): NativeXRenderer then fills an output of any
   // aspect ratio, with a separate render scale per axis, instead of showing the 16:9 image with bars.
   bool widens_cameras = false;
+  // With widens_cameras, a game without hooks round its 2D views whose frame is: the scene's copy
+  // (scene_resolve_caller), then only smaller targets (a bloom chain), then one draw of the output's size (the
+  // composite), then the HUD into the output: every draw of the output's size after that first one goes into the
+  // aspect box (D43), and so does every one in a frame without a scene's copy (a loading screen, a video, a menu)
+  // when the frame before had none either. Battlefield 1943 (D162's order).
+  bool box_2d_after_composite = false;
   // Float constants in which the game gives its shaders the size of a texture they sample, as (width, height,
   // 1 / width, 1 / height), to compute texel positions themselves (POTCAWE's shadow maps: a bilinear filter of four
   // point samples on the map's texels). A resolve result is larger on the host (the render scale, the shadow scale,
@@ -257,6 +263,18 @@ double AspectFactor();
 // draws go into a box of the game's aspect ratio in the middle of their render target instead of being
 // stretched with the 3D view. Set by the game's hooks around its 2D views; off again at every Present.
 void SetGameAspectBox(bool on);
+
+// A world marker the game projected to its HUD this moment (a capture flag's icon, a name tag), in pixels of the
+// game's output (1280x720): with Profile::box_2d_after_composite on a wider output, a HUD draw on it is placed where
+// the widened 3D view shows that point, not in the 16:9 box. Any thread; kept 0.2 s.
+void NoteHudMarker(float x, float y);
+// Whether a HUD marker was noted within `radius` pixels of (x, y) in the last 0.2 s.
+bool NearHudMarker(double x, double y, double radius);
+// One of the game's own menu screens is up now (its UI says so about once a second): the 2D layer is a menu, kept
+// together in the middle, not anchored to the edges. Any thread.
+void NoteGameMenu();
+// Whether NoteGameMenu came within the last 1.5 s.
+bool GameMenuRecently();
 
 // D150: a fixed GPU workload timed once, for a first start's auto detect: started now, run at a present soon after;
 // its time (ms) once known (false until then; -1 if it could not run). About 0.6 ms on an RTX 4070 Ti.

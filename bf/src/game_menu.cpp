@@ -83,6 +83,7 @@ REXCVAR_DECLARE(bool, bf_unlock_fps);  // frame_rate.cpp
 REXCVAR_DECLARE(bool, server);         // server_mode.cpp: a dedicated server has no menu
 REXCVAR_DECLARE(double, bf_max_fps);
 REXCVAR_DECLARE(bool, native_x_renderer);  // NativeXRenderer: its own shader storage is made before the first draw
+REXCVAR_DECLARE(bool, native_x_renderer_fill_screen);  // NativeXRenderer: ultrawide fill (Aspect ratio row)
 
 void SetFrameRate(double fps);  // frame_rate.cpp
 
@@ -112,10 +113,16 @@ double UpscalerRatio(const std::string& mode) {
 }
 // What NativeXRenderer draws for an output (renderer.cpp, D37 and D157): the game's 1280x720 at the largest scale that
 // fits the output, divided by the ratio, at least 1.
+// With Fill screen (native_x_renderer_fill_screen, 0.4.0) a screen of another shape gets the game's width times the
+// screen's aspect over 16:9 (per axis scales, renderer.cpp's fill).
 std::pair<int, int> DrawnSizeFor(int out_w, int out_h, double ratio) {
-  const double fit = std::min(double(std::max(out_w, 1)) / 1280.0, double(std::max(out_h, 1)) / 720.0);
+  const double w = double(std::max(out_w, 1)), h = double(std::max(out_h, 1));
+  const double factor = REXCVAR_GET(native_x_renderer_fill_screen) && std::fabs((w / h) / (16.0 / 9.0) - 1.0) > 0.01
+                            ? (w / h) / (16.0 / 9.0)
+                            : 1.0;
+  const double fit = std::min(w / (1280.0 * factor), h / 720.0);
   const double scale = std::max(1.0, fit / std::max(ratio, 1.0));
-  return {int(std::lround(1280.0 * scale)), int(std::lround(720.0 * scale))};
+  return {int(std::lround(1280.0 * factor * scale)), int(std::lround(720.0 * scale))};
 }
 // Graphics presets (TekRantGaming, 12 Nov 2026: "graphic presets Potato, low, medium, high, ultra all with appropriate
 // presets for players"): the Graphics page's settings that cost frame time. Low, Medium and High are the auto detect's
@@ -1511,6 +1518,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   static constexpr ListItem kMainItems[] = {
       {"QUICK MATCH", 0, Does::kOurs},          {"SERVER BROWSER", -1, Does::kOurs},
       {"JOIN MATCH WITH FRIENDS", 1, Does::kScreenThenOk},
+      {"CREATE PRIVATE MATCH", -1, Does::kOurs},
       {"STATS & AWARDS", 3, Does::kScreen},
       {"PC SETTINGS", -1, Does::kOurs},         {"ACHIEVEMENTS", 5, Does::kNothing},
       {"LEADERBOARDS", 6, Does::kScreen},       {"HELP", -1, Does::kOurs},
@@ -2475,7 +2483,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // than the first match).
   static constexpr const char* kStartCvars[] = {"native_x_renderer_antialiasing", "native_x_renderer_frame_generation",
                                                 "native_x_renderer_shadow_scale", "native_x_renderer_sharpness",
-                                                "native_x_renderer_scaling", "bf_upscaler_mode", "user_language"};
+                                                "native_x_renderer_scaling", "bf_upscaler_mode", "user_language",
+                                                "native_x_renderer_fill_screen"};
   static constexpr const char* kStartKeys[] = {"vsync", "monitor", "window_width", "window_height"};
   std::map<std::string, std::string> started_with_;
   std::string StartValue(const std::string& key) {
@@ -2760,14 +2769,34 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       rows.push_back(rate);
     }
 
-    SettingRow aspect{"Screen", "Aspect ratio", "What the game's 16:9 picture does on a screen of another shape.",
-                      {"Letterbox 16:9", "Stretch"}, settings_.Get("letterbox", "on") == "on" ? 0 : 1};
+    // Ultrawide (0.4.0): NativeXRenderer fills a screen of any shape with a wider view (Hor+, fov.cpp), the HUD kept at
+    // 16:9 in the middle; or the 16:9 picture with bars. "Stretch" did nothing under NativeXRenderer (it always
+    // letterboxed). Read at the start (the render scale is fixed then).
+    SettingRow aspect{"Screen", "Aspect ratio",
+                      "Fill screen: on an ultrawide or other non 16:9 screen you see more to the sides, nothing is "
+                      "stretched and the HUD stays 16:9 in the middle. Letterbox: the 16:9 picture with bars.",
+                      {"Fill screen", "Letterbox 16:9"}, Cvar("native_x_renderer_fill_screen") == "false" ? 1 : 0};
+    aspect.start_key = "cvar.native_x_renderer_fill_screen";
     aspect.choose = [this](int i) {
-      settings_.values["letterbox"] = i ? "off" : "on";
+      const char* v = i ? "false" : "true";
+      settings_.values["cvar.native_x_renderer_fill_screen"] = v;
       settings_.Save();
-      rex::cvar::SetFlagByName("present_letterbox", i ? "false" : "true");
+      rex::cvar::SetFlagByName("native_x_renderer_fill_screen", v);
     };
     rows.push_back(aspect);
+    // With Fill screen on a wider screen: the HUD at the screen's edges (the minimap left, the ammo right) or all of it
+    // in 16:9 in the middle. At once.
+    SettingRow hud{"Screen", "HUD layout",
+                   "With Fill screen on an ultrawide screen: Edges puts the minimap and ammo at the screen's sides; "
+                   "Centered keeps the whole HUD in 16:9 in the middle.",
+                   {"Edges", "Centered"}, Cvar("native_x_renderer_hud_layout") == "centered" ? 1 : 0};
+    hud.choose = [this](int i) {
+      const char* v = i ? "centered" : "edges";
+      settings_.values["cvar.native_x_renderer_hud_layout"] = v;
+      settings_.Save();
+      rex::cvar::SetFlagByName("native_x_renderer_hud_layout", v);
+    };
+    rows.push_back(hud);
 
     // Picture: brightness and gamma of the game's picture, in the GPU plugin's gamma ramp (King Kong's curve), at
     // once; our menus and the overlays stay as they are.
@@ -3405,7 +3434,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       Text(d, kf.stencil, 54 * s, ImVec2(sz.x * 0.14f - 3 * s, sz.y * 0.052f), kit::kCream, "SETTINGS");
     }
     if (SettingsPanel(d, ImVec2(sz.x * 0.14f, sz.y * 0.13f), ImVec2(sz.x * 0.86f, sz.y * 0.80f), in, true))
-      page_ = Page::kMain, row_ = 5;  // back on the main menu's Settings row
+      page_ = Page::kMain, row_ = MainRowOf("PC SETTINGS");
     BfTags(d, io, {{"LB RB", "Section"}, {"B", "Back"}});
     if (RestartPending()) {  // the rows marked NEXT START (SERVERS-PLAN.md section 3)
       const std::string t = "SETTINGS MARKED NEXT START TAKE EFFECT WHEN THE GAME STARTS AGAIN";
@@ -3491,9 +3520,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         d->AddLine(ImVec2(hx, y - sh * 0.5f), ImVec2(x1, y - sh * 0.5f), IM_COL32(176, 174, 168, 255), 1.0f);
       }
       if (y + rh < top || y > bottom) continue;
-      const bool sel = focused && i == row_;
       const ImVec2 r0(x0, y), r1(x1, y + rh);
-      if (focused && ImGui::IsMouseHoveringRect(r0, r1) && ImGui::GetIO().MouseDelta.y) row_ = i;
+      const ImGuiIO& io = ImGui::GetIO();
+      const bool hovered = focused && ImGui::IsMouseHoveringRect(
+          ImVec2(x0, std::max(y, top)), ImVec2(x1, std::min(y + rh, bottom)));
+      const bool clicked = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+      if (hovered && (clicked || io.MouseDelta.y)) row_ = i;
+      const bool sel = focused && i == row_;
       if (sel) d->AddRectFilled(r0, r1, kBfGreen);
       const ImU32 ink = it.disabled ? (sel ? IM_COL32(170, 176, 150, 255) : kBfFaint) : sel ? kBfGreenInk : kBfInk;
       Text(d, g_fonts.bf_med, name_size, ImVec2(x0 + 12 * s, CapTop(y, rh, name_size)), ink, Upper(it.name));
@@ -3510,8 +3543,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         Text(d, g_fonts.bf_med, ts, ImVec2(vx - (sel ? 44 : 22) * s - tw, CapTop(y, rh, ts)),
              sel ? kBfGreenInk : IM_COL32(176, 52, 40, 255), "NEXT START");
       }
+      const float t0 = x0 + (x1 - x0) * 0.52f, t1 = vx - 26 * s;
       if (it.slider) {  // the slider's track left of its value
-        const float t0 = x0 + (x1 - x0) * 0.52f, t1 = vx - 26 * s, ty = y + rh * 0.5f;
+        const float ty = y + rh * 0.5f;
         if (t1 > t0) {
           const float f = (it.val - it.lo) / std::max(1e-6f, it.hi - it.lo), fx = t0 + (t1 - t0) * f;
           d->AddRectFilled(ImVec2(t0, ty - 1.5f * s), ImVec2(t1, ty + 1.5f * s),
@@ -3524,14 +3558,22 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         Text(d, g_fonts.bf_med, vs, ImVec2(vx - 20 * s, CapTop(y, rh, vs)), kBfGreenInk, "<");
         Text(d, g_fonts.bf_med, vs, ImVec2(x1 - 22 * s, CapTop(y, rh, vs)), kBfGreenInk, ">");
       }
-      const bool clicked = focused && ImGui::IsMouseHoveringRect(r0, r1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
       if (!sel || it.disabled) continue;
       // Each change logged, for the player's log and the tests.
       if (it.activate && (in.accept || clicked)) {
         REXLOG_INFO("BF settings: {} / {} opened", kTabNames[tab_], it.name);
         it.activate();
-      } else if (it.slider && (in.left || in.right)) {
-        const float v = std::clamp(it.val + (in.left ? -it.step : it.step), it.lo, it.hi);
+      } else if (it.slider) {
+        const float mouse_x = io.MousePos.x;
+        const bool track_click = clicked && t1 > t0 && mouse_x >= t0 && mouse_x <= t1;
+        const bool left = in.left || (clicked && mouse_x >= vx - 24 * s && mouse_x < vx);
+        const bool right = in.right || (clicked && mouse_x >= x1 - 26 * s);
+        if (!track_click && !left && !right) continue;
+        const float target = track_click
+            ? std::lerp(it.lo, it.hi, (mouse_x - t0) / (t1 - t0))
+            : it.val + (left ? -it.step : it.step);
+        const float v = std::clamp(
+            track_click ? it.lo + std::round((target - it.lo) / it.step) * it.step : target, it.lo, it.hi);
         REXLOG_INFO("BF settings: {} / {} -> {}", kTabNames[tab_], it.name, it.format ? it.format(v) : fmt::format("{}", v));
         it.set(v);
       } else if (it.choose && !it.options.empty() && (in.left || in.right || in.accept || clicked)) {
@@ -4787,6 +4829,7 @@ bool GameMenuPassing() { return g_menu && g_menu->passing(); }
 void NoteGameMenuSignal() {
   const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
   const int64_t last = g_game_menu_signal_at.exchange(now, std::memory_order_relaxed);
+  native_x_renderer::NoteGameMenu();  // ultrawide: the 2D layer is a menu, kept together in the middle
   // Once each time one comes up (its calls come about once a second): in a match it should never be.
   if (!last || std::chrono::steady_clock::duration(now - last) > std::chrono::seconds(3))
     REXLOG_INFO("BF menu: the game's own menu screen is up (its couch call){}", InMatch() ? ", in a match" : "");

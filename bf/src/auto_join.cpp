@@ -55,7 +55,7 @@ REXCVAR_DEFINE_BOOL(bf_join_open_squad, false, "BF1943",
 namespace bf1943 {
 
 void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated);  // input_settings.cpp
-void LookPad(uint8_t* gamepad);                                  // look.cpp
+void LookPad(uint8_t* gamepad, bool seated);                     // look.cpp
 bool LocalOnFoot();                                              // look.cpp: the vehicle seeker
 bool LocalSeated(const uint8_t* base);                           // look.cpp: in a vehicle, any seat
 void HudGlyphsTick(bool seated);                                 // hud_glyphs.cpp: the prompts drawn again on a change
@@ -1195,7 +1195,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   if (!input_off)  // Settings > Controls
     bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, seated);
   bf1943::HudGlyphsTick(seated);  // hud_glyphs.cpp: the keyboard prompts follow the seat's keys
-  if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4);  // look.cpp: the mouse in a vehicle
+  if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4, seated);
   const uint16_t buttons = uint16_t(p[4] << 8 | p[5]) | press;
   p[4] = uint8_t(buttons >> 8);
   p[5] = uint8_t(buttons);
