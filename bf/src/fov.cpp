@@ -352,7 +352,10 @@ void SmgSights(PPCContext& ctx, uint8_t* base, uint32_t soldier, double fov_degr
     std::sscanf(text.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
   }
 #if defined(_WIN32)
-  if (REXCVAR_GET(bf_smg_sight_tune) && blend > 0.5) {
+  // Only while this game's window is the one in front (the keys are read from the keyboard itself).
+  DWORD front_pid = 0;
+  GetWindowThreadProcessId(GetForegroundWindow(), &front_pid);
+  if (REXCVAR_GET(bf_smg_sight_tune) && blend > 0.5 && front_pid == GetCurrentProcessId()) {
     // One step at a press, then repeated while the key is held (from 0.35 s, every 40 ms).
     static std::map<int, std::chrono::steady_clock::time_point> next;
     const auto now = std::chrono::steady_clock::now();
