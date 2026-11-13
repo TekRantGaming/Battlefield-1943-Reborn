@@ -2814,14 +2814,15 @@ DrawPath::HudPlace DrawPath::ClassifyHudDraw(std::span<const Copy> copies, uint6
     ++(place.align == 0.0f ? t.left : place.align == 1.0f ? t.right : t.middle);
   } else if (double marker_x = -1;
              !hud_menu_ &&
-             // Through a scope only a draw the size and shape of a marker's icon (10 to 72 canvas pixels each way, not
-             // a line): the sight's crosshair and mil dots lie in the middle, where whatever the game projects as the
-             // aim moves over the map passes within reach, and taken for markers they left their places (13 Nov:
-             // "aiming at different areas of the map causes the scope mesh crosshair and mildots displace").
-             (!hud_scope_ || [&] {
+             // Only a draw the size and shape of a marker's icon or of a letter of its label (6 to 44 canvas pixels
+             // each way, not a line). The middle of the screen is where whatever the game projects as the aim moves
+             // passes, and a sight drawn there in pieces was taken apart piece by piece as each came within reach of
+             // such a point: a scope's crosshair and mil dots (13 Nov), then a plane's gunsight, whose ring is larger
+             // than any marker and whose bars are lines ("invisible when you first get in the plane ... glitchy").
+             [&] {
                const double w = (hi - lo) * 640.0, h = (y_hi - y_lo) * 360.0;
-               return w >= 10.0 && w <= 72.0 && h >= 10.0 && h <= 72.0 && w <= h * 2.5 && h <= w * 2.5;
-             }()) &&
+               return w >= 6.0 && w <= 44.0 && h >= 6.0 && h <= 44.0 && w <= h * 2.5 && h <= w * 2.5;
+             }() &&
              NearHudMarker(((lo + hi) * 0.5 + 1.0) * 640.0, (1.0 - (y_lo + y_hi) * 0.5) * 360.0, 48.0, &marker_x)) {
     // A world marker (the game's projection noted it, NoteHudMarker): its centre where the 3D view shows that place,
     // its size the HUD's. Every piece of one marker moves by the marker's own place, not by its own centre (13 Nov:

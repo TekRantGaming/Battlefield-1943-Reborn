@@ -80,6 +80,10 @@ REXCVAR_DEFINE_STRING(bf_player_name, "", "BF1943",
                       "The name other players see (empty: the one saved in bf1943-settings.txt, made at the first start)");
 // King Kong's Upscaler mode (TekRantGaming, 11 Nov 2026, v0.2.1: AMD FSR 1 and NVIDIA NIS "exactly" as King Kong has them): how
 // many pixels the game draws before the upscaler (native_x_renderer_scaling fsr or nis) scales them to the screen.
+REXCVAR_DEFINE_DOUBLE(bf_render_scale, 100.0, "BF1943",
+                      "Render resolution in percent of the display's (50 to 150), with the Upscaler off: under 100 the "
+                      "picture is drawn smaller and scaled up, over 100 larger and scaled down (supersampling). Never "
+                      "below 720 lines");
 REXCVAR_DEFINE_STRING(bf_upscaler_mode, "quality", "BF1943",
                       "With AMD FSR 1 or NVIDIA NIS (native_x_renderer_scaling): native, quality, balanced or "
                       "performance, the game drawn at the screen's size divided by 1, 1.5, 1.7 or 2 (never below 720p); "
@@ -210,9 +214,16 @@ void ApplyUpscaler(bool log, const std::string& nis_support) {
     return;
   }
   if (scaling != "bilinear") rex::cvar::SetFlagByName("native_x_renderer_scaling", "bilinear");
-  rex::cvar::SetFlagByName("native_x_renderer_upscale_ratio", "0");
+  // Render resolution (13 Nov 2026: "set at 100% on a slider that can be increased to 150%, and decreased to 50%"):
+  // the display's size times the percentage, as the renderer's ratio (the size divided by it: 2 for 50%, 0.667 for
+  // 150%). 100%: none.
+  const double percent = std::clamp(REXCVAR_GET(bf_render_scale), 50.0, 150.0);
+  const bool scaled = std::fabs(percent - 100.0) > 0.5;
+  rex::cvar::SetFlagByName("native_x_renderer_upscale_ratio", scaled ? fmt::format("{:.6f}", 100.0 / percent) : "0");
   rex::cvar::SetFlagByName("native_x_renderer_sharpness", g_plain_sharpness);
-  if (log) REXLOG_INFO("BF upscaler: Off, the game drawn at the display's resolution");
+  if (log)
+    REXLOG_INFO("BF upscaler: Off, the game drawn at {:.0f}% of the display's resolution{}", percent,
+                scaled ? " (never below 720 lines)" : "");
 }
 #if defined(BF_DEV_TOOLS)
 const auto g_dev_began = std::chrono::steady_clock::now();  // the process start, for test scripts
@@ -2391,7 +2402,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   static constexpr const char* kStartCvars[] = {"native_x_renderer_antialiasing", "native_x_renderer_frame_generation",
                                                 "native_x_renderer_shadow_scale", "native_x_renderer_sharpness",
                                                 "native_x_renderer_scaling", "bf_upscaler_mode", "user_language",
-                                                "native_x_renderer_fill_screen"};
+                                                "native_x_renderer_fill_screen", "bf_render_scale"};
   static constexpr const char* kStartKeys[] = {"vsync", "monitor", "window_width", "window_height"};
   std::map<std::string, std::string> started_with_;
   std::string StartValue(const std::string& key) {
@@ -2443,7 +2454,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // The Upscaler's rows and the Sharpness it stands in for: the renderer's settings follow before the game runs (Play
     // takes them; once it runs, they wait for the next start, as the rows say).
     if (name == "native_x_renderer_sharpness") g_plain_sharpness = value;
-    if (name == "native_x_renderer_scaling" || name == "bf_upscaler_mode" || name == "native_x_renderer_sharpness")
+    if (name == "native_x_renderer_scaling" || name == "bf_upscaler_mode" || name == "native_x_renderer_sharpness" ||
+        name == "bf_render_scale")
       ApplyUpscaler(false, settings_.Get("nis_support", ""));
   }
   static bool Truthy(const std::string& v) { return v == "true" || v == "1" || v == "on"; }
@@ -2895,6 +2907,17 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         if (!same.empty()) help += " Same as " + same + " here.";
       }
       rows.push_back(Choice("Image", "Upscaler mode", help, "bf_upscaler_mode", options));
+    }
+    {
+      // Render resolution: the display's at 100%, less for speed, more for a cleaner picture (supersampling). With an
+      // upscaler its mode says how much is drawn, so the row is its then.
+      SettingRow r = Slider("Image", "Render resolution",
+                            "How large the game is drawn before it is fitted to your screen. 100% is your screen's own "
+                            "resolution. Lower is faster and softer; higher is slower and cleaner, with smoother edges "
+                            "(never below 720 lines). Applies at the next start.",
+                            "bf_render_scale", 50, 150, 5, Percent, 100);
+      if (upscaler) r.disabled = true, r.note = "The Upscaler mode sets the render resolution while an upscaler is on.";
+      rows.push_back(r);
     }
     rows.push_back(Choice("Image", "Shadow quality",
                           "The shadow maps' detail. Original draws them at the render resolution. Applies at the next "

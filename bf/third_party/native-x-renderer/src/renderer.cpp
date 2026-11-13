@@ -172,7 +172,8 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_check_nis, false, "NativeXRenderer",
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_upscale_ratio, 0.0, "NativeXRenderer",
                       "With the render scale from the screen (native_x_renderer_resolution_scale 0): that scale "
                       "divided by this, at least 1, for a spatial upscaler to bring up to the screen (read at startup, "
-                      "D157): AMD's 1.5 Quality, 1.7 Balanced, 2 Performance. 0 or 1: the screen's own");
+                      "D157): AMD's 1.5 Quality, 1.7 Balanced, 2 Performance. Under 1 draws larger than the screen "
+                      "(0.667: one and a half times, supersampling). 0 or 1: the screen's own");
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_shadow_scale, 0.0, "NativeXRenderer",
                       "The shadow maps' scale, host pixels per guest pixel on both axes (read at startup, D92): the "
                       "depth passes with no color target that are not of the game's output size are drawn at least "
@@ -2662,7 +2663,9 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
     double forced = REXCVAR_GET(native_x_renderer_resolution_scale);
     // D157: a spatial upscaler's mode, the scale from the screen divided by its ratio (never below 1, below).
     double ratio = REXCVAR_GET(native_x_renderer_upscale_ratio);
-    bool divided = forced <= 0.0 && ratio > 1.0;
+    // Under 1 too (13 Nov 2026, Battlefield 1943's Render resolution above 100%): the image larger than the output,
+    // brought down to it when presenting (supersampling).
+    bool divided = forced <= 0.0 && ratio > 0.0 && std::abs(ratio - 1.0) > 1e-3;
     double from_output = divided ? fit / ratio : fit;
     uint32_t max_dimension = device->device()->GetAdapterInfo().Texture.MaxTexture2DDimension;
     double factor = fill ? image_aspect / guest_aspect : 1.0;
