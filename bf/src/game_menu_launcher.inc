@@ -2531,6 +2531,18 @@
       kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error ? kit::kRed : kit::kInkFaint,
                    error ? pm_error_ : std::string(kAbout[pm_row_]), q0.x - band.x - st(40));
       if (GreenButton(d, st, q0, q1, kit::Button::kA, "HOST THE MATCH")) clicked = kPmHost;
+      // An experimental tick rate chosen: said in a red strip over the picture's foot, whatever row is chosen (13 Nov
+      // 2026: "a warning disclaimer ... when Tick Rate is changed to 75 or 100").
+      if (pm_tick_ > 60) {
+        const ImVec2 w0(band.x, band.y - st(46)), w1(hb.x, band.y);
+        d->AddRectFilled(w0, w1, IM_COL32(150, 38, 30, 235));
+        kit::Spaced(d, f.ui_bold, st(9), ImVec2(w0.x + st(20), w0.y + st(8)), kit::kCream,
+                    fmt::format("WARNING \xC2\xB7 {} HZ IS EXPERIMENTAL", pm_tick_), st(1.5f));
+        kit::Wrapped(d, f.ui, st(10.5f), ImVec2(w0.x + st(20), w0.y + st(22)), kit::kCream,
+                     "Not tested. Weapons, vehicles and timers may behave oddly, your PC and every player's connection "
+                     "work harder, and players on older versions cannot join. Use 60 Hz for a normal match.",
+                     w1.x - w0.x - st(40));
+      }
     }
     if (in.accept) clicked = pm_row_;
     if (clicked >= 0) {
