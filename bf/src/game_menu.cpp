@@ -2639,6 +2639,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     std::function<void(int)> slot_click;
     std::function<void(int)> nudge;
     std::string start_key;  // a setting taken only at the start ("cvar.<name>" or a settings key): NEXT START if changed
+    int preview = 0;  // a picture over the row (game_menu_settings.inc): 1 the crosshairs at the HUD's scale, 2 the minimap's sizes
   };
 
   // Settings the renderer or the window take only at the start (their rows say "Applies at the next start"). Their
@@ -3659,34 +3660,88 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       }
       SetCvar("bf_wheel_bindable", "true");
     }
+    // 0.4.2 ("combine the Keybinds and Remap Gamepad tabs into a single tab called Remap, and add a single column
+    // for controller inputs to the left of the Keyboard columns"): the first slot is the controller's button for the
+    // action, from the bf_remap_* settings (which say what each button presses) read the other way round. A click or
+    // A on it takes the next button; the button it takes swaps actions with the one it had, so every action keeps
+    // one button. The sticks' own actions have none to change.
+    static const std::pair<const char*, const char*> kPadOf[] = {
+        {"keybind_a", "a"}, {"keybind_b", "b"}, {"keybind_x", "x"}, {"keybind_y", "y"},
+        {"keybind_left_shoulder", "lb"}, {"keybind_right_shoulder", "rb"}, {"keybind_left_trigger", "lt"},
+        {"keybind_right_trigger", "rt"}, {"keybind_lstick_press", "ls"}, {"keybind_rstick_press", "rs"},
+        {"keybind_back", "back"}, {"keybind_start", "start"}, {"keybind_dpad_up", "up"}, {"keybind_dpad_down", "down"},
+        {"keybind_dpad_left", "left"}, {"keybind_dpad_right", "right"}};
+    static const std::pair<const char*, const char*> kPadNames[] = {
+        {"a", "A"}, {"b", "B"}, {"x", "X"}, {"y", "Y"}, {"lb", "LB"}, {"rb", "RB"}, {"lt", "LT"}, {"rt", "RT"},
+        {"ls", "LS"}, {"rs", "RS"}, {"back", "Back"}, {"start", "Start"}, {"up", "D-Up"}, {"down", "D-Down"},
+        {"left", "D-Left"}, {"right", "D-Right"}};
+    auto pad_action = [](const std::string& cvar) -> std::string {
+      for (const auto& [bind, id] : kPadOf)
+        if (cvar == bind) return id;
+      return "";
+    };
+    auto pad_button = [this](const std::string& action) -> int {  // the button that presses the action, or -1
+      for (int b = 0; b < int(std::size(kPadNames)); ++b)
+        if (Cvar(std::string("bf_remap_") + kPadNames[b].first) == action) return b;
+      return -1;
+    };
+    auto pad_next = [this, pad_button](const std::string& action) {
+      const int n = int(std::size(kPadNames)), had = pad_button(action), next = (had + 1) % n;
+      const std::string next_cvar = std::string("bf_remap_") + kPadNames[next].first, other = Cvar(next_cvar);
+      SetCvar(next_cvar, action);
+      if (had >= 0) SetCvar(std::string("bf_remap_") + kPadNames[had].first, other);
+      REXLOG_INFO("BF settings: the controller's {} now does {} ({} does {})", kPadNames[next].second, action,
+                  had >= 0 ? kPadNames[had].second : "nothing else", had >= 0 ? other : std::string("-"));
+    };
     std::vector<SettingRow> rows;
     int index = 0;
     for (const auto& [cvar, label] : kBinds) {
-      SettingRow r{"Keyboard and mouse bindings", label,
-                   "Two keys and two mouse buttons for each action: any of them does it. Click a slot (or A on it), "
-                   "then press the key or the mouse button; the mouse columns also take the side buttons and, for the "
-                   "button actions, a wheel notch. Esc keeps what it has; hold Esc to clear the slot."};
+      SettingRow r{"Bindings", label,
+                   "The controller's button, two keys and two mouse buttons for each action: any of them does it. "
+                   "Controller: click the slot (or A on it) for the next button; the two actions swap buttons. "
+                   "Keyboard and mouse: click a slot (or A on it), then press the key or the mouse button; the mouse "
+                   "columns also take the side buttons and, for the button actions, a wheel notch. Esc keeps what "
+                   "it has; hold Esc to clear the slot."};
       const std::string name = cvar;
       const bool chosen = index++ == row_;
       const std::array<std::string, 4> slots = BindSlots(Cvar(cvar));
-      r.slots.assign(slots.begin(), slots.end());
-      r.slot_cursor = chosen ? std::clamp(slot_cursor_, 0, 3) : -1;
-      r.slot_capture = capture_ == cvar ? capture_slot_ : -1;
-      r.slot_click = [this, name](int slot) { capture_ = name, capture_slot_ = slot_cursor_ = std::clamp(slot, 0, 3); };
-      r.activate = [this, name] { capture_ = name, capture_slot_ = std::clamp(slot_cursor_, 0, 3); };
-      r.nudge = [this](int by) { slot_cursor_ = std::clamp(slot_cursor_ + by, 0, 3); };
+      const std::string action = pad_action(name);
+      const bool stick = name.find("stick_") != std::string::npos && action.empty();
+      const int button = action.empty() ? -1 : pad_button(action);
+      r.slots.push_back(stick ? (name.find("lstick") != std::string::npos ? "L stick" : "R stick")
+                              : button >= 0 ? kPadNames[button].second : "");
+      r.slots.insert(r.slots.end(), slots.begin(), slots.end());
+      r.slot_cursor = chosen ? std::clamp(slot_cursor_, 0, 4) : -1;
+      r.slot_capture = capture_ == cvar ? capture_slot_ + 1 : -1;
+      r.slot_click = [this, name, action, pad_next](int slot) {
+        slot_cursor_ = std::clamp(slot, 0, 4);
+        if (slot == 0) {
+          if (!action.empty()) pad_next(action);
+          return;
+        }
+        capture_ = name, capture_slot_ = slot_cursor_ - 1;
+      };
+      r.activate = [this, name, action, pad_next] {
+        if (slot_cursor_ <= 0) {
+          if (!action.empty()) pad_next(action);
+          return;
+        }
+        capture_ = name, capture_slot_ = std::clamp(slot_cursor_, 1, 4) - 1;
+      };
+      r.nudge = [this](int by) { slot_cursor_ = std::clamp(slot_cursor_ + by, 0, 4); };
       // The older panel (the pause menu's) shows the slots as text, the chosen one in brackets.
-      for (int s = 0; s < 4; ++s) {
-        std::string shown = r.slot_capture == s ? "PRESS" : slots[size_t(s)].empty() ? "-" : slots[size_t(s)];
+      for (int s = 0; s < 5; ++s) {
+        std::string shown = r.slot_capture == s ? "PRESS" : r.slots[size_t(s)].empty() ? "-" : r.slots[size_t(s)];
         if (chosen && r.slot_cursor == s) shown = "[" + shown + "]";
-        r.value += (s == 0 ? "" : s == 2 ? "   |   " : "  ") + shown;
+        r.value += (s == 0 ? "" : s == 1 || s == 3 ? "   |   " : "  ") + shown;
       }
       rows.push_back(r);
     }
-    SettingRow reset{"Reset", "Reset bindings", "Every key back to its default."};
+    SettingRow reset{"Reset", "Reset bindings", "Every key, mouse button and controller button back to its default."};
     reset.activate = [this] {
       for (const auto& [cvar, label] : kBinds)
         if (const auto* info = rex::cvar::GetFlagInfo(cvar)) SetCvar(cvar, info->default_value);
+      for (const auto& [id, shown] : kPadNames) SetCvar(std::string("bf_remap_") + id, id);
     };
     rows.push_back(reset);
     return rows;
@@ -3716,12 +3771,14 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // 13 Nov 2026: the HUD's size (the soldier's and the vehicles' HUD and the crosshair; NativeXRenderer scales each
     // part about the screen's corner, edge or centre it hangs on) and, apart from it, the minimap's.
     rows.push_back(Slider("HUD", "HUD scale",
-                          "The size of the HUD and the crosshair on foot and in vehicles. 100% is the game's own. The "
-                          "minimap has its own size below. Applies at once.",
+                          "The size of the HUD and the crosshair on foot and in vehicles. 100% is the game's own; the "
+                          "three crosshairs over the slider show the size you pick. The minimap has its own size "
+                          "below. Applies at once.",
                           "native_x_renderer_hud_scale", 50, 100, 5, Percent));
     rows.push_back(Choice("HUD", "Minimap size", "The minimap's size, apart from the HUD scale. Applies at once.",
                           "native_x_renderer_minimap_scale",
                           {{"Small", "75.000000"}, {"Medium", "100.000000"}, {"Large", "125.000000"}}));
+    rows[rows.size() - 2].preview = 1, rows.back().preview = 2;  // drawn over the rows, at their sizes
     rows.push_back(Choice("Overlay", "Performance metrics",
                           "Readings in the top left corner while you play. F2 switches between them.",
                           "bf_performance_metrics", {{"Off", "off"}, {"FPS only", "fps"}, {"Full", "full"}}));

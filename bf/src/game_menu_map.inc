@@ -12,14 +12,15 @@
   // and a little up, +z down and a little to the right. So a player finds the points where the deploy screen has them.
   bool pause_map_wide_ = false;
 
-  void PauseMap(ImDrawList* d, ImGuiIO& io, const Stage& st, const Input& in, bool has_input) {
+  void PauseMap(ImDrawList* d, ImGuiIO& io, const Stage& st, const Input& in, bool has_input, const ImVec2* box = nullptr) {
     const std::vector<CapturePoint> points = CapturePoints();
     if (points.empty()) return;  // no level's world yet, or one without capture points
     const kit::Fonts& f = kit::GetFonts();
     const std::string folder = LoadedLevelFolder();
-    const ImVec2 a = st.P(436, 120), b = st.P(788, 534);
+    const ImVec2 a = box ? box[0] : st.P(436, 120), b = box ? box[1] : st.P(788, 534);  // box: the pause page's own
     kit::PaperArt(d, a, b);
-    const float x0 = a.x + st(8), x1 = b.x - st(8), side = x1 - x0;
+    // 0.4.2: the pause page's map is 4:3 (ar: its width over its height); the older square one is 1.
+    const float x0 = a.x + st(8), x1 = b.x - st(8), ar = box ? 4.0f / 3.0f : 1.0f, side = (x1 - x0) / ar;
     float y = a.y + st(9);
     // The map's own axes (metres to the right and down), from the world's x and z, and back.
     static const float kCos = std::cos(27.0f * 3.14159265f / 180.0f), kSin = std::sin(27.0f * 3.14159265f / 180.0f);
@@ -38,13 +39,14 @@
     const bool can_zoom = lettered >= 2 && lettered < int(points.size());
     const bool wide = pause_map_wide_ || lettered < 2;
     const float cx = wide ? (ax0 + ax1) * 0.5f : (lx0 + lx1) * 0.5f, cy = wide ? (ay0 + ay1) * 0.5f : (ly0 + ly1) * 0.5f;
-    float half = wide ? std::max(ax1 - ax0, ay1 - ay0) * 0.5f + 130.0f : std::max(lx1 - lx0, ly1 - ly0) * 0.5f + 120.0f;
+    // half: half the view's height in metres (its width is ar times that)
+    float half = wide ? std::max((ax1 - ax0) / ar, ay1 - ay0) * 0.5f + 130.0f : std::max((lx1 - lx0) / ar, ly1 - ly0) * 0.5f + 120.0f;
     half = std::clamp(half, 220.0f, 1024.0f);
     // Never past the picture (it covers 1024 m each way from the level's middle): the view is drawn in from its
     // edge until its four corners are on the picture. What is then outside stays at the map's edge (below).
     for (int i = 0; i < 60; ++i) {
       float reach = 0;
-      for (const ImVec2 corner : {ImVec2(-half, -half), ImVec2(half, -half), ImVec2(half, half), ImVec2(-half, half)}) {
+      for (const ImVec2 corner : {ImVec2(-half * ar, -half), ImVec2(half * ar, -half), ImVec2(half * ar, half), ImVec2(-half * ar, half)}) {
         const ImVec2 w = world(ImVec2(cx + corner.x, cy + corner.y));
         reach = std::max(reach, std::max(std::fabs(w.x), std::fabs(w.y)));
       }
@@ -66,7 +68,7 @@
     const float scale = side / (2.0f * half);
     auto to_screen = [&](float wx, float wz) {
       const ImVec2 m = turned(wx, wz);
-      return ImVec2(m0.x + (m.x - cx + half) * scale, m0.y + (m.y - cy + half) * scale);
+      return ImVec2(m0.x + (m.x - cx + half * ar) * scale, m0.y + (m.y - cy + half) * scale);
     };
     // A mark outside the view stays at the map's edge, as the game's minimap keeps its flags at its rim.
     auto kept = [&](ImVec2 c, float margin) {
@@ -86,8 +88,8 @@
         const float u = 0.5f - w.x / 2048.0f, v = 0.5f - w.y / 2048.0f;
         return ImVec2(uv0.x + (uv1.x - uv0.x) * std::clamp(u, eu, 1.0f - eu), uv0.y + (uv1.y - uv0.y) * std::clamp(v, ev, 1.0f - ev));
       };
-      d->AddImageQuad(io.Fonts->TexRef, m0, ImVec2(m1.x, m0.y), m1, ImVec2(m0.x, m1.y), at(-half, -half), at(half, -half),
-                      at(half, half), at(-half, half));
+      d->AddImageQuad(io.Fonts->TexRef, m0, ImVec2(m1.x, m0.y), m1, ImVec2(m0.x, m1.y), at(-half * ar, -half), at(half * ar, -half),
+                      at(half * ar, half), at(-half * ar, half));
     }
     d->PushClipRect(m0, m1, true);
     // ---- the game's own map icons, then the capture points' flags over them

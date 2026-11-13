@@ -981,7 +981,7 @@ void BfFontPrepare(const fs::path& game_dir, const fs::path& user_dir);  // bf_f
 
 namespace {
 
-constexpr int kMenuArtVersion = 2;  // 2: the Xbox bumpers and triggers (12 Nov 2026)
+constexpr int kMenuArtVersion = 3;  // 2: the Xbox bumpers and triggers (12 Nov 2026); 3: the crosshairs, the minimap's ring
 constexpr const char* kMapIconsFile = "icons-1.png";  // the pause menu map's icons; its number follows the letters' look
 
 struct Picture {
@@ -1218,6 +1218,18 @@ void ExtractMenuArt(const fs::path& game, const fs::path& out_dir) {
                               {kCq, kCqMeta, "329", "icon_plane_w"},   {kCq, kCqMeta, "337", "icon_jeep_w"},
                               {kCq, kCqMeta, "333", "icon_boat_w"}});
       if (CutWhole(a, dir, "textures/ui/minimap/minimapcompass.res", "compass", true)) ++made;
+      // 0.4.2: the game's own crosshairs and minimap ring, for the pictures over Gameplay's HUD scale and Minimap
+      // size rows (game_menu_settings.inc): every sprite of the crosshair movie's atlas by its number.
+      {
+        static const char* kX = "menu/hud_crosshair_textures_xenon/atlas0.res";
+        static const char* kXMeta = "menu/hud_crosshair_textures_xenon/atlas_meta.dbx";
+        if (CutWhole(a, dir, kX, "xhair_atlas", false)) ++made;
+        for (const auto& [id, rect] : AtlasRects(a, kXMeta)) {
+          const std::string out = "xhair_" + id;
+          made += CutAll(a, dir, {{kX, kXMeta, id.c_str(), out.c_str()}});
+        }
+        if (CutWhole(a, dir, "textures/ui/minimap/minimapoverlaycircle.res", "minimap_ring", true)) ++made;
+      }
     }
   }
   if (MakePaper(out_dir)) ++made;

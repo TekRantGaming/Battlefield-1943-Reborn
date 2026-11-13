@@ -74,11 +74,12 @@
     float top = pa.y + st(6);
     if (sub_ != kSubNone) {  // a page under Controls: its name over its rows
       kit::Spaced(d, f.typed, st(8), ImVec2(pa.x + st(18), pa.y + st(14)), kit::kInkSection,
-                  sub_ == kSubRemap ? "CONTROLS \xC2\xB7 BUTTON REMAPPING" : "CONTROLS \xC2\xB7 KEYBOARD AND MOUSE BINDINGS", st(2));
+                  sub_ == kSubRemap ? "CONTROLS \xC2\xB7 BUTTON REMAPPING" : "CONTROLS \xC2\xB7 REMAP", st(2));
       top = pa.y + st(32);
     }
     const float list_bottom = pb.y - st(6), rh = st(33), sh = st(28), strip_h = st(58);
     auto is_strip = [](const SettingRow& r) { return r.name == "Graphics preset" && !r.options.empty(); };
+    auto extra_h = [&](const SettingRow& r) { return r.preview == 1 ? st(132) : r.preview == 2 ? st(112) : 0.0f; };  // a picture over the row (0.4.2)
     std::vector<float> ys(size_t(count), 0.0f);
     float total = 0;
     {
@@ -86,13 +87,13 @@
       for (int i = 0; i < count; ++i) {
         if (rows[size_t(i)].section != section) section = rows[size_t(i)].section, total += sh;
         ys[size_t(i)] = total;
-        total += is_strip(rows[size_t(i)]) ? strip_h : rh;
+        total += is_strip(rows[size_t(i)]) ? strip_h : rh + extra_h(rows[size_t(i)]);
       }
     }
     const float view = list_bottom - top;
     if (ImGui::IsMouseHoveringRect(pa, pb) && io.MouseWheel != 0) scroll_ -= io.MouseWheel * rh * 2;
     if (in.up || in.down || in.prev_tab || in.next_tab) {  // the chosen row kept in view, its section's name with it
-      const float h = is_strip(rows[size_t(row_)]) ? strip_h : rh;
+      const float h = is_strip(rows[size_t(row_)]) ? strip_h : rh + extra_h(rows[size_t(row_)]);
       if (ys[size_t(row_)] - scroll_ < sh) scroll_ = std::max(0.0f, ys[size_t(row_)] - sh);
       if (ys[size_t(row_)] + h - scroll_ > view) scroll_ = ys[size_t(row_)] + h - view;
     }
@@ -102,21 +103,24 @@
     const float x0 = pa.x, x1 = pb.x, tx0 = pa.x + st(18), tx1 = pb.x - st(18), size = st(13);
     for (int i = 0; i < count; ++i) {
       const SettingRow& it = rows[size_t(i)];
-      const float y = top + ys[size_t(i)] - scroll_;
+      const float y_row = top + ys[size_t(i)] - scroll_, ex = extra_h(it);
+      const float y = y_row + ex;  // the row's own line, under its picture
       const float h = is_strip(it) ? strip_h : rh;
       if (it.section != section) {
         section = it.section;
-        kit::Spaced(d, f.typed, st(8), ImVec2(tx0, y - sh + st(9)), kit::kInkSection, Upper(section), st(2));
-        d->AddLine(ImVec2(tx0, y - st(3)), ImVec2(tx1, y - st(3)), kit::kRule, 1.0f);
+        kit::Spaced(d, f.typed, st(8), ImVec2(tx0, y_row - sh + st(9)), kit::kInkSection, Upper(section), st(2));
+        d->AddLine(ImVec2(tx0, y_row - st(3)), ImVec2(tx1, y_row - st(3)), kit::kRule, 1.0f);
         if (!it.slots.empty()) {  // the bindings' columns: two keys, two mouse buttons
-          const float bw = st(82), gap = st(6), pair = st(14);
+          const float bw = st(66), gap = st(6), pair = st(14);
           const float mouse_x = tx1 - 2 * bw - gap, keys_x = mouse_x - pair - 2 * bw - gap;
-          kit::Spaced(d, f.typed, st(8), ImVec2(keys_x, y - sh + st(9)), kit::kInkSection, "KEYBOARD", st(2));
-          kit::Spaced(d, f.typed, st(8), ImVec2(mouse_x, y - sh + st(9)), kit::kInkSection, "MOUSE", st(2));
+          if (it.slots.size() == 5)
+            kit::Spaced(d, f.typed, st(7), ImVec2(keys_x - 2 * pair - bw, y_row - sh + st(10)), kit::kInkSection, "CONTROLLER", st(1.2f));
+          kit::Spaced(d, f.typed, st(8), ImVec2(keys_x, y_row - sh + st(9)), kit::kInkSection, "KEYBOARD", st(2));
+          kit::Spaced(d, f.typed, st(8), ImVec2(mouse_x, y_row - sh + st(9)), kit::kInkSection, "MOUSE", st(2));
         }
       }
-      if (y + h < top || y > list_bottom) continue;
-      const ImVec2 r0(x0, y), r1(x1, y + h);
+      if (y + h < top || y_row > list_bottom) continue;
+      const ImVec2 r0(x0, y_row), r1(x1, y + h);
       const bool hover = ImGui::IsMouseHoveringRect(r0, r1) && ImGui::IsMouseHoveringRect(ImVec2(pa.x, top), ImVec2(pb.x, list_bottom));
       if (hover && io.MouseDelta.x + io.MouseDelta.y != 0 && slider_drag_ < 0) row_ = i;
       const bool sel = i == row_;
@@ -192,14 +196,71 @@
       }
       const ImU32 ink = sel ? kit::kCream : it.disabled ? kit::kInkFaint : kit::kInk;
       const float ty = y + (rh - size * 1.45f) * 0.5f;
+      if (it.preview) {
+        // 0.4.2: what the row changes, drawn at its size. 1: the crosshairs on foot, at a gun and in a plane, at the
+        // HUD's scale; 2: the minimap small, medium and large, the chosen one lit.
+        const ImVec2 p0(tx0, y_row + st(6)), p1(tx1, y_row + ex - st(2));
+        d->AddRectFilled(p0, p1, IM_COL32(38, 44, 36, 255));
+        d->AddRect(p0, p1, kit::kBorder, 0, 0, 1.0f);
+        const float cy = (p0.y + p1.y) * 0.5f - st(5), third = (p1.x - p0.x) / 3.0f;
+        const ImU32 white = IM_COL32(245, 245, 240, 255), dim = IM_COL32(245, 245, 240, 90);
+        auto label = [&](int k, const char* t, bool lit) {
+          const float w = kit::SpacedWidth(f.typed, st(7), t, st(1.5f));
+          kit::Spaced(d, f.typed, st(7), ImVec2(p0.x + third * (float(k) + 0.5f) - w * 0.5f, p1.y - st(13)),
+                      lit ? kit::kCream : kit::kKhakiDim, t, st(1.5f));
+        };
+        // The game's own art ("use the actual crosshair and minimap meshes"): the sprites of its crosshair movie's
+        // atlas and its minimap's compass, extracted from the player's game files (shader_prep.cpp ExtractMenuArt), at
+        // half their size on the game's 720 line screen, so the three keep their sizes against each other.
+        const fs::path art = UserDir() / "cache" / "extracted" / "menu";
+        // A sprite about c (corner: one quarter of a whole, its inner corner at c, mirrored by fx and fy).
+        auto sprite = [&](const char* name, ImVec2 c, float k, bool corner, bool fx, bool fy, ImU32 tint) {
+          ImVec2 u0, u1;
+          int w = 0, h = 0;
+          if (!kit::ImageFileUv(art / name, u0, u1, w, h) || w < 1 || h < 1) return false;
+          const float sw = float(w) * st.u * k, sh2 = float(h) * st.u * k;
+          const ImVec2 at = corner ? ImVec2(fx ? c.x : c.x - sw, fy ? c.y : c.y - sh2) : ImVec2(c.x - sw * 0.5f, c.y - sh2 * 0.5f);
+          d->AddImage(io.Fonts->TexRef, at, ImVec2(at.x + sw, at.y + sh2), ImVec2(fx ? u1.x : u0.x, fy ? u1.y : u0.y),
+                      ImVec2(fx ? u0.x : u1.x, fy ? u0.y : u1.y), tint);
+          return true;
+        };
+        if (it.preview == 1) {
+          const float k = 0.5f * it.val / 100.0f;
+          const ImU32 full = IM_COL32(255, 255, 255, 255);
+          const ImVec2 c0(p0.x + third * 0.5f, cy), c1(p0.x + third * 1.5f, cy), c2(p0.x + third * 2.5f, cy);
+          sprite("xhair_68.png", c0, k, false, false, false, full);  // on foot: the soldier's cross
+          sprite("xhair_61.png", c1, k, false, false, false, full);  // a gun's ring
+          sprite("xhair_58.png", c1, k, false, false, false, full);
+          for (int q = 0; q < 4; ++q) sprite("xhair_105.png", c2, k, true, (q & 1) != 0, (q & 2) != 0, full);  // a plane's sight: four quarters
+          sprite("xhair_58.png", c2, k, false, false, false, full);
+          label(0, "ON FOOT", true), label(1, "TURRET", true), label(2, "PLANE", true);
+        } else {
+          static const char* kNames[3] = {"SMALL", "MEDIUM", "LARGE"};
+          for (int k = 0; k < 3; ++k) {
+            const bool on = it.index == k;
+            const float size = 0.27f * (0.75f + 0.25f * float(k));
+            const ImVec2 c(p0.x + third * (float(k) + 0.5f), cy);
+            sprite("minimap_ring.png", c, size * 0.86f, false, false, false, on ? IM_COL32(58, 92, 120, 255) : IM_COL32(48, 62, 72, 200));
+            if (!sprite("compass.png", c, size, false, false, false, on ? white : IM_COL32(255, 255, 255, 120)))
+              d->AddCircle(c, st(30) * size / 0.27f, on ? white : dim, 40, 1.0f);
+            d->AddTriangleFilled(ImVec2(c.x, c.y - st(5)), ImVec2(c.x - st(3.5f), c.y + st(4)), ImVec2(c.x + st(3.5f), c.y + st(4)),
+                                 on ? IM_COL32(122, 196, 70, 255) : dim);
+            label(k, kNames[k], on);
+          }
+        }
+      }
+      if (it.slots.size() == 5) d->PushClipRect(ImVec2(tx0, y), ImVec2(tx1 - 5 * st(66) - 4 * st(6) - 2 * st(14) - st(8), y + rh), true);
       d->AddText(f.ui, size, ImVec2(tx0, ty), ink, it.name.c_str());
+      if (it.slots.size() == 5) d->PopClipRect();
       if (!it.slots.empty()) {
         // A binding: its four slots as boxes (13 Nov 2026). A click on one, or A on the one left and right are on,
         // makes it wait for a press; the waiting one is red.
-        const float bw = st(82), gap = st(6), pair = st(14);
         const int n = int(it.slots.size());
+        const float bw = n == 5 ? st(66) : st(82), gap = st(6), pair = st(14);
         for (int k = 0; k < n; ++k) {
-          const float right = tx1 - float(n - 1 - k) * (bw + gap) - (k < 2 ? pair : 0.0f);
+          // from the right: the mouse's pair, the keyboard's pair, and (five slots) the controller's one
+          const int from_right = n - 1 - k;
+          const float right = tx1 - float(from_right) * (bw + gap) - (from_right >= 4 ? 2 * pair : from_right >= 2 ? pair : 0.0f);
           const ImVec2 b0(right - bw, y + st(5)), b1(right, y + rh - st(5));
           const bool over = hover && ImGui::IsMouseHoveringRect(b0, b1);
           const bool waiting = it.slot_capture == k, cursor = sel && it.slot_cursor == k;
@@ -390,21 +451,40 @@
     d->AddRect(ra, rb, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
     {
       float y = ra.y;
-      const float h = st(53);
+      // 0.4.2: a category under the mouse is lit, as the menus' rows are; its caption wraps inside the rail.
+      const float cap = st(6.5f), track = st(1.2f), room = rb.x - ra.x - st(32);
+      auto caption_lines = [&](const std::string& t) {
+        std::vector<std::string> lines(1);
+        for (size_t at = 0; at < t.size();) {
+          const size_t end = std::min(t.find(' ', at), t.size());
+          const std::string word = t.substr(at, end - at);
+          const std::string tried = lines.back().empty() ? word : lines.back() + " " + word;
+          if (!lines.back().empty() && kit::SpacedWidth(f.typed, cap, tried, track) > room) lines.push_back(word);
+          else lines.back() = tried;
+          at = end + 1;
+        }
+        return lines;
+      };
       for (int t = 0; t < kTabCount; ++t) {
+        const std::vector<std::string> lines = caption_lines(kTabSubs[t]);
+        const float h = st(53) + st(10) * float(lines.size() - 1);
         const ImVec2 a(ra.x, y), b(rb.x, y + h);
         const bool sel = t == tab_;
+        const bool over = !sel && ImGui::IsMouseHoveringRect(a, b);
         if (sel) {
           kit::PaperArt(d, a, b);
           d->AddRectFilled(a, ImVec2(a.x + st(5), b.y), kit::kStamp);
+        } else if (over) {
+          d->AddRectFilled(a, b, IM_COL32(241, 234, 211, 30));
+          d->AddRectFilled(a, ImVec2(a.x + st(5), b.y), IM_COL32(241, 234, 211, 110));
         }
         d->AddRectFilled(ImVec2(a.x, b.y - 1), ImVec2(b.x, b.y), IM_COL32(241, 234, 211, 20));
-        kit::GameText(d, kit::GameFont::kHeadlineMedium, st(15), ImVec2(a.x + st(20), a.y + st(10)), sel ? kit::kInk : kit::kKhaki,
-                      kTabNames[t]);
-        kit::Spaced(d, f.typed, st(6.5f), ImVec2(a.x + st(20), a.y + st(34)), sel ? kit::kInkSection : kit::kKhakiDim, kTabSubs[t],
-                    st(1.2f));
-        if (!sel && ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-          tab_ = t, row_ = 0, scroll_ = 0, sub_ = kSubNone;
+        kit::GameText(d, kit::GameFont::kHeadlineMedium, st(15), ImVec2(a.x + st(20), a.y + st(10)),
+                      sel ? kit::kInk : over ? kit::kCream : kit::kKhaki, kTabNames[t]);
+        for (size_t l = 0; l < lines.size(); ++l)
+          kit::Spaced(d, f.typed, cap, ImVec2(a.x + st(20), a.y + st(34) + st(10) * float(l)),
+                      sel ? kit::kInkSection : over ? kit::kKhaki : kit::kKhakiDim, lines[l], track);
+        if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) tab_ = t, row_ = 0, scroll_ = 0, sub_ = kSubNone;
         y += h;
       }
       // The PC: its graphics card (as the renderer named it for the NIS check), its display, the preset the auto
@@ -460,15 +540,7 @@
         x += w - st(3);
         return over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && capture_.empty();
       };
-      open_remap = false;
-      {
-        const float x0 = x;
-        const float kw = kit::SpacedWidth(f.ui_bold, size, "KEYBINDS", st(1.5f)) + st(44);
-        x = x0 + kw - st(3);
-        open_remap = folder_tab("REMAP GAMEPAD");  // behind
-        x = x0;
-        open_keys = folder_tab("KEYBINDS");  // in front
-      }
+      open_keys = folder_tab("REMAP");  // 0.4.2: one page, the controller's column beside the keyboard's and the mouse's
       pa.y += h;
     }
     if (graphics) {  // Apply settings and Restore defaults under the rows
@@ -483,7 +555,7 @@
     // ---- the actions
     if (edit || in.view) return BeginAccount(false);
     if (controls && (open_keys || in.x)) sub_ = kSubKeys, row_ = 0, scroll_ = 0;
-    else if (controls && (open_remap || in.y)) sub_ = kSubRemap, row_ = 0, scroll_ = 0;
+    else if (controls && open_remap) sub_ = kSubRemap, row_ = 0, scroll_ = 0;
     if (graphics && (apply || in.y)) ApplyGraphicsPending();
     else if (graphics && (defaults || (in.x && !preset_back))) RestoreGraphicsDefaults();
     else if (in.x && preset_back) PresetBack();
