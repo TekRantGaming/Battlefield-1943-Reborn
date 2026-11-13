@@ -2475,7 +2475,7 @@
       } else if (i == kPmMap) {
         value_text(kPmMapNames[pm_map_], true, false);
       } else if (i == kPmTick) {
-        value_text(std::to_string(pm_tick_) + (pm_tick_ > 60 ? " HZ \xC2\xB7 EXPERIMENTAL" : pm_tick_ == 30 ? " HZ \xC2\xB7 XBOX 360" : " HZ"),
+        value_text(std::to_string(pm_tick_) + " HZ " + "Â·" + (pm_tick_ > 60 ? " EXPERIMENTAL" : pm_tick_ == 30 ? " ORIGINAL" : " DEFAULT"),
                    true, false);
       } else if (i == kPmNet) {
         value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
@@ -2520,7 +2520,7 @@
           "you want another. For an Online match, open it on your router for friends outside your home.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
           "server browser: the pause copies the address for you. The match ends when you leave it.",
-          "How many times a second the match is simulated. 60 is the default; 30 is the Xbox 360's. 75 and 100 are "
+          "How many times a second the match is simulated. 60 is the default; 30 is the original game's. 75 and 100 are "
           "experimental: untested, and they ask more of your PC and of every player's connection. A player's game "
           "takes the match's rate when it joins."};
       kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, kTitles[pm_row_], st(2));
