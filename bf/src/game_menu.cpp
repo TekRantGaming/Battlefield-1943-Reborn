@@ -944,6 +944,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       auto_joined_ = true, QuickJoin();
     PrivateMatchTick();  // our Create Private Match: its server's state, the join, its end
     TickRejoinTick();    // the join asked for before a restart at the server's tick rate
+    if (team_suicide_at_ > 0 && ImGui::GetTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
+      team_suicide_at_ = -1;
+      REXLOG_INFO("BF pause: the game's suicide after the change of team, to spawn at the new base");
+      SuicideNow();
+    }
     // The server list is wanted (server_list.h Want) by a match being played and the friends page here; the browser
     // and Quick Play ask for it themselves.
     if (!joined_gid_.empty() || page_ == Page::kFriends) list_.Want();
@@ -4101,11 +4106,28 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // game's own commands; docs/MENUS-PLAN.md). The game's own pause is never opened: Start reaches ours only
   // (auto_join.cpp), the match goes on behind it darkened (multiplayer), and the game reads an empty pad meanwhile.
   // Exit Game and Suicide ask first, as the game's did, then send doExitLevel and suicide.
-  static constexpr const char* kPauseRows[] = {"RESUME",   "MY SQUAD",     "SCOREBOARD",   "SETTINGS", "CONTROLS",
-                                               "LEADERBOARDS", "ACHIEVEMENTS", "EXIT GAME", "SUICIDE"};
-  static constexpr int kPauseResume = 0, kPauseSquad = 1, kPauseScoreboard = 2, kPauseSettingsRow = 3,
-                       kPauseControls = 4, kPauseLeaderboards = 5, kPauseAchievements = 6, kPauseExit = 7,
-                       kPauseSuicide = 8;
+  // 13 Nov 2026 ("I don't see a way to change teams in-game"): Change Team, by the game's own selectTeam (the
+  // console's game had no such row; a developer's test here has used the command since the comms work). The switch
+  // leaves the soldier where it stands, so the game's suicide follows two seconds later and the player spawns at the
+  // new team's base.
+  static constexpr const char* kPauseRows[] = {"RESUME",   "MY SQUAD",     "CHANGE TEAM",  "SCOREBOARD", "SETTINGS",
+                                               "CONTROLS", "LEADERBOARDS", "ACHIEVEMENTS", "EXIT GAME",  "SUICIDE"};
+  static constexpr int kPauseResume = 0, kPauseSquad = 1, kPauseTeam = 2, kPauseScoreboard = 3, kPauseSettingsRow = 4,
+                       kPauseControls = 5, kPauseLeaderboards = 6, kPauseAchievements = 7, kPauseExit = 8,
+                       kPauseSuicide = 9;
+  double team_suicide_at_ = -1;  // after a change of team: the suicide that sends the soldier to its new base
+  void ChangeTeamNow() {
+    const int mine = comms::Team();
+    if (mine != 1 && mine != 2) {
+      REXLOG_WARN("BF pause: Change Team, but the player's team is not known yet");
+      menu_error_ = "Your team is not known yet. Try again once you have spawned.", menu_error_at_ = ImGui::GetTime();
+      return;
+    }
+    const int other = 3 - mine;
+    REXLOG_INFO("BF pause: Change Team, from team {} to {} (the game's own selectTeam)", mine, other);
+    GameCommand("selectTeam", std::to_string(other));
+    team_suicide_at_ = ImGui::GetTime() + 2.0;
+  }
   bool ach_from_pause_ = false;  // the achievements opened from the pause: B goes back there
   int pause_confirm_ = -1;  // the row whose question is up (Exit Game, Suicide), else -1
 
@@ -4138,7 +4160,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     } else if (row == kPauseAchievements) {
       LoadTestProfile();
       page_ = Page::kAchievements, ach_scroll_ = 0, ach_from_pause_ = true;
-    } else if (row == kPauseExit || row == kPauseSuicide) {
+    } else if (row == kPauseExit || row == kPauseSuicide || row == kPauseTeam) {
       pause_confirm_ = row;
     }
   }
@@ -4233,6 +4255,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         return;
       }
       if (in.back) pause_confirm_ = -1;
+    } else if (pause_confirm_ == kPauseTeam) {
+      pause_confirm_ = -1;
+      ChangeTeamNow();
+      open_ = false;
+      return;
     } else if (pause_confirm_ >= 0) {
       const bool exit = pause_confirm_ == kPauseExit;
       const float w = 760 * u, h = 300 * u;

@@ -19,6 +19,7 @@ void NoteTeam(int team, int squad);  // the local player's team (1, 2; 0 not kno
 void ReadTeam(const uint8_t* base, bool level_loaded);  // auto_join.cpp's pad read: NoteTeam from the game's player
 int Team();   // 0 while not known
 int Squad();  // 0 none, else the game's squad number + 1
+int Team();   // the local player's team: 1 or 2, 0 while not known
 
 // For the overlay (comms_ui.cpp).
 struct ChatLine {

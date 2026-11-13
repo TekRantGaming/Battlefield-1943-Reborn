@@ -203,6 +203,7 @@
       std::string note;
       if (i == kPauseSuicide) note = "RESPAWN AT A FLAG";
       else if (i == kPauseSquad) note = comms::Squad() > 0 ? fmt::format("SQUAD {}", comms::Squad()) : "NO SQUAD";
+      else if (i == kPauseTeam) note = "TO THE OTHER SIDE";
       if (sel) {
         kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(b.x - st(18) - st(20), a.y + h * 0.5f), st(20));
       } else if (!note.empty()) {
@@ -237,6 +238,18 @@
         return;
       }
       if (in.back) pause_confirm_ = -1;
+    } else if (pause_confirm_ == kPauseTeam) {
+      const int r = PauseCard(d, io, st, in, clicked >= 0, "CHANGE TEAM", "SWITCH SIDES?",
+                              "You join the other team. Your soldier dies and you spawn at your new team's base; it "
+                              "counts as a death. A server may refuse it to keep the teams even.",
+                              "YES", kit::Button::kA, "NO", kit::Button::kB);
+      if (r == 1) {
+        pause_confirm_ = -1;
+        ChangeTeamNow();
+        open_ = false;
+        return;
+      }
+      if (r == 0) pause_confirm_ = -1;
     } else if (pause_confirm_ >= 0) {
       const bool exit = pause_confirm_ == kPauseExit;
       const int r = PauseCard(d, io, st, in, clicked >= 0, exit ? "EXIT GAME" : "SUICIDE", exit ? "LEAVE THIS MATCH?" : "END THIS LIFE?",

@@ -1059,6 +1059,7 @@ void ReadTeam(const uint8_t* base, bool level_loaded) {
 }
 int Team() { return g_team.load(std::memory_order_relaxed); }
 int Squad() { return g_squad.load(std::memory_order_relaxed); }
+int Team() { return g_team.load(std::memory_order_relaxed); }
 void NoteJoined(const std::string& address) {
   {
     std::lock_guard lock(g_mutex);
