@@ -2859,10 +2859,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     rows.push_back(Choice("Image", "Antialiasing",
                           "Smooths jagged edges. FXAA is the lightest and softens the whole picture a little. SMAA "
                           "finds the edges and smooths only those, so textures and text stay sharp: Low and Medium "
-                          "are faster, High and Ultra search further along each edge. Applies at the next start.",
+                          "are faster, High and Ultra search further along each edge. CMAA 2 (Intel's) smooths "
+                          "edges and long slanted lines while leaving everything else untouched, the sharpest of the "
+                          "three; Ultra catches fainter edges. Applies at the next start.",
                           "native_x_renderer_antialiasing",
                           {{"Off", "off"}, {"FXAA", "fxaa"}, {"SMAA Low", "smaa_low"}, {"SMAA Medium", "smaa_medium"},
-                           {"SMAA High", "smaa_high"}, {"SMAA Ultra", "smaa_ultra"}}));
+                           {"SMAA High", "smaa_high"}, {"SMAA Ultra", "smaa_ultra"}, {"CMAA 2", "cmaa"},
+                           {"CMAA 2 Ultra", "cmaa_ultra"}}));
     // Upscaling: King Kong's Upscaler and Upscaler mode rows and their words (TekRantGaming, 11 Nov 2026, v0.2.1: AMD FSR 1 and
     // NVIDIA NIS, "copy exactly that"). NativeXRenderer scales the drawn picture up to the screen with them (D115, on
     // Vulkan, so NIS can run on Linux too: King Kong's NIS is in its Direct3D 12 presenter, Windows only). Off draws the
@@ -4644,7 +4647,7 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   // (SMAA, DLAA, DLSS, FSR 3.1); no frame generation (it needed those).
   if (!REXCVAR_GET(server)) {
     const std::string aa = rex::cvar::GetFlagByName("native_x_renderer_antialiasing");
-    if (aa != "off" && aa != "fxaa" && aa.rfind("smaa", 0) != 0)
+    if (aa != "off" && aa != "fxaa" && aa.rfind("smaa", 0) != 0 && aa.rfind("cmaa", 0) != 0)
       rex::cvar::SetFlagByName("native_x_renderer_antialiasing", "fxaa");
     rex::cvar::SetFlagByName("native_x_renderer_frame_generation", "false");
   }

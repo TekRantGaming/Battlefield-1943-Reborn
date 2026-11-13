@@ -270,6 +270,9 @@ class Bf1943App : public rex::ReXApp {
       bf1943::SetLevelGameRoot(p.game_data_root);
       bf1943::HdExport(p.game_data_root);  // developer: BF_DEV_HD_EXPORT, the HD pack's source pictures
       bf1943::HdExportUi(p.game_data_root);  // BF_HD_EXPORT_UI: the menu and HUD pictures for the pack
+      // NXR_SHADER_TEST=1 (a developer's check): the renderer's CMAA shaders compiled, the count of failures the
+      // exit code, and no game.
+      if (const char* v = std::getenv("NXR_SHADER_TEST"); v && *v == '1') std::_Exit(native_x_renderer::TestUtilityShaders());
       // An imported HD texture pack (Settings > Graphics): the renderer reads it when HD textures are on (D149).
       {
         std::error_code ec;

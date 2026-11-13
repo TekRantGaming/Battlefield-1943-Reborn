@@ -264,6 +264,9 @@ void StorageProgress(uint32_t* queued, uint32_t* done, uint32_t* loading, uint32
 using TexturePatchFn = bool (*)(uint32_t width, uint32_t height, const uint8_t* guest_data, std::vector<uint8_t>& rgba,
                                 bool again, uint32_t scale, const uint8_t* hd_base);
 void SetTexturePatcher(TexturePatchFn fn);
+// Compiles the antialiasing passes' compute shaders (CMAA 2) without a device and logs the result: how many of them
+// failed (a developer's check that needs no window; NXR_SHADER_TEST=1 in Battlefield 1943 Reborn).
+int TestUtilityShaders();
 // D160: the textures the patcher took are offered to it again before the next draw, for pictures that follow the
 // game's state (Battlefield 1943's keyboard prompts: the keys of a vehicle's seat differ from a soldier's on foot).
 // From any thread.

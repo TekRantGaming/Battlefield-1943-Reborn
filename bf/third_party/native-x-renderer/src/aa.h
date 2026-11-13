@@ -34,8 +34,9 @@ namespace native_x_renderer {
 
 class Antialiasing {
  public:
-  enum class Mode { kOff, kFxaa, kSmaa };
-  // "off", "fxaa" or "smaa"; anything else is SMAA (logged).
+  enum class Mode { kOff, kFxaa, kSmaa, kCmaa };
+  // "off", "fxaa", "smaa" (and its presets) or "cmaa" (cmaa_low, cmaa_medium, cmaa, cmaa_ultra: Intel's CMAA 2,
+  // cmaa_shaders.h); anything else is SMAA (logged).
   static Mode ParseMode(std::string_view name);
   static const char* ModeName(Mode mode);
 
@@ -75,6 +76,11 @@ class Antialiasing {
     uint32_t width = 0, height = 0;
     Diligent::TEXTURE_FORMAT format = Diligent::TEX_FORMAT_UNKNOWN;
     Diligent::RefCntAutoPtr<Diligent::ITexture> color, edges, weights;
+    // CMAA 2: the changed pixels (alpha 1), each 2x2 quad's list head (`edges` holds its packed edges, two pixels
+    // to a texel), and its lists.
+    Diligent::RefCntAutoPtr<Diligent::ITexture> resolved, heads;
+    Diligent::RefCntAutoPtr<Diligent::IBuffer> candidates, items, locations;
+    uint32_t candidates_max = 0, items_max = 0, locations_max = 0;
     uint64_t used = 0;  // the application that used it last (0: never)
   };
   // The set for this size and format: kept, or made in place of the set used longest ago. nullptr if that failed.
@@ -85,6 +91,11 @@ class Antialiasing {
   Mode mode_ = Mode::kOff;
   Diligent::RefCntAutoPtr<Diligent::IBuffer> constants_;
   Pass smaa_edges_, smaa_weights_;
+  // CMAA 2 (cmaa_shaders.h): its compute passes, constants, counters and indirect arguments.
+  bool CreateCompute(Pass& pass, const char* name, const char* body);
+  void ApplyCmaa(Diligent::IDeviceContext* context, Textures& set, Diligent::ITextureView* color);
+  Pass cmaa_edges_, cmaa_args_, cmaa_process_, cmaa_apply_;
+  Diligent::RefCntAutoPtr<Diligent::IBuffer> cmaa_constants_, cmaa_control_, cmaa_indirect_;
   std::map<Diligent::TEXTURE_FORMAT, Pass> output_passes_;  // SMAA neighborhood blending, or FXAA
   Diligent::RefCntAutoPtr<Diligent::ITexture> area_, search_;
   Textures textures_[2];
