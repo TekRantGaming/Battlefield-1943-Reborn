@@ -373,9 +373,9 @@
                              {kit::Button::kLB, "SECTION"},
                              {kit::Button::kRB, "SECTION"}};
     if (preset_back) cues.push_back({kit::Button::kX, "BACK TO " + Upper(last_preset)});
-    if (graphics) cues.push_back({kit::Button::kY, "APPLY"});
-    if (graphics && !preset_back) cues.push_back({kit::Button::kX, "RESTORE DEFAULTS"});
-    if (controls) cues.push_back({kit::Button::kX, "KEYBINDS"}), cues.push_back({kit::Button::kY, "REMAP GAMEPAD"});
+    // (No prompts for the page's own buttons, 13 Nov 2026: "Remove the extra buttons on the bottom bar". A
+    // controller's Y and X still press them: Apply and Restore defaults on Graphics, Remap gamepad and Keybinds on
+    // Controls.)
     if (restart) cues.push_back({kit::Button::kStart, "RESTART TO APPLY", "P", true});
     cues.push_back({kit::Button::kB, "BACK"});
     Prompts(d, st, st.P(48, 662), cues, in, 15);
