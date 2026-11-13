@@ -17,19 +17,19 @@ themselves, and the servers now only let the newest version in.
 - **Ultrawide screens.** On a 21:9, 32:9 or other wide screen the game fills the screen with a wider view: more to
   each side, nothing stretched. Settings > Display > HUD layout puts the minimap and ammo at the screen's sides
   (Edges) or keeps the whole HUD in 16:9 in the middle (Centered). Menus, the deploy screen and loading screens stay
-  together in the middle. Aspect ratio: Fill screen or Letterbox 16:9, at the next start. By ThatZaliaSGuy
+  together in the middle. Aspect ratio: Fill screen or Letterbox 16:9, at the next start. By [@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy)
   ([pull request 11](../../pull/11)).
 - **Mouse flying.** In planes the mouse moves the stick: right and left roll, forward and back pitch, and the stick
   springs back to the centre when the mouse stops. A and D keep the rudder. Which way is up follows Vertical fly
-  (Settings > Controls > Game controls). By ThatZaliaSGuy ([pull request 11](../../pull/11)).
+  (Settings > Controls > Game controls). By [@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy) ([pull request 11](../../pull/11)).
 - **Free look in vehicles.** In a driver's or passenger's seat the mouse turns the view one to one, as on foot; in
-  third person it turns round the vehicle. Only your own view moves. By ThatZaliaSGuy
+  third person it turns round the vehicle. Only your own view moves. By [@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy)
   ([pull request 11](../../pull/11)).
 - **Sharper mouse aim in vehicles.** Gun aim and plane steering go straight into the game's own input, not through
   a controller stick: no dead zone, and a gun stops when the mouse stops. A controller works as before. By
-  ThatZaliaSGuy ([pull request 11](../../pull/11)).
+  [@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy) ([pull request 11](../../pull/11)).
 - **Create Private Match** is back on the main menu: a match on your own PC for you and your friends, who join with
-  Direct connect. Put back by ThatZaliaSGuy ([pull request 11](../../pull/11)).
+  Direct connect. Put back by [@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy) ([pull request 11](../../pull/11)).
 - **What's new.** After an update the game shows you that version's notes, once, when its shaders are ready.
 - **Server regions and tick rate.** The server browser shows where each server is, with its flag, and its tick rate
   in Hz. A region filter is beside the search box.
@@ -66,7 +66,7 @@ themselves, and the servers now only let the newest version in.
 - **Linux: rough lettering.** The chat, the voice list and the performance overlay were drawn in a small pixel font
   on Linux. They now use a proper one.
 - **Flying with the mouse.** A plane's control surfaces were taken for a gun turret, so the mouse could not fly a
-  plane. By ThatZaliaSGuy ([pull request 11](../../pull/11)).
+  plane. By [@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy) ([pull request 11](../../pull/11)).
 - General bug fixes.
 
 **Known issues**

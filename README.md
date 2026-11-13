@@ -273,7 +273,7 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 ## Credits and licences
 
 - **Battlefield 1943 Reborn** by TekRantGaming and contributors (MIT, [LICENSE](LICENSE)): the port's own code.
-- **ThatZaliaSGuy**: ultrawide screens, mouse flying, free look in vehicles and the mouse written into the game's own
+- **[@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy)**: ultrawide screens, mouse flying, free look in vehicles and the mouse written into the game's own
   input ([pull request 11](../../pull/11)).
 - **ReXGlue SDK** (BSD 3 Clause), derived from Xenia: the recompiler and runtime.
 - **NativeXRenderer** by Gustavo Garcia (MIT): the Vulkan renderer.
