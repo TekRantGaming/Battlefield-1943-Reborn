@@ -367,6 +367,10 @@ void SetAttachedCameraMove(const float* position, const float* move, const float
 // to its weapon view this frame: the world's camera has another); null: none. From the game's thread, each frame it
 // applies.
 void SetWeaponLayerMove(const float* move, float fov_degrees);
+// The game's crosshair not drawn for the next quarter second (Battlefield 1943: aiming down an SMG's own sights, as
+// its rifles and pistols hide it): HUD draws (no depth test) from the crosshair sheet (256 x 256, 8_8_8_8) are left
+// out. From the game's thread, each frame it applies.
+void HideCrosshair();
 
 // The view's 3D drawing is done and its post-processing starts. For the main 3D view, DLAA runs here on its
 // color and depth, and the game's post-processing then reads the antialiased image.

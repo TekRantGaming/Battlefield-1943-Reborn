@@ -241,6 +241,8 @@ REXCVAR_DEFINE_BOOL(bf_smg_sights, false, "BF1943", "SMG zoom: the gun's own sig
 // (game_menu.cpp draws SmgSightTuneText) and are saved for that gun.
 REXCVAR_DEFINE_STRING(bf_smg_sight_us, "-0.0725,0.0135,0.0,0,0,0", "BF1943", "Iron Sight: the Thompson's move, x,y,z,yaw,pitch,roll");
 REXCVAR_DEFINE_STRING(bf_smg_sight_jp, "-0.0725,0.0135,0.0,0,0,0", "BF1943", "Iron Sight: the Type 100's move, x,y,z,yaw,pitch,roll");
+REXCVAR_DEFINE_BOOL(bf_smg_sights_no_crosshair, true, "BF1943",
+                    "Iron Sight: no crosshair while aiming down an SMG's sights, as with the rifles and pistols");
 REXCVAR_DEFINE_BOOL(bf_smg_sight_tune, false, "BF1943", "Iron Sight: line the SMG's sights up with the keyboard while aiming (arrows, Page Up/Down, number pad)");
 namespace {
 std::mutex g_tune_mutex;
@@ -439,6 +441,8 @@ void SmgSights(PPCContext& ctx, uint8_t* base, uint32_t soldier, double fov_degr
   }
 #endif
   if (blend <= 0.001) return;
+  // "remove crosshair when iron sight is being used when zoomed-in, just like the pistols and rifles natively do"
+  if (REXCVAR_GET(bf_smg_sights_no_crosshair) && blend > 0.3) native_x_renderer::HideCrosshair();
   const double k = blend * blend * (3.0 - 2.0 * blend);  // eased
   const double deg = 3.14159265358979 / 180.0;
   const double yaw = v[3] * deg * k, pitch = v[4] * deg * k, roll = v[5] * deg * k;

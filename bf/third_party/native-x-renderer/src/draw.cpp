@@ -664,6 +664,14 @@ void DrawPath::Draw(const StateTracker::Program& vertex_program, const StateTrac
   }
 }
 
+// HideCrosshair (native_x_renderer.h): until when the crosshair sheet's HUD draws are left out.
+namespace {
+std::atomic<int64_t> g_hide_crosshair_until{0};  // steady clock ticks
+}  // namespace
+void RecordHideCrosshair() {
+  g_hide_crosshair_until.store((std::chrono::steady_clock::now() + std::chrono::milliseconds(250)).time_since_epoch().count(),
+                               std::memory_order_relaxed);
+}
 bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const StateTracker::Program& pixel_program,
                             std::span<const Copy> copies, const std::array<HostTarget*, 5>& targets) {
   const rg::RegisterFile& regs = *registers_;
@@ -1613,6 +1621,16 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   // offset that centers the target's guest area in its host size.
   const RenderScale& target_scale = sized->scale;
   float scale_x = target_scale.x, scale_y = target_scale.y, offset_x = 0.0f, offset_y = 0.0f;
+  // HideCrosshair: a HUD draw (no depth test) whose first texture is the crosshair sheet is left out.
+  if (!state.depth_enable && pixel_shader &&
+      g_hide_crosshair_until.load(std::memory_order_relaxed) > std::chrono::steady_clock::now().time_since_epoch().count()) {
+    if (const uint32_t mask = pixel_shader->GetUsedTextureMaskAfterTranslation()) {
+      uint32_t first = 0;
+      while (!(mask & (1u << first))) ++first;
+      const auto fetch = regs.GetTextureFetch(first);
+      if (uint32_t(fetch.format) == 6 && fetch.size_2d.width + 1 == 256 && fetch.size_2d.height + 1 == 256) return false;
+    }
+  }
   HudPlace place;
   place.align = aspect_align_;
   const bool hud_scaling = hud_scale_ != 1.0f || minimap_scale_ != 1.0f;

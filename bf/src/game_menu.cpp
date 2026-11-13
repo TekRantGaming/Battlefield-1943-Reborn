@@ -3799,6 +3799,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "the rifles and pistols do, without the zoom's blur. Only your view changes: where the "
                           "shots go is the same. Applies at once.",
                           "bf_smg_sights", "Zoom In", "Iron Sight"));
+    rows.push_back(Toggle("HUD", "Iron Sight crosshair",
+                          "With SMG aiming at Iron Sight: whether the crosshair shows while you aim down the "
+                          "sights. Hidden is how the rifles and pistols aim. Applies at once.",
+                          "bf_smg_sights_no_crosshair", "Shown", "Hidden"));
 #if defined(BF_INTERNAL_TOOLS)  // an internal build's only
     rows.push_back(Toggle("HUD", "Sight alignment",
                           "For lining the SMG's sights up yourself. On, with SMG aiming at Iron Sight: aim with an "
