@@ -297,6 +297,7 @@ void NoteMapIcon(const uint8_t* base, uint32_t out, uint32_t item) {
   if (!(icon.u1 > icon.u0 && icon.v1 > icon.v0)) return;
   icon.x = LoadF(base, item - 0x30), icon.z = LoadF(base, item - 0x28);
   if (!std::isfinite(icon.x) || !std::isfinite(icon.z)) return;
+  icon.color = Load32(base, item + 8);  // passed to the minimap's sprite draw (sub_8241FA58's r7) with the picture
   icon.flag = x >= 396 || KindOf(kSmall, icon.u0, icon.v0) >= 0;
   const auto now = std::chrono::steady_clock::now();
   std::lock_guard lock(g_mutex);
@@ -403,6 +404,11 @@ std::vector<MapIcon> MapIcons() {
 FlagRect LetteredFlag(int kind, int letter) {
   const Texel t = Lettered(std::clamp(kind, 0, 2), std::clamp(letter, 0, kLetterCount - 1));
   return {t.x, t.y, kFlag, kFlag};
+}
+
+FlagRect PlainFlag(int kind) {
+  const Texel t = kSmall[std::clamp(kind, 0, 2)];
+  return {t.x, t.y, 20, 14};
 }
 
 std::string CapturePointTitle(const std::string& name) {

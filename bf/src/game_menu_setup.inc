@@ -38,7 +38,7 @@
     const ImVec2 ra = st.P(48, 93), rb = st.P(400, 650);
     d->AddRectFilled(ra, rb, IM_COL32(13, 15, 11, 204));
     d->AddRect(ra, rb, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
-    kit::Spaced(d, f.typed, st(8), ImVec2(ra.x + st(20), ra.y + st(16)), kit::kKhakiDim, "FIRST START \xC2\xB7 ABOUT TWO MINUTES", st(2));
+    kit::Spaced(d, f.typed, st(10), ImVec2(ra.x + st(20), ra.y + st(16)), kit::kKhakiDim, "FIRST START \xC2\xB7 ABOUT TWO MINUTES", st(2));
     kit::GameText(d, kit::GameFont::kHeadline, st(30), ImVec2(ra.x + st(20), ra.y + st(32)), kit::kCream, "SETUP");
     float y = ra.y + st(78);
     const float h = st(40);
@@ -55,17 +55,17 @@
       if (done) d->AddRectFilled(n0, n1, kit::kGreen);
       else d->AddRect(n0, n1, cur ? kit::kInk : kit::kKhakiDim, 0, 0, 1.0f);
       const std::string num = std::to_string(n);
-      const float nw = kit::TextWidth(f.ui_bold, st(10), num);
-      d->AddText(f.ui_bold, st(10), ImVec2((n0.x + n1.x - nw) * 0.5f, n0.y + st(2.5f)), done ? kit::kCream : cur ? kit::kInk : kit::kKhakiDim,
+      const float nw = kit::TextWidth(f.ui_bold, st(11.5f), num);
+      d->AddText(f.ui_bold, st(11.5f), ImVec2((n0.x + n1.x - nw) * 0.5f, n0.y + st(2.5f)), done ? kit::kCream : cur ? kit::kInk : kit::kKhakiDim,
                  num.c_str());
       kit::GameText(d, kit::GameFont::kHeadlineMedium, st(12), ImVec2(a.x + st(52), a.y + st(8)),
                     cur ? kit::kInk : done ? kit::kKhaki : kit::kKhakiDim, kSetupRows[i].name);
-      kit::Spaced(d, f.typed, st(6), ImVec2(a.x + st(52), a.y + st(26)), cur ? kit::kInkSection : kit::kKhakiDim, kSetupRows[i].sub,
+      kit::Spaced(d, f.typed, st(7.5f), ImVec2(a.x + st(52), a.y + st(26)), cur ? kit::kInkSection : kit::kKhakiDim, kSetupRows[i].sub,
                   st(1.2f));
       y += h;
     }
-    kit::Spaced(d, f.typed, st(7), ImVec2(ra.x + st(20), rb.y - st(36)), kit::kKhakiDim, "NOTHING IS SENT ANYWHERE.", st(1.5f));
-    kit::Spaced(d, f.typed, st(7), ImVec2(ra.x + st(20), rb.y - st(22)), kit::kKhakiDim, "NO GAME FILES ARE INCLUDED.", st(1.5f));
+    kit::Spaced(d, f.typed, st(8.75f), ImVec2(ra.x + st(20), rb.y - st(36)), kit::kKhakiDim, "NOTHING IS SENT ANYWHERE.", st(1.5f));
+    kit::Spaced(d, f.typed, st(8.75f), ImVec2(ra.x + st(20), rb.y - st(22)), kit::kKhakiDim, "NO GAME FILES ARE INCLUDED.", st(1.5f));
     const SetupPanel p{st.P(427, 93), st.P(1232, 650)};
     kit::PaperArt(d, p.a, p.b);
     MenuFoot(d, st);
@@ -76,11 +76,11 @@
   float SetupTitle(ImDrawList* d, const Stage& st, const SetupPanel& p, int step, const std::string& title, const std::string& text) {
     const kit::Fonts& f = kit::GetFonts();
     const std::string next = kSetupNext[std::clamp(step, 1, kSetupSteps) - 1];
-    kit::Spaced(d, f.typed, st(8), ImVec2(p.a.x + st(24), p.a.y + st(18)), kit::kInkSection,
+    kit::Spaced(d, f.typed, st(10), ImVec2(p.a.x + st(24), p.a.y + st(18)), kit::kInkSection,
                 fmt::format("STEP {} OF {}{}", step, kSetupSteps, next.empty() ? "" : " \xC2\xB7 NEXT: " + next), st(2));
     kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(p.a.x + st(24), p.a.y + st(34)), kit::kInk, title);
     float y = p.a.y + st(34) + st(26) + st(12);
-    if (!text.empty()) y += kit::Wrapped(d, f.ui, st(12.5f), ImVec2(p.a.x + st(24), y), kit::kInk, text, p.b.x - p.a.x - st(48)) + st(10);
+    if (!text.empty()) y += kit::Wrapped(d, f.ui, st(14.25f), ImVec2(p.a.x + st(24), y), kit::kInk, text, p.b.x - p.a.x - st(48)) + st(10);
     return y;
   }
   // A choice card: paper on the paper, a green border and a filled ring when chosen (none of that when it is not
@@ -110,10 +110,10 @@
       d->AddText(f.ui_bold, st(13), ImVec2(a.x + st(20), y), kit::kInk, strong.c_str());
       y += st(22);
     }
-    y += kit::Wrapped(d, f.ui, st(11.5f), ImVec2(a.x + st(20), y), kit::kInk, text, wrap) + st(8);
+    y += kit::Wrapped(d, f.ui, st(13.25f), ImVec2(a.x + st(20), y), kit::kInk, text, wrap) + st(8);
     for (const char* pt : points) {
       d->AddRectFilled(ImVec2(a.x + st(20), y + st(5)), ImVec2(a.x + st(25), y + st(10)), kit::kInk);
-      y += kit::Wrapped(d, f.ui, st(11), ImVec2(a.x + st(32), y), kit::kInkSoft, pt, wrap - st(12)) + st(4);
+      y += kit::Wrapped(d, f.ui, st(12.75f), ImVec2(a.x + st(32), y), kit::kInkSoft, pt, wrap - st(12)) + st(4);
     }
     return hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
   }
@@ -199,8 +199,8 @@
       d->AddText(f.ui_bold, st(13), ImVec2(r0.x + st(46), r0.y + (rh - st(13) * 1.45f) * 0.5f), ink, kOptions[i].second);
       if (i == 0) {
         const std::string now = std::string("Now: ") + kit::StyleName(kit::StyleFor("auto", device_ == Device::kKeyboard));
-        const float nw = kit::TextWidth(f.ui, st(10), now);
-        d->AddText(f.ui, st(10), ImVec2(r1.x - st(14) - nw, r0.y + (rh - st(10) * 1.45f) * 0.5f), sel ? kit::kCream : kit::kInkFaint, now.c_str());
+        const float nw = kit::TextWidth(f.ui, st(11.5f), now);
+        d->AddText(f.ui, st(11.5f), ImVec2(r1.x - st(14) - nw, r0.y + (rh - st(10) * 1.45f) * 0.5f), sel ? kit::kCream : kit::kInkFaint, now.c_str());
       }
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
     }
@@ -208,7 +208,7 @@
       const ImVec2 a(p.a.x + st(410), y0 + st(8)), b(p.b.x - st(16), p.b.y - st(16));
       d->AddRectFilled(a, b, kit::kPaperCard);
       d->AddRect(a, b, kit::kBorder, 0, 0, 1.0f);
-      kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(18), a.y + st(16)), kit::kInkSection, "PREVIEW", st(2));
+      kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(18), a.y + st(16)), kit::kInkSection, "PREVIEW", st(2));
       const kit::Style style = kit::StyleFor(kOptions[prompts_row_].first, device_ == Device::kKeyboard);
       const std::pair<kit::Button, const char*> kShown[] = {
           {kit::Button::kA, "Enter"}, {kit::Button::kB, "Esc"},  {kit::Button::kX, "F"},   {kit::Button::kY, "R"},
@@ -220,7 +220,7 @@
         const float gw = kit::Glyph(d, style, kShown[i].first, kShown[i].second, ImVec2(x, y + st(18)), st(36));
         x += std::max(gw, st(36)) + st(22);
       }
-      kit::Wrapped(d, f.ui, st(10.5f), ImVec2(a.x + st(18), b.y - st(40)), kit::kInkFaint,
+      kit::Wrapped(d, f.ui, st(12), ImVec2(a.x + st(18), b.y - st(40)), kit::kInkFaint,
                    std::string(kit::StyleName(style)) + ": what the prompts look like.", b.x - a.x - st(36));
     }
     if (in.accept) clicked = prompts_row_;
@@ -268,10 +268,10 @@
       clicked = 1;
     {  // the key, on the push to talk card
       const ImVec2 k(b0.x + st(20), b1.y - st(44));
-      kit::Spaced(d, f.typed, st(7.5f), k, kit::kInkSection, capture_.empty() ? "HOLD" : "PRESS A KEY (ESC KEEPS THE OLD ONE)", st(1.5f));
+      kit::Spaced(d, f.typed, st(9.5f), k, kit::kInkSection, capture_.empty() ? "HOLD" : "PRESS A KEY (ESC KEEPS THE OLD ONE)", st(1.5f));
       if (capture_.empty()) {
         const float gw = kit::Glyph(d, kit::Style::kKeyboard, kit::Button::kKey, key.empty() ? "B" : key, ImVec2(k.x + st(40), k.y + st(5)), st(22));
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2(k.x + st(40) + gw + st(12), k.y), kit::kInkSection,
+        kit::Spaced(d, f.typed, st(9.5f), ImVec2(k.x + st(40) + gw + st(12), k.y), kit::kInkSection,
                     device_ == Device::kKeyboard ? "F CHANGES IT" : "X CHANGES IT", st(1.5f));
       }
     }
@@ -279,8 +279,8 @@
       const ImVec2 s0(p.a.x + st(24), p.b.y - st(74)), s1(p.b.x - st(24), p.b.y - st(20));
       d->AddRectFilled(s0, s1, kit::kPaperDim);
       d->AddRectFilled(s0, ImVec2(s0.x + st(4), s1.y), kit::kStamp);
-      kit::Spaced(d, f.typed, st(7.5f), ImVec2(s0.x + st(16), s0.y + st(10)), kit::kStamp, "BOTH TEAMS HEAR YOU", st(1.5f));
-      kit::Wrapped(d, f.ui, st(10.5f), ImVec2(s0.x + st(16), s0.y + st(24)), kit::kInk,
+      kit::Spaced(d, f.typed, st(9.5f), ImVec2(s0.x + st(16), s0.y + st(10)), kit::kStamp, "BOTH TEAMS HEAR YOU", st(1.5f));
+      kit::Wrapped(d, f.ui, st(12), ImVec2(s0.x + st(16), s0.y + st(24)), kit::kInk,
                    fmt::format("Everyone within about {} metres hears you, friend or enemy, from your direction: careful near the "
                                "enemy. Text chat is there too (T to all, Y to your team, U to your squad), and all of it can be "
                                "changed or turned off in Settings, Audio.",
@@ -320,21 +320,21 @@
       const ImVec2 s0(p.a.x + st(24), y), s1(p.b.x - st(24), y + st(50));
       d->AddRectFilled(s0, s1, kit::kPaperDim);
       d->AddRectFilled(s0, ImVec2(s0.x + st(4), s1.y), kit::kStamp);
-      kit::Spaced(d, f.typed, st(7.5f), ImVec2(s0.x + st(16), s0.y + st(10)), kit::kStamp, "FOUND A BUG?", st(1.5f));
-      kit::Wrapped(d, f.ui, st(10.5f), ImVec2(s0.x + st(16), s0.y + st(24)), kit::kInk,
+      kit::Spaced(d, f.typed, st(9.5f), ImVec2(s0.x + st(16), s0.y + st(10)), kit::kStamp, "FOUND A BUG?", st(1.5f));
+      kit::Wrapped(d, f.ui, st(12), ImVec2(s0.x + st(16), s0.y + st(24)), kit::kInk,
                    "Report an issue on the main menu shows your log file and opens our Discord: tell us what you did, what you "
                    "saw and what you expected.",
                    s1.x - s0.x - st(32));
       y = s1.y + st(16);
     }
     if (restart) {
-      y += kit::Wrapped(d, f.ui, st(10.5f), ImVec2(p.a.x + st(24), y), kit::kRed,
+      y += kit::Wrapped(d, f.ui, st(12), ImVec2(p.a.x + st(24), y), kit::kRed,
                         "Some of your graphics settings take effect when the game starts, so it starts again when you finish "
                         "(a few seconds).",
                         wrap) +
            st(12);
     }
-    kit::Spaced(d, f.typed, st(8), ImVec2(p.a.x + st(24), y), kit::kInkSection, "STAY IN THE LOOP \xC2\xB7 THE OFFICIAL COMMUNITIES", st(2));
+    kit::Spaced(d, f.typed, st(10), ImVec2(p.a.x + st(24), y), kit::kInkSection, "STAY IN THE LOOP \xC2\xB7 THE OFFICIAL COMMUNITIES", st(2));
     y += st(18);
     const float cw = (wrap - st(16)) * 0.5f, ch = st(164);
     int card = -1;
@@ -347,7 +347,7 @@
                               : "A shortcut with the game's artwork and controller support in Big Picture."))
       card = 1;
     y += ch + st(14);
-    kit::Wrapped(d, f.ui, st(11), ImVec2(p.a.x + st(24), y), kit::kInkFaint,
+    kit::Wrapped(d, f.ui, st(12.75f), ImVec2(p.a.x + st(24), y), kit::kInkFaint,
                  "Thank you for playing. Everything you chose is in Settings, any time.", wrap);
     CheckSteamOnce();
     if (SteamDialog(d, io, st, in)) return;

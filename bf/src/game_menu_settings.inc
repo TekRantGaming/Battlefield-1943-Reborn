@@ -9,7 +9,9 @@
 
   static constexpr const char* kTabSubs[kTabCount] = {"WINDOW, RESOLUTION, FRAME RATE", "PRESETS, UPSCALING, LIGHTING",
                                                       "VOLUME, VOICE CHAT", "MOUSE, KEYBOARD, CONTROLLER, AIM ASSIST",
-                                                      "NAME, LANGUAGE, CHAT"};
+                                                      "NAME, LANGUAGE, CHAT",
+                                                      // the sniper scope only in a build with it (scope_pip.h)
+                                                      kScopePip ? "LETTERED FLAGS, SNIPER SCOPE" : "LETTERED FLAGS"};
 
   // Back where the settings were opened from: the pause (a match running), else the menu (Home before the game runs).
   void BackFromSettings() {
@@ -73,7 +75,7 @@
     row_ = std::clamp(row_, 0, count - 1);
     float top = pa.y + st(6);
     if (sub_ != kSubNone) {  // a page under Controls: its name over its rows
-      kit::Spaced(d, f.typed, st(8), ImVec2(pa.x + st(18), pa.y + st(14)), kit::kInkSection,
+      kit::Spaced(d, f.typed, st(10), ImVec2(pa.x + st(18), pa.y + st(14)), kit::kInkSection,
                   sub_ == kSubRemap ? "CONTROLS \xC2\xB7 BUTTON REMAPPING" : "CONTROLS \xC2\xB7 REMAP", st(2));
       top = pa.y + st(32);
     }
@@ -108,7 +110,7 @@
       const float h = is_strip(it) ? strip_h : rh;
       if (it.section != section) {
         section = it.section;
-        kit::Spaced(d, f.typed, st(8), ImVec2(tx0, y_row - sh + st(9)), kit::kInkSection, Upper(section), st(2));
+        kit::Spaced(d, f.typed, st(10), ImVec2(tx0, y_row - sh + st(9)), kit::kInkSection, Upper(section), st(2));
         d->AddLine(ImVec2(tx0, y_row - st(3)), ImVec2(tx1, y_row - st(3)), kit::kRule, 1.0f);
         if (!it.slots.empty()) {  // the bindings' columns: two keys, two mouse buttons
           const float bw = st(66), gap = st(6), pair = st(14);
@@ -165,7 +167,7 @@
           d->AddRectFilled(b0, b1, on ? kit::kStrip : cur ? kit::kPaperLight : kit::kPaperDim);
           d->AddRect(b0, b1, cur ? kit::kStamp : on ? kit::kStrip : kit::kBorder, 0, 0, cur ? st(2.5f) : 1.0f);
           const std::string& label = it.options[size_t(o)];
-          const float lw = kit::TextWidth(f.ui_bold, st(12), label);
+          const float lw = kit::TextWidth(f.ui_bold, st(13.75f), label);
           // The prompt on the highlighted one while it is not the preset in use: A (Enter), then its name.
           const float gh = st(17);
           const float gw = cur && !on ? kit::Glyph(nullptr, PromptStyle(), kit::Button::kA, KeyFor(kit::Button::kA), ImVec2(0, 0), gh, false) +
@@ -173,7 +175,7 @@
                                       : 0.0f;
           const float lx = (b0.x + b1.x - lw - gw) * 0.5f;
           if (gw > 0) kit::Glyph(d, PromptStyle(), kit::Button::kA, KeyFor(kit::Button::kA), ImVec2(lx, (b0.y + b1.y) * 0.5f), gh);
-          d->AddText(f.ui_bold, st(12), ImVec2(lx + gw, b0.y + (b1.y - b0.y - st(12) * 1.45f) * 0.5f),
+          d->AddText(f.ui_bold, st(13.75f), ImVec2(lx + gw, b0.y + (b1.y - b0.y - st(12) * 1.45f) * 0.5f),
                      on ? kit::kStripText : kit::kInk, label.c_str());
           if (bh && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked_opt = o;
           bx += bw + gap;
@@ -290,8 +292,8 @@
       const float vw = kit::TextWidth(f.ui_bold, size, shown), vx = tx1 - vw;
       d->AddText(f.ui_bold, size, ImVec2(vx, ty), sel ? kit::kCream : changeable ? kit::kInk : kit::kInkFaint, shown.c_str());
       if (Pending(it)) {  // changed, taken at the next start
-        const float tw = kit::SpacedWidth(f.typed, st(7), "NEXT START", st(1.5f));
-        kit::Spaced(d, f.typed, st(7), ImVec2(vx - st(14) - tw, y + rh * 0.5f - st(4)), sel ? kit::kCream : kit::kStamp, "NEXT START",
+        const float tw = kit::SpacedWidth(f.typed, st(8.75f), "NEXT START", st(1.5f));
+        kit::Spaced(d, f.typed, st(8.75f), ImVec2(vx - st(14) - tw, y + rh * 0.5f - st(4)), sel ? kit::kCream : kit::kStamp, "NEXT START",
                     st(1.5f));
       }
       const float t0 = x0 + (x1 - x0) * 0.48f, tyc = y + rh * 0.5f;
@@ -346,21 +348,21 @@
       const SettingRow& it = rows[size_t(row_)];
       const float wrap = hb.x - ha.x - st(36);
       float y = ha.y + st(18);
-      kit::Spaced(d, f.typed, st(8), ImVec2(ha.x + st(18), y), kit::kInkSection, Upper(it.name), st(2));
+      kit::Spaced(d, f.typed, st(10), ImVec2(ha.x + st(18), y), kit::kInkSection, Upper(it.name), st(2));
       y += st(20);
-      y += kit::Wrapped(d, f.ui, st(11.5f), ImVec2(ha.x + st(18), y), kit::kInk, it.help, wrap) + st(14);
+      y += kit::Wrapped(d, f.ui, st(13.25f), ImVec2(ha.x + st(18), y), kit::kInk, it.help, wrap) + st(14);
       auto note_box = [&](const std::string& t) {  // a boxed note with the red tab
-        const float nh = kit::WrappedHeight(f.ui, st(10.5f), t, wrap - st(28)) + st(20);
+        const float nh = kit::WrappedHeight(f.ui, st(12), t, wrap - st(28)) + st(20);
         const ImVec2 n0(ha.x + st(18), y), n1(hb.x - st(18), y + nh);
         d->AddRectFilled(n0, n1, kit::kPaperDim);
         d->AddRectFilled(n0, ImVec2(n0.x + st(3), n1.y), kit::kStamp);
-        kit::Wrapped(d, f.ui, st(10.5f), ImVec2(n0.x + st(14), n0.y + st(10)), kit::kInk, t, wrap - st(28));
+        kit::Wrapped(d, f.ui, st(12), ImVec2(n0.x + st(14), n0.y + st(10)), kit::kInk, t, wrap - st(28));
         y = n1.y + st(12);
       };
       if (!it.note.empty()) note_box(it.note);
       if (graphics) {
         const auto& presets = GraphicsPresets();
-        kit::Spaced(d, f.typed, st(8), ImVec2(ha.x + st(18), y), kit::kInkSection,
+        kit::Spaced(d, f.typed, st(10), ImVec2(ha.x + st(18), y), kit::kInkSection,
                     preset >= 0 ? "PRESET: " + Upper(presets[size_t(preset)].name) : "PRESET: CUSTOM", st(2));
         y += st(20);
         if (preset < 0 && !last_preset.empty())
@@ -402,7 +404,7 @@
     const bool edit = MenuChrome(d, io, st, status, online_ok);
     CaptureKeyInto(in);
     const bool restart = RestartPending();
-    kit::Spaced(d, f.typed, st(8.5f), st.P(48, 91), restart ? kit::kStamp : kit::kKhakiDim,
+    kit::Spaced(d, f.typed, st(10.5f), st.P(48, 91), restart ? kit::kStamp : kit::kKhakiDim,
                 restart ? "SETTINGS MARKED NEXT START TAKE EFFECT WHEN THE GAME STARTS AGAIN"
                         : "EVERYTHING APPLIES IN GAME \xC2\xB7 SOME AT THE NEXT START",
                 st(2));
@@ -452,7 +454,7 @@
     {
       float y = ra.y;
       // 0.4.2: a category under the mouse is lit, as the menus' rows are; its caption wraps inside the rail.
-      const float cap = st(6.5f), track = st(1.2f), room = rb.x - ra.x - st(32);
+      const float cap = st(8), track = st(1.2f), room = rb.x - ra.x - st(32);
       auto caption_lines = [&](const std::string& t) {
         std::vector<std::string> lines(1);
         for (size_t at = 0; at < t.size();) {
@@ -490,7 +492,7 @@
       // The PC: its graphics card (as the renderer named it for the NIS check), its display, the preset the auto
       // detect chose (the GPU's tier once it is timed in the game; the fast tier's before).
       const float py = y + st(16);
-      kit::Spaced(d, f.typed, st(7.5f), ImVec2(ra.x + st(20), py), kit::kKhakiDim, "YOUR PC \xC2\xB7 AUTO DETECT", st(2));
+      kit::Spaced(d, f.typed, st(9.5f), ImVec2(ra.x + st(20), py), kit::kKhakiDim, "YOUR PC \xC2\xB7 AUTO DETECT", st(2));
       rex::ui::Window* window = window_ ? window_() : nullptr;
       const int monitor = std::atoi(settings_.Get("monitor", "0").c_str());
       const DisplayMode desktop = DesktopDisplayMode(monitor, window);
@@ -500,12 +502,12 @@
                                  : slowness > 0 ? std::string(kTierPresets[TierOf(slowness)])
                                                 : std::string(kTierPresets[2]) + " (not timed yet)";
       auto pc_row = [&](float yy, const char* k, const std::string& v) {
-        d->AddText(f.ui, st(10), ImVec2(ra.x + st(20), yy), kit::kKhakiText, k);
-        float size = st(10);
-        const float room = rb.x - ra.x - st(40) - kit::TextWidth(f.ui, st(10), k) - st(10);
+        d->AddText(f.ui, st(11.5f), ImVec2(ra.x + st(20), yy), kit::kKhakiText, k);
+        float size = st(11.5f);
+        const float room = rb.x - ra.x - st(40) - kit::TextWidth(f.ui, st(11.5f), k) - st(10);
         float vw = kit::TextWidth(f.ui_bold, size, v);
         if (vw > room && vw > 0) size *= std::max(0.7f, room / vw), vw = kit::TextWidth(f.ui_bold, size, v);
-        d->AddText(f.ui_bold, size, ImVec2(rb.x - st(20) - vw, yy + (st(10) - size) * 0.7f), kit::kKhaki, v.c_str());
+        d->AddText(f.ui_bold, size, ImVec2(rb.x - st(20) - vw, yy + (st(11.5f) - size) * 0.7f), kit::kKhaki, v.c_str());
         d->AddRectFilled(ImVec2(ra.x + st(20), yy + st(21)), ImVec2(rb.x - st(20), yy + st(22)), IM_COL32(241, 234, 211, 20));
       };
       pc_row(py + st(18), "Graphics card", gpu.empty() ? "Not known yet" : gpu);

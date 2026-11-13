@@ -9,3 +9,7 @@ https://kenney.nl/assets/input-prompts
 
 Also released under Creative Commons 0 (CC0). Trimmed and resized by
 tools/make_glyphs.py --kenney.
+
+keyboard/MB4.png and keyboard/MB5.png (the mouse's side buttons) are drawn from Xelu's
+keyboard/Mouse_Simple.png by tools/make_mouse_side_glyphs.py, their numbers in Oswald
+(bf/fonts, SIL Open Font Licence).

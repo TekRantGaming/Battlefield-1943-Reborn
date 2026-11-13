@@ -1,6 +1,7 @@
-// The mouse's stick: planes, and vehicle guns and turrets (0.4.1).
+// The mouse's stick: planes (0.4.0, pull request 11 of the players' repository by ThatZaliaSGuy), and vehicle guns and
+// turrets (0.4.1, pull request 16 by the same).
 //
-// The Beachhead project's Modern mouse flight (E:\Projects\Beachhead, vehicle.gd: the pilot's mouse "flies the
+// The Beachhead project's Modern mouse flight (its vehicle.gd: the pilot's mouse "flies the
 // aircraft"), written into the game's input concepts (native_input.cpp), never the pad. Each mouse movement adds
 // counts x sensitivity x 0.02 to a virtual stick; the stick springs back to the centre at 10 a second (Beachhead's
 // flight_mouse.lerp(0, min(10 dt, 1)) each step). So a flick gives a short, firm deflection, a steady pull holds it,
@@ -55,6 +56,7 @@ struct State {
   Clock::time_point updated{};
   Clock::time_point stick_until{};  // a controller's sticks have it until then
   Clock::time_point gun_until{};    // a gun's axes hold this long after its parts were last seen
+  Clock::time_point plane_until{};  // a plane is held this long after its seat was last known (a hitch)
   float roll6 = 0, pitch5 = 0;
   Clock::time_point steered_at{};
   Clock::time_point logged{};
@@ -66,7 +68,7 @@ void Let_go() {
   g.active = false;
   g.axes = 0;
   g.x = g.y = 0;
-  g.updated = {}, g.steered_at = {}, g.gun_until = {};
+  g.updated = {}, g.steered_at = {}, g.gun_until = {}, g.plane_until = {};
 }
 }  // namespace
 
@@ -101,10 +103,15 @@ bool PlaneMouseConcepts(float& roll6, float& pitch5, unsigned& axes) {
 bool PlaneMouse(uint8_t* gamepad, double dx, double dy) {
   SeatInfo seat;
   const bool have_seat = LocalSeat(seat);
-  const bool plane = have_seat && seat.kind == SeatKind::kPlane && REXCVAR_GET(bf_plane_mouse_aim);
-  const unsigned gun = plane ? 0 : VehicleMouseAxes();
+  bool plane = have_seat && seat.kind == SeatKind::kPlane && REXCVAR_GET(bf_plane_mouse_aim);
   std::lock_guard lock(g.mutex);
   const auto now = Clock::now();
+  // A hitch in flight (the seat's mapping older than 200 ms: a frame of 200 ms or more) is not leaving the plane: it
+  // is held for a second, as 0.4.0 held it (the review of pull request 16: the next read let go of the stick, and that
+  // frame's mouse went to the rudder and the pitch as free look).
+  if (plane) g.plane_until = now + std::chrono::seconds(1);
+  else if (!have_seat && g.active && g.plane && now < g.plane_until && REXCVAR_GET(bf_plane_mouse_aim)) plane = true;
+  const unsigned gun = plane ? 0 : VehicleMouseAxes();
   // Another seat: the stick starts centred, and nothing is carried over.
   if (g.active && have_seat && seat.key != g.seat_key) Let_go();
   unsigned axes = plane ? 3u : gun;
@@ -156,7 +163,10 @@ bool PlaneMouse(uint8_t* gamepad, double dx, double dy) {
   // a gun down (concept 5 negative).
   g.roll6 = float(std::clamp(g.x, -1.0, 1.0));
   g.pitch5 = float(std::clamp(-g.y, -1.0, 1.0));
-  g.steered_at = now;
+  // Only a stick off its centre steers (pull request 11's fix, dropped again by pull request 16 and put back in its
+  // review): a centred mouse stick writes nothing, so a controller's gentle stick (under the 0.3 that marks a
+  // controller in use) is the game's, in a plane and at a gun alike.
+  if (std::fabs(g.roll6) > 0.02f || std::fabs(g.pitch5) > 0.02f) g.steered_at = now;
   if (REXCVAR_GET(bf_debug_vehicle_mouse) && now - g.logged > std::chrono::milliseconds(250) &&
       (g.roll6 != 0 || g.pitch5 != 0)) {
     g.logged = now;

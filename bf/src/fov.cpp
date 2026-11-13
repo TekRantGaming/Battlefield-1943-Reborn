@@ -39,11 +39,17 @@
 
 #include <rex/cvar.h>
 #include <rex/hook.h>
+#include <rex/logging.h>
 
 #include <native_x_renderer/native_x_renderer.h>
 
 #include "comms.h"
+#include "scope_pip.h"
+#include "seat_info.h"
 
+REXCVAR_DEFINE_BOOL(bf_scope_pip, false, "BF1943",
+                    "Sniper scope (Settings > Enhancements, experimental): picture in picture, only the scope's lens "
+                    "zooms in and the world around it stays in view (NativeXRenderer D168)");
 REXCVAR_DEFINE_DOUBLE(bf_fov, 0.0, "BF1943",
                       "The camera's horizontal field of view at 16:9 in degrees (60 to 120); 0: the game's own, 85.6");
 // Vehicles' own slider (TekRantGaming, 12 Nov 2026): the camera while the local soldier sits in a vehicle.
@@ -135,9 +141,11 @@ REX_HOOK_RAW(sub_82583248) {
   if (uint32_t(ctx.lr) == kCameraFovCaller) {
     // The rendered camera (its world matrix at +0x40: right, up, back, position rows): voice chat's listener and the
     // position a voice comes from (comms.cpp), on foot, in a vehicle or watching after a death alike.
+    float right[3] = {1, 0, 0}, up[3] = {0, 1, 0}, back[3] = {0, 0, 1};
     if (const uint32_t view = ctx.r3.u32) {
-      const float right[3] = {LoadF(base, view + 0x40), LoadF(base, view + 0x44), LoadF(base, view + 0x48)};
-      const float back[3] = {LoadF(base, view + 0x60), LoadF(base, view + 0x64), LoadF(base, view + 0x68)};
+      for (int i = 0; i < 3; ++i)
+        right[i] = LoadF(base, view + 0x40 + 4 * i), up[i] = LoadF(base, view + 0x50 + 4 * i),
+        back[i] = LoadF(base, view + 0x60 + 4 * i);
       const float pos[3] = {LoadF(base, view + 0x70), LoadF(base, view + 0x74), LoadF(base, view + 0x78)};
       bf1943::comms::NoteCamera(pos, right, back);
     }
@@ -147,6 +155,34 @@ REX_HOOK_RAW(sub_82583248) {
     if (controller) {
       bf1943::g_fov_now_deg.store(LoadF(base, controller + 0x30), std::memory_order_relaxed);
       bf1943::g_fov_own_deg.store(LoadF(base, controller + 0x28), std::memory_order_relaxed);
+    }
+    // The picture in picture scope (Enhancements, NativeXRenderer D168): how far the view is zoomed (the half angles'
+    // tangents, now over the camera's own: a sight's about 0.6 to 0.8, a sniper scope's much less; the renderer also
+    // waits for the game's scope mask). The world around the lens is drawn with the camera's own field of view as
+    // rendered (bf_fov's mapping included).
+    {
+      constexpr double kPi = 3.14159265358979323846;
+      const double now_deg = bf1943::g_fov_now_deg.load(std::memory_order_relaxed);
+      const double own_deg = bf1943::g_fov_own_deg.load(std::memory_order_relaxed);
+      const bool valid = now_deg > 1.0 && now_deg < 179.0 && own_deg > 1.0 && own_deg < 179.0;
+      const double zoom = valid ? std::tan(now_deg * kPi / 360.0) / std::tan(own_deg * kPi / 360.0) : 1.0;
+      const double own_rendered = valid ? Mapped(own_deg * kPi / 180.0) : 0.9;
+      // A step of the zoom logged (a tenth of the way), while the scope is on: the research of a sight's and a scope's.
+      static int logged_step = 10;
+      const int step = int(std::lround(std::clamp(zoom, 0.0, 1.0) * 10));
+      // Only in a build with the scope (scope_pip.h: not in 0.4.1), with the switch on.
+      const bool pip = kScopePip && REXCVAR_GET(bf_scope_pip);
+      if (step != logged_step && pip) {
+        logged_step = step;
+        REXLOG_INFO("BF scope: zoom {:.2f} (field of view {:.1f} of the camera's {:.1f} degrees)", zoom, now_deg, own_deg);
+      }
+      // On foot only (the soldier's seat, from the game's own input mapping): the game's composite, which the renderer
+      // follows, is the same with and without a scope (run v41scope26), so a vehicle's or the air raid bomber's zoomed
+      // view must never count as a scope's.
+      bf1943::SeatInfo seat;
+      const bool on_foot = pip && bf1943::LocalSeat(seat) && seat.kind == bf1943::SeatKind::kSoldier;
+      native_x_renderer::NoteScopeView(on_foot, right, up, back,
+                                       float(std::tan(std::clamp(own_rendered, 0.1, 3.0) * 0.5)), float(zoom));
     }
     ctx.f1.f64 = Mapped(ctx.f1.f64);
   }

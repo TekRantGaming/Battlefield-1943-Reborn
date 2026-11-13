@@ -333,6 +333,29 @@
   }
   bool nis_noted_ = false;
 
+  // Each frame until known: which temporal upscalers run on this GPU (the renderer's answer at this start), saved for
+  // the Upscaler row; a choice that does not run here becomes one that does (TemporalFallback).
+  void NoteTemporalSupport() {
+    if (temporal_noted_) return;
+    bool fsr4 = false, fsr3 = false, xess = false, dlss = false;
+    if (!native_x_renderer::TemporalSupport(&fsr4, &fsr3, &xess, &dlss)) return;
+    temporal_noted_ = true;
+    const std::string value = std::string(",") + (fsr4 ? "fsr4," : "") + (fsr3 ? "fsr," : "") + (xess ? "xess," : "") +
+                              (dlss ? "dlss," : "") + "taa,";
+    if (settings_.Get("temporal_support", "") != value) {
+      settings_.values["temporal_support"] = value;
+      settings_.Save();
+      REXLOG_INFO("BF upscaler: the Upscaler row offers {}", value);
+    }
+    const std::string t = Cvar("bf_temporal");
+    if (const std::string to = TemporalFallback(t, value); to != t) {
+      REXLOG_INFO("BF upscaler: {} does not run on this GPU: {} from the next start", t, to);
+      settings_.values["cvar.bf_temporal"] = to;
+      settings_.Save();
+    }
+  }
+  bool temporal_noted_ = false;
+
   // ---- a small question over the page: Cancel focused (King Kong's Skip all). True once answered; `yes` the second.
   bool Question(ImDrawList* d, ImGuiIO& io, const Stage& st, const std::string& title, const std::string& text,
                 const std::string& no, const std::string& yes, Input& in, bool& answered_yes) {
@@ -1709,10 +1732,13 @@
   Settings test_profile_;
   bool test_profile_active_ = false;
 
+  // Dev builds only (the review of pull request 16): a player's game never shows a made up rank or awards.
   void LoadTestProfile() {
+#if defined(BF_DEV_TOOLS)
     test_profile_ = Settings{settings_.path.parent_path() / "bf1943-test-profile.txt", {}};
     test_profile_.Load();
     test_profile_active_ = test_profile_.Get("enabled", "false") == "true";
+#endif
   }
 
   void StatsPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
@@ -2200,9 +2226,9 @@
   // A password for the match (13 Nov 2026): a switch under the name, and its field while it is on.
   bool pm_pass_on_ = false;
   std::string pm_pass_;
-  // The match's tick rate: 60 by default, 30 the console's, 75 and 100 experimental.
+  // The match's tick rate: 30 by default (the console's), 60, 75 and 100 experimental.
   static constexpr int kPmTicks[] = {30, 60, 75, 100};
-  int pm_tick_ = 60;
+  int pm_tick_ = 30;
   bool pm_lan_ = false, pm_listed_ = false;
   std::string pm_name_, pm_port_text_ = "18300";
   // The row takes typing now: the name, or the port when it is the player's to choose.
@@ -2228,8 +2254,8 @@
     pm_port_text_ = settings_.Get("private_match_port", "18300");
     pm_pass_on_ = settings_.Get("private_match_password_on", "0") == "1";
     pm_pass_ = settings_.Get("private_match_password", "");
-    pm_tick_ = std::atoi(settings_.Get("private_match_tick", "60").c_str());
-    if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 60;
+    pm_tick_ = std::atoi(settings_.Get("private_match_tick", "30").c_str());
+    if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 30;
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
@@ -2265,17 +2291,25 @@
       UseOwnBackend("127.0.0.1");
     }
     const std::string me = settings_.Get("player_name", "");
-    o.name = !pm_name_.empty() ? pm_name_ : me.empty() ? "Custom match" : me + "'s match";
+    // Through our profanity filter (text_filter.h): a listed match's name is everybody's to read.
+    o.name = text_filter::Censor(!pm_name_.empty() ? pm_name_ : me.empty() ? "Custom match" : me + "'s match");
     if (pm_pass_on_ && pm_pass_.empty()) {
       pm_error_ = "Type the match's password, or switch Password off.";
       return;
     }
     o.password = pm_pass_on_ ? pm_pass_ : std::string();
     o.tick = pm_tick_;
-    // The host's own game runs at the match's rate: set now when the game has not started; a game already running at
-    // another is asked to start again when it joins (Join).
-    SetTickRate(pm_tick_);
-    o.listed = !pm_lan_;  // always in the browser: Community for an Online match (a LAN match is on the LAN tab)
+    // The host's own game runs at the match's rate, set before its timers are made. Once a match was played at
+    // another, this run cannot change: the server would start, and the host's join would have to start the game again,
+    // which ends the server with it (the review of pull request 16). Said instead.
+    if (!SetTickRate(pm_tick_)) {
+      pm_error_ = fmt::format("This run plays at {} Hz. To host at {} Hz, start the game again first.", TickRate(), pm_tick_);
+      return;
+    }
+    // In everybody's browser only when Show in browser is on (as before 0.4.1: a custom match is joined by its address
+    // unless its host says otherwise; the review of pull request 16 found it always listed, the row never shown). A
+    // LAN match is on its network's LAN tab.
+    o.listed = !pm_lan_ && pm_listed_;
     if (PmPortTyped()) {
       const int port = std::atoi(pm_port_text_.c_str());
       if (port < 1024 || port > 65535) {
@@ -2345,6 +2379,7 @@
     // The host's own game shows its match the password like any other (its join is then let in).
     if (pm_pass_on_ && !pm_pass_.empty()) KnockMatch(sv.address, me, pm_pass_);
     pm_joining_ = true;
+    exp_accepted_address_ = sv.address;  // its rate chosen on the Custom Match page, with that page's warning
     REXLOG_INFO("BF private match: registered as game {}; joining it", sv.gid);
     Join(sv);
   }
@@ -2399,13 +2434,14 @@
     std::vector<int> order = {kPmName, kPmPass};
     if (pm_pass_on_) order.push_back(kPmPassText);
     order.insert(order.end(), {kPmMap, kPmTick, kPmNet});
+    if (!pm_lan_) order.push_back(kPmListed);
     if (!pm_lan_) order.push_back(kPmUpnp);
     order.insert(order.end(), {kPmPort, kPmHost});
     {
       int at = 0;
       for (int k = 0; k < int(order.size()); ++k)
         if (order[size_t(k)] == pm_row_) at = k;
-      if (std::find(order.begin(), order.end(), pm_row_) == order.end()) pm_row_ = kPmNet, at = 2;  // UPnP went with LAN
+      if (std::find(order.begin(), order.end(), pm_row_) == order.end()) pm_row_ = kPmNet, at = 3;  // UPnP went with LAN
       const int n = int(order.size());
       if (in.up) pm_row_ = order[size_t((at + n - 1) % n)];
       if (in.down) pm_row_ = order[size_t((at + 1) % n)];
@@ -2516,8 +2552,7 @@
       } else if (i == kPmMap) {
         value_text(kPmMapNames[pm_map_], true, false);
       } else if (i == kPmTick) {
-        value_text(std::to_string(pm_tick_) + (pm_tick_ > 60 ? "Hz - Experimental" : pm_tick_ == 30 ? "Hz - Original" : "Hz - Default"),
-                   true, false);
+        value_text(std::to_string(pm_tick_) + (pm_tick_ == 30 ? "Hz - Default" : "Hz - Experimental"), true, false);
       } else if (i == kPmNet) {
         value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
       } else if (i == kPmListed) {
@@ -2547,12 +2582,12 @@
                     off ? IM_COL32(120, 116, 100, 150) : dim, shown, st(1.5f));
       }
       y += h;
-      // An experimental tick rate: the warning right under the row, in red (13 Nov 2026: "Place the warning
-      // disclaimer under the Tick Rate segment").
-      if (i == kPmTick && pm_tick_ > 60) {
-        const std::string warning = "Weapons, vehicles and timers may behave oddly, your PC and every player's "
-                                    "connection work harder, and players on older versions cannot join. Use 60 Hz "
-                                    "for a normal match.";
+      // An experimental tick rate (every one above 30: TekRantGaming, 13 Nov 2026): the warning right under the
+      // row, in red.
+      if (i == kPmTick && pm_tick_ != 30) {
+        const std::string warning = "Physics, weapons, vehicles and timers may behave oddly or break, your PC and every "
+                                    "player's connection work harder, and players on older versions cannot join. Use "
+                                    "30 Hz for a normal match.";
         const float wx = ra.x + st(52), wrap = rb.x - st(18) - wx, size = st(10);
         const ImU32 red = IM_COL32(236, 92, 76, 255);  // a red that reads on the dark rail
         const float wh = st(6) + st(14) + kit::WrappedHeight(f.ui, size, warning, wrap) + st(10);
@@ -2580,9 +2615,9 @@
           "you want another. For an Online match, open it on your router for friends outside your home.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
           "server browser: the pause copies the address for you. The match ends when you leave it.",
-          "How many times a second the match is simulated. 60 is the default; 30 is the original game's. 75 and 100 are "
-          "experimental: untested, and they ask more of your PC and of every player's connection. A player's game "
-          "takes the match's rate when it joins.",
+          "How many times a second the match is simulated. 30, the original game's, is the default. 60, 75 and 100 "
+          "are experimental: physics and timing may break, and they ask more of your PC and of every player's "
+          "connection. A player's game takes the match's rate when it joins.",
           "On, only players who type the match's password can join; the server browser shows a padlock by its name. "
           "Off, anybody who sees the match can join.",
           "The password players type to join: up to 24 letters, digits or signs, no spaces. Give it to your friends "
@@ -2747,7 +2782,7 @@
     bool online_ok = false;
     const std::string status = OnlineStatus(online_ok);
     const bool edit = MenuChrome(d, io, st, status, online_ok);
-    kit::Spaced(d, f.typed, st(8.5f), st.P(48, 91), kit::kKhakiDim, "FIELD MANUAL \xC2\xB7 THE TUTORIAL, THE CONTROLS, THE CREDITS", st(2));
+    kit::Spaced(d, f.typed, st(10.5f), st.P(48, 91), kit::kKhakiDim, "FIELD MANUAL \xC2\xB7 THE TUTORIAL, THE CONTROLS, THE CREDITS", st(2));
     kit::GameText(d, kit::GameFont::kHeadline, st(40), st.P(48, 105), kit::kCream, "HELP");
     Prompts(d, st, st.P(48, 662), {{kit::Button::kA, "SELECT"}, {kit::Button::kB, "BACK"}}, in, 15);
     MenuFoot(d, st);
@@ -2780,24 +2815,24 @@
         d->AddRectFilled(a, ImVec2(a.x + st(5), b.y), kit::kStamp);
       }
       d->AddRectFilled(ImVec2(a.x, b.y - 1), ImVec2(b.x, b.y), IM_COL32(241, 234, 211, 20));
-      kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(24), a.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
+      kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(24), a.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
                   fmt::format("{:02d}", i + 1), st(1.5f));
       kit::GameText(d, kit::GameFont::kHeadlineMedium, st(19), ImVec2(a.x + st(52), a.y + (h - st(19)) * 0.5f),
                     sel ? kit::kInk : kit::kKhaki, kRows[i]);
       if (sel) {
         kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(b.x - st(18) - st(20), a.y + h * 0.5f), st(20));
       } else {
-        const float nw = kit::SpacedWidth(f.typed, st(7.5f), kNotes[i], st(1.5f));
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2(b.x - st(18) - nw, a.y + h * 0.5f - st(5)), kit::kKhakiDim, kNotes[i], st(1.5f));
+        const float nw = kit::SpacedWidth(f.typed, st(9.5f), kNotes[i], st(1.5f));
+        kit::Spaced(d, f.typed, st(9.5f), ImVec2(b.x - st(18) - nw, a.y + h * 0.5f - st(5)), kit::kKhakiDim, kNotes[i], st(1.5f));
       }
     }
     {  // the chosen row's card
       const ImVec2 a = st.P(427, 167), b = st.P(1232, 400);
       kit::PaperArt(d, a, b);
-      kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(24), a.y + st(22)), kit::kInkSection,
+      kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(24), a.y + st(22)), kit::kInkSection,
                   std::string("FIELD MANUAL \xC2\xB7 ") + kRows[help_row_], st(2));
       kit::GameText(d, kit::GameFont::kHeadline, st(28), ImVec2(a.x + st(24), a.y + st(40)), kit::kInk, kRows[help_row_]);
-      kit::Wrapped(d, f.ui, st(12.5f), ImVec2(a.x + st(24), a.y + st(86)), kit::kInk, kAbout[help_row_], b.x - a.x - st(48) - st(170));
+      kit::Wrapped(d, f.ui, st(14.25f), ImVec2(a.x + st(24), a.y + st(86)), kit::kInk, kAbout[help_row_], b.x - a.x - st(48) - st(170));
       if (GreenButton(d, st, ImVec2(a.x + st(24), b.y - st(64)), ImVec2(a.x + st(24) + st(230), b.y - st(24)), kit::Button::kA,
                       kButtons[help_row_]))
         clicked = help_row_;
@@ -3440,7 +3475,7 @@
     }
     return true;
   }
-  // ---- Updates (update.cpp): when configured, checked at the start and every 6 hours while Home
+  // ---- Updates (update.cpp, King Kong's way; always on, TekRantGaming): checked at the start and every 6 hours while Home
   // is open; a newer release downloads by itself, and installs at once from the update page while Home is showing.
   std::string UpdateNote() {
     auto& u = update::Get();
@@ -3454,7 +3489,6 @@
     switch (state) {
       case update::State::kIdle:
       case update::State::kChecking: return "CHECKING \xC2\xB7 " + v;
-      case update::State::kDisabled: return "UPDATES OFF \xC2\xB7 " + v;
       case update::State::kNone: {
         std::lock_guard lock(u.mutex);
         return (u.message == "Up to date" ? "UP TO DATE \xC2\xB7 " : "NOT CHECKED \xC2\xB7 ") + v;
@@ -3603,7 +3637,7 @@
       for (const ChangelogEntry& e : Changelog()) all.push_back(&e);
     const std::vector<const ChangelogEntry*>& entries = whats_new_all_ ? all : whats_new_shown_;
     const ChangelogEntry* first = entries.empty() ? nullptr : entries.front();
-    kit::Spaced(d, f.typed, st(8.5f), ImVec2(x0, a.y + st(26)), kit::kInkSection,
+    kit::Spaced(d, f.typed, st(10.5f), ImVec2(x0, a.y + st(26)), kit::kInkSection,
                 whats_new_all_ ? "BATTLEFIELD 1943 REBORN \xC2\xB7 THE CHANGELOG" : "BATTLEFIELD 1943 REBORN \xC2\xB7 UPDATED", st(2));
     kit::GameText(d, kit::GameFont::kHeadline, st(30), ImVec2(x0, a.y + st(42)), kit::kInk,
                   whats_new_all_ ? std::string("EVERY VERSION") : "WHAT'S NEW IN " + Upper(first ? first->version : std::string(BfVersion())));
@@ -3629,14 +3663,14 @@
         }
         const std::string about = Upper(e->date) + (e->title.empty() ? "" : " \xC2\xB7 " + Upper(e->title));
         if (!about.empty()) {
-          if (out) kit::Wrapped(out, f.typed, st(8), ImVec2(v0.x, y), kit::kInkSection, about, wrap);
-          y += kit::WrappedHeight(f.typed, st(8), about, wrap) + st(10);
+          if (out) kit::Wrapped(out, f.typed, st(10), ImVec2(v0.x, y), kit::kInkSection, about, wrap);
+          y += kit::WrappedHeight(f.typed, st(10), about, wrap) + st(10);
         }
         for (const ChangelogLine& l : ChangelogLines(e->body)) {
           if (l.kind == ChangelogLine::kHead) {
             y += st(6);
             if (out) {
-              kit::Spaced(out, f.ui_bold, st(10), ImVec2(v0.x, y), kit::kStamp, Upper(l.text), st(2));
+              kit::Spaced(out, f.ui_bold, st(11.5f), ImVec2(v0.x, y), kit::kStamp, Upper(l.text), st(2));
               out->AddRectFilled(ImVec2(v0.x, y + st(17)), ImVec2(v0.x + wrap, y + st(18)), kit::kRule);
             }
             y += st(26);
@@ -3663,7 +3697,7 @@
             {{kit::Button::kA, "CLOSE", "", true}, {kit::Button::kX, whats_new_all_ ? "THIS UPDATE" : "EVERY VERSION"}}, in, 14);
     if (total > view) {
       const std::string hint = "UP AND DOWN SCROLL";
-      kit::Spaced(d, f.typed, st(7.5f), ImVec2(x1 - kit::SpacedWidth(f.typed, st(7.5f), hint, st(1.5f)), b.y - st(34)), kit::kInkSection, hint, st(1.5f));
+      kit::Spaced(d, f.typed, st(9.5f), ImVec2(x1 - kit::SpacedWidth(f.typed, st(9.5f), hint, st(1.5f)), b.y - st(34)), kit::kInkSection, hint, st(1.5f));
     }
     // Up and down (held: the menu's own repeat), the bumpers a page, the wheel.
     if (in.up) whats_new_scroll_ -= st(70);

@@ -294,9 +294,26 @@ double Density(const State& s) {
   return d > 0.25 ? d : 1.0;
 }
 
+#if defined(BF_DEV_TOOLS)
+// A scripted test run (BF_DEV_SCRIPTED=1, tools/run_game.ps1): the PC's own mouse is kept out of the match as it is
+// out of the launcher (game_menu.cpp). A test window at the back still gets the pointer's moves over any part of it
+// that shows, and with the developer mouse on (MouseLook) they turned a tank's and an AA gun's aim in the middle of
+// a test (runs v41tank1 and v41aa, 13 Nov 2026: the prompts changed to the keyboard's at the same moment).
+bool ScriptedRun() {
+  static const bool on = [] {
+    const char* v = std::getenv("BF_DEV_SCRIPTED");
+    return v && *v == '1';
+  }();
+  return on;
+}
+#endif
+
 class Listener : public rex::ui::WindowInputListener {
  public:
   void OnMouseMove(rex::ui::MouseEvent& e) override {
+#if defined(BF_DEV_TOOLS)
+    if (ScriptedRun()) return;
+#endif
     if ((e.dx() == 0.0f && e.dy() == 0.0f) || !MouseLook() || bf1943::GameMenuOpen() || bf1943::SpawnMouseActive() ||
         bf1943::comms::Typing())
       return;
@@ -312,6 +329,9 @@ class Listener : public rex::ui::WindowInputListener {
   }
   // Keyboard & mouse: the wheel toggles the weapon, a notch a press (WheelNotch).
   void OnMouseWheel(rex::ui::MouseEvent& e) override {
+#if defined(BF_DEV_TOOLS)
+    if (ScriptedRun()) return;
+#endif
     if (!e.scroll_y() || !MouseLook() || bf1943::GameMenuOpen() || bf1943::comms::Typing()) return;
     bf1943::WheelNotch(e.scroll_y() > 0 ? 1 : -1);
   }

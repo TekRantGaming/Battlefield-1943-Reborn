@@ -135,6 +135,9 @@ bool Fsr::Load(IRenderDevice* device) {
   wchar_t path[MAX_PATH] = {};
   DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
   std::wstring folder(path, length);
+  // Only from the executable's own folder: without its path (none, or too long) nothing is loaded, never by a bare
+  // name, which would be searched for in the current folder too (the review of pull request 16).
+  if (length == 0 || length >= MAX_PATH || folder.find_last_of(L"\\/") == std::wstring::npos) return false;
   folder.resize(folder.find_last_of(L"\\/") + 1);
   // 13 Nov 2026: AMD FSR SDK 2.4.0's loader (the first SDK with FSR 4 on Vulkan). It finds
   // amd_fidelityfx_upscaler_vk.dll beside the executable, which holds FSR 4.1 and FSR 3.1.
@@ -160,6 +163,47 @@ bool Fsr::Load(IRenderDevice* device) {
   return true;
 #else
   REXLOG_INFO("[native_x_renderer] FSR: not in this build");
+  return false;
+#endif
+}
+
+bool Fsr::Generations(IRenderDevice* device, bool* fsr4, bool* fsr3) {
+  *fsr4 = *fsr3 = false;
+#if NATIVE_X_RENDERER_FSR
+  if (!Load(device)) return false;
+  RefCntAutoPtr<IRenderDeviceVk> vk_device(device, IID_RenderDeviceVk);
+  if (!vk_device) return false;
+  VkDeviceContext vk{};
+  vk.vkDevice = vk_device->GetVkDevice();
+  vk.vkPhysicalDevice = vk_device->GetVkPhysicalDevice();
+  vk.vkDeviceProcAddr = DeviceProcAddr;
+  uint64_t count = 0;
+  ffxQueryDescGetVersions versions{};
+  versions.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
+  versions.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+  versions.device = &vk;
+  versions.outputCount = &count;
+  reinterpret_cast<PfnFfxQuery>(query_)(nullptr, &versions.header);
+  std::vector<uint64_t> ids(size_t(std::min<uint64_t>(count, 64)));
+  std::vector<const char*> names(ids.size(), nullptr);
+  count = ids.size();
+  versions.versionIds = ids.data();
+  versions.versionNames = names.data();
+  if (!ids.empty()) reinterpret_cast<PfnFfxQuery>(query_)(nullptr, &versions.header);
+  std::string list;
+  for (size_t i = 0; i < ids.size() && i < count; ++i) {
+    const std::string name = names[i] ? names[i] : "";
+    list += (list.empty() ? "" : ", ") + name;
+    const size_t digit = name.find_first_of("0123456789");
+    if (digit == std::string::npos) continue;
+    if (name[digit] == '4') *fsr4 = true;
+    if (name[digit] == '3') *fsr3 = true;
+  }
+  REXLOG_INFO("[native_x_renderer] FSR: this GPU runs AMD's {} (FSR 4 {}, FSR 3.1 {})", list.empty() ? "none" : list,
+              *fsr4 ? "offered" : "not offered", *fsr3 ? "offered" : "not offered");
+  return *fsr4 || *fsr3;
+#else
+  (void)device;
   return false;
 #endif
 }

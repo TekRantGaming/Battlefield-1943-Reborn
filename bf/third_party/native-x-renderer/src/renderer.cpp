@@ -20,9 +20,12 @@
 #include "gtao.h"
 #include "grass.h"
 #include "night.h"
+#include "scope.h"
 #include "ssgi.h"
 #include "motion_blur.h"
 #include "upscaler.h"
+#include "fsr.h"
+#include "xess.h"
 #include "framegen.h"
 #include "overlay_motion.h"
 #include "blit.h"
@@ -229,6 +232,9 @@ DisplayGamma g_gamma;  // the guest's display gamma ramp, applied when presentin
 Scaling g_scaling;     // the image scaled into the window by FSR 1 or NIS, and sharpened (D115)
 // D158: whether NIS runs on this GPU (-1 not asked, 0 no, 1 yes), and the GPU's name, for the game's menus.
 std::atomic<int> g_nis_support{-1};
+// 14 Nov 2026 (TekRantGaming: only the upscalers this GPU's vendor supports are offered): which temporal upscalers run
+// here, asked at the start (bits: 1 FSR 4, 2 FSR 3.1, 4 XeSS, 8 DLSS; -1 until asked).
+std::atomic<int> g_temporal_support{-1};
 std::string g_gpu_name;
 Antialiasing g_aa;     // on the finished scene (D41)
 // 13 Nov 2026: the setting read again once a frame, so Off, FXAA, SMAA and CMAA 2 change while the game runs (not to
@@ -236,6 +242,32 @@ Antialiasing g_aa;     // on the finished scene (D41)
 std::string g_aa_name;
 bool g_aa_live = false;
 Night g_night;         // the finished scene as a moonlit night (D162)
+Scope g_scope;         // the picture in picture sniper scope (D168)
+bool g_scope_pending = false;  // the scene's copy was made: the scope follows the game's composite (after the night)
+bool g_scope_mask_seen = false;  // the scope's pass was drawn in this frame (the research log's)
+bool g_scope_watch = false;  // the game reports its view (the picture in picture on, in a match): as of the last present
+uint64_t g_scope_unzoomed = 0;  // the game's scoped picture seen without a sniper scope's zoom (the periodic log)
+// A sniper scope's zoom (the half angles' tangents, now over the camera's own): the Springfield's 0.22 (run v41scope5);
+// a sight's is about 0.6 to 0.8.
+constexpr float kScopeZoom = 0.6f;
+// NXR_SCOPE_RESEARCH=1: the draws after the scene of one frame with the scope up (its 40th composite; =N: the Nth, from
+// 2) and of one without (the 90th after the scope first came down, so one in the match), logged (the research of which
+// draws are the game's mask: DrawPath::SetScopeFrame). The 40th is still in the scope's raise, which the game draws
+// black (run v41scope12).
+int ScopeResearch(bool scoped) {
+  static const char* env = std::getenv("NXR_SCOPE_RESEARCH");
+  if (!env) return 0;
+  static const int at = std::atoi(env) >= 2 ? std::atoi(env) : 40;
+  static int scoped_frames = 0, plain_frames = 0;
+  if (scoped) return ++scoped_frames == at || scoped_frames == at + 1 ? 2 : 0;
+  return scoped_frames > 0 && (++plain_frames == 90 || plain_frames == 91) ? 1 : 0;
+}
+bool g_scope_research_frame = false;  // this frame's draws are logged: its present is too
+bool g_scope_research_present = false;  // the logged frame's present: what it shows
+int g_scope_draw_probes = 0;            // the logged frame's draws into the output read back after each
+// NXR_SCOPE_RESEARCH: four pixels of a texture read back (ScopeProbe), to see where the scope's pass went.
+ITexture* g_scope_probe_texture = nullptr;
+void ScopeProbe(const char* when, ITexture* texture);
 // D162: the main view's depth (its shader view) kept at the view's end for the night's haze, the view's share of it,
 // and the frame it is from.
 Diligent::RefCntAutoPtr<Diligent::ITextureView> g_night_depth;
@@ -372,6 +404,45 @@ GuestSurface g_scene_color_surface;
 std::vector<std::pair<GuestSurface, HostTarget*>> g_reduced_used;
 std::filesystem::path g_cache_root;  // the runtime's cache directory (D42)
 std::unique_ptr<DrawPath> g_draw;  // created on the first draw (it needs the tracker's register file)
+
+void ScopeProbe(const char* when, ITexture* texture) {
+  if (!texture || !g_device) return;
+  const TextureDesc& desc = texture->GetDesc();
+  TextureDesc staging;
+  staging.Name = "NativeXRenderer scope probe";
+  staging.Type = RESOURCE_DIM_TEX_2D;
+  staging.Width = 1, staging.Height = 1;
+  staging.Format = desc.Format;
+  staging.Usage = USAGE_STAGING;
+  staging.CPUAccessFlags = CPU_ACCESS_READ;
+  std::string text;
+  // A corner (the game's black ring); on the reticle's level line inside the lens; inside the game's round view but
+  // outside the lens, off the lines; inside the lens, off the lines. Each within the texture: a copy from outside it
+  // lost the Vulkan device (run v41scope13, the luminance chain's 3 x 3 texture).
+  const uint32_t w = desc.Width, h = desc.Height;
+  if (!w || !h) return;
+  for (auto at : {std::pair<uint32_t, uint32_t>{8, 8}, {w / 2 + h / 5, h / 2}, {w / 2 + h * 38 / 100, h / 2 + h / 10},
+                  {w / 2 + h / 10, h / 2 + h / 10}}) {
+    at.first = std::min(at.first, w - 1), at.second = std::min(at.second, h - 1);
+    RefCntAutoPtr<ITexture> probe;
+    g_device->device()->CreateTexture(staging, nullptr, &probe);
+    if (!probe) return;
+    Box box(at.first, at.first + 1, at.second, at.second + 1);
+    CopyTextureAttribs copy(texture, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, probe, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    copy.pSrcBox = &box;
+    g_device->context()->CopyTexture(copy);
+    g_device->context()->WaitForIdle();
+    MappedTextureSubresource mapped;
+    g_device->context()->MapTextureSubresource(probe, 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, mapped);
+    if (mapped.pData) {
+      const uint8_t* px = static_cast<const uint8_t*>(mapped.pData);
+      text += fmt::format(" ({}, {}): {:02X} {:02X} {:02X} {:02X}", at.first, at.second, px[0], px[1], px[2], px[3]);
+    }
+    g_device->context()->UnmapTextureSubresource(probe, 0, 0);
+  }
+  REXLOG_INFO("[native_x_renderer] scope research, {}: {} ({}x{} format {}):{}", when, fmt::ptr(texture), desc.Width,
+              desc.Height, int(desc.Format), text);
+}
 bool g_draw_failed = false;
 bool g_tiling = false;  // between BeginTiling and EndTiling
 // The size of a tiled pass's image, from BeginTiling's tile rectangles: the GPU draws the pass once per tile
@@ -891,6 +962,74 @@ void ExecuteDraw(const Command& c) {
       t->written = ++g_target_writes;
       g_draw->TargetsChanged();
     }
+  }
+  // D168: the picture in picture scope. On the game's composite (after the night), while the view is not zoomed, the
+  // finished scene is remembered, and from there the game's own scope mask pass is watched for (DrawPath::IsScopeMask:
+  // a sniper scope's only; a sight's zoom, a vehicle's or a menu's has none). Right after that pass, the lens (its
+  // middle, the game's reticle in it) and the world around it are drawn over the pass's picture, before the HUD.
+  if (g_scope_pending && targets[0] && targets[0]->guest_width == g_profile->output_width &&
+      targets[0]->guest_height == g_profile->output_height) {
+    g_scope_pending = false;
+    HostTarget* t = targets[0];
+    ScopeCamera camera;
+    float zoom = 1.0f;
+    if (t->texture && t->view && t->samples == 1 &&
+        ScopeView(camera.right, camera.up, camera.back, camera.tan_half_v, zoom)) {
+      if (zoom > 0.97f) {
+        // With the view's depth at its end (taken for the scope too): the first person weapon left out.
+        // Its coordinates from the target's, as the night's: the target's texture may be larger than the view.
+        const bool depth = g_night_depth && g_night_depth_frame == g_device->frames_presented();
+        const TextureDesc& desc = t->texture->GetDesc();
+        const float view_w = float(t->scale.HostWidth(g_profile->output_width));
+        const float view_h = float(t->scale.HostHeight(g_profile->output_height));
+        const float uv[2] = {(view_w > 0 ? float(desc.Width) / view_w : 1.0f) * g_night_depth_uv[0],
+                             (view_h > 0 ? float(desc.Height) / view_h : 1.0f) * g_night_depth_uv[1]};
+        g_scope.Remember(g_device->device(), g_device->context(), t->texture, camera, depth ? g_night_depth.RawPtr() : nullptr,
+                         uv);
+      }
+      const int research = ScopeResearch(zoom < kScopeZoom);
+      g_scope_research_frame = g_scope_research_frame || research != 0;
+      g_draw->SetScopeFrame(true, research);
+      if (research) {
+        REXLOG_INFO("[native_x_renderer] scope research: the composite on {}", fmt::ptr(t));
+        ScopeProbe("the composite", t->texture);
+      }
+    }
+  }
+  if (g_draw->TakeScopeMaskDrawn() && targets[0] && targets[0]->texture && targets[0]->view &&
+      targets[0]->samples == 1) {
+    HostTarget* t = targets[0];
+    ScopeCamera camera;
+    float zoom = 1.0f;
+    // Zoomed as a sniper scope zooms, too: the same pass blurs the view as the soldier spawns (run v41scope7).
+    const bool noted = ScopeView(camera.right, camera.up, camera.back, camera.tan_half_v, zoom);
+    if (noted && zoom >= kScopeZoom) ++g_scope_unzoomed;  // the periodic log: whether its shaders are a scope's alone
+    if (noted && zoom < kScopeZoom) {
+      if (g_scope_research_frame) ScopeProbe("before the scope's pass", t->texture);
+      g_scope.Apply(g_device->device(), g_device->context(), t->texture, t->view, camera);
+      t->written = ++g_target_writes;
+      g_draw->TargetsChanged();
+      {  // the game's reticle, drawn later with the HUD, cut to the lens (until the present)
+        const TextureDesc& d = t->texture->GetDesc();
+        int l, tp, r, b;
+        Scope::LensSquare(d.Width, d.Height, l, tp, r, b);
+        g_draw->SetScopeClip(l, tp, r, b);
+      }
+      g_scope_mask_seen = true;
+      if (g_scope_research_frame) {
+        REXLOG_INFO("[native_x_renderer] scope research: the scope's pass on {}", fmt::ptr(t));
+        ScopeProbe("after the scope's pass", t->texture);
+        g_scope_probe_texture = t->texture;
+      }
+    }
+  }
+  // D168 research: in a logged frame, the output's pixels after each of its draws (which of them paints the game's black
+  // ring and its reticle in a steady scoped frame: there the game's composite and HUD, no mask pass, run v41scope13).
+  if (g_scope_research_frame && targets[0] && targets[0]->texture && targets[0]->samples == 1 &&
+      targets[0]->guest_width == g_profile->output_width && targets[0]->guest_height == g_profile->output_height &&
+      g_scope_draw_probes < 220) {
+    ++g_scope_draw_probes;
+    ScopeProbe(fmt::format("after draw {}", g_scope_draw_probes).c_str(), targets[0]->texture);
   }
   // D113: which depth resolve's words the draw read, for a depth target at a color target's EDRAM.
   uint32_t packed = g_draw->TakePackedRead();
@@ -1414,6 +1553,14 @@ void ExecuteResolve(const Command& c) {
     ApplyOpaqueEffects();
   }
   HostTarget* source = TargetFor(surface);
+  // D168 research (NXR_SCOPE_RESEARCH): in a logged frame, each copy of an output size color target: from which target,
+  // and four of its pixels (where the screen's picture comes from in a scoped frame).
+  if (g_scope_research_frame && source && source->texture && !surface.depth &&
+      surface.width == g_profile->output_width && surface.height == g_profile->output_height) {
+    REXLOG_INFO("[native_x_renderer] scope research: a resolve from {} (caller {:08X}{})", fmt::ptr(source), c.caller,
+                c.scene_caller ? ", the scene's copy" : "");
+    ScopeProbe("the resolve's source", source->texture);
+  }
   // D163: the night's camera from the terrain, if the opaque effects did not take it (they reset the terrain's frame).
   if (c.caller == g_profile->ao_resolve_caller && surface.depth) NoteNightCamera();
   // D162: the world's depth for the night's haze, at the same depth copy (once a frame): the first person weapon's
@@ -1602,6 +1749,13 @@ void ExecuteResolve(const Command& c) {
                                        : (source->samples > 1 ? Blitter::Source::kColorMsaa : Blitter::Source::kColor);
   if (scaled) kind = source->depth ? Blitter::Source::kDepthScaled : Blitter::Source::kColorScaled;
   g_blit.Copy(g_device->context(), source->srv, kind, from, target_view, to, options);
+  // D168 research (NXR_SCOPE_RESEARCH): in a logged frame, where each color resolve went, and four of its pixels there.
+  if (g_scope_research_frame && !source->depth && target->texture) {
+    REXLOG_INFO("[native_x_renderer] scope research: resolved {}x{} of {} (caller {:08X}) into {:08X}, {}x{} format {}{}",
+                copied.width, copied.height, fmt::ptr(source), c.caller, address, width, height, format,
+                aliased ? ", read through its MSAA alias" : "");
+    ScopeProbe("the resolve's texture", target->texture);
+  }
   // D163: the effects' layer for the night: a colour copy of half the output's size after the world's opaque draws (the
   // night's world depth taken this frame) whose last draw blended: Battlefield 1943's half size pass of its emissive
   // particles (muzzle flashes, tracers, fire, explosions: run nightrd2, its premultiplied draws then one draw over the
@@ -1707,6 +1861,12 @@ void ExecuteResolve(const Command& c) {
   if (REXCVAR_GET(native_x_renderer_night) && c.scene_caller && slice == 0 &&
       target->guest_width == g_profile->output_width && target->guest_height == g_profile->output_height) {
     g_night_pending = true;
+  }
+  // D168: the scope's pass is armed the same way, while the game says it is on.
+  if (c.scene_caller && slice == 0 && target->guest_width == g_profile->output_width &&
+      target->guest_height == g_profile->output_height) {
+    float r[3], u[3], b[3], t, zoom;
+    g_scope_pending = ScopeView(r, u, b, t, zoom);
   }
   // The grass's water picture (grass.h): the finished scene, the water in it, against the grass's snapshot.
   if (c.scene_caller && slice == 0 && g_grass_ready && Grass::On() &&
@@ -1933,7 +2093,9 @@ void UpscaleScene() {
   g_blur_voted = false;
   PromoteReduced(upscaled ? g_scene_color : nullptr);
   // D162: the view's depth for the night at the scene's copy, which follows in this frame.
-  if (REXCVAR_GET(native_x_renderer_night) && g_scene_depth && g_scene_depth->srv && g_scene_depth->texture) {
+  // D168: the picture in picture scope's too, to leave the first person weapon out of the view it remembers.
+  if ((REXCVAR_GET(native_x_renderer_night) || g_scope_watch) && g_scene_depth && g_scene_depth->srv &&
+      g_scene_depth->texture) {
     const TextureDesc& depth = g_scene_depth->texture->GetDesc();
     g_night_depth = g_scene_depth->srv;
     g_night_depth_uv[0] = float(g_scene_depth->scale.HostWidth(g_profile->output_width)) / float(depth.Width);
@@ -1996,6 +2158,14 @@ void PresentFrontBuffer(const Command& c, ITextureView* back_buffer) {
     fetch1 = c.fetch[1];
     front = g_resolved.FindNewest(GpuAddress(fetch1 & 0xFFFFF000u));
     if (front) g_resolved.MarkUsed(front);
+  }
+  if (g_scope_research_present) {  // D168 research: the picture this present shows
+    g_scope_research_present = false;
+    REXLOG_INFO("[native_x_renderer] scope research: the present shows {:08X}{}", GpuAddress(fetch1 & 0xFFFFF000u),
+                front ? fmt::format(", {}x{} format {}, its last resolve {} frames ago", front->width, front->height,
+                                    front->guest_format, g_resolved.frame() - front->last_resolve_frame)
+                      : ", nothing resolved there");
+    if (front && front->texture) ScopeProbe("the front buffer", front->texture);
   }
   const auto& desc = g_device->swap_chain()->GetDesc();
   g_present_area[0] = g_present_area[1] = 0;
@@ -2340,6 +2510,30 @@ void ExecutePresent(const Command& c) {
   g_terrain.Reset();
   g_scene_antialiased = false;
   g_night_pending = false;  // a frame whose composite never came
+  g_scope_pending = false;
+  g_scope_research_present = g_scope_research_frame;  // PresentFrontBuffer logs what it shows
+  g_scope_draw_probes = 0;
+  if (g_scope_research_frame && g_scope_probe_texture) ScopeProbe("at the present", g_scope_probe_texture);
+  g_scope_probe_texture = nullptr;
+  // A research frame's present: the draws after it until the next composite are logged too.
+  // D168: the next frame's draws watched for the game's scope mask pass while the game reports its view (the picture in
+  // picture on, in a match), whatever the zoom: the pass is drawn only at a sniper scope's (Apply's test). Armed at the
+  // composite only, the pass was missed in most scoped frames (run v41scope12: drawn in 9 of about 470; there the
+  // composite came before the mask pass only while the scope was being raised).
+  {
+    float right[3], up[3], back[3], tan_half_v, zoom;
+    const bool watch = ScopeView(right, up, back, tan_half_v, zoom);
+    g_scope_watch = watch;
+    if (g_draw) {
+      g_draw->SetScopeFrame(watch, g_scope_research_frame ? 3 : 0);
+      g_draw->SetScopeClip(0, 0, 0, 0);
+    }
+  }
+  if (g_scope_research_frame)
+    REXLOG_INFO("[native_x_renderer] scope research: present (the scope's pass {})", g_scope_mask_seen ? "drawn" : "not drawn");
+  g_scope_research_frame = false;
+  g_scope_mask_seen = false;
+  g_scope.EndFrame();
   // D163: this frame's model draws are used; the models the game gave, taken for the next frames.
   g_night_model_draws.clear();
   {
@@ -2840,6 +3034,21 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
       g_nis_support = Scaling::Supported(device->device(), Scaling::Filter::kNis) ? 1 : 0;
     }
   }
+  // Which temporal upscalers this GPU runs, for the game's menus (TemporalSupport): FSR as AMD's library lists it for
+  // this GPU (FSR 4 on a Radeon RX 9000 only), XeSS as Intel's library answers for it, DLSS on an NVIDIA GeForce RTX
+  // (NGX runs on RTX cards only).
+  {
+    bool fsr4 = false, fsr3 = false;
+    Fsr probe;
+    probe.Generations(device->device(), &fsr4, &fsr3);
+    const bool xess = Xess::Runs(device->device());
+    const GraphicsAdapterInfo& adapter = device->device()->GetAdapterInfo();
+    const std::string name = adapter.Description;
+    const bool dlss = adapter.Vendor == ADAPTER_VENDOR_NVIDIA && name.find("RTX") != std::string::npos;
+    g_temporal_support = (fsr4 ? 1 : 0) | (fsr3 ? 2 : 0) | (xess ? 4 : 0) | (dlss ? 8 : 0);
+    REXLOG_INFO("[native_x_renderer] temporal upscalers on {}: FSR 4 {}, FSR 3.1 {}, XeSS {}, DLSS {}", name,
+                fsr4 ? "yes" : "no", fsr3 ? "yes" : "no", xess ? "yes" : "no", dlss ? "yes" : "no");
+  }
   // The SDK's dialogs (D75): without them a game that asks for text (GRAW's new game) waits on a black screen.
   g_window = window;
   if (!g_overlay.Initialize(device->device(), device->swap_chain()->GetDesc().ColorBufferFormat)) {
@@ -3105,6 +3314,12 @@ double AspectFactor() { return g_aspect_factor; }
 
 void GpuBenchmarkStart() { g_gpu_benchmark.Request(); }
 bool GpuBenchmarkResult(double* ms) { return g_gpu_benchmark.Result(ms); }
+bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss) {
+  const int support = g_temporal_support.load();
+  if (support < 0) return false;
+  *fsr4 = (support & 1) != 0, *fsr3 = (support & 2) != 0, *xess = (support & 4) != 0, *dlss = (support & 8) != 0;
+  return true;
+}
 bool NisSupport(bool* runs, std::string* gpu) {
   const int support = g_nis_support.load();
   if (support < 0) return false;
@@ -3313,6 +3528,12 @@ void ExecuteFrameEnd(const Command& c) {
       REXLOG_INFO("[native_x_renderer] renderer: frame {}: antialiasing ({}) applied {} times in {} frames ({} sets of "
                   "its image sized textures made, D141)",
                   frame, Antialiasing::ModeName(g_aa.mode()), g_aa.TakeApplied(), g_uploads.frames, g_aa.TakeMade());
+    }
+    if (const uint64_t scoped = g_scope.TakeApplied(); scoped || g_scope_unzoomed) {
+      REXLOG_INFO("[native_x_renderer] renderer: frame {}: the picture in picture scope drawn in {} of {} frames, the "
+                  "game's scoped picture {} times without a scope's zoom (D168)",
+                  frame, scoped, g_uploads.frames, g_scope_unzoomed);
+      g_scope_unzoomed = 0;
     }
     if (REXCVAR_GET(native_x_renderer_night)) {
       uint64_t world = 0, glow = 0, lights = 0, sprites = 0;

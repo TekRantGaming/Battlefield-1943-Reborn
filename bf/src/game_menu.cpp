@@ -24,6 +24,7 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <tuple>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -39,6 +40,9 @@
 #include <rex/system/kernel_state.h>  // the achievements (AchievementsPage)
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/window.h>
+#if defined(BF_DEV_TOOLS)
+#include <rex/ui/window_sdl.h>  // the tests' mouse side buttons, pushed into the window's own SDL queue
+#endif
 
 #include <native_x_renderer/native_x_renderer.h>
 
@@ -48,6 +52,7 @@
 #include "launcher_kit.h"
 #include "private_match.h"
 #include "regions.h"
+#include "scope_pip.h"
 #include "server_list.h"
 #include "projects_art.h"
 #include "steam_shortcut.h"
@@ -107,6 +112,7 @@ REXCVAR_DEFINE_STRING(bf_upscaler_mode, "quality", "BF1943",
                       "read at the start")
     .allowed({"native", "quality", "balanced", "performance"});
 REXCVAR_DECLARE(bool, bf_unlock_fps);  // frame_rate.cpp
+REXCVAR_DECLARE(bool, bf_flag_letters);  // capture_points.cpp: letters in the capture point flags (Enhancements)
 REXCVAR_DECLARE(bool, server);         // server_mode.cpp: a dedicated server has no menu
 REXCVAR_DECLARE(double, bf_max_fps);
 REXCVAR_DECLARE(bool, native_x_renderer);  // NativeXRenderer: its own shader storage is made before the first draw
@@ -214,6 +220,15 @@ std::string g_plain_sharpness = "-1";
 // 13 Nov 2026: with a temporal upscaler (bf_temporal) the renderer's antialiasing is that upscaler in its mode, the
 // spatial upscaler is off and so is the sharpening at presenting (the temporal one has its own:
 // native_x_renderer_upscaler_sharpness); without one, the antialiasing is the finished picture's (bf_post_aa).
+// The temporal upscalers this GPU runs (14 Nov 2026, TekRantGaming: "all the upscalers that are offered only appear as
+// an option in the game if the user has a valid vendor that supports each version"): the renderer's answer at the last
+// start, kept in the settings as ",fsr4,fsr,xess,dlss," (those that run; TAA runs everywhere). Empty: not known yet.
+// A choice this GPU does not run: FSR 4 becomes FSR 3.1 where that runs, anything else Off.
+std::string TemporalFallback(const std::string& t, const std::string& supported) {
+  if (supported.empty() || t == "off" || t == "taa" || supported.find("," + t + ",") != std::string::npos) return t;
+  if (t == "fsr4" && supported.find(",fsr,") != std::string::npos) return "fsr";
+  return "off";
+}
 bool TemporalUpscalerOn() {
   const std::string t = rex::cvar::GetFlagByName("bf_temporal");
   return t == "fsr4" || t == "fsr" || t == "dlss" || t == "xess" || t == "taa";
@@ -635,6 +650,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         game_dir_(std::move(game_dir)) {
     settings_.path = std::move(settings_path);
     settings_.Load();
+    MigrateInvert041();
     RefreshGameFlipY();
     BfListShotSetDir(settings_.path.parent_path() / "cache" / "extracted");
     kit::SetMenuArtDir(settings_.path.parent_path() / "cache" / "extracted" / "menu");  // the game's own menu art
@@ -663,6 +679,15 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (const char* own = std::getenv("BF_OWN_BACKEND"); own && *own) {
       UseOwnBackend(own);
       if (const char* port = std::getenv("BF_OWN_BACKEND_JOIN"); port && *port) own_join_port_ = port;
+    }
+    // Read once: a later restart of this run (Restart to apply, an update) must not join that server again (the
+    // review of pull request 16: the variables were passed on to every restart after).
+    for (const char* name : {"BF_JOIN_TICK", "BF_JOIN_ADDRESS", "BF_OWN_BACKEND", "BF_OWN_BACKEND_JOIN"}) {
+#if defined(_WIN32)
+      _putenv_s(name, "");
+#else
+      unsetenv(name);
+#endif
     }
     // What's new once after an update (King Kong's rule, launcher.cpp: the settings say the launcher has run before
     // and an older version ran last; never on a first install, whose setup's end notes this version). It opens on
@@ -831,7 +856,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         gpu_benchmark_at_ = ImGui::GetTime() + 3.0;
       else if (ImGui::GetTime() >= gpu_benchmark_at_) gpu_benchmark_started_ = true, native_x_renderer::GpuBenchmarkStart();
     }
-    if (!REXCVAR_GET(server)) AutoDetectWhenTimed(), NoteNisSupport();
+    if (!REXCVAR_GET(server)) AutoDetectWhenTimed(), NoteNisSupport(), NoteTemporalSupport();
 #if defined(BF_DEV_TOOLS)
     // BF_DEV_HD_IMPORT=<pack> (tests): Settings > Graphics > Import HD texture pack, as if chosen, once.
     {
@@ -945,6 +970,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       const bool want = our_menus && (Cvar("bf_menu_music") != "false" || dev_music);
       PlayMenuMusic(UserDir() / "cache" / "extracted" / "music" / "menu.wav", want);
     }
+    // Every frame, the menu open or not (Yes closes the pause: the check never ran, run v41team1).
+    if (team_suicide_at_ > 0 && ImGui::GetTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
+      team_suicide_at_ = -1;
+      // Only when the team did change and the player is still in the match (the review of pull request 16: a refused
+      // switch, or leaving within the two seconds, still killed the soldier).
+      if (InMatch() && comms::Team() == team_wanted_) {
+        REXLOG_INFO("BF pause: the game's suicide after the change of team, to spawn at the new base");
+        SuicideNow();
+      } else {
+        REXLOG_INFO("BF pause: no change of team to team {} (now {}): no suicide", team_wanted_, comms::Team());
+      }
+    }
     if (!open_) {
       was_open_ = false;
       return;
@@ -972,11 +1009,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     TickRejoinTick();    // the join asked for before a restart at the server's tick rate
     OwnBackendLeaveTick();  // a LAN match is over: back on the main servers
     HostLanAtStartTick();   // a LAN match asked for before a restart
-    if (team_suicide_at_ > 0 && ImGui::GetTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
-      team_suicide_at_ = -1;
-      REXLOG_INFO("BF pause: the game's suicide after the change of team, to spawn at the new base");
-      SuicideNow();
-    }
     // The server list is wanted (server_list.h Want) by a match being played and the friends page here; the browser
     // and Quick Play ask for it themselves.
     if (!joined_gid_.empty() || page_ == Page::kFriends) list_.Want();
@@ -1053,7 +1085,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       key.left |= ImGui::IsKeyPressed(ImGuiKey_LeftArrow);
       key.right |= ImGui::IsKeyPressed(ImGuiKey_RightArrow);
       key.accept |= ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
-      key.back |= ImGui::IsKeyPressed(ImGuiKey_Escape);
+      // Not while the Esc that cleared a binding's slot is still held (its key repeat backed out of the page: the
+      // review of pull request 16).
+      if (!ImGui::IsKeyDown(ImGuiKey_Escape)) esc_swallow_ = false;
+      key.back |= ImGui::IsKeyPressed(ImGuiKey_Escape) && !esc_swallow_;
       if (!typing) {
         key.prev_tab |= ImGui::IsKeyPressed(ImGuiKey_Q);
         key.next_tab |= ImGui::IsKeyPressed(ImGuiKey_E);
@@ -1097,7 +1132,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // A pop-up over whatever page is up (the version gate's UPDATE NEEDED, AskToUpdate; What's new after an update,
     // WhatsNewTick): that page is drawn without the buttons, the mouse's button, its movement and its wheel, which
     // are the pop-up's (ImGui's IsMouseClicked asks MouseDown first).
-    const bool over_popup = update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_;
+    const bool over_popup = update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_;
     const Input popup_in = in;
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
@@ -1137,6 +1172,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       io.MouseDown[0] = popup_down, io.MouseDelta = popup_delta, io.MouseWheel = popup_wheel;
       if (update_popup_) UpdatePopup(d, io, popup_in);
       else if (own_popup_) OwnBackendPopup(d, io, popup_in);
+      else if (exp_popup_) ExperimentalPopup(d, io, popup_in);
       else if (tick_popup_) TickPopup(d, io, popup_in);
       else if (pw_popup_) PasswordPopup(d, io, popup_in);
       else if (whats_new_open_) WhatsNewPopup(d, io, popup_in);
@@ -2029,10 +2065,92 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   bool QuickJoin() {
     const auto servers = list_.servers();
     const ServerInfo* best = nullptr;
+    // Never an experimental tick rate (TekRantGaming, 0.4.1, 13 Nov 2026: "quick play will never put you into one of
+    // these experimental 60hz" servers): 30 Hz only.
     for (const auto& sv : servers)
-      if (sv.players < sv.max_players && (!best || sv.players > best->players)) best = &sv;
+      if (sv.Tick() == 30 && sv.players < sv.max_players && (!best || sv.players > best->players)) best = &sv;
     if (best) Join(*best);
     return best != nullptr;
+  }
+
+  // An experimental server (any tick rate but the game's own 30, 0.4.1): before it is joined from the server browser
+  // (its list, Favourites, Direct connect) the player is warned in TekRantGaming's words (13 Nov 2026), and can only
+  // connect anyway after 5 s. Not for Quick Play (it never picks one), the host's own Custom Match (chosen with its
+  // warning on that page) or the join that follows a restart at the server's rate (the player was warned before it).
+  bool exp_popup_ = false;
+  ServerInfo exp_popup_server_;
+  double exp_popup_at_ = 0;           // ImGui's time when it opened
+  std::string exp_accepted_address_;  // the server the player chose to connect to anyway
+  bool ExperimentalWarned(const ServerInfo& sv) {
+    if (sv.Tick() == 30 || exp_accepted_address_ == sv.address) return true;
+#if defined(BF_DEV_TOOLS)
+    if (std::getenv("BF_AUTO_JOIN")) return true;  // test joins: nobody to read it
+#endif
+    exp_popup_ = true, exp_popup_server_ = sv, exp_popup_at_ = ImGui::GetTime(), popup_row_ = 0;
+    REXLOG_INFO("BF join: {} runs at an experimental {} Hz: warned before joining", sv.name, sv.Tick());
+    return false;
+  }
+  void ExperimentalPopup(ImDrawList* d, ImGuiIO& io, Input in) {
+    const Stage st = StageOf(io);
+    const kit::Fonts& f = kit::GetFonts();
+    d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 190));
+    const ImVec2 a = st.P(300, 150), b = st.P(980, 500);
+    static constexpr const char* kParagraphs[] = {
+        "You are connecting to an experimental server currently testing a 60Hz server tick rate.",
+        "This server is known to have potential game breaking issues. Increasing the server tick rate introduces "
+        "changes to the physics engine, which is currently being decoupled from its original timing. This may cause "
+        "unexpected behaviour, physics inconsistencies, broken mechanics or other gameplay issues.",
+        "This server is available for testing and feedback purposes only. It is not representative of the stable "
+        "gameplay experience and is not recommended for normal gameplay."};
+    {
+      kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.3f);
+      kit::Paper(d, a, b, st.u);
+      kit::Tape(d, ImVec2((a.x + b.x) * 0.5f, a.y), st(110), st(26), -3);
+      kit::Heading(d, st(36), ImVec2(a.x + st(30), a.y + st(26)), kit::kInk, "EXPERIMENTAL SERVER", st(1.5f), st(620));
+      kit::Spaced(d, f.typed, st(11), ImVec2(a.x + st(32), a.y + st(72)), kit::kStamp,
+                  fmt::format("{} \xC2\xB7 {} HZ", exp_popup_server_.name, exp_popup_server_.Tick()), st(1.5f));
+      float y = a.y + st(98);
+      for (const char* para : kParagraphs) {
+        kit::Wrapped(d, f.ui, st(16), ImVec2(a.x + st(30), y), kit::kInkSoft, para, st(620));
+        y += kit::WrappedHeight(f.ui, st(16), para, st(620)) + st(12);
+      }
+    }
+    // Close, and Connect anyway: locked for its first 5 s (it counts down), then like any button.
+    const double left = 5.0 - (ImGui::GetTime() - exp_popup_at_);
+    const bool locked = left > 0;
+    if (locked) popup_row_ = 0;
+    else if (in.left || in.right || in.up || in.down) popup_row_ = 1 - popup_row_;
+    int clicked = -1;
+    float x = a.x + st(30);
+    for (int i = 0; i < 2; ++i) {
+      const std::string label = i == 0 ? std::string("Close")
+                                       : locked ? fmt::format("Connect anyway ({})", int(std::ceil(left)))
+                                                : std::string("Connect anyway");
+      const ImVec2 c0(x, b.y - st(70)), c1(x + st(250), b.y - st(26));
+      const bool off = i == 1 && locked;
+      const bool hover = ImGui::IsMouseHoveringRect(c0, c1);
+      if (hover && !off && io.MouseDelta.x + io.MouseDelta.y != 0) popup_row_ = i;
+      const bool sel = popup_row_ == i && !off;
+      if (sel) d->AddRectFilled(ImVec2(c0.x, c0.y + st(4)), ImVec2(c1.x, c1.y + st(4)), kit::kGreenShadow);
+      d->AddRectFilled(c0, c1, sel ? kit::kGreen : off ? kit::kPaperDim : kit::kPaperCard);
+      if (!sel) d->AddRect(c0, c1, kit::kBorder, 0, 0, st(2));
+      const float tw = kit::TextWidth(f.ui_bold, st(20), label);
+      d->AddText(f.ui_bold, st(20), ImVec2((c0.x + c1.x - tw) * 0.5f, c0.y + st(8)),
+                 sel ? IM_COL32(255, 255, 255, 255) : off ? kit::kInkFaint : kit::kInk, label.c_str());
+      if (hover && !off && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
+      x += st(270);
+    }
+    if (in.accept) clicked = popup_row_;
+    if (in.back) clicked = 0;
+    if (clicked < 0) return;
+    exp_popup_ = false;
+    if (clicked == 0) {
+      REXLOG_INFO("BF join: the experimental server {} not joined (closed)", exp_popup_server_.name);
+      return;
+    }
+    REXLOG_INFO("BF join: {} joined anyway ({} Hz, experimental)", exp_popup_server_.name, exp_popup_server_.Tick());
+    exp_accepted_address_ = exp_popup_server_.address;
+    Join(exp_popup_server_);
   }
 
   // A server of the other tick rate while the game already runs (its rate is fixed at its start): asked, then the
@@ -2097,6 +2215,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       pw_popup_ = true, pw_server_ = sv, pw_text_.clear(), pw_error_.clear();
       return;
     }
+    if (!ExperimentalWarned(sv)) return;
     pw_passed_.clear();
     if (!own_backend_.empty()) own_match_joined_ = true;
     if (sv.Tick() != TickRate() && !SetTickRate(sv.Tick())) {
@@ -2389,6 +2508,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (sv.address != tick_join_address_) continue;
       REXLOG_INFO("BF join: joining {} as asked before the restart ({} Hz)", sv.name, sv.Tick());
       tick_join_address_.clear();
+      exp_accepted_address_ = sv.address;  // warned before the restart
       Join(sv);
       return;
     }
@@ -2636,8 +2756,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // Gameplay, in King Kong's order, rows and wording. Every value is saved in bf1943-settings.txt: our own keys,
   // and runtime settings as "cvar.<name>" (set again at every start, ApplyStartupDisplaySettings). Rows that need
   // more of the game found first are shown, greyed, with a note.
-  enum Tab { kTabDisplay, kTabGraphics, kTabAudio, kTabControls, kTabGameplay, kTabCount };
-  static constexpr const char* kTabNames[kTabCount] = {"DISPLAY", "GRAPHICS", "AUDIO", "CONTROLS", "GAMEPLAY"};
+  enum Tab { kTabDisplay, kTabGraphics, kTabAudio, kTabControls, kTabGameplay, kTabEnhancements, kTabCount };
+  static constexpr const char* kTabNames[kTabCount] = {"DISPLAY", "GRAPHICS", "AUDIO", "CONTROLS", "GAMEPLAY",
+                                                       "ENHANCEMENTS"};
   static constexpr const char* kNotYet = "Coming in a later version: this needs more of the game's own code found first.";
 
   struct SettingRow {
@@ -2773,6 +2894,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
   static bool Truthy(const std::string& v) { return v == "true" || v == "1" || v == "on"; }
 
+  // The Upscaler row's choices: Off and TAA always, the others only where this GPU runs them (the renderer's answer,
+  // NoteTemporalSupport); before the first answer, Off and TAA alone. The one chosen stays listed until it is changed.
+  std::vector<std::pair<std::string, std::string>> TemporalChoices() {
+    const std::string supported = settings_.Get("temporal_support", "");
+    const std::string chosen = Cvar("bf_temporal");
+    std::vector<std::pair<std::string, std::string>> out = {{"Off", "off"}};
+    for (const auto& [title, value] : std::vector<std::pair<std::string, std::string>>{
+             {"AMD FSR 4", "fsr4"}, {"AMD FSR 3.1", "fsr"}, {"Intel XeSS", "xess"}, {"NVIDIA DLSS", "dlss"}})
+      if (supported.find("," + value + ",") != std::string::npos || value == chosen) out.push_back({title, value});
+    out.push_back({"TAA", "taa"});
+    return out;
+  }
   SettingRow Choice(const std::string& section, const std::string& name, const std::string& help,
                     const std::string& cvar, const std::vector<std::pair<std::string, std::string>>& options) {
     SettingRow r{section, name, help};
@@ -2832,6 +2965,45 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // (look.cpp: the game negates the right stick's y in land vehicles and boats with it, so the stick value the
   // vehicle mouse gives must be negated too, or a tank's gun goes the wrong way for a player who set it:
   // TekRantGaming, 12 Nov 2026, 0.3.0 players with the mouse). Kept in an atomic: the settings map is the UI thread's.
+  // 0.4.1's invert settings from 0.4.0's, once (the review of pull request 16, as of 12 before it: the pull request
+  // stopped reading the mouse's "Mouse vertical in vehicles" and cleared the controller's Camera vertical without
+  // carrying either over, so inverted players would have been turned round by the update):
+  //   - the mouse in vehicles (bf_mouse_invert_y_vehicle) gets what 0.4.0 gave: its Inverted or Normal, or with "Same
+  //     as on foot" (the default) the on foot invert;
+  //   - the controller's Camera vertical (bf_invert_rs_y, the stick's y turned round before the game) is folded into
+  //     the game's own Vertical look settings for each seat (FlipY turned round), and cleared.
+  // The mouse's new Invert flight is not carried over, on purpose: mouse flying is a flight stick now (the notes say so).
+  void MigrateInvert041() {
+    if (settings_.Get("settings_041_invert", "") == "1") return;
+    auto saved = [this](const char* name, const std::string& fallback) {
+      const std::string v = settings_.Get(std::string("cvar.") + name, "");
+      return v.empty() ? fallback : v;
+    };
+    auto put = [this](const char* name, bool on) {
+      settings_.values[std::string("cvar.") + name] = on ? "true" : "false";
+      rex::cvar::SetFlagByName(name, on ? "true" : "false");
+    };
+    // (0.3.0's own bf_mouse_invert_y_vehicle is not read: 0.4.0 went by this setting, and a "Normal" player who still
+    // had it on would have been turned round: the review of pull request 16.)
+    const std::string vertical = saved("bf_mouse_vehicle_vertical", "same");
+    const bool foot = Truthy(saved("bf_mouse_invert_y", "false"));
+    const bool vehicles = vertical == "inverted" ? true : vertical == "normal" ? false : foot;
+    put("bf_mouse_invert_y_vehicle", vehicles);
+    const bool fold = Truthy(saved("bf_invert_rs_y", "false"));
+    if (fold) {
+      for (const char* k : {"Scheme1FlipY", "Scheme2FlipY", "Scheme4FlipY"}) {
+        const std::string key = std::string("game.GstInput.") + k;
+        settings_.values[key] = settings_.Get(key, "0") == "1" ? "0" : "1";
+      }
+      const std::string fly = "game.GstInput.Scheme3FlipY";
+      settings_.values[fly] = settings_.Get(fly, "1") == "1" ? "0" : "1";
+      put("bf_invert_rs_y", false);
+    }
+    settings_.values["settings_041_invert"] = "1";
+    settings_.Save();
+    REXLOG_INFO("BF settings: 0.4.1's invert settings from 0.4.0's: the mouse in vehicles {}{}",
+                vehicles ? "inverted" : "normal", fold ? "; the controller's Camera vertical folded into the game's own" : "");
+  }
   void RefreshGameFlipY() {
     game_flip_y_.store(GameValue("GstInput", "Scheme2FlipY", "0") == "1", std::memory_order_relaxed);
   }
@@ -2894,6 +3066,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       case kTabGraphics: return GraphicsRows();
       case kTabAudio: return AudioRows();
       case kTabControls: return sub_ == kSubRemap ? RemapRows() : sub_ == kSubKeys ? KeyRows() : ControlsRows();
+      case kTabEnhancements: return EnhancementsRows();
       default: return GameplayRows();
     }
   }
@@ -3175,9 +3348,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // No Graphics API row: Vulkan, our renderer, is the only one (DECISIONS.md, 5 Nov 2026 evening). The rows set
     // NativeXRenderer's own settings: the presenter's swap_post_effect and present_effect, which these rows set before,
     // are not used when NativeXRenderer draws (they changed nothing).
-    // Antialiasing (TekRantGaming, 9 Nov 2026, after testing them all: "FXAA works the best, so we're only going to offer
-    // that, and it should be on by default"): Off or FXAA. DLAA, DLSS, FSR 3.1 and SMAA are no longer offered (a saved
-    // one becomes FXAA: ApplyStartupDisplaySettings); frame generation went with them (it needs DLSS or FSR 3.1).
+    // Antialiasing (TekRantGaming, 9 Nov 2026, after testing them all: "FXAA works the best, so we're only going to
+    // offer that, and it should be on by default"): Off or FXAA until 0.4.1, where pull request 16 (ThatZaliaSGuy,
+    // merged at TekRantGaming's word "review and merge", 13 Nov) offers SMAA and Intel CMAA 2 again beside it, and the temporal
+    // upscalers in a section of their own. Frame generation stays out (it needs DLSS or FSR 3.1 of SDK 1.1.4).
     // 13 Nov 2026 (this fork): SMAA is offered again beside FXAA, at the reference implementation's four presets
     // (NativeXRenderer has had SMAA 1x since D41; the row offered only FXAA since 9 Nov).
     const std::string temporal_now = Cvar("bf_temporal");  // (through Cvar: a change waiting for Apply shows)
@@ -3200,14 +3374,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // antialiasing above cannot.
     rows.push_back(Choice("Upscaling", "Upscaler",
                           "Antialiases, and in the modes below Native upscales, with what the last frames showed: the "
-                          "steadiest picture. AMD FSR 4 is AMD's newest (Radeon RX 6000 and later with a current "
-                          "driver; elsewhere AMD's library picks what the card runs). AMD FSR 3.1 runs on any card. "
-                          "Intel XeSS runs on any recent card. NVIDIA DLSS needs a GeForce RTX. TAA is the game's own plain "
-                          "temporal antialiasing, at your display's resolution only. Replaces Antialiasing and the spatial upscaler. Applies at "
-                          "the next start.",
-                          "bf_temporal",
-                          {{"Off", "off"}, {"AMD FSR 4", "fsr4"}, {"AMD FSR 3.1", "fsr"}, {"Intel XeSS", "xess"},
-                           {"NVIDIA DLSS", "dlss"}, {"TAA", "taa"}}));
+                          "steadiest picture. Only the upscalers your graphics card runs are listed: AMD FSR 4 on a "
+                          "Radeon RX 9000, AMD FSR 3.1 and Intel XeSS where AMD's and Intel's libraries run on your "
+                          "card, NVIDIA DLSS on a GeForce RTX. TAA is the game's own plain temporal antialiasing, at "
+                          "your display's resolution only, on any card. Replaces Antialiasing and the spatial "
+                          "upscaler. Applies at the next start.",
+                          "bf_temporal", TemporalChoices()));
     {
       SettingRow mode = Choice("Upscaling", "Upscaler mode",
                                "Native AA draws the game at your display's resolution and only antialiases. The others "
@@ -3546,8 +3718,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "Which way the camera turns when you push the right stick left or right.", "bf_invert_rs_x",
                           "Normal", "Inverted"));
     // One invert for each of on foot, vehicles and planes (13 Nov: several "Invert look" rows in different sections).
-    // They are the game's own FlipY settings; the older stick-level Camera vertical is folded into them once.
-    if (Truthy(Cvar("bf_invert_rs_y"))) SetCvar("bf_invert_rs_y", "false");
+    // They are the game's own FlipY settings; the older stick-level Camera vertical is folded into them once, at the
+    // start (MigrateInvert041), so it is off here.
     rows.push_back(GameChoice("Controller", "Invert camera",
                               "Inverts the right stick's up and down on foot, and in gunner and passenger seats.",
                               "GstInput", {"Scheme1FlipY"}, "0", {{"Normal", "0"}, {"Inverted", "1"}}));
@@ -3784,6 +3956,27 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     return rows;
   }
 
+  // Enhancements (TekRantGaming, 13 Nov 2026: "I think we will have a lot of upcoming features like this so should
+  // probably have them in a new settings category"): features of ours that change how the game looks or plays, each
+  // with its own switch. Not a step of the first start's setup (game_menu_setup.inc has its own list).
+  std::vector<SettingRow> EnhancementsRows() {
+    std::vector<SettingRow> rows;
+    rows.push_back(Toggle("Enhancements", "Lettered flags",
+                          "A letter inside every capture point's flag: in the row under the ticket bars, on the markers in "
+                          "the world, on the minimap, the deploy screen's map and the pause menu's map. The same point has "
+                          "the same letter in every match. Off: the game's own plain flags.",
+                          "bf_flag_letters"));
+    // TekRantGaming, 13 Nov 2026: "add a modern sniper scope implementation ... off by default ... marked as
+    // (experimental)", picture in picture (NativeXRenderer D168, fov.cpp); not in 0.4.1 (scope_pip.h).
+    if (kScopePip)
+      rows.push_back(Toggle("Enhancements", "Sniper scope (experimental)",
+                            "Picture in picture: through a sniper scope only its lens zooms in, and you still see the "
+                            "world around it, darkened. The world around the lens is the one you saw as the scope came "
+                            "up, turned with your aim. Off: the game's own scope, which fills the screen.",
+                            "bf_scope_pip"));
+    return rows;
+  }
+
   std::vector<SettingRow> GameplayRows() {
     std::vector<SettingRow> rows;
     SettingRow name{"Player", "Name", name_saved_.empty() ? "The name other players see in the game."
@@ -3859,8 +4052,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return "LMB";
       if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) return "RMB";
       if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) return "MMB";
-      if (ImGui::IsMouseClicked(3)) return "Mouse4";
-      if (ImGui::IsMouseClicked(4)) return "Mouse5";
+      // The side buttons by the names issue 14 gave them (the prompts' pictures, glyphs/keyboard/MB4.png and MB5.png).
+      if (ImGui::IsMouseClicked(3)) return "MB4";
+      if (ImGui::IsMouseClicked(4)) return "MB5";
       if (wheel && ImGui::GetIO().MouseWheel > 0) return "WheelUp";
       if (wheel && ImGui::GetIO().MouseWheel < 0) return "WheelDown";
       return {};
@@ -3895,7 +4089,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
   // A binding's keys as its four slots: its first two keyboard keys, then its first two mouse buttons.
   static bool MouseKeyName(const std::string& k) {
-    return k == "LMB" || k == "RMB" || k == "MMB" || k == "Mouse4" || k == "Mouse5" || k == "WheelUp" || k == "WheelDown";
+    return k == "LMB" || k == "RMB" || k == "MMB" || k == "MB4" || k == "MB5" || k == "Mouse4" || k == "Mouse5" ||
+           k == "WheelUp" || k == "WheelDown";
   }
   static std::array<std::string, 4> BindSlots(const std::string& value) {
     std::array<std::string, 4> slots;
@@ -3946,6 +4141,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         StoreBindSlot(capture_, capture_slot_, "");
         capture_.clear();
         esc_held_since_ = -1;
+        esc_swallow_ = true;  // the rest of this hold is not a Back
       }
     } else if (esc_held_since_ >= 0) {  // let go before that: the slot keeps what it has
       esc_held_since_ = -1;
@@ -4259,6 +4455,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
 
   void PauseTest() {
+#if defined(BF_DEV_TOOLS)
+    SideButtonTick();
+#endif
     static const std::pair<double, double> at = [] {
       const char* v = std::getenv("BF_PAUSE_TEST");
       if (!v || !*v) return std::pair<double, double>{-1, -1};
@@ -4327,8 +4526,45 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       else if (what == "bfright") PressBf({0x0008}), Passing(0x0008);
       else if (what == "bfy") PressBf({0x8000}), Passing(0x8000);
       else if (what == "bfstart") open_ = false, PressBf({kPadStart});  // ours closed, the game's own pause (traces)
+#if defined(BF_DEV_TOOLS)
+      // sdlmb4, sdlmb5: a mouse side button pressed and let go (issue 14).
+      else if (what == "sdlmb4" || what == "sdlmb5") PushSideButton(what == "sdlmb4" ? SDL_BUTTON_X1 : SDL_BUTTON_X2, true);
+#endif
     }
   }
+
+#if defined(BF_DEV_TOOLS)
+  // Tests: a mouse side button through the window's own SDL event queue, as a real one arrives (SDL, the window, the
+  // menu layer and the keyboard and mouse driver), never through the PC's own input (issue 14, 13 Nov 2026). Let go
+  // 0.15 s later (SideButtonTick).
+  uint8_t side_button_up_ = 0;
+  double side_button_up_at_ = 0;
+  void PushSideButton(uint8_t button, bool down) {
+    auto* w = window_ ? static_cast<rex::ui::WindowSDL*>(window_()) : nullptr;
+    SDL_Window* sdl = w ? w->sdl_window() : nullptr;
+    if (!sdl) {
+      REXLOG_WARN("BF test: no window for mouse button {}", int(button));
+      return;
+    }
+    SDL_Event e{};
+    e.type = down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+    e.button.windowID = SDL_GetWindowID(sdl);
+    e.button.button = button;
+    e.button.down = down;
+    e.button.clicks = 1;
+    const bool ok = SDL_PushEvent(&e);
+    REXLOG_INFO("BF test: mouse button {} {} through the window's queue{}", int(button), down ? "down" : "up",
+                ok ? "" : " (refused)");
+    if (down) side_button_up_ = button, side_button_up_at_ = ImGui::GetTime() + 0.15;
+  }
+  void SideButtonTick() {
+    if (side_button_up_ && ImGui::GetTime() >= side_button_up_at_) {
+      const uint8_t b = side_button_up_;
+      side_button_up_ = 0;
+      PushSideButton(b, false);
+    }
+  }
+#endif
 
   // Our pause, in place of the game's (TekRantGaming, 10 Nov 2026: a 100% replacement whose rows do what they say, by the
   // game's own commands; docs/MENUS-PLAN.md). The game's own pause is never opened: Start reaches ours only
@@ -4355,8 +4591,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const int other = 3 - mine;
     REXLOG_INFO("BF pause: Change Team, from team {} to {} (the game's own selectTeam)", mine, other);
     GameCommand("selectTeam", std::to_string(other));
-    team_suicide_at_ = ImGui::GetTime() + 2.0;
+    team_suicide_at_ = ImGui::GetTime() + 2.0, team_wanted_ = other;
   }
+  int team_wanted_ = 0;  // the team Change Team asked for
   bool ach_from_pause_ = false;  // the achievements opened from the pause: B goes back there
   int pause_confirm_ = -1;  // the row whose question is up (Exit Game, Suicide), else -1
 
@@ -4964,6 +5201,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   std::string capture_;  // the keybind_* setting waiting for a key
   int capture_slot_ = 0;  // its slot (0, 1 keys; 2, 3 mouse buttons)
   double esc_held_since_ = -1;  // Esc down while a slot waits (ImGui's time; -1: it is up)
+  bool esc_swallow_ = false;    // the Esc that cleared a slot is still held
   int slot_cursor_ = 0;   // the slot left and right are on, in the bindings' chosen row
   std::function<rex::ui::Window*()> window_;
   std::vector<DisplayMode> modes_;  // the monitor's fullscreen modes, listed once per monitor
@@ -5250,6 +5488,12 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   // The Upscaler (ApplyUpscaler): the sharpness as the settings and the command line give it is the one for Off.
   if (!REXCVAR_GET(server)) {
     g_plain_sharpness = rex::cvar::GetFlagByName("native_x_renderer_sharpness");
+    // A temporal upscaler the last start found this GPU does not run: one it does (TemporalFallback).
+    const std::string t = rex::cvar::GetFlagByName("bf_temporal");
+    if (const std::string to = TemporalFallback(t, settings.Get("temporal_support", "")); to != t) {
+      REXLOG_INFO("BF upscaler: {} does not run on this GPU (its last start found): {} instead", t, to);
+      rex::cvar::SetFlagByName("bf_temporal", to);
+    }
     ApplyUpscaler(true, settings.Get("nis_support", ""));
   }
   if (auto it = settings.values.find("fullscreen"); it != settings.values.end())

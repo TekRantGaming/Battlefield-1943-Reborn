@@ -132,6 +132,21 @@ class DrawPath {
   void SetHudScale(float hud, float minimap) { hud_scale_ = hud, minimap_scale_ = minimap; }
   // The decisions' tallies and a sample, for the renderer's periodic log; cleared.
   std::string TakeHudLog();
+  // D168, the picture in picture sniper scope (scope.h). watch (renderer.cpp, every frame while the game reports its
+  // view): the game's scoped picture (IsScopeMask: its composite of the zoomed view with the black ring round it, and
+  // the black pass of the scope's raise) is noticed, so the scope's pass runs right after it, before the HUD. log: each
+  // draw after the composite logged (1 a frame without the scope, 2 one with it, 3 after the present: the research).
+  void SetScopeFrame(bool watch, int log) { scope_watch_ = watch, scope_log_ = log, scope_logged_ = 0; }
+  // Whether the last draw was the game's scoped picture (asked once after each draw).
+  bool TakeScopeMaskDrawn() {
+    const bool drawn = scope_mask_drawn_;
+    scope_mask_drawn_ = false;
+    return drawn;
+  }
+  // D168: while the scope's lens is drawn (until the frame's end), the game's reticle, a full screen 2D quad drawn with
+  // the HUD, is cut to the lens's square (host pixels of the output; right <= left: not cut), so its lines end at the
+  // lens and the world around it has none.
+  void SetScopeClip(int left, int top, int right, int bottom) { scope_clip_ = Diligent::Rect{left, top, right, bottom}; }
   // At the frame's end: whether it was a menu (its boxed area), and the frame's run state cleared.
   void EndHudFrame() {
     hud_menu_ = (hud_backdrop_ || GameMenuRecently()) && !hud_mesh_;
@@ -299,6 +314,9 @@ class DrawPath {
   bool aspect_box_ = false;  // D43
   float aspect_align_ = 0.5f;
   bool hud_classify_ = false, hud_edges_ = false, hud_debug_ = false;
+  bool scope_watch_ = false, scope_mask_drawn_ = false;  // D168
+  int scope_log_ = 0, scope_logged_ = 0;
+  Diligent::Rect scope_clip_{};  // D168: SetScopeClip
   float hud_scale_ = 1.0f, minimap_scale_ = 1.0f;
   // The texture the HUD draw being placed samples (its first: width, height, guest format), 0 without one. A draw
   // from the game's crosshair sheet is never a world marker (ClassifyHudDraw).
@@ -321,8 +339,12 @@ class DrawPath {
     // bottom, from the third of the height its centre is in; a panel's contents and a line's next glyphs take
     // their first's, like the alignment.
     float anchor_y = 0.5f;
+    float anchor_x = 0.5f;  // the width it is scaled about with a centred HUD (0 left, 0.5 middle, 1 right)
   };
   HudPlace ClassifyHudDraw(std::span<const Copy> copies, uint64_t vertex_shader);
+  // D168: an inline 2D quad's extent in clip space (lo x, hi x, lo y, hi y) by the transform its vertex shader's
+  // constants hold, found as ClassifyHudDraw finds it (rows, then columns); false when none is found. No side effects.
+  bool HudClipExtent(std::span<const Copy> copies, uint32_t count, double out[4]) const;
   // Within a frame: the last placed draw (a line of text's glyphs follow their first), and the frame's covered area.
   struct HudPrev {
     bool valid = false;

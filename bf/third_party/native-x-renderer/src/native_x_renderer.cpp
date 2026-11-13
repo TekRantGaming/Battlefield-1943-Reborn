@@ -143,6 +143,9 @@ void GpuBenchmarkStart() {
 }
 bool GpuBenchmarkResult(double* ms) { return g_renderer && renderer::GpuBenchmarkResult(ms); }
 bool NisSupport(bool* runs, std::string* gpu) { return g_renderer && renderer::NisSupport(runs, gpu); }
+bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss) {
+  return g_renderer && renderer::TemporalSupport(fsr4, fsr3, xess, dlss);
+}
 
 // D163: kept whether the renderer runs yet or not (the level is read on a worker).
 void NightLamps(const NightLamp* lamps, uint32_t count) { renderer::NightLamps(lamps, count); }
@@ -167,6 +170,33 @@ void NoteHudMarker(float x, float y) {
   std::lock_guard lock(g_hud_markers_mutex);
   std::erase_if(g_hud_markers, [&](const HudMarker& m) { return now - m.at > std::chrono::milliseconds(200); });
   if (g_hud_markers.size() < 1024) g_hud_markers.push_back({x, y, now});
+}
+
+namespace {
+struct ScopeNote {
+  bool on = false;
+  float right[3] = {}, up[3] = {}, back[3] = {}, tan_half_v = 0.5f, zoom = 1.0f;
+  std::chrono::steady_clock::time_point at{};
+};
+std::mutex g_scope_mutex;
+ScopeNote g_scope_note;
+}  // namespace
+
+void NoteScopeView(bool on, const float right[3], const float up[3], const float back[3], float tan_half_v_own, float zoom) {
+  std::lock_guard lock(g_scope_mutex);
+  ScopeNote& n = g_scope_note;
+  n.on = on, n.zoom = std::isfinite(zoom) ? std::clamp(zoom, 0.0f, 2.0f) : 1.0f, n.at = std::chrono::steady_clock::now();
+  for (int i = 0; i < 3; ++i) n.right[i] = right[i], n.up[i] = up[i], n.back[i] = back[i];
+  n.tan_half_v = std::isfinite(tan_half_v_own) ? std::clamp(tan_half_v_own, 0.05f, 4.0f) : 0.5f;
+}
+
+bool ScopeView(float right[3], float up[3], float back[3], float& tan_half_v_own, float& zoom) {
+  std::lock_guard lock(g_scope_mutex);
+  const ScopeNote& n = g_scope_note;
+  if (!n.on || std::chrono::steady_clock::now() - n.at > std::chrono::milliseconds(250)) return false;
+  for (int i = 0; i < 3; ++i) right[i] = n.right[i], up[i] = n.up[i], back[i] = n.back[i];
+  tan_half_v_own = n.tan_half_v, zoom = n.zoom;
+  return true;
 }
 
 std::atomic<int64_t> g_game_menu_at{0};

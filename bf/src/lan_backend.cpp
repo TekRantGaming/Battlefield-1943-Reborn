@@ -17,6 +17,7 @@
 // bytes goes in parts (base64 chunks).
 // Started by gm_host.cpp before it registers, when bf_lan_backend is set (private_match.cpp sets it for a LAN match).
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -278,7 +279,7 @@ void Fesl(Conn& c, const std::string& kind, uint32_t id, const Fields& f) {
            {{"TXN", txn}, {"filters", ""}, {"enabled", ""}, {"disabled", ""},
             {"telemetryToken", Base64("127.0.0.1,9946,enUS,bf1943-no-telemetry")}});
   } else if (key == "rank/GetStats") {
-    const int count = std::atoi(Get(f, "keys.[]", "0").c_str());
+    const int count = std::clamp(std::atoi(Get(f, "keys.[]", "0").c_str()), 0, 256);  // the game asks a few dozen
     Fields out = {{"TXN", txn}, {"stats.[]", std::to_string(count)}};
     for (int i = 0; i < count; ++i) {
       const std::string stat = Get(f, "keys." + std::to_string(i));
@@ -404,6 +405,8 @@ void ServeConn(SOCKET s, bool theater) {
       const std::string part = Replaced(Get(fields, "data"), "%3d", "=");
       if (multi_id != id) multi_id = id, multi_data.clear(), multi_b64 = 0;
       multi_data += Unbase64(part), multi_b64 += part.size();
+      // At most 1 MB in all.
+      if (multi_data.size() > (1u << 20)) break;
       if (multi_b64 < size_t(std::atoll(Get(fields, "size", "0").c_str()))) continue;
       multi_id = ~0u;
       fields = Parse(multi_data);
@@ -538,15 +541,25 @@ SOCKET Listen(uint16_t port) {
   return s;
 }
 
+// At most 64 connections at once on each port (a match has 24 players).
 template <typename F>
 void Accept(SOCKET listener, F&& serve) {
   std::thread([listener, serve] {
+    static std::atomic<int> open{0};
     for (;;) {
       const SOCKET s = accept(listener, nullptr, nullptr);
       if (s == INVALID_SOCKET) return;
+      if (open.load() >= 64) {
+        closesocket(s);
+        continue;
+      }
       BOOL yes = TRUE;
       setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&yes), sizeof(yes));
-      std::thread([s, serve] { serve(s); }).detach();
+      ++open;
+      std::thread([s, serve] {
+        serve(s);
+        --open;
+      }).detach();
     }
   }).detach();
 }
@@ -570,6 +583,11 @@ void Discovery() {
       if (got < 0 && WSAGetLastError() != WSAECONNRESET) break;
       continue;
     }
+    // Only a PC of this network is answered (private, link local or loopback addresses).
+    const uint32_t ip = ntohl(from.sin_addr.s_addr);
+    const bool local = (ip >> 24) == 10 || (ip >> 24) == 127 || (ip >> 20) == 0xAC1 || (ip >> 16) == 0xC0A8 ||
+                       (ip >> 16) == 0xA9FE;
+    if (!local) continue;
     std::string out = "BF43LAN!";
     {
       std::lock_guard lock(g_mutex);

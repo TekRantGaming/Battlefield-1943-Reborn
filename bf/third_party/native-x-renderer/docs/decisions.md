@@ -5209,3 +5209,87 @@ the first runs at 21:9, 32:9, 16:10 and 4:3:**
 - A world marker (`kPoint`) is moved down as well as across: on an output taller than 16:9 the box sits in the middle
   of the height, and a marker moved across only sat up to 5 percent of the height off its flag.
 - How a draw's place was found is a kind and a register, worded only for the debug log: no string per HUD draw.
+
+## D167 — Pull request 16's renderer part: SMAA presets, Intel CMAA 2, a TAA, AMD FSR 4.1 and 3.1 from the FSR SDK 2.4.0, Intel XeSS 3, HUD scale, world marker pieces (2026-11-13, ThatZaliaSGuy, for Battlefield 1943 Reborn 0.4.1)
+
+**Decision:** taken from Battlefield 1943 Reborn's pull request 16 (merged at TekRantGaming's word, reviewed line by
+line):
+- Antialiasing on the finished picture: FXAA, SMAA at the reference implementation's four presets, and Intel CMAA 2
+  (two presets) as compute passes ported to GLSL (`src/cmaa_shaders.h`, Apache 2.0). It switches while the game runs.
+- Temporal upscalers on the 3D view before the game's post-processing: AMD FSR 4.1 and FSR 3.1 through the FSR SDK
+  2.4.0's loader (`amd_fidelityfx_loader_vk.dll`, which finds `amd_fidelityfx_upscaler_vk.dll`), Intel XeSS 3
+  (`libxess.dll`; its instance and device extensions and features added when an XeSS mode is chosen), NVIDIA DLSS as
+  before, and a plain TAA of the renderer's own (`src/taa.cpp`). The libraries are fetched when configuring, each
+  checked by its SHA256, copied next to the game and loaded only from its folder. FidelityFX SDK 1.1.4's library,
+  which frame generation used, is no longer fetched (frame generation has not been offered since 9 Nov).
+- HUD scale and minimap size for the boxed HUD; a world marker's pieces follow its point across a wider screen only
+  when they are marker sized (a plane's gunsight came apart on ultrawide: the fix of the withdrawn pull request 12);
+  a draw from the crosshair sheet is never a marker.
+- An HD pack may hold the HUD's, the deploy screen's and the icon atlases' pictures; the game draws its prompts and
+  flag letters into the pack's picture at the pack's size.
+- While anisotropic filtering is forced (2x and up), a game's negative texture LOD bias is dropped.
+
+**Changed in the review (Claude for Battlefield 1943 Reborn):** an HD pack entry with impossible sizes is left out
+(16384 texels a side, 16 levels, 1 GB; a crafted pack wrapped a size check and crashed every start), the HUD's HD
+copies are at most 8 times the game's size, the vendor libraries are never loaded by a bare name (no executable
+path: none), and XeSS is used only when its library has every function called.
+
+**Not verified at the merge:** XeSS adds its feature structures to DiligentCore's chain without removing duplicates
+(Intel's header asks the caller to); FSR 4 itself (it needs a Radeon RX 9000: elsewhere AMD's library runs FSR 3.1
+under the "FSR 4" name).
+
+**Seen in play after the merge (13 Nov 2026, a GeForce RTX 4070 Ti, Wake Island, one run a mode, runs v41g-*):**
+SMAA High, CMAA 2 and CMAA 2 Ultra, FSR 3.1 and "FSR 4" (AMD's library offers 3.1.6 and 2.3.4 on this GPU and runs
+3.1.6), XeSS (the device's chain held each feature structure once: 1000059000, 1000351000, 51 and 53; Intel's library
+from the SDK 3.0.2 tag, its hash as pinned, reports its upscaler as 2.0.2), DLAA and TAA: each applied every frame in
+play, a clean picture, no errors. FSR 4 on a Radeon RX 9000 and XeSS on other drivers are still not seen.
+
+## D168 — The picture in picture sniper scope (2026-11-13, Claude for Battlefield 1943 Reborn 0.4.1)
+
+**Context.** TekRantGaming asked for "a modern sniper scope implementation" as a switch in the game's new Settings >
+Enhancements page, "Picture in picture", off by default and marked experimental. The game draws one view a frame: with
+a sniper scope up, the whole 3D view is the zoomed one, composed black but for a round view, and the reticle is drawn
+with the HUD. There is no second, unzoomed view to put round a lens.
+
+**Decision** (src/scope.h, renderer.cpp, draw.cpp; the game's side in bf/src/fov.cpp):
+- The game reports its camera every frame while the switch is on and the soldier is on foot (its own input mapping's
+  seat): right, up and back, the tangent of half its own field of view, and the zoom (the half angles' tangents, now
+  over its own: a sight's about 0.6 to 0.8, the Springfield's 0.22). The renderer watches each frame's draws while it
+  does.
+- Not zoomed (above 0.97): at the game's composite (the first draw of the output's size after the scene's copy) the
+  finished scene is kept with its camera, into a half float texture whose alpha is the world's share: 0 on the first
+  person weapon, which the view's depth at its end holds alone on foot (nearer than 3 m, the rest cleared to far:
+  D162's test). Its mips are made once when the scope comes up.
+- Zoomed as a sniper scope (below 0.6): right after the game's composite of the zoomed view (vertex shader
+  962547C8BB566F8B with pixel shader 8DD620FF8D8BB8FA at the output's size; while the scope comes up, its black pass
+  589877255C25EA63), one pass: a lens of 0.3 of the height keeps the middle of the game's picture; round it the kept
+  view, turned to where the camera looks now, a coarser mip, 45% darker, the weapon's gap filled by push and pull (a
+  coarse level's world colour refined by each finer level by its share); a dark rim. The HUD is drawn over it as always.
+- The reticle, eight of the HUD sprite shaders' quads (BCFA50F3EA22BAE7 with 90AC5F14E9463FB2) stretched by their
+  constants into lines across the screen, is cut to the lens's square while the lens is drawn: a quad a quarter of the
+  screen or more one way in clip space (DrawPath::HudClipExtent, the HUD classifier's transform search without its
+  side effects). Its lines run through the centre, so the square cuts them at the circle.
+
+**Findings on the way** (runs v41scope5 to v41scope27):
+- The first hook, the full screen pass after two half size ones, is the scope's raise only. Steady scoped frames are
+  the composite and the HUD: armed at the composite, the pass ran in 9 of about 470 scoped frames (v41scope12); armed
+  every frame, in all of them (v41scope17: 471 of 600, the rest the raise).
+- The composite's shaders are the same without a scope (seen 600 times in 600 frames, v41scope26), so the zoom alone
+  tells a scope's frame from another, and only on foot: a tank's view is 0.9 (v41piptank) and the air raid's bomber
+  view is a seat of its own.
+- A research probe copying from outside a texture (the luminance chain's 3 x 3 one) lost the Vulkan device
+  (v41scope13); the probes keep inside each texture now.
+- With the switch on and no scope, the GPU's frame time is the same as with it off (about 10.1 ms both, 3200 x 1800,
+  GeForce RTX 4070 Ti, v41pipcost-false and -true).
+
+**Research switches:** NXR_SCOPE_RESEARCH=N logs the Nth scoped composite's frame (every draw after the composite,
+every resolve with its destination, the front buffer shown, and the output's pixels after each draw);
+NXR_SCOPE_DEBUG=1 paints the world round the lens red; NXR_SCOPE_MASK=vs:ps,... adds shader pairs to follow.
+
+**Limits:** the world round the lens is a still from when the scope came up, turned with the aim: what moves there
+stays where it was until the scope comes down, and a long turn reaches past its edge (shown fading). The weapon's gap
+is a blur of what was round it. The shaders are Battlefield 1943's own.
+
+**Not in Battlefield 1943 Reborn 0.4.1:** taken out of the update at TekRantGaming's word (13 Nov 2026, 20:20, "drop
+the sniper change from this update"). The renderer's part stays: it runs only while the game reports its view, which
+a release build never does (the game's CMake BF_SCOPE_PIP, off by default: no Enhancements row, no report).

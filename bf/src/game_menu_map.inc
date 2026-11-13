@@ -1,9 +1,12 @@
   // ---- The pause menu's map (TekRantGaming, 13 Nov 2026: "the current pause menu doesn't have a map which makes
   // bombers hard to use"). The level's own map picture (the one the game's minimap and deploy screen draw: 1024 x
   // 1024 over 2048 m, +x to the left and +z up; shader_prep.cpp cuts it into cache\extracted\minimap), with:
-  //   - the capture points as their lettered flags, each in its owner's colour (capture_points.h);
-  //   - the icons the game's own minimap draws at this moment (the vehicles, the team, the bases: what the player
-  //     may see and nothing more), from the game's icon atlas;
+  //   - the capture points as their lettered flags, each in its owner's colour (capture_points.h); the game's plain
+  //     flags with Enhancements > Lettered flags off;
+  //   - the icons the game's own minimap draws at this moment (the vehicles and the bases: what the player may see
+  //     and nothing more), from the game's icon atlas;
+  //   - the other players (0.4.1): every team mate, and an enemy while the game shows him (map_players.cpp), also
+  //     where the game draws no minimap (a bomber view);
   //   - the player: an arrow where the rendered camera is, pointing where it looks (in an air raid that is the
   //     bombers' sight, so the arrow is the bombers).
   // X, or a click on the map, changes between the island and the whole battle with the carriers.
@@ -11,6 +14,8 @@
   // states Spawn and Overview in hud_root_cq have CameraRotation -27): the level seen from above with +x to the right
   // and a little up, +z down and a little to the right. So a player finds the points where the deploy screen has them.
   bool pause_map_wide_ = false;
+  // A soldier's facing from his transform's third row: this way round (map_players.cpp; checked against the camera).
+  static constexpr float kFacing = 1.0f;
 
   void PauseMap(ImDrawList* d, ImGuiIO& io, const Stage& st, const Input& in, bool has_input, const ImVec2* box = nullptr) {
     const std::vector<CapturePoint> points = CapturePoints();
@@ -54,14 +59,14 @@
       half *= 0.97f;
     }
     // ---- the head: what the map shows, and the button that changes it
-    kit::Spaced(d, f.typed, st(8), ImVec2(x0 + st(2), y), kit::kInkSection, wide ? "MAP \xC2\xB7 THE WHOLE BATTLE" : "MAP \xC2\xB7 THE ISLAND", st(2));
+    kit::Spaced(d, f.typed, st(10), ImVec2(x0 + st(2), y), kit::kInkSection, wide ? "MAP \xC2\xB7 THE WHOLE BATTLE" : "MAP \xC2\xB7 THE ISLAND", st(2));
     if (can_zoom) {
       const std::string hint = wide ? "THE ISLAND" : "THE WHOLE BATTLE";
-      const float tw = kit::SpacedWidth(f.typed, st(7.5f), hint, st(1.5f));
+      const float tw = kit::SpacedWidth(f.typed, st(9.5f), hint, st(1.5f));
       const float gw = kit::Glyph(d, PromptStyle(), kit::Button::kX, KeyFor(kit::Button::kX), ImVec2(0, 0), st(14), false);
       const float gx = x1 - st(2) - tw - st(6) - gw;
       kit::Glyph(d, PromptStyle(), kit::Button::kX, KeyFor(kit::Button::kX), ImVec2(gx, y + st(4)), st(14));
-      kit::Spaced(d, f.typed, st(7.5f), ImVec2(gx + gw + st(6), y), kit::kInkSection, hint, st(1.5f));
+      kit::Spaced(d, f.typed, st(9.5f), ImVec2(gx + gw + st(6), y), kit::kInkSection, hint, st(1.5f));
     }
     y += st(17);
     const ImVec2 m0(x0, y), m1(x1, y + side);
@@ -102,18 +107,48 @@
       d->AddImage(io.Fonts->TexRef, ImVec2(std::round(c.x - w * 0.5f), std::round(c.y - h * 0.5f)),
                   ImVec2(std::round(c.x - w * 0.5f) + w, std::round(c.y - h * 0.5f) + h), s0, s1);
     };
+#if defined(BF_DEV_TOOLS)
+    // BF_DEV_PAUSEMAP=1: what the map is given, every 3 s (the minimap's icons by their atlas picture, with a count).
+    {
+      static const bool on = std::getenv("BF_DEV_PAUSEMAP") != nullptr;
+      static double logged = 0;
+      if (on && ImGui::GetTime() - logged > 3.0) {
+        logged = ImGui::GetTime();
+        std::map<std::tuple<int, int, int, int, bool, uint32_t>, int> seen;
+        for (const MapIcon& i : MapIcons())
+          ++seen[{int(std::lround(i.u0 * 512)), int(std::lround(i.v0 * 256)), int(std::lround((i.u1 - i.u0) * 512)),
+                  int(std::lround((i.v1 - i.v0) * 256)), i.flag, i.color}];
+        std::string text;
+        for (const auto& [k, n] : seen)
+          text += fmt::format(" [{},{} {}x{}{} colour {} x{}]", std::get<0>(k), std::get<1>(k), std::get<2>(k), std::get<3>(k),
+                              std::get<4>(k) ? " flag" : "", std::get<5>(k), n);
+        REXLOG_INFO("BF pause map: {} icon pictures (atlas {}):{}", seen.size(), icons ? "ready" : "not ready", text);
+      }
+    }
+#endif
+    const std::vector<MapPlayer> players = MapPlayers();
     if (icons) {
       for (const MapIcon& i : MapIcons()) {
         if (i.flag) continue;  // the points' own flags are drawn below, larger and lettered
         const float tw = (i.u1 - i.u0) * 512.0f, th = (i.v1 - i.v0) * 256.0f;
         if (tw < 2 || th < 2 || tw > 80 || th > 80) continue;
-        const float k = st(0.5f) * (tw > 40 ? 0.5f : 1.0f);  // the atlas's 64 texel pictures are drawn as its 32 ones
+        // The players' arrows (the player's own at 305, 0, everyone else's at 277, 66): the players are drawn below
+        // from the game's player list (the minimap's arrows are there only while it is drawn); an arrow of no player
+        // in that list stays, larger.
+        const int ix = int(std::lround(i.u0 * 512)), iy = int(std::lround(i.v0 * 256));
+        if (ix == 305 && iy == 0) continue;
+        const bool arrow = ix == 277 && iy == 66;
+        if (arrow && std::any_of(players.begin(), players.end(),
+                                 [&](const MapPlayer& m) { return std::hypot(m.x - i.x, m.z - i.z) < 1.5f; }))
+          continue;
+        const float k = st(arrow ? 0.8f : 0.5f) * (tw > 40 ? 0.5f : 1.0f);  // the atlas's 64 texel pictures as its 32 ones
         sprite(i.u0 * 512.0f, i.v0 * 256.0f, i.u1 * 512.0f, i.v1 * 256.0f, to_screen(i.x, i.z), tw * k, th * k);
       }
     }
     // A point's colour: as the game's own maps show it now; else by its owner: blue the player's team, red the other
     // (before the team is known, blue the first team and red the second).
     const int team = comms::Team();
+    const bool letters = REXCVAR_GET(bf_flag_letters);
     auto kind_of = [team](const CapturePoint& p) {
       if (p.shown >= 0) return p.shown;
       return p.owner == 0 ? 0 : team > 0 ? (p.owner == team ? 1 : 2) : p.owner;
@@ -123,17 +158,48 @@
       const int kind = kind_of(p);
       if (p.contested && int(ImGui::GetTime() * 4.0) % 2 == 1) continue;  // being taken: it blinks, as in the game
       const ImVec2 c = kept(to_screen(p.x, p.z), st(10));
-      if (icons) {
+      if (icons && letters) {
         const FlagRect r = LetteredFlag(kind, p.letter);
         sprite(float(r.x), float(r.y), float(r.x + r.w), float(r.y + r.h), c, st(28), st(28));
-      } else {  // the icon picture is not in the cache yet: a disc in the owner's colour with the letter
+      } else if (icons) {  // the plain flag (20 x 14 texels) at about the lettered one's size
+        const FlagRect r = PlainFlag(kind);
+        sprite(float(r.x), float(r.y), float(r.x + r.w), float(r.y + r.h), c, st(26), st(18.2f));
+      } else {  // the icon picture is not in the cache yet: a disc in the owner's colour (with the letter)
         const ImU32 fill = kind == 0 ? IM_COL32(236, 232, 220, 255) : kind == 1 ? IM_COL32(40, 96, 170, 255) : IM_COL32(176, 52, 40, 255);
         d->AddCircleFilled(c, st(9), fill, 24);
         d->AddCircle(c, st(9), IM_COL32(16, 18, 14, 255), 24, std::max(1.0f, st(1.2f)));
+        if (!letters) continue;
         const char letter[2] = {char('A' + p.letter), 0};
-        const float lw = kit::TextWidth(f.ui_bold, st(11), letter);
-        d->AddText(f.ui_bold, st(11), ImVec2(c.x - lw * 0.5f, c.y - st(11) * 0.72f), kind == 0 ? kit::kInk : IM_COL32(255, 255, 255, 255), letter);
+        const float lw = kit::TextWidth(f.ui_bold, st(12.75f), letter);
+        d->AddText(f.ui_bold, st(12.75f), ImVec2(c.x - lw * 0.5f, c.y - st(11) * 0.72f), kind == 0 ? kit::kInk : IM_COL32(255, 255, 255, 255), letter);
       }
+    }
+    // An arrow at `c` pointing along the world's (dx, dz), `r` long, or a disc when it points nowhere.
+    auto arrow = [&](ImVec2 c, float dx, float dz, float r, ImU32 fill) {
+      const ImVec2 heading = turned(dx, dz);  // on the map
+      const float len = std::hypot(heading.x, heading.y);
+      if (len < 0.001f) {
+        d->AddCircleFilled(c, r * 0.6f, IM_COL32(12, 16, 20, 255), 16);
+        d->AddCircleFilled(c, r * 0.45f, fill, 16);
+        return;
+      }
+      const ImVec2 dir(heading.x / len, heading.y / len), perp(-dir.y, dir.x);
+      const ImVec2 tip(c.x + dir.x * r, c.y + dir.y * r);
+      const ImVec2 l(c.x - dir.x * r * 0.72f + perp.x * r * 0.66f, c.y - dir.y * r * 0.72f + perp.y * r * 0.66f);
+      const ImVec2 rr(c.x - dir.x * r * 0.72f - perp.x * r * 0.66f, c.y - dir.y * r * 0.72f - perp.y * r * 0.66f);
+      const ImVec2 notch(c.x - dir.x * r * 0.3f, c.y - dir.y * r * 0.3f);
+      const ImVec2 shape[4] = {tip, l, notch, rr};
+      d->AddTriangleFilled(tip, l, notch, fill);
+      d->AddTriangleFilled(tip, notch, rr, fill);
+      d->AddPolyline(shape, 4, IM_COL32(12, 16, 20, 255), ImDrawFlags_Closed, std::max(1.0f, st(1.3f)));
+    };
+    // ---- the other players (map_players.cpp): every team mate, and an enemy while the game shows him; blue, the
+    // squad's green, red, each an arrow the way he faces. One outside the view is not drawn (its edge is the flags').
+    for (const MapPlayer& m : players) {
+      const ImVec2 c = to_screen(m.x, m.z);
+      if (c.x < m0.x || c.x > m1.x || c.y < m0.y || c.y > m1.y) continue;
+      const ImU32 fill = m.enemy ? IM_COL32(214, 58, 44, 255) : m.squad ? IM_COL32(96, 196, 120, 255) : IM_COL32(66, 140, 232, 255);
+      arrow(c, m.fx * kFacing, m.fz * kFacing, st(6.5f), fill);
     }
     // ---- the player: where the camera is, and where it looks
     float pos[3], right[3], back[3];
@@ -144,30 +210,15 @@
         const float sign = back[1] > 0 ? 1.0f : -1.0f;  // back points up when the camera looks down
         dx = ux * sign, dz = uz * sign;
       }
-      const ImVec2 heading = turned(dx, dz);  // on the map
-      const float len = std::hypot(heading.x, heading.y);
-      const ImVec2 c = kept(to_screen(pos[0], pos[2]), st(7));
-      if (len > 0.001f) {
-        const ImVec2 dir(heading.x / len, heading.y / len), perp(-dir.y, dir.x);
-        const float r = st(8);
-        const ImVec2 tip(c.x + dir.x * r, c.y + dir.y * r);
-        const ImVec2 l(c.x - dir.x * r * 0.72f + perp.x * r * 0.66f, c.y - dir.y * r * 0.72f + perp.y * r * 0.66f);
-        const ImVec2 rr(c.x - dir.x * r * 0.72f - perp.x * r * 0.66f, c.y - dir.y * r * 0.72f - perp.y * r * 0.66f);
-        const ImVec2 notch(c.x - dir.x * r * 0.3f, c.y - dir.y * r * 0.3f);
-        const ImVec2 shape[4] = {tip, l, notch, rr};
-        d->AddTriangleFilled(tip, l, notch, IM_COL32(122, 196, 70, 255));
-        d->AddTriangleFilled(tip, notch, rr, IM_COL32(122, 196, 70, 255));
-        d->AddPolyline(shape, 4, IM_COL32(12, 20, 8, 255), ImDrawFlags_Closed, std::max(1.0f, st(1.3f)));
-      } else {
-        d->AddCircleFilled(c, st(4), IM_COL32(122, 196, 70, 255), 16);
-      }
+      arrow(kept(to_screen(pos[0], pos[2]), st(7)), dx, dz, st(8), IM_COL32(122, 196, 70, 255));
     }
     d->PopClipRect();
     d->AddRect(m0, m1, kit::kInk, 0, 0, std::max(1.0f, st(1)));
-    // ---- under the map: each point's letter in its owner's colour, and its name
+    // ---- under the map: each point's letter in its owner's colour (only the colour with the letters off), and its
+    // name
     {
       float lx = x0 + st(2), ly = m1.y + st(8);
-      const float size = st(9.5f), line = st(15);
+      const float size = st(11), line = st(16);
       for (const CapturePoint& p : points) {
         if (p.letter < 0) continue;
         const int kind = kind_of(p);
@@ -179,8 +230,9 @@
         d->AddRectFilled(c0, c1, kind == 0 ? IM_COL32(250, 248, 240, 255) : kind == 1 ? IM_COL32(40, 96, 170, 255) : kit::kRed);
         d->AddRect(c0, c1, kit::kInk, 0, 0, 1.0f);
         const float lw = kit::TextWidth(f.ui_bold, size, letter);
-        d->AddText(f.ui_bold, size, ImVec2((c0.x + c1.x - lw) * 0.5f, ly + (st(12) - size * 1.45f) * 0.5f),
-                   kind == 0 ? kit::kInk : IM_COL32(255, 255, 255, 255), letter);
+        if (letters)
+          d->AddText(f.ui_bold, size, ImVec2((c0.x + c1.x - lw) * 0.5f, ly + (st(12) - size * 1.45f) * 0.5f),
+                     kind == 0 ? kit::kInk : IM_COL32(255, 255, 255, 255), letter);
         d->AddText(f.ui, size, ImVec2(c1.x + st(5), ly + (st(12) - size * 1.45f) * 0.5f), kit::kInk, name.c_str());
         lx += w;
       }

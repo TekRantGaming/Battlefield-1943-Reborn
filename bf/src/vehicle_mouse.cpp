@@ -1,4 +1,6 @@
-// Vehicle guns and turrets with the mouse (0.4.1).
+// Vehicle guns and turrets with the mouse (0.4.1, pull request 16 of the players' repository by ThatZaliaSGuy). Until
+// 0.4.0 the mouse aimed and did not push a stick (TekRantGaming, 8 Nov 2026: "Mouse: should not be joystick
+// emulation"); the stick below came in with TekRantGaming's "review and merge" of pull request 16 (13 Nov 2026).
 //
 // How the game turns them: each turning part (a tank's turret and gun, a mounted machine gun, an AA gun's mount) is a
 // ChildRotationBodyData part with a physics body. Twice a game tick sub_822ADE38(helper, input) reads the seat's input
@@ -106,6 +108,11 @@ REX_HOOK_RAW(sub_822ADE38) {
   const int rate = bf1943::TickRate();
   // Not in the game's image (0x82000000 up: read-only, a write there faults, tick_rate.cpp): data loaded with a level.
   if (rate != 30 && Guest(data) && !(data >= 0x82000000 && data < 0x84000000)) {
+    // One at a time (the review of pull request 16, as of 12 before it): the drive belongs to the part's type, shared
+    // by every vehicle of that type, and a server steps many vehicles: two steps at once could leave it scaled for
+    // good. Recursive: a step that steps another part on this thread waits for nothing.
+    static std::recursive_mutex drive_mutex;
+    std::lock_guard drive_lock(drive_mutex);
     const float drive = LoadF(base, data + 32);
     StoreF(base, data + 32, drive * float(rate) / 30.0f);
     __imp__sub_822ADE38(ctx, base);

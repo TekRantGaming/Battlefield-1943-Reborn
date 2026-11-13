@@ -358,9 +358,9 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
               break;
             }
           }
-          for (int mb = 0; mb < 3; ++mb) {
+          for (int mb = 0; mb < 5; ++mb) {
             if (ImGui::IsMouseClicked(mb)) {
-              const char* names[] = {"LMB", "RMB", "MMB"};
+              const char* names[] = {"LMB", "RMB", "MMB", "MB4", "MB5"};
               rex::cvar::SetFlagByName(entry.name, names[mb]);
               capturing_bind_name_.clear();
               break;

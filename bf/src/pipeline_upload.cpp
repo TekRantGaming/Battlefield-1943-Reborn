@@ -47,11 +47,11 @@
 #include <winhttp.h>
 #endif
 
-REXCVAR_DEFINE_BOOL(bf_share_pipelines, false, "BF1943",
+REXCVAR_DEFINE_BOOL(bf_share_pipelines, true, "BF1943",
                     "Send the graphics pipelines this game builds (no game files, no personal data) to our server, "
                     "for the next update's shader list");
-REXCVAR_DEFINE_STRING(bf_pipelines_url, "", "BF1943",
-                      "Endpoint for graphics pipeline sharing (empty disables uploads)");
+REXCVAR_DEFINE_STRING(bf_pipelines_url, "https://kk-launcher-telemetry.tekrantgaming.workers.dev/v1/bf/pipelines",
+                      "BF1943", "Where the graphics pipelines go (bf_share_pipelines)");
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
 
 #ifndef BF_VERSION_STRING
@@ -247,7 +247,7 @@ void NotePlayedLevel(const std::string& title) {
 
 // The game's start (bf1943_app.h): the upload thread, in a player's game only.
 void StartPipelineUploads(const std::filesystem::path& user_dir, const std::filesystem::path& cache_dir) {
-  if (REXCVAR_GET(server) || UploadUrl().empty()) return;
+  if (REXCVAR_GET(server)) return;
   std::thread([user_dir, cache_dir] {
 #if defined(BF_DEV_TOOLS)
     // BF_DEV_PIPELINES_AFTER=<s> (tests): the first upload that long after the start (default 120).

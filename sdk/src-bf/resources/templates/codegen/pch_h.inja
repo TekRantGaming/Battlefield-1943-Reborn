@@ -315,21 +315,40 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
   return count;
 }
 
-#define REX_CHECK_GLOBAL_LOCK()                                        \
-  ([&]() -> u64 {                                                      \
-    auto lock_ = rex::thread::global_critical_region::AcquireDirect(); \
-    return ppc_global_lock_count_().load() ? 0 : 0x8000;               \
-  }())
+// The game disables and restores interrupts (mtmsrd) around its spinlocks thousands of times a frame, and each is a
+// lock of the global critical region, a std::recursive_mutex (Battlefield 1943 Reborn, 13 Nov 2026, profiled on a ROG
+// Ally). So:
+//  - mfmsr answers from this thread's own count of holds, on every platform: after taking the lock the shared count
+//    could only be this thread's own, so the answer is the same, and it no longer takes the lock just to read it;
+//  - Linux: taking the lock tries it for a short while (try_lock and the CPU's pause) before sleeping. glibc's
+//    recursive mutex sleeps in the kernel at the first contention and every unlock with a waiter is a futex wake: a
+//    quarter of the game's CPU time went to futex calls and their contention. Windows' lock spins by itself.
+inline thread_local i32 ppc_global_lock_depth_ = 0;
 
-#define REX_ENTER_GLOBAL_LOCK()                          \
-  do {                                                   \
-    rex::thread::global_critical_region::mutex().lock(); \
-    ppc_global_lock_count_().fetch_add(1);               \
-  } while (0)
+inline void ppc_global_lock_enter_() {
+  auto& mutex_ = rex::thread::global_critical_region::mutex();
+#if defined(__linux__)
+  bool locked_ = mutex_.try_lock();
+  for (int spin_ = 0; !locked_ && spin_ < 200; ++spin_) {
+    __builtin_ia32_pause();
+    locked_ = mutex_.try_lock();
+  }
+  if (!locked_) mutex_.lock();
+#else
+  mutex_.lock();
+#endif
+  ++ppc_global_lock_depth_;
+  ppc_global_lock_count_().fetch_add(1, std::memory_order_relaxed);
+}
+
+#define REX_CHECK_GLOBAL_LOCK() (u64(ppc_global_lock_depth_ ? 0 : 0x8000))
+
+#define REX_ENTER_GLOBAL_LOCK() ppc_global_lock_enter_()
 
 #define REX_LEAVE_GLOBAL_LOCK()                                                           \
   do {                                                                                    \
-    auto old_count_ = ppc_global_lock_count_().fetch_sub(1);                              \
+    auto old_count_ = ppc_global_lock_count_().fetch_sub(1, std::memory_order_relaxed);   \
     assert(old_count_ >= 1 && "LeaveGlobalLock called without matching EnterGlobalLock"); \
+    --ppc_global_lock_depth_;                                                             \
     rex::thread::global_critical_region::mutex().unlock();                                \
   } while (0)

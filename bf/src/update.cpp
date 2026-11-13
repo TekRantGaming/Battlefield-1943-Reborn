@@ -32,8 +32,9 @@ extern char** environ;
 
 // The releases' feed: the public release repository's releases/latest (0.1.x asked for TekRantGaming/BF1943-Reborn,
 // which never existed, so they never found an update).
-REXCVAR_DEFINE_STRING(bf_update_feed, "", "BF1943",
-                      "GitHub releases/latest API address for updates and repair (empty disables both)");
+REXCVAR_DEFINE_STRING(bf_update_feed,
+                      "https://api.github.com/repos/TekRantGaming/Battlefield-1943-Reborn/releases/latest", "BF1943",
+                      "Where updates are looked for (a GitHub releases/latest API address)");
 
 namespace bf1943 {
 const char* BfVersion();                // pipeline_upload.cpp
@@ -78,13 +79,6 @@ const char* DevUpdateZip() {
   return v && *v ? v : nullptr;
 }
 #endif
-
-bool UpdatesEnabled() {
-#if defined(BF_DEV_TOOLS)
-  if (DevUpdateZip()) return true;
-#endif
-  return !REXCVAR_GET(bf_update_feed).empty();
-}
 
 // This platform's download: only a name that ENDS with it (King Kong's lesson: old updaters took any name containing
 // it, so no other asset may contain it either; tools/make_packages.ps1 checks).
@@ -592,10 +586,6 @@ void SetProtectedFolders(std::vector<fs::path> folders) {
 }
 
 void StartInBackground(const fs::path& state_file) {
-  if (!UpdatesEnabled()) {
-    REXLOG_INFO("BF update: no feed configured; automatic updates and file repair disabled");
-    return SetState(State::kDisabled);
-  }
   if (g_working.exchange(true)) return;
   std::thread([state_file] {
     Finish(state_file);
@@ -605,7 +595,6 @@ void StartInBackground(const fs::path& state_file) {
 }
 
 void CheckInBackground() {
-  if (!UpdatesEnabled()) return SetState(State::kDisabled);
   if (g_working.exchange(true)) return;
   const int s = g_status.state;
   if (s == int(State::kChecked) || s == int(State::kInstalling) || s == int(State::kInstalled)) {
@@ -619,7 +608,6 @@ void CheckInBackground() {
 }
 
 void InstallInBackground() {
-  if (!UpdatesEnabled()) return SetState(State::kDisabled);
   if (g_status.state != int(State::kChecked) || g_working.exchange(true)) return;
   std::thread([] {
     Install();
@@ -671,7 +659,6 @@ bool RestartSelf() {
 }
 
 void CleanUpAfterUpdate() {
-  if (!UpdatesEnabled()) return;
 #if defined(_WIN32)
   // On a worker, tried for 20 s: right after an update the program that installed it may still be closing, and its
   // old files are in use until it has. Only the .old copies beside the files the lists name (King Kong's way: a file

@@ -1,4 +1,6 @@
 <p align="center">
+  <a href="https://recomplauncher.com/game/battlefield-1943-reborn"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+  <br>
   <img src="docs/images/alpha-playtest-banner.png" alt="Battlefield 1943 Reborn: early playtest, alpha, subject to change" width="100%">
 </p>
 
@@ -178,8 +180,9 @@ Everything is in our Settings menu, from the main menu and the pause menu.
 EA's servers for Battlefield 1943 are gone. Reborn brings online play back with its own main backend, which every
 player logs in to and which lists every server.
 
-- **Official servers** are run by TekRantGaming: eight with Wake Island, Guadalcanal and Iwo Jima in turn, one each
-  for Wake Island, Guadalcanal and Iwo Jima around the clock, and Air Superiority on Coral Sea.
+- **Official servers** are run by TekRantGaming, in EU Central: eight with Wake Island, Guadalcanal and Iwo Jima in
+  turn, one each for Wake Island, Guadalcanal and Iwo Jima around the clock, Air Superiority on Coral Sea, and an
+  experimental 60 Hz test server with all four maps in turn.
 - **Community servers**: anyone can host dedicated servers with `BF1943-Reborn-Server-<version>-windows.zip`, from a
   manager page in the browser. Each server has its own name, description, maps, players and pause between rounds,
   and shows in everyone's server browser under Community with its region; LAN only keeps it off the list. See
@@ -273,7 +276,7 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 ## Credits and licences
 
 - **Battlefield 1943 Reborn** by TekRantGaming and contributors (MIT, [LICENSE](LICENSE)): the port's own code.
-- **ThatZaliaSGuy**: ultrawide screens, mouse flying, free look in vehicles and the mouse written into the game's own
+- **[@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy)**: ultrawide screens, mouse flying, free look in vehicles and the mouse written into the game's own
   input ([pull request 11](../../pull/11)).
 - **ReXGlue SDK** (BSD 3 Clause), derived from Xenia: the recompiler and runtime.
 - **NativeXRenderer** by Gustavo Garcia (MIT): the Vulkan renderer.
@@ -294,6 +297,10 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
   downloaded when used.
 
 Every download includes the full licence texts in its `licences` folder.
+
+> [!NOTE]
+> **AI disclosure:** this port was made almost entirely with Claude Code (Anthropic). The repository owner directed
+> and tested the work; the AI did the analysis, code, tools and documentation.
 
 ## Legal
 

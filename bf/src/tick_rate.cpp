@@ -12,7 +12,7 @@
 // bound, a projectile's one-tick advance, a physics object's default step, start-up settle loops and a frame-count
 // timer. It is set to 1 / rate once, at the first timer: the settle loops then settle in half the time at 60.
 //
-// Every player and server in a match must run the same rate (the 0.4 version gate keeps 30 and 60 apart). Default 30.
+// Every player and server in a match must run the same rate: a game takes its server's when it joins. Default 30.
 
 #include <atomic>
 #include <bit>
@@ -36,12 +36,13 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 
-// 13 Nov 2026: 60 is the default ("60Hz should be default"), and a player's game takes the rate of the server it
-// joins ("automatically toggle between 30Hz and 60Hz depending on what the server is using"): SetTickRate, before the
-// game's timers are made (a join from the launcher); once they are made the rate is the run's, and a server of the
-// other rate is joined by starting the game again at it (game_menu.cpp).
-REXCVAR_DEFINE_DOUBLE(bf_tick_rate, 60.0, "BF1943",
-                      "The game's simulation rate, ticks a second: 60, 30 (the Xbox 360's), or 75 or 100 "
+// A player's game takes the rate of the server it joins: SetTickRate, before the game's timers are made (a join
+// from the launcher); once they are made the rate is the run's, and a server of another rate is joined by starting
+// the game again at it (game_menu.cpp). 30 is the default and the only stable rate (TekRantGaming, 0.4.1, 13 Nov 2026:
+// a 60 Hz server is "an experimental server currently testing a 60Hz server tick rate"; the player is warned before
+// joining one, and Quick Play never joins one).
+REXCVAR_DEFINE_DOUBLE(bf_tick_rate, 30.0, "BF1943",
+                      "The game's simulation rate, ticks a second: 30 (the Xbox 360's, the default), or 60, 75 or 100 "
                       "(experimental). A server runs at it; a player's game starts at it and takes the rate of the "
                       "server it joins");
 
@@ -73,9 +74,8 @@ bool WriteReadOnly(uint8_t* host, uint32_t bits) {
 }  // namespace
 
 namespace bf1943 {
-// The rates there are: 30 (the Xbox 360's), 60 (the default), and 75 and 100, experimental (13 Nov 2026: "Can we add
-// experimental 75Hz and 100Hz tickrates too?"; the game's timers and time step take any rate, but only 30 and 60
-// have been played). Anything else is `otherwise`.
+// The rates there are: 30 (the Xbox 360's, the default), and 60, 75 and 100, experimental (the game's timers and time
+// step take any rate; only 30 and 60 have been played). Anything else is `otherwise`.
 int ValidTickRate(long rate, int otherwise) {
   return rate == 30 || rate == 60 || rate == 75 || rate == 100 ? int(rate) : otherwise;
 }
@@ -84,7 +84,7 @@ int TickRate() {
   int r = g_rate.load(std::memory_order_relaxed);
   if (r) return r;
   const double v = REXCVAR_GET(bf_tick_rate);
-  r = std::isfinite(v) ? ValidTickRate(std::lround(v), 60) : 60;
+  r = std::isfinite(v) ? ValidTickRate(std::lround(v), 30) : 30;
   g_rate.store(r, std::memory_order_relaxed);
   return r;
 }

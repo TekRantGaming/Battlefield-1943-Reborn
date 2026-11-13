@@ -580,10 +580,10 @@ void MnkInputDriver::OnMouseDown(rex::ui::MouseEvent& e) {
     case rex::ui::MouseEvent::Button::kMiddle:
       SetKeyState(static_cast<uint16_t>(VirtualKey::kMButton), true);
       break;
-    case rex::ui::MouseEvent::Button::kX1:
+    case rex::ui::MouseEvent::Button::kX1:  // Mouse 4, the back side button (bound as MB4)
       SetKeyState(static_cast<uint16_t>(VirtualKey::kXButton1), true);
       break;
-    case rex::ui::MouseEvent::Button::kX2:
+    case rex::ui::MouseEvent::Button::kX2:  // Mouse 5, the forward side button (MB5)
       SetKeyState(static_cast<uint16_t>(VirtualKey::kXButton2), true);
       break;
     default:

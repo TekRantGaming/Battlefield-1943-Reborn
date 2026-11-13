@@ -24,6 +24,7 @@ param(
     [string]$PeerArgs = "",  # extra runtime flags for the second client (-PeerPad), e.g. its frame rate
     [string]$ServerArgs = "",  # extra runtime flags for the dedicated server (-WithServer), e.g. its map rotation
     [string]$PeerPad = "",  # join tests: a second client with this BF_DEV_PAD script starts first (log in runs\<name>\peer)
+    [string]$Peer2Pad = "",  # a third client after the peer (127.0.0.4, log in runs\<name>\peer2): a team mate and an enemy
     [int]$ServerWarmup = 25,
     [string]$ServerCl = "-dedicated -platform xenon",  # the server's guest command line (--cl)
     [switch]$Lldb,  # run under VS LLVM lldb in batch mode and save a backtrace of every thread on a stop
@@ -146,19 +147,22 @@ if (-not $Interactive) { $launchArgs += "--bf_update_feed=$(if ($env:BF_TEST_UPD
     $helpers = @()
     if ($WithServer) { $helpers += "server" }
     if ($PeerPad) { $helpers += "peer" }
+    if ($Peer2Pad) { $helpers += "peer2" }  # the peer on one team, peer2 on the other, then the main client with the peer
     foreach ($kind in $helpers) {
+        $pad = $(if ($kind -eq "peer") { $PeerPad } elseif ($kind -eq "peer2") { $Peer2Pad } else { "" })
         $sdir = Join-Path $dir $kind; New-Item -ItemType Directory -Force (Join-Path $sdir "user") | Out-Null
         $helperArgs = @("--game_data_root=`"$(Join-Path $root 'input\pkg')`"", "--user_data_root=`"$(Join-Path $sdir 'user')`"",
                         "--log_file=`"$(Join-Path $sdir 'bf1943.log')`"", "--fullscreen=false", "--window_start=background")
-        if ($kind -eq "server") { $helperArgs += @("--server", "--cl=`"$ServerCl`""); if ($ServerArgs) { $helperArgs += $ServerArgs } } else { if ($PeerPad -ne "driver") { $helperArgs += "--bf_launcher=false" }; if ($PeerArgs) { $helperArgs += $PeerArgs } }
+        if ($kind -eq "server") { $helperArgs += @("--server", "--cl=`"$ServerCl`""); if ($ServerArgs) { $helperArgs += $ServerArgs } } else { if ($pad -ne "driver") { $helperArgs += "--bf_launcher=false" }; if ($PeerArgs) { $helperArgs += $PeerArgs } }
         Set-Content (Join-Path $sdir "args.txt") ($helperArgs -join " ") -Encoding ascii
         # -PeerPad driver: the peer gets no pad script, so our menu driver signs it in and joins (BF_AUTO_JOIN=1).
-        $devPadSaved = $env:BF_DEV_PAD; $env:BF_DEV_PAD = $(if ($kind -eq "peer" -and $PeerPad -ne "driver") { $PeerPad } else { "" })
+        $devPadSaved = $env:BF_DEV_PAD; $env:BF_DEV_PAD = $(if ($kind -ne "server" -and $pad -ne "driver") { $pad } else { "" })
         if ($kind -eq "peer") { $env:BF_LOOPBACK_ADDR = "127.0.0.2" }  # its own address and XUID (bf\src\live_layers.cpp)
+        if ($kind -eq "peer2") { $env:BF_LOOPBACK_ADDR = "127.0.0.4" }  # .3 is the GameManager host's gateway then
         # BF_PEER_CLEAR (tests): environment variables the second client does not get, names separated by commas (the
         # host's own pause test in a private match test, say).
         $cleared = @{}
-        if ($kind -eq "peer" -and $env:BF_PEER_CLEAR) { foreach ($n in $env:BF_PEER_CLEAR.Split(",")) { $cleared[$n] = [Environment]::GetEnvironmentVariable($n); [Environment]::SetEnvironmentVariable($n, $null) } }
+        if ($kind -ne "server" -and $env:BF_PEER_CLEAR) { foreach ($n in $env:BF_PEER_CLEAR.Split(",")) { $cleared[$n] = [Environment]::GetEnvironmentVariable($n); [Environment]::SetEnvironmentVariable($n, $null) } }
         $hp = Start-Process -FilePath $exe -ArgumentList $helperArgs -WorkingDirectory $bin -WindowStyle Minimized `
             -RedirectStandardError (Join-Path $sdir "stderr.txt") -RedirectStandardOutput (Join-Path $sdir "stdout.txt") -PassThru
         $env:BF_DEV_PAD = $devPadSaved; $env:BF_LOOPBACK_ADDR = ""

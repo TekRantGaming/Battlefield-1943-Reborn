@@ -47,6 +47,11 @@
           int n = sizeof(from);
           const int got = recvfrom(s, in, sizeof(in) - 1, 0, reinterpret_cast<sockaddr*>(&from), &n);
           if (got < 9 || std::memcmp(in, "BF43LAN!", 8) != 0) continue;
+          // From this network only (private, link local or loopback addresses).
+          const uint32_t from_ip = ntohl(from.sin_addr.s_addr);
+          if (!((from_ip >> 24) == 10 || (from_ip >> 24) == 127 || (from_ip >> 20) == 0xAC1 || (from_ip >> 16) == 0xC0A8 ||
+                (from_ip >> 16) == 0xA9FE))
+            continue;
           const std::string line(in + 8, size_t(got - 8));
           char ip[32] = {};
           inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip));
@@ -178,12 +183,12 @@
 
   // A small label on a tape (`fill` and `ink`; a border on the paper ones); returns its width, `clicked` the mouse.
   float ChipWidth(const Stage& st, const std::string& t) {
-    return kit::SpacedWidth(kit::GetFonts().ui_bold, st(8), t, st(1.2f)) + st(18);
+    return kit::SpacedWidth(kit::GetFonts().ui_bold, st(9.25f), t, st(1.2f)) + st(18);
   }
   float Chip(ImDrawList* d, const Stage& st, ImVec2 at, float h, const std::string& t, ImU32 fill, ImU32 ink, bool border,
              bool* clicked = nullptr) {
     const kit::Fonts& f = kit::GetFonts();
-    const float size = st(8), track = st(1.2f);
+    const float size = st(9.25f), track = st(1.2f);
     const float w = ChipWidth(st, t);
     const ImVec2 b(at.x + w, at.y + h);
     d->AddRectFilled(at, b, fill);
@@ -258,7 +263,7 @@
           !online_ok ? "PACIFIC THEATRE \xC2\xB7 THE SERVER LIST IS NOT REACHABLE RIGHT NOW"
                      : fmt::format("PACIFIC THEATRE \xC2\xB7 {} {} \xC2\xB7 {} {} ONLINE", all.size(),
                                    all.size() == 1 ? "SERVER" : "SERVERS", players, players == 1 ? "PLAYER" : "PLAYERS");
-      kit::Spaced(d, f.typed, st(8.5f), st.P(48, 91), kit::kKhakiDim, eyebrow, st(2));
+      kit::Spaced(d, f.typed, st(10.5f), st.P(48, 91), kit::kKhakiDim, eyebrow, st(2));
       kit::GameText(d, kit::GameFont::kHeadline, st(40), st.P(48, 105), kit::kCream, "SERVER BROWSER");
     }
     {
@@ -275,7 +280,7 @@
       for (int t = 0; t < kBrowserTabCount; ++t) {
         const float lw = kit::TextWidth(f.ui_bold, size, kTabNames[t]);
         const std::string count = t < 3 ? std::to_string(counts[t]) : t == kTabLan && lan ? std::to_string(lan_found.size()) : "";
-        const float cw = count.empty() ? 0 : kit::TextWidth(f.ui_bold, st(8), count) + st(10);
+        const float cw = count.empty() ? 0 : kit::TextWidth(f.ui_bold, st(9.25f), count) + st(10);
         const float w = st(22) + lw + (count.empty() ? st(22) : st(10) + cw + st(14));
         boxes.push_back({ImVec2(x, y0), ImVec2(x + w, y0 + h), lw, cw, count});
         x += w - st(3);  // each a little over the next
@@ -364,7 +369,7 @@
       const ImVec2 mc(s0.x + st(16), (s0.y + s1.y) * 0.5f - st(1.5f));  // the magnifier
       d->AddCircle(mc, st(4.5f), kit::kInkSection, 16, st(1.6f));
       d->AddLine(ImVec2(mc.x + st(3.3f), mc.y + st(3.3f)), ImVec2(mc.x + st(7.5f), mc.y + st(7.5f)), kit::kInkSection, st(2));
-      const float size = st(12);
+      const float size = st(13.75f);
       const std::string shown = browser_search_.empty() ? (typing ? "" : "Search servers") : browser_search_;
       const ImVec2 tp(s0.x + st(30), s0.y + (s1.y - s0.y - size * 1.45f) * 0.5f);
       d->AddText(f.ui_bold, size, tp, browser_search_.empty() ? kit::kInkSection : kit::kInk, shown.c_str());
@@ -512,10 +517,10 @@
       else
         why = fmt::format("No {} server right now. The list refreshes every 5 seconds.",
                           browser_tab_ == kTabOfficial ? "official" : "community");
-      kit::Wrapped(d, f.ui, st(12), ImVec2(ta.x + st(20), top + st(20)), kit::kInkFaint, why, tb.x - ta.x - st(40));
+      kit::Wrapped(d, f.ui, st(13.75f), ImVec2(ta.x + st(20), top + st(20)), kit::kInkFaint, why, tb.x - ta.x - st(40));
     }
     if (ImGui::GetTime() - browser_note_at_ < 2.5)
-      kit::Spaced(d, f.typed, st(8), ImVec2(ta.x, tb.y + st(8)), kit::kKhakiText, browser_note_, st(2));
+      kit::Spaced(d, f.typed, st(10), ImVec2(ta.x, tb.y + st(8)), kit::kKhakiText, browser_note_, st(2));
     // ---- the chosen server's card: its map, the chips, the name, the description, Join, the favourite
     kit::PaperArt(d, pa, pb);
     const ServerInfo* sv = n ? &servers[size_t(row_)] : nullptr;
@@ -529,8 +534,8 @@
                   Upper(sv ? (sv->map.empty() ? "Wake Island" : sv->map) : "Wake Island"));
     const bool fav = sv && IsFavourite(*sv);
     if (!sv) {
-      kit::Spaced(d, f.typed, st(8), ImVec2(pa.x + st(18), p1.y + st(18)), kit::kInkSection, "NO SERVER CHOSEN", st(2));
-      kit::Wrapped(d, f.ui, st(11), ImVec2(pa.x + st(18), p1.y + st(36)), kit::kInkFaint,
+      kit::Spaced(d, f.typed, st(10), ImVec2(pa.x + st(18), p1.y + st(18)), kit::kInkSection, "NO SERVER CHOSEN", st(2));
+      kit::Wrapped(d, f.ui, st(12.75f), ImVec2(pa.x + st(18), p1.y + st(36)), kit::kInkFaint,
                    "Pick a server in the table to see it here.", pb.x - pa.x - st(36));
     } else {
       const bool full = sv->max_players > 0 && sv->players >= sv->max_players;
@@ -547,18 +552,18 @@
       std::string line = fmt::format("{} / {} PLAYERS", sv->players, sv->max_players);
       if (sv->ping_ms >= 0) line += fmt::format(" \xC2\xB7 {} MS", sv->ping_ms);
       if (full) line += " \xC2\xB7 FULL";
-      kit::Spaced(d, f.typed, st(7.5f), ImVec2(pa.x + st(18), y), full ? kit::kStamp : kit::kInkSection, line, st(1.5f));
+      kit::Spaced(d, f.typed, st(9.5f), ImVec2(pa.x + st(18), y), full ? kit::kStamp : kit::kInkSection, line, st(1.5f));
       y += st(20);
       const std::string desc = !sv->description.empty() ? sv->description
                                : sv->official              ? "An official server, run by TRG Studios."
                                                            : "A community server.";
-      y += kit::Wrapped(d, f.ui, st(10.5f), ImVec2(pa.x + st(18), y), kit::kInk, desc, pb.x - pa.x - st(36)) + st(12);
+      y += kit::Wrapped(d, f.ui, st(12), ImVec2(pa.x + st(18), y), kit::kInk, desc, pb.x - pa.x - st(36)) + st(12);
       auto row = [&](const char* k, const std::string& v) {
         d->AddLine(ImVec2(pa.x + st(18), y), ImVec2(pb.x - st(18), y), kit::kRule, 1.0f);
         y += st(7);
-        d->AddText(f.ui, st(10.5f), ImVec2(pa.x + st(18), y), kit::kInkFaint, k);
-        const float vw = kit::TextWidth(f.ui_bold, st(10.5f), v);
-        d->AddText(f.ui_bold, st(10.5f), ImVec2(pb.x - st(18) - vw, y), kit::kInk, v.c_str());
+        d->AddText(f.ui, st(12), ImVec2(pa.x + st(18), y), kit::kInkFaint, k);
+        const float vw = kit::TextWidth(f.ui_bold, st(12), v);
+        d->AddText(f.ui_bold, st(12), ImVec2(pb.x - st(18) - vw, y), kit::kInk, v.c_str());
         y += st(24);
       };
       {  // where it is, with the flag before the name
@@ -566,7 +571,7 @@
         const float flag_y = y + st(7);
         row("Region", r ? r->name : sv->region.empty() ? "Not said" : sv->region);
         if (r) {
-          const float vw = kit::TextWidth(f.ui_bold, st(10.5f), r->name);
+          const float vw = kit::TextWidth(f.ui_bold, st(12), r->name);
           const ImVec2 f0(pb.x - st(18) - vw - st(27), flag_y + st(1));
           DrawFlag(d, r->country, f0, ImVec2(f0.x + st(20), f0.y + st(13)));
         }
@@ -666,11 +671,11 @@
     kit::PaperArt(d, ta, tb);
     const float x = ta.x + st(26);
     float y = ta.y + st(24);
-    kit::Spaced(d, f.typed, st(8), ImVec2(x, y), kit::kInkSection, "JOIN A SERVER BY ITS ADDRESS", st(2));
+    kit::Spaced(d, f.typed, st(10), ImVec2(x, y), kit::kInkSection, "JOIN A SERVER BY ITS ADDRESS", st(2));
     y += st(18);
     kit::GameText(d, kit::GameFont::kHeadline, st(30), ImVec2(x, y), kit::kInk, "DIRECT CONNECT");
     y += st(30) + st(14);
-    y += kit::Wrapped(d, f.ui, st(11.5f), ImVec2(x, y), kit::kInkFaint,
+    y += kit::Wrapped(d, f.ui, st(13.25f), ImVec2(x, y), kit::kInkFaint,
                       "For a server that is not listed, such as a friend's custom match or a LAN server. Ask its host for the "
                       "address.",
                       st(440)) +
@@ -690,12 +695,12 @@
     const std::string state = direct_job_               ? "LOOKING FOR THE SERVER..."
                               : !direct_error_.empty() ? Upper(direct_error_)
                                                        : "AN ADDRESS AND PORT, OR A NAME. THE PORT IS 18300 IF YOU LEAVE IT OUT.";
-    kit::Spaced(d, f.typed, st(7.5f), ImVec2(x, y), direct_error_.empty() || direct_job_ ? kit::kInkSection : kit::kStamp, state,
+    kit::Spaced(d, f.typed, st(9.5f), ImVec2(x, y), direct_error_.empty() || direct_job_ ? kit::kInkSection : kit::kStamp, state,
                 st(1.5f));
     y += st(30);
     const std::vector<std::string> recent = RecentServers();
     if (!recent.empty()) {  // a click (Y with a controller) fills the address in
-      kit::Spaced(d, f.typed, st(8), ImVec2(x, y), kit::kInkSection, "RECENT", st(2));
+      kit::Spaced(d, f.typed, st(10), ImVec2(x, y), kit::kInkSection, "RECENT", st(2));
       y += st(18);
       for (size_t i = 0; i < recent.size() && i < 4; ++i) {
         const std::string& r = recent[i];
@@ -704,9 +709,9 @@
         const bool hover = ImGui::IsMouseHoveringRect(r0, r1);
         if (hover) d->AddRectFilled(r0, r1, IM_COL32(34, 36, 27, 16));
         d->AddLine(ImVec2(r0.x, r1.y), ImVec2(r1.x, r1.y), kit::kRule, 1.0f);
-        d->AddText(f.ui_bold, st(12), ImVec2(x + st(8), y + (st(34) - st(12) * 1.45f) * 0.5f), kit::kInk, name.c_str());
-        const float aw = kit::SpacedWidth(f.typed, st(8), address, st(1.5f));
-        kit::Spaced(d, f.typed, st(8), ImVec2(r1.x - st(8) - aw, y + st(12)), kit::kInkSection, address, st(1.5f));
+        d->AddText(f.ui_bold, st(13.75f), ImVec2(x + st(8), y + (st(34) - st(12) * 1.45f) * 0.5f), kit::kInk, name.c_str());
+        const float aw = kit::SpacedWidth(f.typed, st(10), address, st(1.5f));
+        kit::Spaced(d, f.typed, st(10), ImVec2(r1.x - st(8) - aw, y + st(12)), kit::kInkSection, address, st(1.5f));
         if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) direct_text_ = address, direct_error_.clear();
         y += st(34);
       }
@@ -714,8 +719,8 @@
     }
     // ---- the right card: the on screen keys, and what the buttons do
     kit::PaperArt(d, pa, pb);
-    kit::Spaced(d, f.typed, st(8), ImVec2(pa.x + st(18), pa.y + st(18)), kit::kInkSection, "ON SCREEN KEYS", st(2));
-    kit::Wrapped(d, f.ui, st(10.5f), ImVec2(pa.x + st(18), pa.y + st(32)), kit::kInkFaint,
+    kit::Spaced(d, f.typed, st(10), ImVec2(pa.x + st(18), pa.y + st(18)), kit::kInkSection, "ON SCREEN KEYS", st(2));
+    kit::Wrapped(d, f.ui, st(12), ImVec2(pa.x + st(18), pa.y + st(32)), kit::kInkFaint,
                  "With a controller: A opens them and types, X deletes, Start connects. A keyboard types straight in.",
                  pb.x - pa.x - st(36));
     static const char* kDigits[] = {"1", "2", "3", "DEL", "4", "5", "6", ".", "7", "8", "9", ":", "ABC", "0", "-", "GO"};

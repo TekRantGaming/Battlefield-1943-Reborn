@@ -59,7 +59,8 @@ UI = os.path.join(HERE, 'manager_ui')
 REGIONS = [
     ('us-east', 'US East', 'us'), ('us-central', 'US Central', 'us'), ('us-west', 'US West', 'us'),
     ('ca', 'Canada', 'ca'), ('mx', 'Mexico', 'mx'), ('br', 'Brazil', 'br'),
-    ('ar', 'Argentina', 'ar'), ('cl', 'Chile', 'cl'), ('gb', 'United Kingdom', 'gb'),
+    ('ar', 'Argentina', 'ar'), ('cl', 'Chile', 'cl'), ('eu-central', 'EU Central', 'eu'),
+    ('gb', 'United Kingdom', 'gb'),
     ('ie', 'Ireland', 'ie'), ('fr', 'France', 'fr'), ('de', 'Germany', 'de'),
     ('nl', 'Netherlands', 'nl'), ('be', 'Belgium', 'be'), ('es', 'Spain', 'es'),
     ('pt', 'Portugal', 'pt'), ('it', 'Italy', 'it'), ('ch', 'Switzerland', 'ch'),
@@ -75,7 +76,7 @@ MAPS = [('wake', 'Wake Island', 'Levels/Wake_island_s'), ('guadalcanal', 'Guadal
         ('iwo', 'Iwo Jima', 'Levels/Iwo_Jima_s'), ('coral', 'Coral Sea', 'Levels/Coral_sea')]
 MAP_TITLE = {k: t for k, t, _ in MAPS}
 MAP_LEVEL = {k: l for k, _, l in MAPS}
-BASE_PORT, MAX_SERVERS, WEB_PORT, TICK_HZ = 18300, 16, 18280, 60  # 60 Hz by default (13 Nov 2026)
+BASE_PORT, MAX_SERVERS, WEB_PORT, TICK_HZ = 18300, 16, 18280, 30  # 30 Hz by default; 60, 75, 100 experimental
 # The dedicated game's own socket: UDP 1003 on its loopback address; Linux moves ports under 1024 up by 30000
 # (bf/src/socket_fixes.cpp HostBindPort).
 GAME_PORT = 1003 if WINDOWS else 31003
@@ -85,7 +86,7 @@ BACKEND_PORTS = (18241, 18246, 18250)  # a backend of our own (LAN only, officia
 # (BF_SERVER_BACKEND_BIND; every address without it).
 LOOPBACK_BASE = int(os.environ.get('BF_SERVER_LOOPBACK_BASE') or 10)
 BACKEND_BIND = os.environ.get('BF_SERVER_BACKEND_BIND') or ''
-MAIN_BACKEND = '127.0.0.1'  # the main backend's address: a package's server.default.json names the real one
+MAIN_BACKEND = '127.0.0.1'
 FEED = 'https://api.github.com/repos/TekRantGaming/Battlefield-1943-Reborn/releases/latest'
 # The messages an admin can send from a list (TekRantGaming, 13 Nov 2026), {time} the time left as words.
 PRESETS = {
@@ -192,7 +193,7 @@ def game_installed():
 
 def new_server(name, port):
     return {'name': name, 'description': '', 'maps': [k for k, _, _ in MAPS], 'round_end_delay': 45, 'listed': True,
-            'night': False, 'port': port, 'max_players': 24, 'autostart': True}
+            'night': False, 'port': port, 'max_players': 24, 'autostart': True, 'tick': 0}
 
 
 def clean_text(value, limit):
@@ -222,6 +223,11 @@ def clean_config(raw):
         entry['listed'] = s.get('listed') is not False
         entry['night'] = s.get('night') is True
         entry['autostart'] = s.get('autostart') is not False
+        # A rate of its own (13 Nov 2026, TekRantGaming: one 60 Hz test server beside the official 30 Hz ones); 0 takes
+        # the manager's rate (Network's Tick rate).
+        with contextlib.suppress(TypeError, ValueError):
+            own = int(s.get('tick') or 0)
+            entry['tick'] = own if own in (30, 60, 75, 100) else 0
         port = BASE_PORT + i
         with contextlib.suppress(TypeError, ValueError):
             port = int(s.get('port') or port)
@@ -238,7 +244,7 @@ def clean_config(raw):
     tick = TICK_HZ
     with contextlib.suppress(TypeError, ValueError):
         tick = int(raw.get('tick') or TICK_HZ)
-    out['tick'] = tick if tick in (30, 60, 75, 100) else TICK_HZ  # 75 and 100: experimental
+    out['tick'] = tick if tick in (30, 60, 75, 100) else TICK_HZ  # 60, 75 and 100: experimental
     out['lan_only'] = raw.get('lan_only') is True
     out['public_address'] = clean_text(raw.get('public_address'), 64)
     out['upnp'] = raw.get('upnp') is not False
@@ -570,8 +576,9 @@ class Manager:
                 '--log_file=' + os.path.join(directory, 'server.log'), '--fullscreen=false', '--window_start=hidden',
                 '--server', '--cl=-dedicated -level ' + MAP_LEVEL[maps[0]], '--bf_map_rotation=' + ','.join(maps),
                 '--bf_round_end_delay=%d' % s['round_end_delay']]
-        # The game simulates at the rate set here.
-        game.append('--bf_tick_rate=%d' % self.cfg['tick'])
+        # The game simulates at the rate set here: the server's own, else the manager's.
+        tick = s.get('tick') or self.cfg['tick']
+        game.append('--bf_tick_rate=%d' % tick)
         backend = (BACKEND_BIND or '127.0.0.1') if self.own_backend() else self.cfg['backend']
         host = [sys.executable, '-I', os.path.join(HERE, 'gmhost.py'), '--backend', backend + ':18250',
                 '--listen', '0.0.0.0:%d' % s['port'], '--game-server', '%s:%d' % (address, GAME_PORT),
@@ -579,7 +586,7 @@ class Manager:
                 '--maps', ','.join(MAP_TITLE[m] for m in maps),
                 '--map-file', os.path.join(directory, 'user', 'current_map.txt'),
                 '--status-file', os.path.join(directory, 'status.json'), '--log', os.path.join(directory, 'host.log'),
-                '--max-players', str(s['max_players']), '--tick', str(self.cfg['tick']),
+                '--max-players', str(s['max_players']), '--tick', str(tick),
                 '--broadcast-file', os.path.join(directory, 'broadcast.json')]
         if self.cfg['region']:
             host += ['--region', self.cfg['region']]

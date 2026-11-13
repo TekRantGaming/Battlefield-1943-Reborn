@@ -45,6 +45,9 @@ bool LoadModule() {
   wchar_t path[MAX_PATH] = {};
   DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
   std::wstring folder(path, length);
+  // Only from the executable's own folder: without its path (none, or too long) nothing is loaded, never by a bare
+  // name, which would be searched for in the current folder too (the review of pull request 16).
+  if (length == 0 || length >= MAX_PATH || folder.find_last_of(L"\\/") == std::wstring::npos) return false;
   folder.resize(folder.find_last_of(L"\\/") + 1);
   g_module = LoadLibraryW((folder + L"libxess.dll").c_str());
   if (!g_module) REXLOG_WARN("[native_x_renderer] XeSS: libxess.dll is not next to the game's executable");
@@ -93,6 +96,60 @@ bool IsFloatFormat(TEXTURE_FORMAT format) {
 
 Xess::~Xess() {
   // As FSR's: the context is not destroyed at the process's end, the device may be gone already.
+}
+
+bool Xess::Runs(IRenderDevice* device) {
+#if NATIVE_X_RENDERER_XESS
+  if (!device || !LoadModule()) return false;
+  auto instance_extensions = Entry<xess_result_t (*)(uint32_t*, const char* const**, uint32_t*)>(
+      "xessVKGetRequiredInstanceExtensions");
+  auto device_extensions =
+      Entry<xess_result_t (*)(VkInstance, VkPhysicalDevice, uint32_t*, const char* const**)>(
+          "xessVKGetRequiredDeviceExtensions");
+  HMODULE vulkan = GetModuleHandleW(L"vulkan-1.dll");
+  if (!vulkan) vulkan = LoadLibraryW(L"vulkan-1.dll");
+  if (!instance_extensions || !device_extensions || !vulkan) return false;
+  uint32_t count = 0, api = 0;
+  const char* const* names = nullptr;
+  if (instance_extensions(&count, &names, &api) != XESS_RESULT_SUCCESS) return false;
+  auto create_instance = reinterpret_cast<PFN_vkCreateInstance>(GetProcAddress(vulkan, "vkCreateInstance"));
+  auto destroy_instance = reinterpret_cast<PFN_vkDestroyInstance>(GetProcAddress(vulkan, "vkDestroyInstance"));
+  auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(GetProcAddress(vulkan, "vkEnumeratePhysicalDevices"));
+  auto properties =
+      reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(GetProcAddress(vulkan, "vkGetPhysicalDeviceProperties"));
+  if (!create_instance || !destroy_instance || !enumerate || !properties) return false;
+  VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+  app.apiVersion = std::max<uint32_t>(api, VK_API_VERSION_1_1);
+  VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+  info.pApplicationInfo = &app;
+  info.enabledExtensionCount = count;
+  info.ppEnabledExtensionNames = names;
+  VkInstance instance = VK_NULL_HANDLE;
+  if (create_instance(&info, nullptr, &instance) != VK_SUCCESS || !instance) return false;
+  uint32_t gpus = 0;
+  enumerate(instance, &gpus, nullptr);
+  std::vector<VkPhysicalDevice> devices(gpus);
+  if (gpus) enumerate(instance, &gpus, devices.data());
+  // The GPU the game's device is on (its vendor and device ids).
+  const GraphicsAdapterInfo& adapter = device->GetAdapterInfo();
+  bool runs = false;
+  for (VkPhysicalDevice gpu : devices) {
+    VkPhysicalDeviceProperties p{};
+    properties(gpu, &p);
+    if (p.vendorID != adapter.VendorId || p.deviceID != adapter.DeviceId) continue;
+    uint32_t device_count = 0;
+    const char* const* device_names = nullptr;
+    runs = device_extensions(instance, gpu, &device_count, &device_names) == XESS_RESULT_SUCCESS;
+    break;
+  }
+  destroy_instance(instance, nullptr);
+  REXLOG_INFO("[native_x_renderer] XeSS: Intel's library {} on {}", runs ? "runs" : "does not run",
+              adapter.Description);
+  return runs;
+#else
+  (void)device;
+  return false;
+#endif
 }
 
 bool Xess::PrepareDevice(EngineVkCreateInfo& create_info) {
@@ -211,7 +268,7 @@ bool Xess::Load(IRenderDevice* device) {
     return false;
   }
   return LoadModule() && Entry<void*>("xessVKCreateContext") && Entry<void*>("xessVKInit") &&
-         Entry<void*>("xessVKExecute");
+         Entry<void*>("xessVKExecute") && Entry<void*>("xessDestroyContext");
 #else
   REXLOG_INFO("[native_x_renderer] XeSS: not in this build");
   return false;

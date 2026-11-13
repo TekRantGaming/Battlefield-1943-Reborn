@@ -65,6 +65,7 @@ void NoteLevelChange();                                          // modern_mode.
 extern std::atomic<float> g_dev_camera[3];                       // look.cpp: the local camera's position
 extern std::atomic<float> g_dev_view_pos[3];                     // dev_matscan.cpp: the rendered camera's
 void DevTeamScan(const uint8_t* base, bool in_world);              // dev_team_scan.cpp: BF_DEV_TEAMSCAN
+void DevPlayerScan(const uint8_t* base, bool in_world);            // dev_player_scan.cpp: BF_DEV_PLAYERSCAN
 #endif
 bool TickBlendNearestTree(uint32_t parts, const float from[3], float out[3], double* dist);  // tick_blend.cpp
 // game_menu.cpp
@@ -1283,8 +1284,10 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   bf1943::comms::NoteInWorld(seated || bf1943::LocalOnFoot());  // voice goes out only from the world
   bf1943::comms::ReadTeam(base, bf1943::LevelLoaded());  // team and squad chat (comms.cpp), the deploy screen too
   bf1943::CapturePointsTick(base, bf1943::LevelLoaded());  // the flags' letters and the pause menu's map
+  bf1943::MapPlayersTick(base, bf1943::LevelLoaded());  // the pause menu's map: team mates and seen enemies
 #if defined(BF_DEV_TOOLS)
   bf1943::DevTeamScan(base, seated || bf1943::LocalOnFoot());  // BF_DEV_TEAMSCAN (dev_team_scan.cpp)
+  bf1943::DevPlayerScan(base, seated || bf1943::LocalOnFoot());  // BF_DEV_PLAYERSCAN (dev_player_scan.cpp)
 #endif
   if (!input_off)  // Settings > Controls
     bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, seated);

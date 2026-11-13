@@ -37,6 +37,7 @@ set(BF1943_SOURCES
     src/f8_panel.cpp
     src/hud_glyphs.cpp
     src/capture_points.cpp
+    src/map_players.cpp
     src/game_music.cpp
     src/plane_mouse.cpp
     src/vehicle_mouse.cpp
@@ -74,10 +75,12 @@ set(BF1943_SOURCES
     src/fov.cpp
     src/vehicle_camera.cpp
     src/tick_blend.cpp
+    src/linux_profiler.cpp
     src/effects.cpp
     src/night_lamps.cpp
     src/dev_types.cpp
     src/dev_team_scan.cpp
+    src/dev_player_scan.cpp
     src/modern_mode.cpp
     src/pipeline_upload.cpp
     src/game_options.cpp
@@ -109,7 +112,7 @@ endif()
 # Linux: the SDK compiles every target with -mcmodel=large ("large executable support"), which makes each call and
 # global access an absolute 64 bit load. The program is far under the 2 GB the default model allows, so the game's
 # own code goes back to it (the flag given last wins). King Kong found this on the ROG Ally (its commit 39064772):
-# its recompiled movie decoder went from 13 to 30 FPS.
+# its recompiled movie decoder went from 13 to 30 FPS. (The renderer's targets: after their add_subdirectory below.)
 if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     foreach(_bf_target bf1943 bf1943_recomp)
         if(TARGET ${_bf_target})
@@ -153,6 +156,18 @@ if(NOT TARGET glslang::SPIRV)
     add_library(glslang::SPIRV ALIAS bf_glslang_spirv)
 endif()
 add_subdirectory(third_party/native-x-renderer)
+# Linux: the renderer back to the default code model as well (see the game's own targets above). Until 13 Nov 2026
+# NativeXRenderer and its SDK glue were the only renderer of any platform built with -mcmodel=large, every call and
+# global access an absolute 64 bit load (LINUX-PERFORMANCE.md).
+if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    foreach(_bf_target native_x_renderer native_x_renderer_sdk)
+        if(TARGET ${_bf_target})
+            target_compile_options(${_bf_target} PRIVATE -mcmodel=small)
+        else()
+            message(WARNING "${_bf_target}: no such target, its code model is left as the SDK's")
+        endif()
+    endforeach()
+endif()
 # DiligentCore's Win32 file system includes ATL for one folder picker dialog; these Build Tools have no ATL, so that
 # its libraries that include it get our CComPtr (third_party/atl_shim/atlbase.h).
 foreach(_bf_atl_target Diligent-Win32Platform Diligent-ShaderTools)
@@ -210,6 +225,12 @@ option(BF_NIGHT_OPS "Night Ops: a night server's maps drawn at night in players'
 if(BF_NIGHT_OPS)
     target_compile_definitions(bf1943 PRIVATE BF_NIGHT_OPS=1)
 endif()
+# The picture in picture sniper scope (src/scope_pip.h): taken out of 0.4.1 at TekRantGaming's word (13 Nov 2026); ON
+# for the private test builds and development.
+option(BF_SCOPE_PIP "The picture in picture sniper scope in Settings > Enhancements" OFF)
+if(BF_SCOPE_PIP)
+    target_compile_definitions(bf1943 PRIVATE BF_SCOPE_PIP=1)
+endif()
 
 # Our own builds only (not a release's, not a pull request's): the SMG sight alignment's sliders and keys.
 option(BF_INTERNAL_TOOLS "Build the internal tuning aids (the SMG sight alignment)" OFF)
@@ -224,7 +245,7 @@ endif()
 
 # bf1943.exe's file details (src/bf1943_version.rc.in): the release's version, set for a package build
 # (tools/make_packages.ps1 checks it).
-set(BF_VERSION "0.4.1" CACHE STRING "The release version in bf1943.exe's file details (major.minor.patch)")
+set(BF_VERSION "0.1.11" CACHE STRING "The release version in bf1943.exe's file details (major.minor.patch)")
 if(WIN32)
     enable_language(RC)
     string(REGEX MATCH "^([0-9]+)[.]([0-9]+)[.]([0-9]+)" _bf_version_match "${BF_VERSION}")

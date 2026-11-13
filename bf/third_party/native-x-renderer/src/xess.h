@@ -31,6 +31,9 @@ class Xess {
   static bool PrepareDevice(Diligent::EngineVkCreateInfo& create_info);
   // The device could not be made with what PrepareDevice added (it is made again without): no XeSS.
   static void DeviceFailed();
+  // Whether Intel's library runs on the GPU `device` was made on (its own answer for that GPU, as PrepareDevice asks
+  // it, on an instance of its own): only then is XeSS offered (14 Nov 2026).
+  static bool Runs(Diligent::IRenderDevice* device);
 
   // False (logged) when the device was not prepared or the library lacks an entry point.
   bool Load(Diligent::IRenderDevice* device);

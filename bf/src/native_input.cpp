@@ -1,4 +1,5 @@
-// Native mouse and keyboard input (0.4.0): the game's input concepts written directly, not through a fake pad.
+// Native mouse and keyboard input (0.4.0, pull request 11 of the players' repository by ThatZaliaSGuy; 0.4.1, pull
+// request 16 by the same): the game's input concepts written directly, not through a fake pad.
 //
 // Once a game tick the local player's input update sub_82264278 maps the pad to its EntryInputState (player+324) with
 // the mapper's virtual sub_822BDB90(mapper, state), called at 0x822644B0; then the game clears disabled concepts,

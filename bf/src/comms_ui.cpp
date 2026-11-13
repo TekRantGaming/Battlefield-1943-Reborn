@@ -80,24 +80,22 @@ bool AnyKey(const std::string& bind, F&& test) {
   }
   return false;
 }
+// A mouse button's ImGui number by its bind name (rex/ui keybinds.cpp), -1 for a key: the left, right, middle and the
+// two side buttons, Mouse 4 and 5 (issue 14).
+int MouseButtonOf(const std::string& k) {
+  return k == "LMB" ? ImGuiMouseButton_Left : k == "RMB" ? ImGuiMouseButton_Right : k == "MMB" ? ImGuiMouseButton_Middle
+       : k == "MB4" || k == "Mouse4" ? 3 : k == "MB5" || k == "Mouse5" ? 4 : -1;
+}
 bool BindDown(const std::string& bind) {
   return AnyKey(bind, [](const std::string& k) {
-    if (k == "LMB") return ImGui::IsMouseDown(ImGuiMouseButton_Left);
-    if (k == "RMB") return ImGui::IsMouseDown(ImGuiMouseButton_Right);
-    if (k == "MMB") return ImGui::IsMouseDown(ImGuiMouseButton_Middle);
-    if (k == "Mouse4") return ImGui::IsMouseDown(3);
-    if (k == "Mouse5") return ImGui::IsMouseDown(4);
+    if (const int b = MouseButtonOf(k); b >= 0) return ImGui::IsMouseDown(b);
     const ImGuiKey key = KeyFromName(k);
     return key != ImGuiKey_None && ImGui::IsKeyDown(key);
   });
 }
 bool BindPressed(const std::string& bind) {
   return AnyKey(bind, [](const std::string& k) {
-    if (k == "LMB") return ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-    if (k == "RMB") return ImGui::IsMouseClicked(ImGuiMouseButton_Right);
-    if (k == "MMB") return ImGui::IsMouseClicked(ImGuiMouseButton_Middle);
-    if (k == "Mouse4") return ImGui::IsMouseClicked(3);
-    if (k == "Mouse5") return ImGui::IsMouseClicked(4);
+    if (const int b = MouseButtonOf(k); b >= 0) return ImGui::IsMouseClicked(b);
     const ImGuiKey key = KeyFromName(k);
     return key != ImGuiKey_None && ImGui::IsKeyPressed(key, false);
   });

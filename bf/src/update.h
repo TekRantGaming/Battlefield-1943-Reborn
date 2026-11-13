@@ -1,6 +1,7 @@
 // Updates, King Kong's way (docs/LAUNCHER-PLAN.md section 5; kk/src/update.cpp, task 370, and its audit). The latest
-// release from the GitHub releases API. Set bf_update_feed to a releases/latest endpoint to enable automatic updates
-// and first-start repair. The local fork defaults to an empty feed.
+// release from the GitHub releases API (bf_update_feed: github.com/TekRantGaming/Battlefield-1943-Reborn; releases/latest
+// never returns a prerelease, so releases are published as normal ones). TekRantGaming's rule (8 Nov 2026): always automatic,
+// no way to turn it off.
 //
 // Windows: the release's asset whose name ENDS with windows-x64.zip, checked against the release's SHA256SUMS.txt line
 // and its listed size (a release without SHA256SUMS.txt is refused), unpacked with Windows' own tar.exe. Its
@@ -45,7 +46,6 @@ enum class State : int {
   kInstalling,
   kInstalled,    // swapped in: restart now
   kFailed,       // `message` says why (player facing)
-  kDisabled,
 };
 
 struct Status {

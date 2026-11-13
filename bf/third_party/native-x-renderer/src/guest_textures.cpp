@@ -71,6 +71,11 @@ class HdPack {
       std::memcpy(&entry.size, e + 48, 8);
       entry.guest_format = u[0], entry.width = u[1], entry.height = u[2], entry.hd_width = u[3];
       entry.hd_height = u[4], entry.mips = u[5], entry.bc = u[6];
+      // Sizes a pack can hold (16384 texels a side, 16 levels, 1 GB an entry): another entry is left out, so no size
+      // worked out from it can wrap (the review of pull request 16: a crafted pack crashed the game at every start).
+      if (entry.hd_width == 0 || entry.hd_height == 0 || entry.hd_width > 16384 || entry.hd_height > 16384 ||
+          entry.mips == 0 || entry.mips > 16 || entry.size > (uint64_t(1) << 30))
+        continue;
       entries_[key] = entry;
     }
     return true;
@@ -1037,7 +1042,7 @@ void GuestTextures::PatchHd(HostTexture& host_texture, bool again) {
   const uint64_t content = XXH3_64bits(guest, hashed) ^ (uint64_t(6) << 56) ^ (uint64_t(w) << 32) ^ (uint64_t(h) << 16);
   const HdEntry* e = pack->Find(content);
   if (!e || e->bc != 0 || e->width != w || e->height != h || e->hd_width % w != 0 || e->hd_width / w < 2 ||
-      e->hd_height != h * (e->hd_width / w))
+      e->hd_width / w > 8 || e->hd_height != h * (e->hd_width / w))
     return none();
   const uint32_t scale = e->hd_width / w, hw = e->hd_width, hh = e->hd_height;
   std::vector<uint8_t> base;

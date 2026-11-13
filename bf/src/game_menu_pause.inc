@@ -27,9 +27,9 @@
     const ImVec2 a = st.P(540, 240), b = st.P(1160, 470);
     kit::PaperArt(d, a, b);
     d->AddRectFilled(a, ImVec2(a.x + st(5), b.y), kit::kStamp);
-    kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(28), a.y + st(22)), kit::kInkSection, eyebrow, st(2));
+    kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(28), a.y + st(22)), kit::kInkSection, eyebrow, st(2));
     kit::GameText(d, kit::GameFont::kHeadline, st(28), ImVec2(a.x + st(28), a.y + st(40)), kit::kInk, title);
-    kit::Wrapped(d, f.ui, st(12), ImVec2(a.x + st(28), a.y + st(88)), kit::kInk, text, b.x - a.x - st(56));
+    kit::Wrapped(d, f.ui, st(13.75f), ImVec2(a.x + st(28), a.y + st(88)), kit::kInk, text, b.x - a.x - st(56));
     const float yw = kit::GameTextWidth(kit::GameFont::kText, st(14), yes, st(1)) + st(70);
     const ImVec2 y0(a.x + st(28), b.y - st(66)), y1(y0.x + yw, b.y - st(26));
     const float nw = kit::GameTextWidth(kit::GameFont::kText, st(14), no, st(1)) + st(70);
@@ -62,26 +62,26 @@
     std::string eyebrow = "FIELD REPORT \xC2\xB7 " + Upper(server.substr(0, 30));
     eyebrow += fmt::format(" \xC2\xB7 {}HZ", sv ? sv->Tick() : TickRate());  // 0.4.2: the match's tick rate after its name
     if (sv) eyebrow += sv->official ? " \xC2\xB7 OFFICIAL" : " \xC2\xB7 COMMUNITY";
-    kit::Spaced(d, f.typed, st(8), ImVec2(x, y), kit::kInkSection, eyebrow, st(2));
+    kit::Spaced(d, f.typed, st(10), ImVec2(x, y), kit::kInkSection, eyebrow, st(2));
     y += st(22);
     kit::GameText(d, kit::GameFont::kHeadline, st(24), ImVec2(x, y), kit::kInk, Upper(map));
     y += st(24) + st(8);
     std::string line;
     if (sv) line = fmt::format("{} / {} PLAYERS \xC2\xB7 ", sv->players, sv->max_players);
     line += fmt::format("{} MIN IN THE FIELD", minutes);
-    kit::Spaced(d, f.typed, st(7.5f), ImVec2(x, y), kit::kInkSection, line, st(1.5f));
+    kit::Spaced(d, f.typed, st(9.5f), ImVec2(x, y), kit::kInkSection, line, st(1.5f));
     y += st(22);
     auto rule = [&](const char* head) {
       d->AddLine(ImVec2(x, y), ImVec2(x1, y), kit::kRule, 1.0f);
       y += st(10);
-      kit::Spaced(d, f.typed, st(8), ImVec2(x, y), kit::kInkSection, head, st(2));
+      kit::Spaced(d, f.typed, st(10), ImVec2(x, y), kit::kInkSection, head, st(2));
       y += st(18);
     };
     // The squad (comms.h: the game's own squad number, read with the pad).
     rule("YOUR SQUAD");
     const int squad = comms::Squad();
-    d->AddText(f.ui_bold, st(12), ImVec2(x, y), kit::kInk, squad > 0 ? fmt::format("Squad {}", squad).c_str() : "Not in a squad");
-    d->AddText(f.ui, st(10.5f), ImVec2(x, y + st(17)), kit::kInkFaint,
+    d->AddText(f.ui_bold, st(13.75f), ImVec2(x, y), kit::kInk, squad > 0 ? fmt::format("Squad {}", squad).c_str() : "Not in a squad");
+    d->AddText(f.ui, st(12), ImVec2(x, y + st(17)), kit::kInkFaint,
                squad > 0 ? "My Squad leaves it; your squad mates are spawn points." : "My Squad finds an open one: spawn on your squad mates.");
     y += st(36);
     // The comms: the voice mode and its key, the text chat's keys.
@@ -107,7 +107,7 @@
       }
       if (!comms::Connected()) {
         y += st(24);
-        kit::Spaced(d, f.typed, st(7), ImVec2(x, y), kit::kStamp, "THE SERVER'S CHAT RELAY HAS NOT ANSWERED YET", st(1.5f));
+        kit::Spaced(d, f.typed, st(8.75f), ImVec2(x, y), kit::kStamp, "THE SERVER'S CHAT RELAY HAS NOT ANSWERED YET", st(1.5f));
         y += st(4);
       }
       y += st(28);
@@ -116,15 +116,15 @@
     {
       const std::vector<comms::ChatLine> lines = comms::RecentChat(4);
       if (lines.empty()) {
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2(x, y), kit::kInkSection, "NO CHAT YET THIS MATCH", st(1.5f));
+        kit::Spaced(d, f.typed, st(9.5f), ImVec2(x, y), kit::kInkSection, "NO CHAT YET THIS MATCH", st(1.5f));
         y += st(18);
       }
       for (const comms::ChatLine& l : lines) {
         const ImU32 col = l.notice ? kit::kInkSection : l.channel == comms::kSquad ? kit::kGreenDark : l.channel == comms::kTeam ? IM_COL32(30, 70, 150, 255) : kit::kInk;
         const std::string head = l.notice ? "" : std::string(l.channel == comms::kSquad ? "[Squad] " : l.channel == comms::kTeam ? "[Team] " : "") + l.name + ": ";
-        const float hw = kit::TextWidth(f.ui_bold, st(10.5f), head);
-        d->AddText(f.ui_bold, st(10.5f), ImVec2(x, y), col, head.c_str());
-        d->AddText(f.ui, st(10.5f), ImVec2(x + hw, y), kit::kInk, l.text.c_str(), nullptr, wrap - hw);
+        const float hw = kit::TextWidth(f.ui_bold, st(12), head);
+        d->AddText(f.ui_bold, st(12), ImVec2(x, y), col, head.c_str());
+        d->AddText(f.ui, st(12), ImVec2(x + hw, y), kit::kInk, l.text.c_str(), nullptr, wrap - hw);
         y += st(15);
       }
     }
@@ -136,10 +136,10 @@
       const std::string reach = pm.reachable == "true"    ? "Friends outside your home can reach it."
                                 : pm.reachable == "false" ? fmt::format("Friends outside your home cannot reach it yet: open UDP {} on your router.", pm.port)
                                                           : fmt::format("Friends on the internet need UDP {} open on your router.", pm.port);
-      y += kit::Wrapped(d, f.ui, st(10.5f), ImVec2(x, y), kit::kInk, reach + " They join with Direct connect in the server browser.", wrap) + st(8);
+      y += kit::Wrapped(d, f.ui, st(12), ImVec2(x, y), kit::kInk, reach + " They join with Direct connect in the server browser.", wrap) + st(8);
       const bool copied = ImGui::GetTime() - pm_copied_at_ < 3;
       const float gw = kit::Glyph(d, PromptStyle(), kit::Button::kY, KeyFor(kit::Button::kY), ImVec2(x, y + st(10)), st(20));
-      kit::Spaced(d, f.ui_bold, st(9), ImVec2(x + gw + st(8), y + st(4)), copied ? kit::kGreenDark : kit::kInk,
+      kit::Spaced(d, f.ui_bold, st(10.25f), ImVec2(x + gw + st(8), y + st(4)), copied ? kit::kGreenDark : kit::kInk,
                   copied ? "ADDRESS COPIED: SEND IT TO YOUR FRIENDS" : "COPY THE ADDRESS FOR FRIENDS", st(1.2f));
       if (in.y) CopyPrivateAddress();
     }
@@ -245,7 +245,7 @@
     const std::string map = joining_map_.empty() ? "Wake Island" : joining_map_;
     const int minutes = match_began_ > 0 ? int((ImGui::GetTime() - match_began_) / 60) : 0;
     const bool edit = MenuChrome(d, io, rst, fmt::format("MATCH RUNNING \xC2\xB7 {} MIN IN THE FIELD", minutes), true, false);
-    kit::Spaced(d, f.typed, st(8.5f), lst.P(48, 105), kit::kKhakiDim, fmt::format("IN THE FIELD \xC2\xB7 {} \xC2\xB7 {} MIN", Upper(map), minutes), st(2));
+    kit::Spaced(d, f.typed, st(10.5f), lst.P(48, 105), kit::kKhakiDim, fmt::format("IN THE FIELD \xC2\xB7 {} \xC2\xB7 {} MIN", Upper(map), minutes), st(2));
     kit::GameText(d, kit::GameFont::kHeadline, st(44), lst.P(48, 118), kit::kCream, "MENU");
     d->AddRectFilled(lst.P(48, 190), lst.P(90, 194), kit::kStamp);
     // The prompts first: a click on one is that button's press for the rest of the frame.
@@ -273,7 +273,7 @@
         d->AddRectFilled(a, ImVec2(a.x + st(5), b.y), kit::kStamp);
       }
       d->AddRectFilled(ImVec2(a.x, b.y - 1), ImVec2(b.x, b.y), IM_COL32(241, 234, 211, 20));
-      kit::Spaced(d, f.typed, st(8), ImVec2(a.x + st(24), a.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
+      kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(24), a.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
                   fmt::format("{:02d}", i + 1), st(1.5f));
       const float cap = compact ? st(14) : st(19);
       const bool danger = i == kPauseSuicide;
@@ -286,8 +286,8 @@
       if (sel) {
         kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(b.x - st(18) - st(20), a.y + h * 0.5f), st(20));
       } else if (!note.empty()) {
-        const float nw = kit::SpacedWidth(f.typed, st(7.5f), note, st(1.5f));
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2(b.x - st(18) - nw, a.y + h * 0.5f - st(5)), kit::kKhakiDim, note, st(1.5f));
+        const float nw = kit::SpacedWidth(f.typed, st(9.5f), note, st(1.5f));
+        kit::Spaced(d, f.typed, st(9.5f), ImVec2(b.x - st(18) - nw, a.y + h * 0.5f - st(5)), kit::kKhakiDim, note, st(1.5f));
       }
       y += h;
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;

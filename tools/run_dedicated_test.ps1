@@ -18,6 +18,7 @@ param(
     [string]$PeerArgs = "",  # run_game.ps1 -PeerArgs: the second client's own flags
     [string]$ServerArgs = "",  # run_game.ps1 -ServerArgs: the dedicated server's own flags
     [string]$PeerPad = "",  # a second client with this pad script (three game processes; it uses 127.0.0.2)
+    [string]$Peer2Pad = "",  # a third client after it (run_game.ps1 -Peer2Pad, 127.0.0.4): a team mate and an enemy
     [int]$StopServerAt = 0,  # stop the dedicated server this many seconds after the client starts
     [string]$GpuPlugin = "",  # run_game.ps1 -GpuPlugin
     [string]$Preset = "bf-dev",  # the client's build (bf-relwithdebinfo: the players' one; no dev pad there)
@@ -70,7 +71,7 @@ if ($BuiltInHost) {
 Start-Sleep 1
 try {
     & (Join-Path $PSScriptRoot "run_game.ps1") -Name $Name -Seconds $Seconds -Preset $Preset -NetTrace:(-not $NoNetTrace) -WithServer `
-        -ServerCl $(if ($Level) { "-dedicated -level $Level" } else { "-dedicated" }) -ServerWarmup 25 -DevPad $DevPad -Shots $Shots -SeedCache $SeedCache -PeerPad $PeerPad -PeerArgs $PeerArgs -ServerArgs $ServerArgs -RuntimeDll $RuntimeDll -GameArgs $GameArgs -Launcher:$Launcher -StopServerAt $StopServerAt -GpuPlugin $GpuPlugin -UserFrom $UserFrom -Stacks $Stacks -FollowRestart:$FollowRestart | Select-Object -Last 3
+        -ServerCl $(if ($Level) { "-dedicated -level $Level" } else { "-dedicated" }) -ServerWarmup 25 -DevPad $DevPad -Shots $Shots -SeedCache $SeedCache -PeerPad $PeerPad -Peer2Pad $Peer2Pad -PeerArgs $PeerArgs -ServerArgs $ServerArgs -RuntimeDll $RuntimeDll -GameArgs $GameArgs -Launcher:$Launcher -StopServerAt $StopServerAt -GpuPlugin $GpuPlugin -UserFrom $UserFrom -Stacks $Stacks -FollowRestart:$FollowRestart | Select-Object -Last 3
 } finally {
     Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
     if ($gm) { Stop-Process -Id $gm.Id -Force -ErrorAction SilentlyContinue }

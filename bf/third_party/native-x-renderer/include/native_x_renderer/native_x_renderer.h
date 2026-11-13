@@ -291,6 +291,13 @@ void NoteHudMarker(float x, float y);
 // Whether a HUD marker was noted within `radius` pixels of (x, y) in the last 0.2 s.
 // marker_x, when given, gets the nearest marker's x (canvas pixels).
 bool NearHudMarker(double x, double y, double radius, double* marker_x = nullptr);
+// D168: the picture in picture sniper scope (Battlefield 1943 Reborn: Settings > Enhancements, experimental). Each
+// frame from the game's camera: whether it is on, the camera's right, up and back in the world, the tangent of half its
+// own (unzoomed) vertical field of view as rendered, and how far it is zoomed now (the tangent of half the field of
+// view now over that of the camera's own: 1 not zoomed, a sight about 0.7, a sniper scope far less). Any thread.
+void NoteScopeView(bool on, const float right[3], const float up[3], const float back[3], float tan_half_v_own, float zoom);
+// For the renderer: the last noted, if it is on and was noted in the last 0.25 s.
+bool ScopeView(float right[3], float up[3], float back[3], float& tan_half_v_own, float& zoom);
 // One of the game's own menu screens is up now (its UI says so about once a second): the 2D layer is a menu, kept
 // together in the middle, not anchored to the edges. Any thread.
 void NoteGameMenu();
@@ -305,6 +312,10 @@ bool GpuBenchmarkResult(double* ms);
 // D158: whether NVIDIA Image Scaling runs on this GPU (asked at startup when native_x_renderer_scaling is nis, or with
 // native_x_renderer_check_nis), and the GPU's name; false until the renderer has started and asked.
 bool NisSupport(bool* runs, std::string* gpu);
+
+// Which temporal upscalers run on this GPU (asked at the renderer's start): FSR 4 and FSR 3.1 as AMD's library lists
+// them for the GPU, XeSS as Intel's library answers, DLSS on an NVIDIA GeForce RTX. False until the renderer has started.
+bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss);
 
 // Developer tests (a camera tour): the terrain's ground height at world x, z, as the grass reads it, asked for with a
 // number and answered a few frames later (GrassProbeResult true once it is, with that number). Grass must be on.

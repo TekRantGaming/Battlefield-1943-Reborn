@@ -24,6 +24,10 @@ class Fsr {
 
   // Loads AMD's library from the executable's folder. False (logged) when it is missing or not in this build.
   bool Load(Diligent::IRenderDevice* device);
+  // The upscaler generations AMD's library lists for this GPU and driver (14 Nov 2026, TekRantGaming: only the
+  // upscalers a GPU runs are offered): FSR 4 is listed on a Radeon RX 9000 only, FSR 3 everywhere it runs. False when
+  // the library is missing or lists none.
+  bool Generations(Diligent::IRenderDevice* device, bool* fsr4, bool* fsr3);
 
   // The input size FSR uses for an output and a quality mode (0 native AA, 1 quality, 2 balanced, 3 performance, 4
   // ultra performance: AMD's per-axis ratios 1, 1.5, 1.7, 2 and 3).

@@ -95,10 +95,12 @@ float TextWidth(ImFont* f, float size, const std::string& t) {
 // 13 Nov 2026 ("increase size of that small font scale across all menu so it's more readable"): the typed font's
 // small sizes (captions, values, eyebrows: up to 10 of the 720 line stage's units) are drawn a quarter larger,
 // everywhere it is measured or drawn through these functions, so what is laid out by its width still fits it.
+// Pull request 16 drew the typed font's small sizes a quarter larger here. 0.4.1 had already made those captions
+// larger where they are drawn (6c7b28f, TekRantGaming's own request), so both together drew them larger twice: kept at
+// 1, the call sites' sizes are the ones that count.
 float TypedScale(ImFont* f, float size) {
-  if (!f || f != g_fonts.typed) return 1.0f;
-  const float unit = std::max(1.0f, ImGui::GetIO().DisplaySize.y / 720.0f);
-  return size / unit <= 10.0f ? 1.25f : 1.0f;
+  (void)f, (void)size;
+  return 1.0f;
 }
 
 float SpacedWidth(ImFont* f, float size, const std::string& t, float track) {

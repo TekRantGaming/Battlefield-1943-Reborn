@@ -141,8 +141,9 @@ static const std::unordered_map<std::string, VirtualKey> kKeyNames = {
     {"LMB", VirtualKey::kLButton},
     {"RMB", VirtualKey::kRButton},
     {"MMB", VirtualKey::kMButton},
-    // Battlefield 1943 Reborn, 13 Nov 2026: the side buttons ("can all mouse buttons be remapped too?").
-    {"Mouse4", VirtualKey::kXButton1},
+    {"MB4", VirtualKey::kXButton1},  // the mouse's back side button
+    {"MB5", VirtualKey::kXButton2},  // the forward side button
+    {"Mouse4", VirtualKey::kXButton1},  // the same, by the names pull request 16 used
     {"Mouse5", VirtualKey::kXButton2},
 };
 
