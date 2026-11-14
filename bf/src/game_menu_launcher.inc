@@ -340,8 +340,9 @@
     bool fsr4 = false, fsr3 = false, xess = false, dlss = false;
     if (!native_x_renderer::TemporalSupport(&fsr4, &fsr3, &xess, &dlss)) return;
     temporal_noted_ = true;
-    const std::string value = std::string(",") + (fsr4 ? "fsr4," : "") + (fsr3 ? "fsr," : "") + (xess ? "xess," : "") +
-                              (dlss ? "dlss," : "") + "taa,";
+    (void)fsr4;  // FSR 4 is no longer offered (0.4.3)
+    const std::string value =
+        std::string(",") + (fsr3 ? "fsr," : "") + (xess ? "xess," : "") + (dlss ? "dlss," : "") + "taa,";
     if (settings_.Get("temporal_support", "") != value) {
       settings_.values["temporal_support"] = value;
       settings_.Save();

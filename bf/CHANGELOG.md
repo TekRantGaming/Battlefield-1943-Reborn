@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.3 (14 November 2026): AMD FSR 4 removed
+
+**Changed**
+- **AMD FSR 4 is no longer in the Upscaler row.** If you had chosen it, your game uses AMD FSR 3.1 instead, or Off
+  where FSR 3.1 does not run on your card. AMD FSR 3.1, Intel XeSS, NVIDIA DLSS and TAA stay.
+
 ## 0.4.2 (13 November 2026): only the upscalers your graphics card runs
 
 **Fixed**
