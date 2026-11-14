@@ -175,6 +175,7 @@ void XThread::set_last_error(uint32_t error_code) {
 void XThread::set_name(const std::string_view name) {
   std::lock_guard<std::mutex> lock(thread_lock_);
   thread_name_ = fmt::format("{} ({:08X})", name, handle());
+  job_thread_.store(name.substr(0, 10) == "JobManager", std::memory_order_relaxed);
 
   if (thread_) {
     // May be getting set before the thread is created.

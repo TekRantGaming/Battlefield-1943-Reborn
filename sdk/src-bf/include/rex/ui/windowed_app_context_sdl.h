@@ -11,7 +11,10 @@
 
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <unordered_map>
 
 #include <SDL3/SDL_events.h>
@@ -63,6 +66,12 @@ class SDLWindowedAppContext final : public WindowedAppContext {
 
   std::unordered_map<SDL_WindowID, WindowSDL*> windows_;
   uint32_t wakeup_event_type_ = 0;
+  // A video driver with no blocking event wait (offscreen, dummy: a headless server): SDL_WaitEvent would poll every
+  // 1 ms, so the loop waits here instead, woken by queued work, and looks at SDL's events at least every 100 ms.
+  std::atomic<bool> headless_{false};
+  std::mutex headless_mutex_;
+  std::condition_variable headless_cv_;
+  bool headless_wake_ = false;
   uint32_t paint_event_type_ = 0;
   uint32_t synchronously_handled_quit_events_ = 0;
   bool event_watch_registered_ = false;

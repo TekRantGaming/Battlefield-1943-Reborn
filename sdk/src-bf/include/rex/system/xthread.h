@@ -336,6 +336,8 @@ class XThread : public XObject {
   uint32_t last_error();
   void set_last_error(uint32_t error_code);
   void set_name(const std::string_view name);
+  // Whether the game named it one of Frostbite's job threads ("JobManager..."; set by set_name).
+  bool is_job_thread() const { return job_thread_.load(std::memory_order_relaxed); }
 
   X_STATUS Create();
   X_STATUS Exit(int exit_code);
@@ -423,6 +425,7 @@ class XThread : public XObject {
   std::atomic<bool> running_{false};
 
   std::string thread_name_;
+  std::atomic<bool> job_thread_{false};
   std::unique_ptr<runtime::ThreadState> thread_state_;
 
   int32_t priority_ = 0;

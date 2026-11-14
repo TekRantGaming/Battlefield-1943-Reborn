@@ -16,6 +16,9 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/util/string_utils.h>  // For TranslateAnsiStringAddress
 #include <rex/system/xobject.h>
+#include <rex/system/xthread.h>
+#include <rex/cvar.h>
+#include <rex/logging.h>
 // #include <rex/kernel/xboxkrnl/private.h>  // TODO: JIT only
 #include <rex/system/xenumerator.h>
 #include <rex/system/xevent.h>
@@ -26,6 +29,9 @@
 #include <rex/system/xsemaphore.h>
 #include <rex/system/xsymboliclink.h>
 #include <rex/system/xthread.h>
+
+REXCVAR_DEFINE_INT32(job_wait_floor_ms, 0, "Kernel",
+                     "The guest's job threads' wait timeouts at least this many ms (0: as the game asks)");
 
 namespace rex::system {
 
@@ -186,6 +192,31 @@ void XObject::SetAttributes(uint32_t obj_attributes_ptr) {
   }
 }
 
+
+// Battlefield 1943 Reborn, 14 Nov 2026: Frostbite's idle job threads (JobManager1 to 5) wait on their job semaphore
+// with a 1 ms timeout and look again, about 800 times a second each, 14% of a core on an idle Linux server. A job
+// posted wakes them at once whatever the timeout, so on a server their timeouts are lengthened to this (0: as asked).
+
+namespace {
+std::chrono::milliseconds JobWaitFloor(std::chrono::milliseconds timeout) {
+  const int32_t floor_ms = REXCVAR_GET(job_wait_floor_ms);
+  if (floor_ms <= 0 || timeout.count() <= 0 || timeout == std::chrono::milliseconds::max() ||
+      timeout.count() >= floor_ms) {
+    return timeout;
+  }
+  // Known once the thread has its name (the game names it after it starts); looked at until then.
+  thread_local bool job_thread = false;
+  if (!job_thread) {
+    auto* thread = rex::system::XThread::IsInThread() ? rex::system::XThread::GetCurrentThread() : nullptr;
+    job_thread = thread && thread->is_job_thread();
+    if (job_thread) {
+      REXLOG_INFO("Kernel: job thread {:08X}'s waits at least {} ms (job_wait_floor_ms)", thread->handle(), floor_ms);
+    }
+  }
+  return job_thread ? std::chrono::milliseconds(floor_ms) : timeout;
+}
+}  // namespace
+
 uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
   if (timeout_ticks > 0) {
     // Absolute time, based on January 1, 1601.
@@ -213,7 +244,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
                                 : std::chrono::milliseconds::max();
 
   XThread::CheckTitleTermination();
-  auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
+  auto result = rex::thread::Wait(wait_handle, alertable ? true : false, JobWaitFloor(timeout_ms));
   XThread::CheckTitleTermination();
   switch (result) {
     case rex::thread::WaitResult::kSuccess:
@@ -241,7 +272,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
 
   auto result =
       rex::thread::SignalAndWait(signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
-                                 alertable ? true : false, timeout_ms);
+                                 alertable ? true : false, JobWaitFloor(timeout_ms));
   switch (result) {
     case rex::thread::WaitResult::kSuccess:
       wait_object->WaitCallback();
@@ -275,7 +306,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
   XThread::CheckTitleTermination();
   if (wait_type) {
     auto result =
-        rex::thread::WaitAny(std::move(wait_handles), alertable ? true : false, timeout_ms);
+        rex::thread::WaitAny(std::move(wait_handles), alertable ? true : false, JobWaitFloor(timeout_ms));
     XThread::CheckTitleTermination();
     switch (result.first) {
       case rex::thread::WaitResult::kSuccess:
@@ -296,7 +327,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
     }
   } else {
     auto result =
-        rex::thread::WaitAll(std::move(wait_handles), alertable ? true : false, timeout_ms);
+        rex::thread::WaitAll(std::move(wait_handles), alertable ? true : false, JobWaitFloor(timeout_ms));
     XThread::CheckTitleTermination();
     switch (result) {
       case rex::thread::WaitResult::kSuccess:

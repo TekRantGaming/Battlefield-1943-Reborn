@@ -589,6 +589,12 @@ class Manager:
         # The game simulates at the rate set here: the server's own, else the manager's.
         tick = s.get('tick') or self.cfg['tick']
         game.append('--bf_tick_rate=%d' % tick)
+        # Frostbite's idle job threads look for work every 1 ms; woken at once by a job anyway, they look every 5 ms on
+        # a server (14 Nov 2026: an empty Linux server 30% of a core before this and the SDK's own wait fixes, 11%
+        # after; the tick's work the same under a live match).
+        game.append('--job_wait_floor_ms=5')
+        # More game flags for every server (tests and tuning): BF_SERVER_GAME_ARGS, separated by spaces.
+        game += os.environ.get('BF_SERVER_GAME_ARGS', '').split()
         backend = (BACKEND_BIND or '127.0.0.1') if self.own_backend() else self.cfg['backend']
         host = [sys.executable, '-I', os.path.join(HERE, 'gmhost.py'), '--backend', backend + ':18250',
                 '--listen', '0.0.0.0:%d' % s['port'], '--game-server', '%s:%d' % (address, GAME_PORT),

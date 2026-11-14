@@ -166,7 +166,13 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
             MarkVblank();
             last_frame_time += interval_ticks;
           }
-          rex::thread::Sleep(std::chrono::milliseconds(1));
+          // Most of the way to the next vblank in one sleep, the last 2 ms in 1 ms steps as before (its timing
+          // unchanged; Battlefield 1943 Reborn, 14 Nov 2026: a 1 ms poll all through woke this thread about 800 times a
+          // second, 2% of a core on an idle Linux server).
+          const uint64_t until_next = last_frame_time + interval_ticks - chrono::Clock::QueryGuestTickCount();
+          const int64_t ms_left =
+              int64_t(until_next > interval_ticks ? 0 : until_next * 1000 / std::max<uint64_t>(guest_tick_frequency, 1));
+          rex::thread::Sleep(std::chrono::milliseconds(ms_left > 3 ? ms_left - 2 : 1));
         }
         return 0;
       }));

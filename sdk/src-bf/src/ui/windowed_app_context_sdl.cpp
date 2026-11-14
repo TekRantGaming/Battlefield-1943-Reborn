@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include <chrono>
 #include <SDL3/SDL.h>
 
 #include <rex/cvar.h>
@@ -85,6 +86,13 @@ void SDLWindowedAppContext::NotifyUILoopOfPendingFunctions() {
   SDL_Event event{};
   event.type = wakeup_event_type_;
   SDL_PushEvent(&event);
+  if (headless_) {
+    {
+      std::lock_guard<std::mutex> lock(headless_mutex_);
+      headless_wake_ = true;
+    }
+    headless_cv_.notify_one();
+  }
 }
 
 void SDLWindowedAppContext::PlatformQuitFromUIThread() {
@@ -94,6 +102,28 @@ void SDLWindowedAppContext::PlatformQuitFromUIThread() {
 }
 
 int SDLWindowedAppContext::RunMainMessageLoop() {
+  // Battlefield 1943 Reborn, 14 Nov 2026: on a headless Linux server the offscreen driver's SDL_WaitEvent woke this
+  // thread about 800 times a second (4% of a core with nothing to do).
+  if (const char* driver = SDL_GetCurrentVideoDriver();
+      driver && (SDL_strcmp(driver, "offscreen") == 0 || SDL_strcmp(driver, "dummy") == 0)) {
+    {
+      std::lock_guard<std::mutex> lock(headless_mutex_);
+      headless_ = true;
+      headless_wake_ = true;  // work queued before this point is run at once
+    }
+    while (!HasQuitFromUIThread()) {
+      {
+        std::unique_lock<std::mutex> lock(headless_mutex_);
+        headless_cv_.wait_for(lock, std::chrono::milliseconds(100), [this] { return headless_wake_; });
+        headless_wake_ = false;
+      }
+      SDL_Event event;
+      while (!HasQuitFromUIThread() && SDL_PollEvent(&event)) {
+        ProcessEvent(event);
+      }
+    }
+    return EXIT_SUCCESS;
+  }
   while (!HasQuitFromUIThread()) {
     SDL_Event event;
     if (!SDL_WaitEvent(&event)) {
