@@ -1944,6 +1944,32 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   if (terrain_ && output_sized && pixel_shader && render_target_count && state.depth_enable) {
     CaptureTerrain(regs, *vertex_shader, viewport, scissor_rect, state);
   }
+  // D169: the sky dome's camera (grass.h SkyCamera).
+  if (sky_ && !sky_->valid && output_sized && pixel_shader && render_target_count &&
+      vertex_shader->ucode_data_hash() == 0x00AB67BFF5297087ull) {
+    std::memcpy(sky_->m, &regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X], sizeof(sky_->m));
+    sky_->viewport = viewport;
+    for (int i = 0; i < 3; ++i) {
+      sky_->ndc_scale[i] = system_constants_.ndc_scale[i];
+      sky_->ndc_offset[i] = system_constants_.ndc_offset[i];
+    }
+    {
+      const float* p9 = reinterpret_cast<const float*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_256_X]) + 9 * 4;
+      const float len = std::sqrt(p9[0] * p9[0] + p9[1] * p9[1] + p9[2] * p9[2]);
+      sky_->sun_valid = std::abs(len - 1.0f) < 0.05f;
+      for (int i = 0; i < 3; ++i) sky_->sun[i] = sky_->sun_valid ? -p9[i] / len : 0.0f;
+    }
+    sky_->valid = true;
+    // D169 research (NXR_SKY_PROBE=3): the dome's vertex and pixel float constants, to find the sun's direction.
+    static const bool probe3 = std::getenv("NXR_SKY_PROBE") && std::string(std::getenv("NXR_SKY_PROBE")) == "3";
+    if (probe3 && hud_frame_ % 600 == 0) {
+      const float* c = reinterpret_cast<const float*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+      for (int base : {0, 256})
+        for (int r = base; r < base + 24; ++r)
+          REXLOG_INFO("[native_x_renderer] sky probe3: frame {} {} c{} {:.4f} {:.4f} {:.4f} {:.4f}", hud_frame_,
+                      base ? "PS" : "VS", r - base, c[r * 4], c[r * 4 + 1], c[r * 4 + 2], c[r * 4 + 3]);
+    }
+  }
 
   IBuffer* index_buffer = nullptr;
   uint64_t index_offset = 0;

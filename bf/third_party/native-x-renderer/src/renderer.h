@@ -36,6 +36,7 @@ bool NisSupport(bool* runs, std::string* gpu);
 bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss);
 // D163: see native_x_renderer::NightLamps.
 void NightLamps(const NightLamp* lamps, uint32_t count);
+void NightSky(const NightSkyStyle& style);
 void NightModels(const NightModelLamps* models, uint32_t count);
 // The stored pipelines made at start (D134).
 void StorageProgress(uint32_t* queued, uint32_t* done, uint32_t* loading, uint32_t* finished);

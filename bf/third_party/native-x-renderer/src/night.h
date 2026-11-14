@@ -33,6 +33,7 @@
 #include "Texture.h"
 #include "TextureView.h"
 #include "glsl.h"
+#include <native_x_renderer/native_x_renderer.h>
 
 #include <rex/logging.h>
 
@@ -83,6 +84,13 @@ struct NightFrame {
   float inverse[3][3] = {};
   float inverse_t[3] = {};
   float eye[3] = {};
+  // D169: the sky's directions (the sky dome's camera, or the terrain's), as `to_ndc` and `inverse`; the level's style.
+  bool sky_camera = false;
+  float sky_to_ndc[4] = {};
+  float sky_inverse[3][3] = {};
+  const NightSkyStyle* sky_style = nullptr;
+  bool sun_valid = false;  // the game's sun (toward it), from the sky dome's draw: the moon goes there
+  float sun[3] = {};
   const NightLight* lights = nullptr;
   uint32_t light_count = 0;
   const NightSprite* sprites = nullptr;
@@ -127,6 +135,24 @@ class Night {
       k.counts[2] = float(desc.Width) / float(std::max(1u, desc.Height));  // the target's aspect, for round glows
       k.counts[3] = float(s.debug);
       k.sky[0] = s.sky;
+      k.sky[1] = f.sky_camera ? 1.0f : 0.0f;
+      std::memcpy(k.sky_to_ndc, f.sky_to_ndc, sizeof(k.sky_to_ndc));
+      for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) k.sky_inverse[r][c] = f.sky_inverse[r][c];
+      {
+        const NightSkyStyle st = f.sky_style ? *f.sky_style : NightSkyStyle{};
+        const float* md = f.sun_valid ? f.sun : st.moon_direction;  // the game's sun when its sky gave it
+        const float ml = std::sqrt(md[0] * md[0] + md[1] * md[1] + md[2] * md[2]);
+        for (int i = 0; i < 3; ++i) {
+          k.moon[i] = ml > 1e-6f ? md[i] / ml : (i == 1 ? 1.0f : 0.0f);
+          k.moon_color[i] = st.moon_color[i];
+          k.horizon[i] = st.horizon_color[i];
+        }
+        k.moon[3] = std::clamp(st.moon_radius, 0.0f, 0.1f);
+        k.moon_color[3] = std::clamp(st.cloud_dim, 0.0f, 1.0f);
+        k.horizon[3] = std::clamp(st.horizon_height, 0.01f, 0.9f);
+        k.stars[0] = std::max(st.stars, 0.0f), k.stars[1] = std::max(st.milky_way, 0.0f), k.stars[2] = st.seed;
+      }
       // The effects' lights: found in the effects' layer's mip about 48 texels wide.
       const bool effect_lights = glow && f.camera;
       if (effect_lights && device && LightsPass(device)) {
@@ -269,7 +295,15 @@ layout(set = 0, binding = 0) uniform NightConstants {
   vec4 eye;     // xyz: the camera; w: the lamps' strength
   vec4 counts;  // x: lights, y: glows, z: the target's aspect, w: tests (1 the world's place, 2 the lights alone)
   vec4 glow2;   // x: the coarse mip the effects' lights are found in, y: their strength, z: 1 with them
-  vec4 skyp;    // D169: x: the night sky's strength (stars, Milky Way, moon); 0 none
+  vec4 skyp;    // D169: x: the night sky's strength (stars, Milky Way, moon); 0 none; y: 1 with its directions
+  vec4 sky0;    // D169: the sky's directions from clip x, y and w (rows), and its NDC from a texture coordinate
+  vec4 sky1;
+  vec4 sky2;
+  vec4 skyndc;
+  vec4 moonp;   // D169, the level's sky: xyz toward the moon, w its radius
+  vec4 moonc;   //   rgb the moon's colour, w the sky's share behind clouds
+  vec4 horizon; //   rgb the haze low on the sky, w how high it reaches
+  vec4 starp;   //   x the stars, y the Milky Way, z the stars' seed
   vec4 lights[72];   // 24 x (position, range), (colour, cos outer), (direction, cos inner)
   vec4 sprites[48];  // 24 x (uv, radius), (colour, the bulb's depth)
 };
@@ -417,7 +451,8 @@ vec3 StarLayer(vec3 d, float px, float cells, float chance, float bright, float 
   vec3 tint = t < 0.15 ? vec3(1.0, 0.80, 0.62) : t < 0.35 ? vec3(1.0, 0.93, 0.84) : t < 0.8 ? vec3(0.95, 0.97, 1.0) : vec3(0.78, 0.86, 1.0);
   return tint * strength * shape;
 }
-vec3 NightSky(vec3 d, float px) {
+// `veil`: the stars' share left (the day sky's clouds and the haze low on the sky); the moon shows through more.
+vec3 NightSky(vec3 d, float px, float veil, float clear) {
   vec3 c = vec3(0.0);
   // The Milky Way: a soft band across the sky, patchy, with darker lanes; very faint.
   const vec3 band_n = normalize(vec3(0.35, 0.42, 0.84));
@@ -425,22 +460,28 @@ vec3 NightSky(vec3 d, float px) {
   float band = exp(-across * across / (2.0 * 0.13 * 0.13));
   float patches = Fbm(d * 5.0 + 3.0);
   float lanes = smoothstep(0.42, 0.62, Fbm(d * 11.0 + 41.0)) * exp(-across * across / (2.0 * 0.05 * 0.05));
-  c += vec3(0.85, 0.88, 1.0) * band * (0.35 + 0.9 * patches) * (1.0 - 0.75 * lanes) * 0.0045;
-  // Stars: a sparse bright layer and denser faint ones, more of the faint ones in the band.
-  c += StarLayer(d, px, 34.0, 0.33, 0.85, 1.0);
-  c += StarLayer(d, px, 90.0, 0.22 + 0.25 * band, 0.16, 2.0);
-  c += StarLayer(d, px, 170.0, 0.10 + 0.35 * band, 0.06, 3.0);
+  c += vec3(0.85, 0.88, 1.0) * band * (0.35 + 0.9 * patches) * (1.0 - 0.75 * lanes) * 0.0045 * starp.y;
+  // Stars: a sparse bright layer and denser faint ones, more of the faint ones in the band; fewer and dimmer on a hazy
+  // night (the faint ones go first).
+  float st = starp.x, seed = starp.z;
+  c += StarLayer(d, px, 34.0, 0.33 * min(st, 1.0), 0.85 * st, 1.0 + seed);
+  c += StarLayer(d, px, 90.0, (0.22 + 0.25 * band * starp.y) * clamp(st * st, 0.0, 1.0), 0.16 * st, 2.0 + seed);
+  c += StarLayer(d, px, 170.0, (0.10 + 0.35 * band * starp.y) * clamp(st * st * st, 0.0, 1.0), 0.06 * st, 3.0 + seed);
+  c *= veil;
   // The moon: a small disc, not full white, a little texture, its edge darker, a soft halo round it.
-  const vec3 moon_d = normalize(vec3(-0.55, 0.38, 0.74));
-  const float moon_r = 0.0105;
+  vec3 moon_d = moonp.xyz;
+  float moon_r = max(moonp.w, 1e-4);
   float ang = acos(clamp(dot(d, moon_d), -1.0, 1.0));
   vec3 rel = d - moon_d * dot(d, moon_d);
   float rim = clamp(ang / moon_r, 0.0, 1.0);
   float disc = 1.0 - smoothstep(moon_r - px * 1.2, moon_r + px * 0.6, ang);
   float maria = Fbm(rel / moon_r * 1.6 + 7.0);
   float surface = (0.78 + 0.22 * smoothstep(0.35, 0.65, maria)) * (1.0 - 0.28 * rim * rim);
-  c = mix(c, vec3(0.62, 0.66, 0.72) * surface, disc);
-  c += vec3(0.30, 0.38, 0.55) * (exp(-ang / 0.035) * 0.03 + exp(-ang / 0.18) * 0.008);
+  // The moon down to the horizon (it rises out of the sea), dimmed a little where the day sky was cloud or the sun's
+  // white glow (the sun is where the moon is: D169).
+  float shown = smoothstep(-0.015, 0.03, d.y) * mix(0.75, 1.0, clear);
+  c = mix(c, moonc.rgb * surface * shown, moonp.w > 0.0 ? disc : 0.0);
+  c += mix(vec3(0.30, 0.38, 0.55), moonc.rgb, 0.5) * (exp(-ang / 0.035) * 0.03 + exp(-ang / 0.18) * 0.008) * shown;
   return c;
 }
 
@@ -466,17 +507,19 @@ void main() {
   // D169: the night sky where the view shows the sky (nothing within 5 km), where the day sky was clear blue (its
   // clouds, grey or white, keep covering it), fading toward the horizon. The direction is taken for every pixel (the
   // pixel's angle needs its neighbours').
-  if (skyp.x > 0.0 && inv_t.w > 0.5) {
-    vec2 ndc = v_texcoord * to_ndc.xy + to_ndc.zw;
+  if (skyp.x > 0.0 && skyp.y > 0.5) {
+    vec2 ndc = v_texcoord * skyndc.xy + skyndc.zw;
     vec3 ray = vec3(ndc, 1.0);
-    vec3 dir = normalize(vec3(dot(inv0.xyz, ray), dot(inv1.xyz, ray), dot(inv2.xyz, ray)));
+    vec3 dir = normalize(vec3(dot(sky0.xyz, ray), dot(sky1.xyz, ray), dot(sky2.xyz, ray)));
     float px = max(length(fwidth(dir)), 1e-5);
     float open = 1.0 - smoothstep(2e-6, 2e-5, depth);
     if (open > 0.0) {
       float hi = max(lin.r, max(lin.g, lin.b)), lo = min(lin.r, min(lin.g, lin.b));
       float clear = smoothstep(0.30, 0.60, hi > 1e-4 ? (hi - lo) / hi : 0.0);
-      float above = smoothstep(-0.02, 0.18, dir.y);
-      result += NightSky(dir, px) * open * mix(0.12, 1.0, clear) * above * skyp.x;
+      float above = smoothstep(-0.02, horizon.w, dir.y);
+      float low = 1.0 - smoothstep(-0.04, horizon.w * 1.6, dir.y);
+      // The level's haze: strongest low on the sky, a third of it overhead (damp air, dust).
+      result += (NightSky(dir, px, mix(moonc.w, 1.0, clear) * above, clear) + horizon.rgb * mix(0.35, 1.0, low) * night.x) * open * skyp.x;
     }
     // Tests (night debug 3): red the sky test, green the clear sky test, blue the direction's height.
     if (counts.w > 2.5 && counts.w < 3.5) {
@@ -507,7 +550,9 @@ void main() {
       float d = sqrt(d2);
       vec3 l = L / max(d, 1e-3);
       float fall = 1.0 - d2 / r2;
-      float att = fall * fall / (1.0 + d2 * 0.25);
+      // D170: a long light (a lighthouse's beam, over 60 m) falls off with its range, not as a lamp's 2 m.
+      float k = l0.w > 60.0 ? 100.0 / r2 : 0.25;
+      float att = fall * fall / (1.0 + d2 * k);
       float spot = dot(l2.xyz, l2.xyz) > 0.5 ? smoothstep(l1.w, l2.w, dot(-l, l2.xyz)) : 1.0;
       float facing = clamp(dot(N, l), 0.0, 1.0) * 0.8 + 0.2;
       lit += l1.rgb * (att * spot * facing);
@@ -564,6 +609,8 @@ void main() {
     float night[4], flags[4], glow[4], to_ndc[4];
     float inverse[3][4];
     float inverse_t[4], eye[4], counts[4], glow2[4], sky[4];
+    float sky_inverse[3][4], sky_to_ndc[4];  // D169
+    float moon[4], moon_color[4], horizon[4], stars[4];
     float lights[kMaxLights * 3][4];
     float sprites[kMaxSprites * 2][4];
   };

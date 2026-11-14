@@ -204,6 +204,8 @@ class DrawPath {
   bool TakeProjection(GtaoProjection& out, float& z_min, float& z_max);
   // The grass prototype (grass.h): the main view's terrain draws are kept in `terrain` (null: none).
   void SetTerrainCapture(TerrainFrame* terrain) { terrain_ = terrain; }
+  // D169: the sky dome's camera kept in `sky` (null: none), the first of a frame's.
+  void SetSkyCapture(SkyCamera* sky) { sky_ = sky; }
   // D163: the night's lamps on models: a main view draw that writes depth with one of these index counts reports its
   // world-view-projection (column form) to `report`; null: none.
   // `index_counts` holds pairs: an index count, the first register of the model's world matrix.
@@ -475,6 +477,7 @@ class DrawPath {
   const std::vector<uint32_t>* model_lamp_counts_ = nullptr;  // D163
   void (*model_lamp_report_)(uint32_t, const Mat4d&) = nullptr;
   TerrainFrame* terrain_ = nullptr;  // the grass prototype's (grass.h)
+  SkyCamera* sky_ = nullptr;         // D169
   std::vector<std::pair<GtaoProjection, uint32_t>> projections_;
   std::vector<std::pair<float, float>> projection_ranges_;  // each candidate's viewport depth range (its first draw's)
   // The last vote's winner, the camera's reprojection (D120).

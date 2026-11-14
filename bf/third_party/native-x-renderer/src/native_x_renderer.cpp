@@ -150,6 +150,7 @@ bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss) {
 // D163: kept whether the renderer runs yet or not (the level is read on a worker).
 void NightLamps(const NightLamp* lamps, uint32_t count) { renderer::NightLamps(lamps, count); }
 void NightModels(const NightModelLamps* models, uint32_t count) { renderer::NightModels(models, count); }
+void NightSky(const NightSkyStyle& style) { renderer::NightSky(style); }
 
 void SetGameAspectBox(bool on) {
   if (g_renderer) renderer::SetGameAspectBox(on);

@@ -74,6 +74,20 @@ struct TerrainFrame {
   }
 };
 
+// D169: the sky dome's draw (Battlefield 1943's, its vertex shader 00AB67BFF5297087): its camera at c0 to c3, rows
+// (clip = row . (direction, 1), no translation: the dome goes with the eye), drawn whichever way the view looks (the
+// terrain's camera is missing when it looks up at the sky), for the night sky's directions.
+struct SkyCamera {
+  bool valid = false;
+  float m[4][4] = {};
+  Diligent::Viewport viewport;
+  float ndc_scale[3] = {}, ndc_offset[3] = {};
+  // Toward the game's sun: its dome's pixel shader constant 9 is the light's direction (from the sun, unit), the one its
+  // shadows and the sea's glint follow (research run niwo3: a moon placed there rose over the glint).
+  bool sun_valid = false;
+  float sun[3] = {};
+};
+
 class Grass {
  public:
   bool Initialize(Diligent::IRenderDevice* device);

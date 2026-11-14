@@ -318,6 +318,7 @@ std::vector<NightLight> g_night_frame_lights;
 std::vector<NightSprite> g_night_frame_sprites;
 bool NightLightsWanted();
 bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings& s);
+void BuildNightSky(NightFrame& f, float to_u, float to_v);
 Gtao g_gtao;           // ambient occlusion at the end of the main view's opaque draws (D132)
 bool g_gtao_on = false;
 bool g_gtao_done = false;  // the opaque effects ran in this frame's view
@@ -336,6 +337,11 @@ bool GrassOn() {
   return g_grass_ready;
 }
 TerrainFrame g_terrain;  // this frame's terrain draws, for it
+SkyCamera g_sky;         // D169: this frame's sky dome camera
+// D169: the level's night sky (NightSky), under the lamps' lock, and the render thread's copy.
+NightSkyStyle g_night_sky_style;
+uint64_t g_night_sky_version = 0, g_night_sky_render_version = ~0ull;
+NightSkyStyle g_night_sky_render;
 bool g_scene_antialiased = false;  // this frame's scene copy antialiased already (Profile::scene_resolve_once, D94)
 Upscaler g_upscaler;   // NVIDIA DLSS (Phase 5, D46)
 // Motion blur (motion_blur.h, 0.4.2): made at its first use; the view's camera vote kept for it (the ambient
@@ -908,6 +914,10 @@ void ExecuteDraw(const Command& c) {
   g_draw->SetProjectionVote((g_gtao_on || g_ssgi_on) && g_scene_view && !g_gtao_done);
   // The terrain's draws: the grass's, and the night's lights' camera (D163).
   g_draw->SetTerrainCapture(g_scene_view && !g_gtao_done && (GrassOn() || NightLightsWanted()) ? &g_terrain : nullptr);
+  // D169: the sky dome's, for the night sky (it may come after the opaque effects).
+  g_draw->SetSkyCapture(g_scene_view && REXCVAR_GET(native_x_renderer_night) && REXCVAR_GET(native_x_renderer_night_sky) > 0.0
+                            ? &g_sky
+                            : nullptr);
   // D163: the models with lamps (a jeep's headlights), at night.
   g_draw->SetModelLamps(g_scene_view && !g_night_model_counts.empty() && REXCVAR_GET(native_x_renderer_night) &&
                                 REXCVAR_GET(native_x_renderer_night_lamps) > 0.0
@@ -957,7 +967,8 @@ void ExecuteDraw(const Command& c) {
         f.glow = g_night_glow->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
         f.glow_uv[0] = to_u, f.glow_uv[1] = to_v;
       }
-      // D163: the camera and the lamps it shows.
+      // D169: the sky's directions; D163: the camera and the lamps it shows.
+      BuildNightSky(f, to_u, to_v);
       if (BuildNightCamera(f, to_u, to_v, night)) {
         f.lights = g_night_frame_lights.data(), f.light_count = uint32_t(g_night_frame_lights.size());
         f.sprites = g_night_frame_sprites.data(), f.sprite_count = uint32_t(g_night_frame_sprites.size());
@@ -1227,19 +1238,13 @@ void NoteNightCamera() {
   g_night_camera.frame = g_device->frames_presented();
 }
 
-// D163: this frame's camera for the night pass (`to_u`, `to_v`: the night target's texture coordinates to the view's
-// 0 to 1), and the lamps it lights and shows: the nearest whose light reaches into the view, and the nearest bulbs in
-// it. False without this frame's camera.
-bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings& s) {
-  const NightCamera& cam = g_night_camera;
-  if (!g_device || cam.frame != g_device->frames_presented()) return false;
-  const float(*m)[4] = cam.wvp;
-  // World from clip x, y and w: the inverse of those three rows' 3x3 part, in double precision.
+// The world (a direction, or a place less the eye) from clip x, y and w: the inverse of rows 0, 1 and 3's 3x3 part of
+// `m`, in double precision; false when it has none.
+bool InverseXYW(const float (*m)[4], double inv[3][3]) {
   const double a[3][3] = {{m[0][0], m[0][1], m[0][2]}, {m[1][0], m[1][1], m[1][2]}, {m[3][0], m[3][1], m[3][2]}};
   const double det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
                      a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
   if (!(std::abs(det) > 1e-12)) return false;
-  double inv[3][3];
   inv[0][0] = (a[1][1] * a[2][2] - a[1][2] * a[2][1]) / det;
   inv[0][1] = (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / det;
   inv[0][2] = (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / det;
@@ -1249,6 +1254,56 @@ bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings
   inv[2][0] = (a[1][0] * a[2][1] - a[1][1] * a[2][0]) / det;
   inv[2][1] = (a[0][1] * a[2][0] - a[0][0] * a[2][1]) / det;
   inv[2][2] = (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / det;
+  return true;
+}
+// The night target's texture coordinates to NDC: to the view's 0 to 1, its depth target's pixels, the draw's viewport
+// (DiligentCore's, Direct3D's way round: NDC y +1 at its top), then the translated shaders' NDC transform undone.
+bool NightToNdc(float out[4], float to_u, float to_v, float view_w, float view_h, const Diligent::Viewport& vp,
+                const float ndc_scale[3], const float ndc_offset[3]) {
+  if (!(vp.Width > 0.0f && vp.Height > 0.0f && ndc_scale[0] != 0.0f && ndc_scale[1] != 0.0f)) return false;
+  out[0] = to_u * view_w * 2.0f / (vp.Width * ndc_scale[0]);
+  out[1] = -to_v * view_h * 2.0f / (vp.Height * ndc_scale[1]);
+  out[2] = (-vp.TopLeftX * 2.0f / vp.Width - 1.0f - ndc_offset[0]) / ndc_scale[0];
+  out[3] = (vp.TopLeftY * 2.0f / vp.Height + 1.0f - ndc_offset[1]) / ndc_scale[1];
+  return true;
+}
+// D169: the night sky's directions this frame, from the sky dome's camera (any way the view looks), and the level's
+// sky style.
+void BuildNightSky(NightFrame& f, float to_u, float to_v) {
+  {
+    std::lock_guard lock(g_night_lamps_mutex);
+    if (g_night_sky_render_version != g_night_sky_version) {
+      g_night_sky_render = g_night_sky_style;
+      g_night_sky_render_version = g_night_sky_version;
+    }
+  }
+  f.sky_style = &g_night_sky_render;
+  if (!g_sky.valid) return;
+  // The moon where the game's sun is (its shadows and the sea's glint agree), unless the level's style says otherwise.
+  static bool sun_kept = false;
+  static float sun[3] = {};
+  if (g_sky.sun_valid) sun_kept = true, std::memcpy(sun, g_sky.sun, sizeof(sun));
+  if (sun_kept && g_night_sky_render.moon_at_sun) f.sun_valid = true, std::memcpy(f.sun, sun, sizeof(f.sun));
+  double inv[3][3];
+  if (!InverseXYW(g_sky.m, inv)) return;
+  const float view_w = g_scene_depth ? float(g_scene_depth->scale.HostWidth(g_profile->output_width)) : g_sky.viewport.Width;
+  const float view_h = g_scene_depth ? float(g_scene_depth->scale.HostHeight(g_profile->output_height)) : g_sky.viewport.Height;
+  if (!NightToNdc(f.sky_to_ndc, to_u, to_v, view_w, view_h, g_sky.viewport, g_sky.ndc_scale, g_sky.ndc_offset)) return;
+  for (int r = 0; r < 3; ++r)
+    for (int c = 0; c < 3; ++c) f.sky_inverse[r][c] = float(inv[r][c]);
+  f.sky_camera = true;
+}
+
+// D163: this frame's camera for the night pass (`to_u`, `to_v`: the night target's texture coordinates to the view's
+// 0 to 1), and the lamps it lights and shows: the nearest whose light reaches into the view, and the nearest bulbs in
+// it. False without this frame's camera.
+bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings& s) {
+  const NightCamera& cam = g_night_camera;
+  if (!g_device || cam.frame != g_device->frames_presented()) return false;
+  const float(*m)[4] = cam.wvp;
+  // World from clip x, y and w: the inverse of those three rows' 3x3 part.
+  double inv[3][3];
+  if (!InverseXYW(m, inv)) return false;
   const double t[3] = {m[0][3], m[1][3], m[3][3]};
   for (int r = 0; r < 3; ++r) {
     for (int c = 0; c < 3; ++c) f.inverse[r][c] = float(inv[r][c]);
@@ -1258,13 +1313,14 @@ bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings
   // The night target's texture coordinates to NDC: to the view's 0 to 1, its depth target's pixels, the terrain's
   // viewport (DiligentCore's, Direct3D's way round: NDC y +1 at its top), then the translated shaders' NDC transform
   // undone.
-  const Diligent::Viewport& vp = cam.viewport;
-  if (!(vp.Width > 0.0f && vp.Height > 0.0f && cam.ndc_scale[0] != 0.0f && cam.ndc_scale[1] != 0.0f)) return false;
-  f.to_ndc[0] = to_u * cam.view_width * 2.0f / (vp.Width * cam.ndc_scale[0]);
-  f.to_ndc[1] = -to_v * cam.view_height * 2.0f / (vp.Height * cam.ndc_scale[1]);
-  f.to_ndc[2] = (-vp.TopLeftX * 2.0f / vp.Width - 1.0f - cam.ndc_offset[0]) / cam.ndc_scale[0];
-  f.to_ndc[3] = (vp.TopLeftY * 2.0f / vp.Height + 1.0f - cam.ndc_offset[1]) / cam.ndc_scale[1];
+  if (!NightToNdc(f.to_ndc, to_u, to_v, cam.view_width, cam.view_height, cam.viewport, cam.ndc_scale, cam.ndc_offset))
+    return false;
   f.camera = true;
+  if (!f.sky_camera) {  // D169: no sky dome drawn this frame: the terrain's directions
+    std::memcpy(f.sky_to_ndc, f.to_ndc, sizeof(f.sky_to_ndc));
+    std::memcpy(f.sky_inverse, f.inverse, sizeof(f.sky_inverse));
+    f.sky_camera = true;
+  }
   // The lamps: their light where its sphere meets the view (clip -w <= x, y <= w, w >= 0), nearest first; their bulbs
   // where they are in the view, nearest first.
   g_night_frame_lights.clear();
@@ -1329,6 +1385,29 @@ bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings
     }
   }
   g_night_models_placed += placed_models;
+  // D170: this frame's firelight and turning beams (seconds since the renderer started, each lamp its own phase from
+  // where it is, so no two fires waver together).
+  {
+    static const auto t0 = std::chrono::steady_clock::now();
+    const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count();
+    for (NightLamp& l : lamps) {
+      if (l.flicker <= 0.0f && l.spin == 0.0f) continue;
+      const float phase = std::fmod(std::abs(l.position[0] * 0.73f + l.position[2] * 1.37f + l.position[1] * 0.31f), 6.2831853f);
+      if (l.flicker > 0.0f) {
+        // Three unrelated waves and a slow breath: a fire's light, never off, never a strobe.
+        const float w = 0.5f * std::sin(t * 7.3f + phase) + 0.3f * std::sin(t * 13.1f + phase * 2.1f) +
+                        0.2f * std::sin(t * 23.7f + phase * 3.7f);
+        const float breath = 0.5f + 0.5f * std::sin(t * 0.9f + phase * 0.5f);
+        const float k = 1.0f + l.flicker * (0.28f * w - 0.12f * breath);
+        for (float& c : l.color) c *= std::max(0.3f, k);
+      }
+      if (l.spin != 0.0f) {
+        const float a = t * l.spin + phase, ca = std::cos(a), sa = std::sin(a);
+        const float x = l.direction[0], z = l.direction[2];
+        l.direction[0] = x * ca - z * sa, l.direction[2] = x * sa + z * ca;
+      }
+    }
+  }
   const float planes[5][4] = {
       {m[3][0] + m[0][0], m[3][1] + m[0][1], m[3][2] + m[0][2], m[3][3] + m[0][3]},
       {m[3][0] - m[0][0], m[3][1] - m[0][1], m[3][2] - m[0][2], m[3][3] - m[0][3]},
@@ -1365,7 +1444,7 @@ bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings
                   "(D163)",
                   f.eye[0], f.eye[1], f.eye[2], lit.size(), l ? l->position[0] : 0.0f, l ? l->position[1] : 0.0f,
                   l ? l->position[2] : 0.0f, lit.empty() ? 0.0f : lit[0].distance, f.to_ndc[0], f.to_ndc[1],
-                  f.to_ndc[2], f.to_ndc[3], vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, cam.view_width,
+                  f.to_ndc[2], f.to_ndc[3], cam.viewport.TopLeftX, cam.viewport.TopLeftY, cam.viewport.Width, cam.viewport.Height, cam.view_width,
                   cam.view_height);
     }
   }
@@ -2512,6 +2591,7 @@ void ExecutePresent(const Command& c) {
   g_auto_view_done = false;
   g_gtao_done = false;
   g_terrain.Reset();
+  g_sky.valid = false;
   g_scene_antialiased = false;
   g_night_pending = false;  // a frame whose composite never came
   g_scope_pending = false;
@@ -3338,6 +3418,14 @@ void NightModels(const NightModelLamps* models, uint32_t count) {
   else g_night_models.clear();
   ++g_night_models_version;
   REXLOG_INFO("[native_x_renderer] night: {} models with lamps (D163)", g_night_models.size());
+}
+
+void NightSky(const NightSkyStyle& style) {
+  std::lock_guard lock(g_night_lamps_mutex);
+  g_night_sky_style = style;
+  ++g_night_sky_version;
+  REXLOG_INFO("[native_x_renderer] night: the sky's style set (stars {:.2f}, Milky Way {:.2f}, moon {:.4f}; D169)",
+              style.stars, style.milky_way, style.moon_radius);
 }
 
 void NightLamps(const NightLamp* lamps, uint32_t count) {

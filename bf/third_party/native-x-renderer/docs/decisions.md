@@ -5293,3 +5293,68 @@ is a blur of what was round it. The shaders are Battlefield 1943's own.
 **Not in Battlefield 1943 Reborn 0.4.1:** taken out of the update at TekRantGaming's word (13 Nov 2026, 20:20, "drop
 the sniper change from this update"). The renderer's part stays: it runs only while the game reports its view, which
 a release build never does (the game's CMake BF_SCOPE_PIP, off by default: no Enhancements row, no report).
+
+## D169 — Night: a sky of the renderer's own (stars, the Milky Way, a moon), each level's own (2026-11-14, Claude for Battlefield 1943 Reborn)
+
+**Context.** TekRantGaming's night maps brief (14 Nov 2026): a unique night sky per map, stars, moon, clouds and ambient
+level, darkness kept. D162 grades the game's day sky into a flat dark blue; there was no sky of the night's own.
+
+**Decision** (src/night.h, renderer.cpp, draw.cpp, grass.h; the game's side in bf/src/night_lamps.cpp):
+- The night pass draws the sky where the view shows nothing within 5 km (the stored depth under 2e-5): stars on three
+  layers of cube face grids (sparse bright, then denser faint ones, more of them in the band), a faint patchy Milky Way
+  with darker lanes, a moon disc with a little texture, a darker rim and a soft halo, and a haze low on the sky. Where
+  the day sky was a grey or white cloud (little saturation) the night sky is dimmed to the level's share, so the
+  game's own clouds keep covering it; it fades out toward the horizon.
+- Its directions come from the sky dome's draw (vertex shader 00AB67BFF5297087): its camera at c0 to c3, rows, clip =
+  row . (direction, 1) without translation (the dome goes with the eye). The terrain's camera (D163) is missing when
+  the view looks up at the sky with no ground in it (research run nsky6: frame 2100 had the dome and no terrain), so the
+  dome's is taken whichever way the view looks, the first of each frame (DrawPath::SetSkyCapture, SkyCamera), and the
+  terrain's is the fallback.
+- NightSky(NightSkyStyle): the level's look, kept until set again: the moon's direction, size and colour, the stars'
+  brightness and number (the faint layers go first), the Milky Way's strength, the horizon haze's colour and height,
+  the sky's share behind clouds, a seed for a different star field. The game sets it per level folder when the level
+  loads: Wake Island a clear Pacific night with a bright Milky Way and a small white moon; Guadalcanal damp, fewer
+  stars in a grey green haze, a bigger yellowed moon low; Iwo Jima dusty, few stars, a low reddened moon, a warm brown
+  horizon. native_x_renderer_night_sky scales it all (0 none).
+- Tests: native_x_renderer_night_debug 3 shows the sky test (red), the clear sky test (green) and the direction's
+  height (blue). NXR_SKY_PROBE=1 or 2 logs the shaders and matrices drawn at the output's size, 3 the dome's vertex and
+  pixel constants (the research).
+- The moon stands where the game's sun is: the dome's pixel shader constant 9 is a unit vector, the light's direction
+  (from the sun); its negation is toward the sun (Iwo Jima: 8.5 degrees up). A moon put there rose over the sea's
+  glint (run niwo3), so the game's own shadows, the sea's glint and the moon agree on every level
+  (NightSkyStyle::moon_at_sun; the level's moon_direction when the dome gives none). The moon is dimmed only a quarter
+  where the day sky was white (near the sun it reads as cloud), and shows down to the horizon.
+
+**Checked** (runs nsky9 to nsky11, ngc1, niwo1 to niwo4, nday1, nperf_sky0 and 1): stars straight overhead (nsky11; with
+the terrain's camera alone that view was blank); the three skies distinct; a day map unchanged (no stars, no grade);
+the frame interval at the display's cap (11.11 ms, 90 Hz) with the sky on and off, 3200 x 1800, GeForce RTX 4070 Ti.
+
+## D170 — Night: firelight that wavers, turning beams, and the levels' buildings lit (2026-11-14, Claude for Battlefield 1943 Reborn)
+
+**Context.** The same brief: purposeful lights on buildings, bases, docks and machinery, fire that reads as fire.
+
+**Decision** (renderer.cpp BuildNightCamera, native_x_renderer.h NightLamp; bf/src/night_lamps.cpp):
+- NightLamp gains `flicker` (0 steady to 1 a fire's) and `spin` (radians a second round the world's up axis). Each
+  frame's copy of the lamps is animated before they are chosen: three unrelated sine waves and a slow breath scale a
+  flickering lamp's colour (never below 0.3 of it, never a strobe); a spinning spot's axis turns. Each lamp's phase
+  comes from where it stands, so no two fires waver together and every player's game sees the same.
+- A long light (range over 60 m) falls off with its range (1 / (1 + 100 d^2 / range^2)) instead of a lamp's (1 / (1 +
+  d^2 / 4)), under which a beam was nothing at 150 m.
+- The game's table of lit models gains colours (fire, lantern, red aviation light, the default warm electric lamp), a
+  hanging work lamp shape, and a share (the houses: 45% lived in, chosen by where they stand). New: the houses' fire
+  emitters, Iwo Jima's lighthouse (two beams turning over the sea, dipping a quarter so they reach the water 150 m out), the control towers' cabs and roof lights, the guard
+  and watch towers' lanterns, the radio masts' and water towers' red lights, the hangars' and sheds' work lamps, the
+  repair platforms', lanterns on the jetties and Guadalcanal's harbour, dim lanterns inside the bunkers and pillboxes,
+  lit rooms in some houses, the storerooms and factories. Each from the model's own mesh part bounds
+  (tools/level_objects.py for where they stand).
+- No shadows: a light inside walls is kept within them (its range shorter than the distance to the ground outside),
+  so it shows through doors and slits without lighting the ground on the far side of a wall.
+
+**Findings:** the houses' fire emitters (Houseeffects_Fire, 42 on Wake) stand inside the houses and draw no flames
+while the house stands (runs nfire1 and nfire2, night debug 2: only the doorway lit), so they are a stove's glow, not
+firelight. Explosions at night (run nnade2, Guadalcanal, grenades every 3 s): the fireball bright and coloured, the
+ground round it lit, its smoke and dust moonlit; D163's open item closed. Lampposts 5.5 from 7 (a wall beside one read
+close to daylight, ngc1).
+
+**Tests:** BF_DEV_CAMERA_POINTS=x,y,z,tx,ty,tz;... (the game's look.cpp, dev builds): the camera at each stop looking at
+its point, with BF_DEV_CAMERA_TOUR's dwell; the view's row 2 is its back (BF_DEV_CAMERA_AT had the point behind).

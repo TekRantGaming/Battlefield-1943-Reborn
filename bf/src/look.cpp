@@ -24,6 +24,8 @@
 // the runtime did.
 
 #include <algorithm>
+#include <array>
+#include <cstdio>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -1053,6 +1055,10 @@ struct Tour {
   uint32_t seed = 1, probe = 0;
   bool asked = false, at_spot = false;
   float x = 0, y = 0, z = 0, ground = 0, probe_x = 0, probe_z = 0;
+  // BF_DEV_CAMERA_POINTS: fixed stops instead, each a place and a point looked at (x, y, z, tx, ty, tz).
+  std::vector<std::array<float, 6>> points;
+  bool look = false;
+  float look_at[3] = {};
   Clock::time_point first{}, since{};
   uint64_t frame = ~0ull;
 } g_tour;
@@ -1067,8 +1073,25 @@ void DevCameraTour(uint8_t* base, uint32_t out, uint64_t frame) {
   Tour& t = g_tour;
   if (!t.parsed) {
     t.parsed = true;
+    // BF_DEV_CAMERA_POINTS=x,y,z,tx,ty,tz;... (tests: the night maps' lights, 14 Nov 2026): the camera at each place in
+    // turn, looking at its point, for the tour's dwell (BF_DEV_CAMERA_TOUR's second number, 10 s without it).
+    if (const char* pts = std::getenv("BF_DEV_CAMERA_POINTS"); pts && *pts) {
+      std::string all = pts;
+      for (size_t pos = 0; pos < all.size();) {
+        const size_t semi = std::min(all.find(';', pos), all.size());
+        std::array<float, 6> q{};
+        if (std::sscanf(all.substr(pos, semi - pos).c_str(), "%f,%f,%f,%f,%f,%f", &q[0], &q[1], &q[2], &q[3], &q[4], &q[5]) == 6)
+          t.points.push_back(q);
+        pos = semi + 1;
+      }
+    }
     const char* v = std::getenv("BF_DEV_CAMERA_TOUR");
-    if (v && *v) {
+    if (!t.points.empty()) {
+      t.on = true;
+      t.spots = int(t.points.size());
+      if (v && *v)
+        if (const char* c = std::strchr(v, ':')) t.dwell = std::max(1.0, std::atof(c + 1));
+    } else if (v && *v) {
       t.on = true;
       t.spots = std::max(1, std::atoi(v));
       if (const char* c = std::strchr(v, ':')) {
@@ -1092,9 +1115,17 @@ void DevCameraTour(uint8_t* base, uint32_t out, uint64_t frame) {
           return;
         }
       }
+      if (!t.points.empty() && !t.at_spot) {
+        const auto& q = t.points[size_t(t.index)];
+        t.x = q[0], t.y = q[1], t.z = q[2];
+        t.look = true, t.look_at[0] = q[3], t.look_at[1] = q[4], t.look_at[2] = q[5];
+        t.at_spot = true, t.since = now;
+        REXLOG_INFO("BF dev camera: point {} of {} at {:.1f} {:.1f} {:.1f} looking at {:.1f} {:.1f} {:.1f}", t.index + 1, t.spots,
+                    t.x, t.y, t.z, q[3], q[4], q[5]);
+      }
       // The next spot, found while the camera stays at the last one: a random place, its ground asked for, kept if it
       // is the kind wanted (every third at the coast; after 400 tries any).
-      if (!t.at_spot || t.asked) {
+      if (t.points.empty() && (!t.at_spot || t.asked)) {
         uint32_t id = 0;
         float ground = 0;
         if (t.asked && native_x_renderer::GrassProbeResult(&id, &ground) && id == t.probe) {
@@ -1123,6 +1154,17 @@ void DevCameraTour(uint8_t* base, uint32_t out, uint64_t frame) {
     StoreF(base, out + 48, t.x);
     StoreF(base, out + 52, t.y);
     StoreF(base, out + 56, t.z);
+    if (t.look) {  // the point kept ahead, its distance and height kept, whichever way the soldier faces (the view's turn is
+                   // the soldier's: its rows here are rebuilt from the aim)
+      float fx = LoadF(base, out + 32), fz = LoadF(base, out + 40);
+      const float n = std::sqrt(fx * fx + fz * fz);
+      if (n > 1e-3f) {
+        fx /= n, fz /= n;
+        const float d = std::hypot(t.look_at[0] - t.x, t.look_at[2] - t.z);
+        StoreF(base, out + 48, t.look_at[0] + fx * d);  // row 2 is the view's back (run nlight2)
+        StoreF(base, out + 56, t.look_at[2] + fz * d);
+      }
+    }
   }
 }
 }  // namespace
@@ -1205,9 +1247,10 @@ REX_HOOK_RAW(sub_82201188) {
       float fx = LoadF(base, out + 32), fz = LoadF(base, out + 40);
       const float n = std::sqrt(fx * fx + fz * fz);
       if (n > 1e-3f) fx /= n, fz /= n;
-      StoreF(base, out + 48, at[0] - fx * back);
+      // Row 2 is the view's back, not its forward (run nlight2, 14 Nov 2026: with "- back" the point was behind).
+      StoreF(base, out + 48, at[0] + fx * back);
       StoreF(base, out + 52, at[1] + up);
-      StoreF(base, out + 56, at[2] - fz * back);
+      StoreF(base, out + 56, at[2] + fz * back);
     }
   }
 #endif

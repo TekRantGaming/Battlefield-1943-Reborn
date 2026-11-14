@@ -338,6 +338,10 @@ struct NightLamp {
   float range = 15.0f;                   // metres: no light beyond
   float cone_inner = 35.0f, cone_outer = 60.0f;  // a spot's half angles in degrees: full light within, none beyond
   float glow = 0.25f;                    // the bulb's glow, its radius in metres (0: none)
+  // D170: firelight wavers (0 steady, 1 a fire's full flicker, its own rhythm from where it is); a spot can turn round
+  // the world's up axis (radians a second, 0 still: a lighthouse's beam).
+  float flicker = 0.0f;
+  float spin = 0.0f;
 };
 // The level's lamps, copied (count 0: none). Lit only at night.
 void NightLamps(const NightLamp* lamps, uint32_t count);
@@ -354,6 +358,24 @@ struct NightModelLamps {
   uint32_t lamp_count = 0;
 };
 void NightModels(const NightModelLamps* models, uint32_t count);
+
+// D169: the night sky's look for the level (native_x_renderer_night_sky scales it all): where the moon is and how big,
+// how many stars and how bright the Milky Way, the haze low on the sky (its colour and how high it reaches: damp air,
+// volcanic dust), and how dim the sky is behind the day sky's clouds. Kept until set again.
+struct NightSkyStyle {
+  float moon_direction[3] = {-0.55f, 0.38f, 0.74f};  // toward the moon (any length; y up)
+  float moon_radius = 0.0105f;                          // radians
+  float moon_color[3] = {0.62f, 0.66f, 0.72f};          // linear, the disc's
+  float stars = 1.0f;                                   // the stars' brightness and number: 1 a clear night
+  float milky_way = 1.0f;                               // the band's brightness: 0 none
+  float horizon_color[3] = {0.004f, 0.006f, 0.012f};  // linear, the haze at the horizon (added)
+  float horizon_height = 0.18f;  // how high the haze reaches (the direction's y) and the stars start to show
+  float cloud_dim = 0.12f;       // the sky's share left where the day sky had clouds
+  float seed = 0.0f;             // a different sky of stars
+  bool moon_at_sun = true;       // the moon where the game's sun is (its shadows and glints agree), when the game's sky gives
+                                 // it; moon_direction otherwise
+};
+void NightSky(const NightSkyStyle& style);
 
 // The game starts drawing a view: a camera's image (its 3D scene, a reflection, a shadow map, a 2D layer).
 // `scene_view_projection`: for a view of the 3D world, its view-projection matrix (16 floats, rows, as the
