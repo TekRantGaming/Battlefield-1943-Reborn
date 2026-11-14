@@ -8,6 +8,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <vector>
@@ -114,6 +115,16 @@ void NoteFrame() {
   else window = now;
   last = now;
   if (now - window < std::chrono::seconds(StatsOn() ? 5 : 30) || times.empty()) return;
+  // BF_FRAME_TIMES=<file>: every frame's time (ms, one a line) appended there too, for the 1% and 0.1% lows of a
+  // benchmark run (tests only; nothing is written without it).
+  static FILE* const times_file = [] {
+    const char* path = std::getenv("BF_FRAME_TIMES");
+    return path && *path ? std::fopen(path, "a") : nullptr;
+  }();
+  if (times_file) {
+    for (float t : times) std::fprintf(times_file, "%.3f\n", t);
+    std::fflush(times_file);
+  }
   std::vector<float> sorted = times;
   std::sort(sorted.begin(), sorted.end());
   float sum = 0;

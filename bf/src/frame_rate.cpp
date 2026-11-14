@@ -262,8 +262,15 @@ void LimitFrame() {
 // profile, sub_823C2430), so with no work it spins a core. bf_job_wait_yield: after 64 empty calls in a row on a
 // thread, it gives up the rest of its time slice (SwitchToThread), so the game's workers get the core on PCs with
 // few cores. Measured (runs jobyield0, jobyield1, Wake Island at 90 FPS): 2.37 cores without, 2.27 with, the same
-// frame times (11.1 ms average, 11.2 ms 99%): the wait costs little, so it stays off.
-REXCVAR_DEFINE_BOOL(bf_job_wait_yield, false, "BF1943",
+// frame times (11.1 ms average, 11.2 ms 99%): the wait costs little, so it stayed off then.
+// On by default since 14 Nov 2026 (the performance brief): on a PC with few cores the waiting threads took the cores
+// from the threads with the work. The client held to two cores of this PC (Wake Island's carrier, no frame limit but
+// the 90 FPS the menu offers here): without it 78 FPS, 1% low 19 to 23 FPS, 204 to 210 frames over twice the average
+// (runs pb_base_wake2c2, 2c3); with it 88 to 90 FPS, 1% low 77 FPS, no frame over 50 ms (pb_yield_wake2c, 2c2),
+// on less CPU (1.20 cores against 1.37). On four cores the longest frame 11.5 ms instead of 14.2 (pb_yield_wake4c,
+// pb_base_wake4c); on all sixteen nothing changes (pb_yield_wake16: 90.0 FPS, 0.1% low 86). A thread with no other
+// thread ready on its core gets the core straight back, so a PC with cores to spare loses nothing.
+REXCVAR_DEFINE_BOOL(bf_job_wait_yield, true, "BF1943",
                     "A thread waiting for the game's jobs yields its core after 64 empty polls (fewer cores busy)");
 // bf_job_wait_sleep: the main thread's own wait only (its call from sub_823C2430's loop, return address 823C24C8;
 // the workers already block on events, run loadstacks1): after 64 empty polls it sleeps a quarter millisecond on a

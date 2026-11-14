@@ -30,7 +30,7 @@
 #include <rex/system/xsymboliclink.h>
 #include <rex/system/xthread.h>
 
-REXCVAR_DEFINE_INT32(job_wait_floor_ms, 0, "Kernel",
+REXCVAR_DEFINE_INT32(job_wait_floor_ms, 5, "Kernel",
                      "The guest's job threads' wait timeouts at least this many ms (0: as the game asks)");
 
 namespace rex::system {
@@ -196,6 +196,10 @@ void XObject::SetAttributes(uint32_t obj_attributes_ptr) {
 // Battlefield 1943 Reborn, 14 Nov 2026: Frostbite's idle job threads (JobManager1 to 5) wait on their job semaphore
 // with a 1 ms timeout and look again, about 800 times a second each, 14% of a core on an idle Linux server. A job
 // posted wakes them at once whatever the timeout, so on a server their timeouts are lengthened to this (0: as asked).
+// The game too since the same day's performance work (default 5): the client's four job threads woke about 15,000
+// times a second in a match. Measured on Windows (Wake Island's carrier, 90 FPS): on all sixteen threads 2.5% less
+// CPU, the same frame times and level load (7.1 s); held to two cores, 1% low 80 FPS and 2 frames over twice the
+// average in two runs, against 45 to 77 FPS and 2 to 17 without (runs pb_floor_*, pb_nofl_*, pb_tq_wake2c).
 
 namespace {
 std::chrono::milliseconds JobWaitFloor(std::chrono::milliseconds timeout) {

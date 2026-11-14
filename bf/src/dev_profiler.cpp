@@ -3,6 +3,7 @@
 // (by name) and, for each, the functions it was in most (DbgHelp, from the PDBs beside the modules: bf1943.pdb and
 // rexgpu-bfnative.pdb; functions in modules without one show as module+offset). For finding where frame time goes.
 //
+// BF_DEV_PROFILE=load,<seconds>: from when a join's loading screen is up (load+<s>: that many seconds later).
 // BF_DEV_PROFILE=<start s>,<seconds>,<ms>: also the samples taken during frames longer than <ms> (from one of the
 // game's swaps to the next: frame_stats.cpp), by function and by call chain (the five innermost frames), to see what a
 // thread did in the long frames alone (a stall of the game's thread, or the renderer waiting in its present).
@@ -35,6 +36,10 @@
 #include <tlhelp32.h>
 
 #include <rex/logging.h>
+
+namespace bf1943 {
+bool LoadingScreenShown();  // auto_join.cpp: the level's loading screen is up after a join's load began
+}
 
 namespace {
 
@@ -97,6 +102,11 @@ uint64_t CpuTime(HANDLE h) {
 }
 
 void Run(double start, double seconds, double hitch_ms) {
+  if (start < 0) {  // "load": from the moment the level's loading screen is up (a join's load), plus -start-1 s
+    while (!bf1943::LoadingScreenShown()) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    start = -start - 1;
+    REXLOG_INFO("BF profile: the loading screen is up");
+  }
   std::this_thread::sleep_for(std::chrono::duration<double>(start));
   g_hitch_ms = hitch_ms;
   const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
@@ -118,15 +128,21 @@ void Run(double start, double seconds, double hitch_ms) {
   for (auto& [id, t] : threads) t.cpu_start = CpuTime(t.handle);
   std::this_thread::sleep_for(std::chrono::seconds(1));
   std::string shares;
+  // BF_DEV_PROFILE_MIN=<percent>: the threads sampled use at least that much of a processor (default 5; lower for an
+  // idle server, whose small costs are spread over many threads).
+  static const double min_share = [] {
+    const char* v = std::getenv("BF_DEV_PROFILE_MIN");
+    return v && *v ? std::atof(v) / 100.0 : 0.05;
+  }();
   for (auto& [id, t] : threads) {
     t.cpu_share = (CpuTime(t.handle) - t.cpu_start) / 1e7;
-    if (t.cpu_share >= 0.05) shares += fmt::format("\n    {:5.1f}%  {}", t.cpu_share * 100, t.name);
+    if (t.cpu_share >= min_share) shares += fmt::format("\n    {:5.1f}%  {}", t.cpu_share * 100, t.name);
   }
   for (auto it = threads.begin(); it != threads.end();) {
-    if (it->second.cpu_share < 0.05) CloseHandle(it->second.handle), it = threads.erase(it);
+    if (it->second.cpu_share < min_share) CloseHandle(it->second.handle), it = threads.erase(it);
     else ++it;
   }
-  REXLOG_INFO("BF profile: threads using 5% of a processor or more over a second:{}", shares);
+  REXLOG_INFO("BF profile: threads using {:.1f}% of a processor or more over a second:{}", min_share * 100, shares);
   REXLOG_INFO("BF profile: sampling {} threads for {:.0f} s", threads.size(), seconds);
   timeBeginPeriod(1);
   const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
@@ -283,7 +299,9 @@ struct Starter {
   Starter() {
     const char* v = std::getenv("BF_DEV_PROFILE");
     if (!v || !*v) return;
-    const double start = std::atof(v);
+    // "load" or "load+<s>" as the start: when the loading screen comes up (or that many seconds after), to profile
+    // a level's load.
+    const double start = std::strncmp(v, "load", 4) == 0 ? -1.0 - (v[4] == '+' ? std::atof(v + 5) : 0.0) : std::atof(v);
     const char* comma = std::strchr(v, ',');
     const double seconds = comma ? std::atof(comma + 1) : 10.0;
     const char* comma2 = comma ? std::strchr(comma + 1, ',') : nullptr;

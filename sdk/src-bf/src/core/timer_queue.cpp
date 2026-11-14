@@ -20,8 +20,16 @@
 #include <disruptorplus/spin_wait_strategy.hpp>
 
 #include <rex/assert.h>
+#include <rex/platform.h>
 #include <rex/thread.h>
 #include <rex/thread/timer_queue.h>
+
+#if REX_PLATFORM_WIN32
+#include "platform_win.h"
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+#endif
 
 namespace dp = disruptorplus;
 
@@ -70,9 +78,40 @@ class TimerQueue {
       {
         // Consume new wait items and add them to sorted wait queue
 #if REX_PLATFORM_WIN32
-        dp::sequence_t available = claim_strategy_.wait_until_published(
-            next_sequence, next_sequence - 1,
-            wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_);
+        // Battlefield 1943 Reborn, 14 Nov 2026: the spin wait strategy's wait (yields in a loop, a 1 ms sleep every
+        // 20th) kept this thread busy between the 1 ms timestamp ticks, and on a PC with few cores took them from
+        // the game's threads. It sleeps on the queue's event (QueueTimer) and a high resolution timer set for the
+        // next due item instead, as the POSIX path below sleeps on its condition variable.
+        // The ring is polled only when the event says something was queued: a poll that finds nothing spins through
+        // the spin_wait's busy loops (thousands of pause instructions) and asks the system for the processor count
+        // (std::thread::hardware_concurrency), which on the 1 ms timestamp timer was most of an idle server's CPU.
+        bool queued = false;
+        if (wait_queue_.empty()) {
+          queued = WaitForSingleObject(wake_event_, INFINITE) == WAIT_OBJECT_0;
+        } else {
+          const auto due = wait_queue_.front()->due_;
+          const auto now = clock::now();
+          if (due > now) {
+            const auto ticks = std::chrono::duration_cast<std::chrono::duration<int64_t, std::ratio<1, 10000000>>>(
+                                   due - now)
+                                   .count();
+            LARGE_INTEGER relative;
+            relative.QuadPart = -std::max<int64_t>(1, ticks);
+            if (due_timer_ && SetWaitableTimer(due_timer_, &relative, 0, nullptr, nullptr, FALSE)) {
+              const HANDLE handles[2] = {wake_event_, due_timer_};
+              queued = WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_OBJECT_0;
+            } else {
+              queued = WaitForSingleObject(wake_event_, DWORD(std::max<int64_t>(1, (ticks + 9999) / 10000))) ==
+                       WAIT_OBJECT_0;
+            }
+          } else {
+            queued = WaitForSingleObject(wake_event_, 0) == WAIT_OBJECT_0;
+          }
+        }
+        dp::sequence_t available =
+            queued ? claim_strategy_.wait_until_published(next_sequence, next_sequence - 1,
+                                                          clock::time_point::min())
+                   : next_sequence - 1;
 #else
         // Sleep until the next timer is due or a new one is queued. The spin wait strategy's
         // wait yielded in a loop and kept this thread at about a fifth of a CPU core even with
@@ -158,7 +197,9 @@ class TimerQueue {
     auto sequence = claim_strategy_.claim_one();
     buffer_[sequence] = std::move(wait_item);
     claim_strategy_.publish(sequence);
-#if !REX_PLATFORM_WIN32
+#if REX_PLATFORM_WIN32
+    SetEvent(wake_event_);
+#else
     {
       std::lock_guard<std::mutex> lock(wake_mutex_);
       wake_pending_ = true;
@@ -182,7 +223,16 @@ class TimerQueue {
   // This is a _sorted_ (ascending due_) list of active timers managed by a
   // dedicated thread
   std::forward_list<std::shared_ptr<WaitItem>> wait_queue_;
-#if !REX_PLATFORM_WIN32
+#if REX_PLATFORM_WIN32
+  // Wakes the dispatch thread when a timer is queued; the timer wakes it when the next one is due (TimerThreadMain).
+  // Made before dispatch_thread_ starts (members are made in declaration order).
+  HANDLE wake_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  HANDLE due_timer_ = [] {
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                          TIMER_ALL_ACCESS);
+    return timer ? timer : CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+  }();
+#else
   // Wakes the dispatch thread when a timer is queued (see TimerThreadMain).
   std::mutex wake_mutex_;
   std::condition_variable wake_cv_;
