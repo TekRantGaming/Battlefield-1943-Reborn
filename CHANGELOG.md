@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.6.2 (14 November 2026): the game starts at 60 Hz again
+
+**Changed**
+- **The game starts at 60 Hz again**, as in 0.4.6. It still joins a 30 Hz server by starting again at that rate.
+
 ## 0.4.6.1 (14 November 2026): the game starts at 30 Hz again
 
 **Changed**
