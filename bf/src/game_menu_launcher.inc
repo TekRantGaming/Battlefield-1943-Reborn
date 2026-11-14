@@ -3517,7 +3517,8 @@
   }
   void UpdateNow() {
     const auto state = update::State(update::Get().state.load());
-    if (state == update::State::kChecked) page_ = Page::kUpdate;
+    // A release found: the update page, which shows its download and installs it (0.4.6.3: also while downloading).
+    if (state == update::State::kChecked || state == update::State::kDownloading) update_asked_ = true, page_ = Page::kUpdate;
     else if (state == update::State::kNone || state == update::State::kFailed) CheckForUpdate("the Update row");
   }
   void CheckForUpdate(const char* why) {
@@ -3525,14 +3526,108 @@
     REXLOG_INFO("BF update: checking ({})", why);
     update::CheckInBackground();
   }
-  // Every frame on the main menu and its pages: the 6 hourly check, and a checked release installs at once while the
-  // main menu is showing (before the game runs and after it: the program starts again either way).
+  // Every frame on the main menu and its pages: the 6 hourly check, and a newer release found (downloading, or here)
+  // brings up the new version pop-up on the main menu, once a run for each version (before the game runs and after it).
+  // Update there opens the update page (its download, then the install, then the game starts again); Cancel leaves it
+  // for this run (the Update row still offers it). Before 0.4.6.3 a checked release installed at once, unasked, and
+  // its download only showed on the Update row (TekRantGaming, 14 Nov 2026: "you can see it downloading, but it's not
+  // really visible").
   void UpdateTick() {
     const double now = ImGui::GetTime();
     if (now - update_checked_at_ > 6 * 3600) CheckForUpdate("six hours since the last one");
-    if (update::State(update::Get().state.load()) == update::State::kChecked && (page_ == Page::kHome || page_ == Page::kMain) &&
-        !quit_popup_ && !update_popup_ && !steam_ask_ && !steam_job_)
-      page_ = Page::kUpdate;
+    auto& u = update::Get();
+    const auto state = update::State(u.state.load());
+    if ((state != update::State::kDownloading && state != update::State::kChecked) || u.finishing.load()) return;
+    std::string version;
+    {
+      std::lock_guard lock(u.mutex);
+      version = u.version;
+    }
+    if (version.empty() || !update::IsNewerVersion(version, BfVersion()) || version == new_version_shown_) return;
+    if ((page_ != Page::kHome && page_ != Page::kMain) || quit_popup_ || update_popup_ || steam_ask_ || steam_job_ ||
+        whats_new_open_ || exp_popup_ || tick_popup_ || pw_popup_ || own_popup_ || new_version_popup_)
+      return;
+    new_version_popup_ = true, new_version_shown_ = version, popup_row_ = 1;  // Update
+    REXLOG_INFO("BF update: version {} found (this is {}): the new version pop-up", version, BfVersion());
+  }
+  // The new version pop-up (TekRantGaming, 14 Nov 2026: "a pop-up that comes up saying new game version released,
+  // cancel an update, and then a disclaimer as well that says you may be rejected from the servers without updating
+  // to the latest version"). The download goes on behind it; its progress shows here.
+  void NewVersionPopup(ImDrawList* d, ImGuiIO& io, Input in) {
+    const Stage st = StageOf(io);
+    const kit::Fonts& f = kit::GetFonts();
+    auto& u = update::Get();
+    const auto state = update::State(u.state.load());
+    d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 190));
+    const ImVec2 a = st.P(330, 170), b = st.P(950, 480);
+    {
+      kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.3f);
+      kit::Paper(d, a, b, st.u);
+      kit::Tape(d, ImVec2((a.x + b.x) * 0.5f, a.y), st(110), st(26), -3);
+      kit::Heading(d, st(36), ImVec2(a.x + st(30), a.y + st(26)), kit::kInk, "NEW GAME VERSION RELEASED", st(1.5f), st(560));
+      kit::Spaced(d, f.typed, st(11), ImVec2(a.x + st(32), a.y + st(72)), kit::kStamp,
+                  fmt::format("VERSION {} \xC2\xB7 THIS GAME {}", new_version_shown_, BfVersion()), st(1.5f));
+      float y = a.y + st(100);
+      const char* text = "A new version of Battlefield 1943 Reborn is out. Update now: it downloads, installs, and the "
+                         "game starts again by itself.";
+      kit::Wrapped(d, f.ui, st(17), ImVec2(a.x + st(30), y), kit::kInkSoft, text, st(560));
+      y += kit::WrappedHeight(f.ui, st(17), text, st(560)) + st(14);
+      const char* warning = "You may be rejected from the servers without updating to the latest version.";
+      kit::Wrapped(d, f.ui_bold, st(17), ImVec2(a.x + st(30), y), kit::kRed, warning, st(560));
+      y += kit::WrappedHeight(f.ui_bold, st(17), warning, st(560)) + st(18);
+      // The download's bar (TekRantGaming, 14 Nov 2026: "instead of using text to show the percentage, add a loading
+      // bar here that shows users exactly what's happening"), as the update page draws it, and a line under it.
+      const uint64_t got = u.bytes.load(), total = u.total.load();
+      const bool ready = state == update::State::kChecked;
+      const float w = st(560);
+      const ImVec2 b0(a.x + st(30), y), b1(a.x + st(30) + w, y + st(20));
+      d->AddRectFilled(b0, b1, IM_COL32(34, 36, 27, 38));
+      if (ready || total) {
+        const double done = ready ? 1.0 : std::min(1.0, double(got) / double(total));
+        d->AddRectFilled(b0, ImVec2(b0.x + w * float(done), b1.y), kit::kGreen);
+      } else {  // not sized yet: a moving stripe
+        const float t = float(std::fmod(ImGui::GetTime() * 0.6, 1.0));
+        d->AddRectFilled(ImVec2(b0.x + w * std::max(0.0f, t * 1.3f - 0.3f), b0.y),
+                         ImVec2(b0.x + w * std::min(1.0f, t * 1.3f), b1.y), kit::kGreen);
+      }
+      d->AddRect(b0, b1, kit::kInk, 0, 0, st(2));
+      const std::string line =
+          ready ? std::string("Downloaded. Update installs it and starts the game again.")
+          : total ? fmt::format("Downloading in the background: {:.0f} MB of {:.0f} MB.", double(got) / 1048576.0,
+                                double(total) / 1048576.0)
+                  : std::string("Downloading in the background.");
+      d->AddText(f.ui, st(15), ImVec2(b0.x, b1.y + st(6)), kit::kInkSoft, line.c_str());
+    }
+    if (in.left || in.right || in.up || in.down) popup_row_ = 1 - popup_row_;
+    int clicked = -1;
+    float x = a.x + st(30);
+    for (int i = 0; i < 2; ++i) {
+      const std::string label = i == 0 ? "Cancel" : "Update";
+      const ImVec2 c0(x, b.y - st(70)), c1(x + st(250), b.y - st(26));
+      const bool hover = ImGui::IsMouseHoveringRect(c0, c1);
+      if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) popup_row_ = i;
+      const bool sel = popup_row_ == i;
+      if (sel) d->AddRectFilled(ImVec2(c0.x, c0.y + st(4)), ImVec2(c1.x, c1.y + st(4)), kit::kGreenShadow);
+      d->AddRectFilled(c0, c1, sel ? kit::kGreen : kit::kPaperCard);
+      if (!sel) d->AddRect(c0, c1, kit::kBorder, 0, 0, st(2));
+      const float tw = kit::TextWidth(f.ui_bold, st(20), label);
+      d->AddText(f.ui_bold, st(20), ImVec2((c0.x + c1.x - tw) * 0.5f, c0.y + st(8)), sel ? IM_COL32(255, 255, 255, 255) : kit::kInk,
+                 label.c_str());
+      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
+      x += st(270);
+    }
+    if (in.accept) clicked = popup_row_;
+    if (in.back) clicked = 0;
+    if (clicked < 0) return;
+    new_version_popup_ = false;
+    if (clicked == 0) {
+      new_version_declined_ = new_version_shown_;
+      REXLOG_INFO("BF update: the new version pop-up answered Cancel (version {} not installed this run)", new_version_shown_);
+      return;
+    }
+    REXLOG_INFO("BF update: the new version pop-up answered Update (version {})", new_version_shown_);
+    update_asked_ = true;
+    page_ = Page::kUpdate;
   }
   // The check at the main menu (TekRantGaming, 13 Nov 2026: "the updater seemed to have failed for a user that had
   // skipped a few versions but worked the moment they hit the update button on the menu can we make it so the client

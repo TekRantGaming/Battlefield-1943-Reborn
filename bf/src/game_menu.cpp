@@ -1115,7 +1115,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // A pop-up over whatever page is up (the version gate's UPDATE NEEDED, AskToUpdate; What's new after an update,
     // WhatsNewTick): that page is drawn without the buttons, the mouse's button, its movement and its wheel, which
     // are the pop-up's (ImGui's IsMouseClicked asks MouseDown first).
-    const bool over_popup = update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_;
+    const bool over_popup =
+        update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ || new_version_popup_;
     const Input popup_in = in;
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
@@ -1154,6 +1155,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (over_popup) {
       io.MouseDown[0] = popup_down, io.MouseDelta = popup_delta, io.MouseWheel = popup_wheel;
       if (update_popup_) UpdatePopup(d, io, popup_in);
+      else if (new_version_popup_) NewVersionPopup(d, io, popup_in);
       else if (own_popup_) OwnBackendPopup(d, io, popup_in);
       else if (exp_popup_) ExperimentalPopup(d, io, popup_in);
       else if (tick_popup_) TickPopup(d, io, popup_in);
@@ -2069,18 +2071,28 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // (its list, Favourites, Direct connect) the player is warned in TekRantGaming's words (13 Nov 2026), and can only
   // connect anyway after 5 s. Not for Quick Play (it never picks one), the host's own Custom Match (chosen with its
   // warning on that page) or the join that follows a restart at the server's rate (the player was warned before it).
+  // 0.4.6.3 (TekRantGaming, 14 Nov 2026): the official US Central servers play test a new server build; before one is
+  // joined (any way: the browser, Home, Quick Play, Favourites, Direct connect) the player is warned in his words, with
+  // Connect locked for 5 s and Cancel, in the same pop-up.
   bool exp_popup_ = false;
+  bool exp_us_ = false;               // the pop-up is the US Central play test's warning, not the tick rate's
   ServerInfo exp_popup_server_;
   double exp_popup_at_ = 0;           // ImGui's time when it opened
   std::string exp_accepted_address_;  // the server the player chose to connect to anyway
+  std::string us_accepted_address_;   // the US Central server the player chose to connect to after its warning
+  static bool UsPlaytest(const ServerInfo& sv) { return sv.official && sv.region == "us-central"; }
   bool ExperimentalWarned(const ServerInfo& sv) {
     // 0.4.2: 60 Hz is no longer experimental (the default); the warning is for 75 and 100.
-    if (sv.Tick() <= 60 || exp_accepted_address_ == sv.address) return true;
+    const bool us = UsPlaytest(sv) && us_accepted_address_ != sv.address;
+    const bool tick = sv.Tick() > 60 && exp_accepted_address_ != sv.address;
+    if (!us && !tick) return true;
 #if defined(BF_DEV_TOOLS)
-    if (std::getenv("BF_AUTO_JOIN")) return true;  // test joins: nobody to read it
+    // Test joins: nobody to read it (BF_DEV_JOIN_WARNINGS=1: shown anyway, for the pop-up's own tests).
+    if (std::getenv("BF_AUTO_JOIN") && !std::getenv("BF_DEV_JOIN_WARNINGS")) return true;
 #endif
-    exp_popup_ = true, exp_popup_server_ = sv, exp_popup_at_ = ImGui::GetTime(), popup_row_ = 0;
-    REXLOG_INFO("BF join: {} runs at an experimental {} Hz: warned before joining", sv.name, sv.Tick());
+    exp_popup_ = true, exp_us_ = us, exp_popup_server_ = sv, exp_popup_at_ = ImGui::GetTime(), popup_row_ = 0;
+    if (us) REXLOG_INFO("BF join: {} is a US Central play test server: warned before joining", sv.name);
+    else REXLOG_INFO("BF join: {} runs at an experimental {} Hz: warned before joining", sv.name, sv.Tick());
     return false;
   }
   void ExperimentalPopup(ImDrawList* d, ImGuiIO& io, Input in) {
@@ -2090,22 +2102,33 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const ImVec2 a = st.P(300, 150), b = st.P(980, 500);
     const std::string first = fmt::format("You are connecting to an experimental server currently testing a {}Hz server tick rate.",
                                           exp_popup_server_.Tick());
-    const char* kParagraphs[] = {
-        first.c_str(),
-        "This server is known to have potential game breaking issues. Increasing the server tick rate introduces "
-        "changes to the physics engine, which is currently being decoupled from its original timing. This may cause "
-        "unexpected behaviour, physics inconsistencies, broken mechanics or other gameplay issues.",
-        "This server is available for testing and feedback purposes only. It is not representative of the stable "
-        "gameplay experience and is not recommended for normal gameplay."};
+    std::vector<const char*> paragraphs;
+    if (exp_us_) {
+      paragraphs = {"US Central servers are currently playtesting a new server build. You may experience issues on this "
+                    "version.",
+                    "It is recommended you stick to the EU servers if you're looking to have a stable experience. However, "
+                    "we are actively collecting data from this US playtest.",
+                    "Once this test is concluded, you will see parity between the US servers and EU servers. Apologies for "
+                    "the inconvenience."};
+    } else {
+      paragraphs = {
+          first.c_str(),
+          "This server is known to have potential game breaking issues. Increasing the server tick rate introduces "
+          "changes to the physics engine, which is currently being decoupled from its original timing. This may cause "
+          "unexpected behaviour, physics inconsistencies, broken mechanics or other gameplay issues.",
+          "This server is available for testing and feedback purposes only. It is not representative of the stable "
+          "gameplay experience and is not recommended for normal gameplay."};
+    }
     {
       kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.3f);
       kit::Paper(d, a, b, st.u);
       kit::Tape(d, ImVec2((a.x + b.x) * 0.5f, a.y), st(110), st(26), -3);
-      kit::Heading(d, st(36), ImVec2(a.x + st(30), a.y + st(26)), kit::kInk, "EXPERIMENTAL SERVER", st(1.5f), st(620));
+      kit::Heading(d, st(36), ImVec2(a.x + st(30), a.y + st(26)), kit::kInk,
+                   exp_us_ ? "US CENTRAL PLAYTEST" : "EXPERIMENTAL SERVER", st(1.5f), st(620));
       kit::Spaced(d, f.typed, st(11), ImVec2(a.x + st(32), a.y + st(72)), kit::kStamp,
                   fmt::format("{} \xC2\xB7 {} HZ", exp_popup_server_.name, exp_popup_server_.Tick()), st(1.5f));
       float y = a.y + st(98);
-      for (const char* para : kParagraphs) {
+      for (const char* para : paragraphs) {
         kit::Wrapped(d, f.ui, st(16), ImVec2(a.x + st(30), y), kit::kInkSoft, para, st(620));
         y += kit::WrappedHeight(f.ui, st(16), para, st(620)) + st(12);
       }
@@ -2118,9 +2141,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     int clicked = -1;
     float x = a.x + st(30);
     for (int i = 0; i < 2; ++i) {
-      const std::string label = i == 0 ? std::string("Close")
-                                       : locked ? fmt::format("Connect anyway ({})", int(std::ceil(left)))
-                                                : std::string("Connect anyway");
+      const char* go = exp_us_ ? "Connect" : "Connect anyway";
+      const std::string label = i == 0 ? std::string(exp_us_ ? "Cancel" : "Close")
+                                       : locked ? fmt::format("{} ({})", go, int(std::ceil(left)))
+                                                : std::string(go);
       const ImVec2 c0(x, b.y - st(70)), c1(x + st(250), b.y - st(26));
       const bool off = i == 1 && locked;
       const bool hover = ImGui::IsMouseHoveringRect(c0, c1);
@@ -2140,11 +2164,17 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (clicked < 0) return;
     exp_popup_ = false;
     if (clicked == 0) {
-      REXLOG_INFO("BF join: the experimental server {} not joined (closed)", exp_popup_server_.name);
+      if (exp_us_) REXLOG_INFO("BF join: the US Central play test server {} not joined (cancelled)", exp_popup_server_.name);
+      else REXLOG_INFO("BF join: the experimental server {} not joined (closed)", exp_popup_server_.name);
       return;
     }
-    REXLOG_INFO("BF join: {} joined anyway ({} Hz, experimental)", exp_popup_server_.name, exp_popup_server_.Tick());
-    exp_accepted_address_ = exp_popup_server_.address;
+    if (exp_us_) {
+      REXLOG_INFO("BF join: {} joined after the US Central play test warning", exp_popup_server_.name);
+      us_accepted_address_ = exp_popup_server_.address;
+    } else {
+      REXLOG_INFO("BF join: {} joined anyway ({} Hz, experimental)", exp_popup_server_.name, exp_popup_server_.Tick());
+      exp_accepted_address_ = exp_popup_server_.address;
+    }
     Join(exp_popup_server_);
   }
 
@@ -5149,6 +5179,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   bool whats_new_pending_ = false, whats_new_open_ = false, whats_new_all_ = false;
   std::string whats_new_from_;
   float whats_new_scroll_ = 0;
+  // 0.4.6.3: a newer release found (TekRantGaming, 14 Nov 2026): the pop-up that says so (NewVersionPopup), the
+  // version it was shown for (once a run), and the version the player cancelled (no automatic install of it this run).
+  bool new_version_popup_ = false;
+  std::string new_version_shown_, new_version_declined_;
   bool update_asked_ = false;     // Update now was chosen: the update page shows the check and the download too
   bool relaunched_ = false;
   float match_accum_ = 0;

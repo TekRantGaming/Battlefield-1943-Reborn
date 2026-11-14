@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.6.3 (14 November 2026): a US Central warning and a new version pop-up
+
+**New**
+- **US Central play test warning.** The US Central servers are play testing a new server build. Before you join one,
+  a warning says so and recommends the EU servers for a stable game. Connect unlocks after 5 seconds, and Cancel takes
+  you back.
+- **New version pop-up.** When a new version is out, a pop-up says so on the main menu, with the download's progress,
+  Update and Cancel, and a reminder that the servers may turn away an older version. Update shows the download and
+  installs it; Cancel leaves it until the next start (the Update button still has it).
+
 ## 0.4.6.2 (14 November 2026): the game starts at 60 Hz again
 
 **Changed**
