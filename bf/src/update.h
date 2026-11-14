@@ -80,7 +80,8 @@ void CleanUpAfterUpdate();
 // update), so the shader page makes every pipeline again and says the game was updated. Nothing is deleted.
 bool PrepareShadersAfterUpdate(const std::filesystem::path& cache_root, const std::string& prepared_for);
 // True when version a ("0.2.1") is newer than b. A version with a suffix comes before the same numbers without one
-// (0.2.0-preview < 0.2.0); suffixes with numbers count up (0.2.0-beta.2 < 0.2.0-beta.3).
+// (0.2.0-preview < 0.2.0); suffixes with numbers count up (0.2.0-beta.2 < 0.2.0-beta.3). A hotfix is a fourth number:
+// 0.4.5 < 0.4.5.1 < 0.4.5.10 < 0.4.5.11 < 0.4.6.
 bool IsNewerVersion(const std::string& a, const std::string& b);
 
 }  // namespace bf1943::update

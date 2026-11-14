@@ -38,11 +38,12 @@
 
 // A player's game takes the rate of the server it joins: SetTickRate, before the game's timers are made (a join
 // from the launcher); once they are made the rate is the run's, and a server of another rate is joined by starting
-// the game again at it (game_menu.cpp). 30 is the default and the only stable rate (TekRantGaming, 0.4.1, 13 Nov 2026:
-// a 60 Hz server is "an experimental server currently testing a 60Hz server tick rate"; the player is warned before
-// joining one, and Quick Play never joins one).
-REXCVAR_DEFINE_DOUBLE(bf_tick_rate, 30.0, "BF1943",
-                      "The game's simulation rate, ticks a second: 30 (the Xbox 360's, the default), or 60, 75 or 100 "
+// the game again at it (game_menu.cpp). 60 is the default since the update after 0.4.5 (TekRantGaming, 14 Nov 2026:
+// "all servers are going to be 60 Hertz. So make sure that the game is loading up in the appropriate mode. We will no
+// longer be offering 30 Hertz server"), so a player's game starts at the official servers' rate and joins them without
+// a restart; 30 is the Xbox 360's, 75 and 100 experimental (the player is warned before joining one).
+REXCVAR_DEFINE_DOUBLE(bf_tick_rate, 60.0, "BF1943",
+                      "The game's simulation rate, ticks a second: 60 (the default), 30 (the Xbox 360's), or 75 or 100 "
                       "(experimental). A server runs at it; a player's game starts at it and takes the rate of the "
                       "server it joins");
 

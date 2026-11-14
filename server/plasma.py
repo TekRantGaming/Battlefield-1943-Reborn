@@ -61,7 +61,7 @@ PLATFORM_FILES = (('windows', 'windows-x64.zip'), ('linux', 'linux-x86_64.AppIma
 
 def version_parts(v):
     """'v0.2.0-beta.3' -> ([0, 2, 0], 3); the second is -1 without a suffix, 0 for a suffix without a number (the
-    game's VersionParts, bf/src/update_files.cpp)."""
+    game's VersionParts, bf/src/update_files.cpp). A hotfix is the fourth number: '0.4.5.10' -> ([0, 4, 5, 10], -1)."""
     v = str(v).strip()
     if v[:1] in ('v', 'V'):
         v = v[1:]
@@ -75,6 +75,7 @@ def version_parts(v):
             elif digits:
                 break
         pre = int(digits) if digits else 0
+    # A hotfix is a fourth number (14 Nov 2026): 0.4.5 < 0.4.5.1 < 0.4.5.10 < 0.4.6, as the game.
     parts = []
     for piece in v.split('.'):
         digits = ''

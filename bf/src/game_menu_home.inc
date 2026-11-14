@@ -143,8 +143,8 @@
     keep = list_.servers();
     const ServerInfo* best = nullptr;
     for (const auto& sv : keep)
-      // As Quick Play chooses (QuickJoin): never an experimental tick rate.
-      if (sv.Tick() == 30 && sv.players < sv.max_players && (!best || sv.players > best->players)) best = &sv;
+      // As Quick Play chooses (QuickJoin, QuickBetter).
+      if (QuickBetter(sv, best)) best = &sv;
     return best;
   }
 

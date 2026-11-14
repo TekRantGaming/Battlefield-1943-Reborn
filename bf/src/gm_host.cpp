@@ -51,6 +51,9 @@ REXCVAR_DEFINE_STRING(bf_gm_backend, "", "BF1943",
 REXCVAR_DEFINE_STRING(bf_gm_listen, "0.0.0.0:18300", "BF1943", "Where players' games reach our GameManager host (UDP)");
 REXCVAR_DEFINE_STRING(bf_gm_name, "Private match", "BF1943", "The match's name in the backend's list");
 REXCVAR_DEFINE_STRING(bf_gm_description, "", "BF1943", "The match's description in the server browser");
+REXCVAR_DEFINE_STRING(bf_gm_password, "", "BF1943",
+                      "The match's password (Custom Match): only a player whose game showed it first is let in; empty: "
+                      "none");
 REXCVAR_DEFINE_BOOL(bf_gm_listed, false, "BF1943", "Listed in the server browser (else joined by Direct connect only)");
 REXCVAR_DEFINE_INT32(bf_gm_max_players, 24, "BF1943", "The most players the backend sends to the match");
 REXCVAR_DEFINE_STRING(bf_gm_status_file, "", "BF1943",
@@ -339,6 +342,19 @@ class Host {
   sockaddr_in listen{}, public_addr{}, game_server{};
   Socket sock = kNoSocket;
   std::map<std::string, Player> players;  // ticket -> player, from the backend's join notices
+  // A match with a password: the names that showed it (lower case, until when), and how many joins that makes.
+  std::map<std::string, Clock::time_point> knocked;
+  int knocks = 0;
+  bool LetIn(const std::string& name) {
+    if (REXCVAR_GET(bf_gm_password).empty()) return true;
+    std::string lower = name;
+    for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+    const auto it = knocked.find(lower);
+    const bool named = it != knocked.end() && Clock::now() < it->second;
+    if (!named && knocks <= 0) return false;
+    if (knocks > 0) --knocks;
+    return true;
+  }
   std::vector<std::unique_ptr<Peer>> peers;
   Clock::time_point pruned_at = Clock::now();
 
@@ -386,6 +402,34 @@ class Host {
     if (data.compare(0, 8, kPing) == 0 || data.compare(0, 8, kProbe) == 0) {
       const Bytes reply = kPong + data.substr(8, 32);
       sendto(sock, reply.data(), int(reply.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
+      return;
+    }
+    // 13 Nov 2026, a match with a password: a player's game shows it before it joins ("BF43PASS", its name, a zero
+    // byte, the password's hash: server_list.h KnockMatch). The right one lets that name in for two minutes, and one
+    // join by any name (the backend may have given the player another).
+    if (data.compare(0, 8, "BF43PASS") == 0) {
+      const std::string password = REXCVAR_GET(bf_gm_password);
+      const size_t zero = data.find('\0', 8);
+      // The name as a player's name can be (the game's are 15 characters): at most 32, printable only, so a packet
+      // cannot fill the host's list or its log (pull request 20's review, 14 Nov 2026).
+      std::string name;
+      if (zero != Bytes::npos)
+        for (char c : data.substr(8, std::min<size_t>(zero - 8, 32)))
+          if (static_cast<unsigned char>(c) >= 0x20 && static_cast<unsigned char>(c) < 0x7f) name += c;
+      const bool right = password.empty() ||
+                         (zero != Bytes::npos && data.substr(zero + 1, 16) == bf1943::MatchPasswordHash(password));
+      if (right && !password.empty()) {
+        std::string lower = name;
+        for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+        // The names let in lately: the expired ones dropped, at most 64 kept (a match has 24 players).
+        const auto now = Clock::now();
+        for (auto it = knocked.begin(); it != knocked.end();) it = it->second <= now ? knocked.erase(it) : std::next(it);
+        if (knocked.size() < 64) knocked[lower] = now + std::chrono::seconds(120);
+        knocks = std::min(knocks + 1, 24);
+      }
+      const Bytes reply = right ? "BF43PSOK" : "BF43PSNO";
+      sendto(sock, reply.data(), int(reply.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
+      Note(fmt::format("password: {} {}", name.empty() ? "a player" : name, right ? "showed the right one" : "showed a wrong one"));
       return;
     }
     Peer* peer = Find(from);
@@ -828,7 +872,9 @@ void Serve() {
         "\"version\": {}, \"region\": {}, \"tick\": {}, \"description\": {}, \"maps\": [{}], \"listed\": {}",
         JsonQuote(host.name), ntohs(host.public_addr.sin_port), JsonQuote(current), REXCVAR_GET(bf_gm_max_players),
         JsonQuote(bf1943::BfVersion()), JsonQuote(REXCVAR_GET(bf_gm_region).substr(0, 16)), bf1943::TickRate(),
-        JsonQuote(REXCVAR_GET(bf_gm_description).substr(0, 200)), maps, st.listed ? "true" : "false");
+        JsonQuote((REXCVAR_GET(bf_gm_password).empty() ? "" : std::string(bf1943::kLockedTag) + " ") +
+                  REXCVAR_GET(bf_gm_description).substr(0, 180)),
+        maps, st.listed ? "true" : "false");
     // A host on one address of its own (tests) says where; one on every address is found by the backend.
     if (host.listen.sin_addr.s_addr != htonl(INADDR_ANY)) {
       char ip[32] = {};
@@ -919,6 +965,8 @@ void Serve() {
                                   : ok == "false" ? "players cannot reach this server"
                                                   : "this server answers on the backend's own machine",
                                   JsonField(line, "address")));
+          } else if (op == "join" && !host.LetIn(JsonField(line, "name"))) {
+            host.Note(fmt::format("backend: {} joins, but showed no password: not let in", JsonField(line, "name")));
           } else if (op == "join") {
             host.Expect(JsonField(line, "ticket"), uint32_t(std::strtoul(JsonField(line, "pid").c_str(), nullptr, 10)),
                         JsonField(line, "name"), std::strtoull(JsonField(line, "xuid").c_str(), nullptr, 10),

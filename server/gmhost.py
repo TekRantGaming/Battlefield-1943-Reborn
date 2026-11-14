@@ -886,7 +886,7 @@ def main():
                     help='a JSON file the server manager writes to send a message to every player on the server: '
                          '{"seq": a new number each time, "kind": "custom", "update" or "restart", "text", "seconds"}')
     ap.add_argument('--region', default='', help="the server's region code, e.g. gb, de, us-east (shown in the browser)")
-    ap.add_argument('--tick', type=int, default=30, help="the server's tick rate in Hz (shown in the browser)")
+    ap.add_argument('--tick', type=int, default=60, help="the server's tick rate in Hz (shown in the browser; 60 by default since 14 Nov 2026)")
     ap.add_argument('--map-file', default='', help="the server's current_map.txt (its map rotation)")
     ap.add_argument('--maps', default='', help='the rotation, map titles separated by commas (for the next map)')
     ap.add_argument('--description', default='', help='shown in the server browser (200 characters)')

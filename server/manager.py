@@ -76,7 +76,9 @@ MAPS = [('wake', 'Wake Island', 'Levels/Wake_island_s'), ('guadalcanal', 'Guadal
         ('iwo', 'Iwo Jima', 'Levels/Iwo_Jima_s'), ('coral', 'Coral Sea', 'Levels/Coral_sea')]
 MAP_TITLE = {k: t for k, t, _ in MAPS}
 MAP_LEVEL = {k: l for k, _, l in MAPS}
-BASE_PORT, MAX_SERVERS, WEB_PORT, TICK_HZ = 18300, 16, 18280, 30  # 30 Hz by default; 60, 75, 100 experimental
+# 60 Hz by default since 14 Nov 2026 (TekRantGaming: "all servers are going to be 60 Hertz", and dedicated servers "30,60
+# and above ... recommend 60hz"); 30 the original game's, 75 and 100 experimental.
+BASE_PORT, MAX_SERVERS, WEB_PORT, TICK_HZ = 18300, 16, 18280, 60
 # The dedicated game's own socket: UDP 1003 on its loopback address; Linux moves ports under 1024 up by 30000
 # (bf/src/socket_fixes.cpp HostBindPort).
 GAME_PORT = 1003 if WINDOWS else 31003
@@ -169,16 +171,24 @@ def package_flags():
         flags = json.loads(read_text(os.path.join(ROOT, 'package.json'), '{}') or '{}')
     except ValueError:
         flags = {}
-    return {'official': bool(flags.get('official')), 'night_ops': bool(flags.get('night_ops'))}
+    # "main_backend": false (TekRantGaming, 14 Nov 2026: official servers on a second machine, a VPS in the US): the
+    # servers are official (the key's code at registering) but the package runs no backend of its own; they register
+    # with the main one (server.json "backend", MAIN_BACKEND by default).
+    return {'official': bool(flags.get('official')), 'night_ops': bool(flags.get('night_ops')),
+            'main_backend': bool(flags.get('official')) and flags.get('main_backend', True) is not False}
 
 
 def version_key(text):
     """A version as numbers for comparing ("0.4.0" < "0.10.1"); a word in it (a test build's) sorts before the
-    release of the same numbers."""
+    release of the same numbers. A hotfix is a fourth number (14 Nov 2026): 0.4.5 < 0.4.5.1 < 0.4.5.10 < 0.4.6;
+    missing numbers count as 0 (0.4.5 is 0.4.5.0)."""
     m = re.match(r'v?(\d+(?:\.\d+)*)(.*)$', str(text).strip())
     if not m:
         return ((-1,), 0)
-    return (tuple(int(x) for x in m.group(1).split('.')), 0 if m.group(2) else 1)
+    numbers = [int(x) for x in m.group(1).split('.')]
+    while len(numbers) < 4:
+        numbers.append(0)
+    return (tuple(numbers), 0 if m.group(2) else 1)
 
 
 def game_exe():
@@ -244,7 +254,7 @@ def clean_config(raw):
     tick = TICK_HZ
     with contextlib.suppress(TypeError, ValueError):
         tick = int(raw.get('tick') or TICK_HZ)
-    out['tick'] = tick if tick in (30, 60, 75, 100) else TICK_HZ  # 60, 75 and 100: experimental
+    out['tick'] = tick if tick in (30, 60, 75, 100) else TICK_HZ  # 75 and 100: experimental
     out['lan_only'] = raw.get('lan_only') is True
     out['public_address'] = clean_text(raw.get('public_address'), 64)
     out['upnp'] = raw.get('upnp') is not False
@@ -530,7 +540,7 @@ class Manager:
     def own_backend(self):
         """'official', 'lan' or '': which backend of our own this package runs."""
         if self.flags['official']:
-            return 'official'
+            return 'official' if self.flags['main_backend'] else ''  # a second official machine: the main backend's
         return 'lan' if self.cfg['lan_only'] else ''
 
     def public_address(self):
@@ -597,6 +607,9 @@ class Manager:
         if s['night'] and self.flags['night_ops']:
             host.append('--night')
         if self.flags['official']:
+            if not os.path.exists(self.official_key()):
+                raise RuntimeError('This is the official server package, and official.key is not in %s. Copy it in '
+                                   'from your own copy (it is never in a download).' % DATA)
             host += ['--official-key-file', self.official_key()]
         env = dict(os.environ)
         env.update({'BF_LOOPBACK_ONLY': '1', 'BF_LOOPBACK_ADDR': address, 'SDL_WINDOW_ACTIVATE_WHEN_SHOWN': '0'})

@@ -29,6 +29,8 @@
 #endif
 #include <windows.h>
 #include <mmsystem.h>
+#else
+#include <SDL3/SDL.h>
 #endif
 
 extern "C" {
@@ -160,15 +162,76 @@ bool EaAudioToWav(const std::vector<uint8_t>& wave_res, const std::vector<uint8_
   return !ec;
 }
 
+#if !defined(_WIN32)
+namespace {
+// Linux (GitHub issue 21, 14 Nov 2026: "users with the appimage having no menu music"): Windows plays these WAVs with
+// its own PlaySound; here SDL's audio (the runtime's, as the voice chat's, comms.cpp) plays them. One sound at a time,
+// as PlaySound: starting one stops the other.
+struct WavPlayer {
+  SDL_AudioStream* stream = nullptr;
+  Uint8* data = nullptr;
+  Uint32 length = 0;
+  size_t at = 0;
+  bool loop = false;
+};
+WavPlayer g_player;
+
+// SDL's audio thread asks for more: the WAV from where it was, from its start again when it loops.
+void SDLCALL FeedWav(void* user, SDL_AudioStream* stream, int additional, int) {
+  auto* p = static_cast<WavPlayer*>(user);
+  while (additional > 0 && p->length > 0) {
+    if (p->at >= p->length) {
+      if (!p->loop) return;
+      p->at = 0;
+    }
+    const int n = int(std::min<size_t>(size_t(additional), p->length - p->at));
+    SDL_PutAudioStreamData(stream, p->data + p->at, n);
+    p->at += size_t(n), additional -= n;
+  }
+}
+void StopWav() {
+  if (g_player.stream) SDL_DestroyAudioStream(g_player.stream);  // its callback has stopped once this returns
+  if (g_player.data) SDL_free(g_player.data);
+  g_player = WavPlayer{};
+}
+bool PlayWav(const fs::path& wav, bool loop) {
+  StopWav();
+  if (!fs::exists(wav)) return false;
+  if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+    REXLOG_WARN("BF music: SDL's audio did not start ({})", SDL_GetError());
+    return false;
+  }
+  SDL_AudioSpec spec{};
+  if (!SDL_LoadWAV(wav.string().c_str(), &spec, &g_player.data, &g_player.length)) {
+    REXLOG_WARN("BF music: {} could not be read ({})", wav.string(), SDL_GetError());
+    return false;
+  }
+  g_player.loop = loop;
+  g_player.stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, FeedWav, &g_player);
+  if (!g_player.stream) {
+    REXLOG_WARN("BF music: no sound device ({})", SDL_GetError());
+    StopWav();
+    return false;
+  }
+  SDL_ResumeAudioStreamDevice(g_player.stream);
+  return true;
+}
+}  // namespace
+#endif
+
 // A sound played once (the startup cards' logo music: game_menu.cpp IntroPage), and every sound stopped.
 void PlaySoundOnce(const fs::path& wav) {
 #if defined(_WIN32)
   if (fs::exists(wav)) PlaySoundW(wav.wstring().c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+#else
+  PlayWav(wav, false);
 #endif
 }
 void StopSounds() {
 #if defined(_WIN32)
   PlaySoundW(nullptr, nullptr, 0);
+#else
+  StopWav();
 #endif
 }
 
@@ -183,6 +246,17 @@ void PlayMenuMusic(const fs::path& wav, bool on) {
     if (playing) REXLOG_INFO("BF music: the menu music plays on loop");
   } else {
     PlaySoundW(nullptr, nullptr, 0);
+    playing = false;
+    REXLOG_INFO("BF music: the menu music stopped");
+  }
+#else
+  static bool playing = false;
+  if (on == playing) return;
+  if (on) {
+    playing = PlayWav(wav, true);
+    if (playing) REXLOG_INFO("BF music: the menu music plays on loop (SDL)");
+  } else {
+    StopWav();
     playing = false;
     REXLOG_INFO("BF music: the menu music stopped");
   }

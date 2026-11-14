@@ -47,7 +47,8 @@
           int n = sizeof(from);
           const int got = recvfrom(s, in, sizeof(in) - 1, 0, reinterpret_cast<sockaddr*>(&from), &n);
           if (got < 9 || std::memcmp(in, "BF43LAN!", 8) != 0) continue;
-          // From this network only (private, link local or loopback addresses).
+          // From this network only (private, link local or loopback addresses): a joined LAN match's backend gets
+          // the sign-in and the player's posts (the review of pull request 16).
           const uint32_t from_ip = ntohl(from.sin_addr.s_addr);
           if (!((from_ip >> 24) == 10 || (from_ip >> 24) == 127 || (from_ip >> 20) == 0xAC1 || (from_ip >> 16) == 0xC0A8 ||
                 (from_ip >> 16) == 0xA9FE))
@@ -61,7 +62,8 @@
           sv.max_players = std::atoi(JsonField(line, "max_players").c_str());
           sv.tick_hz = std::atoi(JsonField(line, "tick").c_str());
           sv.next_map = JsonField(line, "next_map");
-          sv.description = "A LAN match", sv.player_hosted = true;
+          sv.description = JsonField(line, "description"), sv.player_hosted = true;
+          TakeDescriptionTags(sv);  // locked, with a password
           const std::string address = JsonField(line, "address");  // ":port" (the address is the answer's own)
           sv.address = std::string(ip) + address.substr(std::min(address.size(), address.rfind(':') == std::string::npos
                                                                                      ? address.size()
@@ -267,29 +269,45 @@
     }
     {
       static const char* kTabNames[kBrowserTabCount] = {"Official", "Community", "Favourites", "LAN", "Direct connect"};
-      const float y0 = st.P(0, 159).y, h = st(34), size = st(13);
+      // 0.4.2: manila folder tabs; the open one in front, the others behind it and a little lower.
+      const float y0 = st.P(0, 170).y, h = st(34), size = st(13);  // standing on the table's sheet (204)
+      struct TabBox {
+        ImVec2 a, b;
+        float lw, cw;
+        std::string count;
+      };
+      std::vector<TabBox> boxes;
       float x = st.P(48, 0).x;
       for (int t = 0; t < kBrowserTabCount; ++t) {
-        const bool cur = t == browser_tab_;
         const float lw = kit::TextWidth(f.ui_bold, size, kTabNames[t]);
         const std::string count = t < 3 ? std::to_string(counts[t]) : t == kTabLan && lan ? std::to_string(lan_found.size()) : "";
         const float cw = count.empty() ? 0 : kit::TextWidth(f.ui_bold, st(9.25f), count) + st(10);
         const float w = st(22) + lw + (count.empty() ? st(22) : st(10) + cw + st(14));
-        const ImVec2 a(x, y0), b(x + w, y0 + h);
-        if (cur) kit::PaperArt(d, a, b);
-        else d->AddRectFilled(a, b, IM_COL32(13, 15, 11, 204));
-        d->AddText(f.ui_bold, size, ImVec2(a.x + st(22), a.y + (h - size * 1.45f) * 0.5f), cur ? kit::kInk : kit::kKhaki,
-                   kTabNames[t]);
-        if (!count.empty()) {
-          const ImVec2 c0(a.x + st(22) + lw + st(10), a.y + (h - st(15)) * 0.5f), c1(c0.x + cw, c0.y + st(15));
-          d->AddRectFilled(c0, c1, cur ? kit::kStrip : IM_COL32(241, 234, 211, 28));
-          d->AddText(f.ui_bold, st(9.25f), ImVec2(c0.x + st(5), c0.y + (st(15) - st(8) * 1.45f) * 0.5f),
-                     cur ? kit::kStripText : kit::kKhaki, count.c_str());
-        }
-        if (!cur && ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-          browser_tab_ = t, row_ = 0, scroll_ = 0, direct_keys_ = false, browser_typing_ = false;
-        x = b.x + st(4);
+        boxes.push_back({ImVec2(x, y0), ImVec2(x + w, y0 + h), lw, cw, count});
+        x += w - st(3);  // each a little over the next
       }
+      auto draw_tab = [&](int t) {
+        const bool cur = t == browser_tab_;
+        const TabBox& box = boxes[t];
+        const ImVec2 a(box.a.x, box.a.y + (cur ? 0 : st(4))), b2 = box.b;
+        const bool over = !cur && ImGui::IsMouseHoveringRect(a, b2);
+        kit::FolderTab(d, a, b2, st.u, cur, over);
+        const float th = b2.y - a.y;
+        d->AddText(f.ui_bold, size, ImVec2(a.x + st(22), a.y + (th - size * 1.45f) * 0.5f),
+                   cur ? kit::kInk : IM_COL32(34, 36, 27, 215), kTabNames[t]);
+        if (!box.count.empty()) {
+          const ImVec2 c0(a.x + st(22) + box.lw + st(10), a.y + (th - st(15)) * 0.5f), c1(c0.x + box.cw, c0.y + st(15));
+          d->AddRectFilled(c0, c1, cur ? kit::kStrip : IM_COL32(34, 36, 27, 60));
+          d->AddText(f.ui_bold, st(8), ImVec2(c0.x + st(5), c0.y + (st(15) - st(8) * 1.45f) * 0.5f),
+                     cur ? kit::kStripText : kit::kInk, box.count.c_str());
+        }
+        if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+          browser_tab_ = t, row_ = 0, scroll_ = 0, direct_keys_ = false, browser_typing_ = false;
+      };
+      const int front = browser_tab_;
+      for (int t = kBrowserTabCount - 1; t >= 0; --t)
+        if (t != front) draw_tab(t);
+      draw_tab(front);
     }
     // ---- the prompts (drawn first: a click on one is that button's press for the rest of the frame)
     std::vector<Cue> cues;
@@ -418,6 +436,13 @@
         const float cap = st(12);
         d->PushClipRect(ImVec2(ta.x, top), ImVec2(ta.x + colx[1] - st(10), tb.y), true);
         float iw = HostIcon(d, st, ImVec2(ta.x + colx[0], y), rh, sv.player_hosted, ink);
+        if (sv.locked) {  // a padlock: the match has a password, asked for on joining
+          const float lx = ta.x + colx[0] + iw, cy = y + rh * 0.5f, w = st(9);
+          d->AddRectFilled(ImVec2(lx, cy - st(1)), ImVec2(lx + w, cy + st(6)), ink);
+          d->PathArcTo(ImVec2(lx + w * 0.5f, cy - st(1)), st(3), 3.14159265f, 6.2831853f, 12);
+          d->PathStroke(ink, 0, st(1.6f));
+          iw += w + st(7);
+        }
         {  // the server's tick rate, after the icon: your game takes it when it joins
           const std::string hz = std::to_string(sv.Tick()) + " HZ";
           const float hs = st(7.5f), hw = kit::SpacedWidth(f.ui_bold, hs, hz, st(1)) + st(10), hh = st(14);

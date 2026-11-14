@@ -407,6 +407,9 @@ std::vector<int> VersionParts(std::string v, int* pre) {
     *pre = digit == std::string::npos ? 0 : std::atoi(v.c_str() + digit);
     v.erase(dash);
   }
+  // A hotfix is a fourth number (TekRantGaming, 14 Nov 2026: "numbers like we can use 0.4.5.10 then 0.4.5.11 for
+  // hotfixes"): 0.4.5 < 0.4.5.1 < 0.4.5.10 < 0.4.5.11 < 0.4.6, missing parts counting as 0. A suffix after a dash
+  // stays a preview (above).
   std::vector<int> parts;
   for (size_t at = 0; at <= v.size();) {
     const size_t dot = std::min(v.find('.', at), v.size());

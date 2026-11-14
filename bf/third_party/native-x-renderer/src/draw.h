@@ -162,6 +162,10 @@ class DrawPath {
   // jitter, in host pixels.
   // The depth range of the last jittered draw's viewport (z of the near plane, of the far plane): reversed
   // when near is above far, as in games that clear depth to 0.
+  // The viewport depth range of the last draw that offered to the camera vote (the world's: Battlefield 1943's first
+  // person weapon, drawn last with another range, offers none that wins). For the motion blur's reprojection.
+  float vote_z_min() const { return vote_z_[0]; }
+  float vote_z_max() const { return vote_z_[1]; }
   float jittered_z_min() const { return jittered_z_[0]; }
   float jittered_z_max() const { return jittered_z_[1]; }
   void SetJitter(bool on, float x, float y, uint32_t guest_width, uint32_t guest_height) {
@@ -378,6 +382,7 @@ class DrawPath {
   float jitter_[2] = {};
   uint32_t jitter_size_[2] = {};
   float jittered_z_[2] = {0.0f, 1.0f};
+  float vote_z_[2] = {0.0f, 1.0f};
   ResolvedTextures* resolved_ = nullptr;  // watching memory_ (D70)
   std::unique_ptr<GuestMemory> memory_;
   std::unique_ptr<GuestTextures> guest_textures_;  // after memory_: destroyed first
@@ -440,6 +445,7 @@ class DrawPath {
   uint64_t tick_blended_ = 0, tick_blended_frame_ = 0;  // draws blended since the last log, this frame
   // D154: a draw of a model placed from another camera moved onto the frame's (in the mapped constants).
   void MoveAttached(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, uint8_t* mapped);
+  void MoveWeaponLayer(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, uint8_t* mapped);
   uint64_t attached_moved_ = 0, attached_seen_ = 0;  // since the last log
   Blitter* blit_ = nullptr;  // D155
   double tick_why_[8] = {};

@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "seat_info.h"
 #include <rex/cvar.h>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/ppc/context.h>
@@ -42,6 +43,21 @@
 #endif
 
 REXCVAR_DEFINE_DOUBLE(bf_camera_sensitivity, 100.0, "BF1943/Controls", "Right stick sensitivity, 25 to 300 (%)");
+// 0.4.2 ("separate vehicle camera sensitivity for controllers"): the right stick in a land vehicle's or a boat's
+// seats (driver, gunner, passenger). Below 100% the stick itself is scaled (a vehicle's guns and camera turn by how
+// far it is pushed); above, the turn is scaled where the game turns the view itself (look.cpp CameraGain). Planes
+// keep the game's own (their right stick is the throttle and the rudder).
+REXCVAR_DEFINE_DOUBLE(bf_vehicle_camera_sensitivity, 100.0, "BF1943/Controls",
+                      "Right stick sensitivity in vehicles, 25 to 300 (%)");
+namespace bf1943 {
+// The controller's camera gain for the seat the player is in now: 0 on foot (the soldier's own applies), else the
+// vehicle's.
+double VehicleCameraGain() {
+  SeatInfo seat;
+  if (!LocalSeat(seat) || (seat.kind != SeatKind::kDriver && seat.kind != SeatKind::kGunner)) return 0.0;
+  return std::clamp(REXCVAR_GET(bf_vehicle_camera_sensitivity), 25.0, 300.0) / 100.0;
+}
+}  // namespace bf1943
 // Original by default: the game's own feel (TekRantGaming, 5 Nov); Modern is a choice.
 REXCVAR_DEFINE_BOOL(bf_camera_modern, false, "BF1943/Controls", "Camera response: true Modern, false Original");
 REXCVAR_DEFINE_DOUBLE(bf_deadzone, 0.0, "BF1943/Controls", "Stick dead zone, 0 to 40 (%)");
@@ -339,6 +355,14 @@ void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated) {
   // has its own vertical setting there.
   Stick(gamepad + 4, gamepad + 6, 1.0, REXCVAR_GET(bf_invert_ls_x), REXCVAR_GET(bf_invert_ls_y));
   CameraStick(gamepad + 8, gamepad + 10, REXCVAR_GET(bf_invert_rs_x), REXCVAR_GET(bf_invert_rs_y));
+  // In a vehicle's seat, under 100%: the right stick itself scaled.
+  if (const double gain = seated ? VehicleCameraGain() : 0.0; gain > 0.0 && gain < 1.0) {
+    for (uint8_t* axis : {gamepad + 8, gamepad + 10}) {
+      const int16_t v = int16_t(uint16_t(axis[0]) << 8 | axis[1]);
+      const int16_t scaled = int16_t(std::lround(double(v) * gain));
+      axis[0] = uint8_t(uint16_t(scaled) >> 8), axis[1] = uint8_t(uint16_t(scaled));
+    }
+  }
 }
 
 }  // namespace bf1943

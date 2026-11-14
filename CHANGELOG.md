@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.4.6 (14 November 2026): 60 Hz everywhere, Custom Match passwords, Iron Sight and motion blur
+
+An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. Earlier versions update to it by
+themselves, and the servers only let the newest version in.
+
+**New**
+- **Custom Match passwords.** Turn on Password under the match's name and type one: the server browser shows a padlock
+  by the match, and players are asked for the password before they join. By ThatZaliaSGuy ([pull request 20](../../pull/20)).
+- **SMG aiming: Iron Sight or Zoom In.** In Settings, the Thompson and the Type 100 can bring their own sights up to
+  your eye instead of the game's zoom (what you see only: aim and spread are unchanged). By ThatZaliaSGuy ([pull request 20](../../pull/20)).
+- **Motion blur of its own.** Off, Low, Medium or High, a strength slider that looks the same at every frame rate, and
+  blur for moving soldiers and vehicles on or off. The blur when you are hit or near an explosion keeps its own
+  switch. By ThatZaliaSGuy ([pull request 20](../../pull/20)).
+- **Controller: vehicle camera sensitivity.** A right stick sensitivity of its own for land vehicles and boats. By ThatZaliaSGuy ([pull request 20](../../pull/20)).
+- **Animation smoothing** (experimental, off by default): in Graphics. By ThatZaliaSGuy ([pull request 20](../../pull/20)).
+
+**Changed**
+- **The game now plays at 60 Hz.** It starts at 60 ticks a second, the official servers' rate, so it joins them
+  straight away. Quick Play picks a 60 Hz server first, and the experimental server warning is gone for 30 and
+  60 Hz servers (a 75 or 100 Hz server still warns you first).
+- **Custom Match: 60 Hz or 30 Hz.** 60 Hz is the default; 30 Hz is the original game's rate.
+- **Server hosts:** the server manager now defaults to 60 Hz (recommended), and each server can have its own tick
+  rate in its Edit page: 60, 30, or the experimental 75 and 100.
+- **Menus:** folder tabs in the server browser and Controls; the pause menu is now "Menu", shows the match's tick rate
+  and uses a wide screen's width with a larger map; Settings categories light up under the mouse, and HUD scale and
+  Minimap size show the game's own crosshair and compass at the size you pick; Keyboard bindings and Remap gamepad are
+  one page with a controller column. By ThatZaliaSGuy ([pull request 20](../../pull/20)).
+- **LAN matches:** after one, the game starts again on the main servers, and hosting a LAN match while the game runs
+  restarts it to host. By ThatZaliaSGuy ([pull request 20](../../pull/20)).
+- **Hotfix updates.** The game, the servers and the server manager now understand hotfix versions such as 0.4.6.1 and
+  0.4.6.2, so small fixes can be sent out quickly between updates.
+
+**Fixed**
+- **The mouse can click Back** on Stats & Awards, Leaderboards, Achievements, Join friends and the pause menu's
+  Scoreboard ([issue 19](../../issues/19)).
+- **Menu music on Linux:** the AppImage now plays the menu music ([issue 21](../../issues/21)).
+
 ## 0.4.5 (14 November 2026): bug fixes
 
 **Fixed**

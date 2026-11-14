@@ -139,7 +139,7 @@
         </div>
         <div id="official-note" class="hint" style="display:none">This is the official package: this machine runs the main backend itself.</div>
         <label class="field"><span>Region</span><select id="region"></select><small>Shown with its flag in the game's server browser, so players can pick a server near them.</small></label>
-        <label class="field"><span>Tick rate</span><select id="tick-rate"><option value="30">30Hz - Default</option><option value="60">60Hz - Experimental</option><option value="75">75Hz - Experimental</option><option value="100">100Hz - Experimental</option></select><small>How many times a second your servers simulate the game. 30 Hz is the game's own. The others are experimental: physics and timing may break, and players are warned before they join. A player's game (v0.4.1 and newer) takes your servers' rate when it joins; older games play at 30 only.</small></label>
+        <label class="field"><span>Tick rate</span><select id="tick-rate"><option value="60">60Hz - Default, recommended</option><option value="30">30Hz - Original</option><option value="75">75Hz - Experimental</option><option value="100">100Hz - Experimental</option></select><small>How many times a second your servers simulate the game. 60 Hz, the default, is recommended and is the official servers' rate. 30 Hz is the original game's. 75 and 100 Hz are experimental: physics and timing may break, and they ask more of your PC and of every player's connection. A player's game (v0.4.1 and newer) takes your servers' rate when it joins; older games play at 30 only. Each server can also have its own rate (Edit).</small></label>
         <div id="lan-box">
           <label class="field"><span>Public address, for players outside your network (optional)</span><input type="text" id="public-address" placeholder="Found from your router when it allows it" maxlength="64"><small>Players on your network use this machine's network address. Players outside need this address and the ports below opened on your router.</small></label>
         </div>
@@ -251,7 +251,7 @@
     <label class="field"><span>Players</span><select id="e-max"></select></label>
     <label class="field"><span>Port (UDP)</span><input type="number" id="e-port" min="1024" max="65535"></label>
     <label class="field"><span>Pause between rounds</span><select id="e-delay"></select></label>
-    <label class="field"><span>Tick rate</span><input type="text" id="e-tick" disabled></label>
+    <label class="field"><span>Tick rate</span><select id="e-tick"></select></label>
   </div>
   <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Maps, in the order they are played</span><div class="maps" id="e-maps"></div></div>
   <label class="check"><input type="checkbox" id="e-listed"><span>Listed in the server browser<br><small>Off: players join only with Direct connect, by the address you give them.</small></span></label>
@@ -489,7 +489,7 @@ function fillForms() {
   const region = $('region');
   region.replaceChildren(h('option', { value: '', text: 'Not said' }), ...state.regions.map(r => h('option', { value: r.code, text: r.name })));
   region.value = c.region;
-  $('tick-rate').value = String(c.tick || 30);
+  $('tick-rate').value = String(c.tick || 60);
   $('public-address').value = c.public_address; $('upnp').checked = c.upnp;
   $('auto-update').checked = c.auto_update;
   const warn = $('warn-minutes');
@@ -524,7 +524,11 @@ function openEdit(n) {
   $('e-delay').replaceChildren(...[30, 45, 60, 90, 120].map(m => h('option', { value: m, text: m + ' seconds' })));
   if (![30, 45, 60, 90, 120].includes(sv.round_end_delay)) $('e-delay').append(h('option', { value: sv.round_end_delay, text: sv.round_end_delay + ' seconds' }));
   $('e-delay').value = sv.round_end_delay;
-  $('e-tick').value = sv.tick ? sv.tick + ' Hz (this server\'s own)' : state.tick + ' Hz (set for every server under Network)';
+  // The server's own tick rate (14 Nov 2026, TekRantGaming: dedicated servers "30,60 and above ... recommend 60hz"),
+  // or the one set for every server under Network.
+  $('e-tick').replaceChildren(h('option', { value: 0, text: 'As under Network (' + state.tick + ' Hz)' }),
+    ...[[60, 'Recommended'], [30, 'Original'], [75, 'Experimental'], [100, 'Experimental']].map(([hz, word]) => h('option', { value: hz, text: hz + ' Hz - ' + word })));
+  $('e-tick').value = String([30, 60, 75, 100].includes(sv.tick) ? sv.tick : 0);
   $('e-listed').checked = sv.listed; $('e-night').checked = sv.night; $('e-autostart').checked = sv.autostart;
   $('e-night-box').style.display = state.night_ops ? '' : 'none';
   $('e-remove').style.display = fresh || state.config.servers.length < 2 ? 'none' : '';
@@ -554,7 +558,7 @@ async function saveEdit(restart) {
   if (servers.some((x, i) => i !== editing - 1 && x.port === port)) return toast('Another server has port ' + port + '.', true);
   servers[editing - 1] = { name: name, description: $('e-description').value.trim(), maps: maps, round_end_delay: Number($('e-delay').value), listed: $('e-listed').checked,
     night: $('e-night').checked, port: port, max_players: Number($('e-max').value), autostart: $('e-autostart').checked,
-    tick: (state.config.servers[editing - 1] || {}).tick || 0 };
+    tick: Number($('e-tick').value) || 0 };
   const n = editing;
   if (!await saveConfig({ servers: servers }, 'Saved')) return;
   $('edit-modal').classList.remove('on');

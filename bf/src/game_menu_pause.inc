@@ -60,6 +60,7 @@
     float y = a.y + st(18);
     const std::string server = sv ? sv->name : joining_.empty() ? "This server" : joining_;
     std::string eyebrow = "FIELD REPORT \xC2\xB7 " + Upper(server.substr(0, 30));
+    eyebrow += fmt::format(" \xC2\xB7 {}HZ", sv ? sv->Tick() : TickRate());  // 0.4.2: the match's tick rate after its name
     if (sv) eyebrow += sv->official ? " \xC2\xB7 OFFICIAL" : " \xC2\xB7 COMMUNITY";
     kit::Spaced(d, f.typed, st(10), ImVec2(x, y), kit::kInkSection, eyebrow, st(2));
     y += st(22);
@@ -153,25 +154,29 @@
     const int count = int(std::size(kPauseRows));
     // The match behind, darkened; the column at the left darker, with a thin rule at its edge.
     d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(6, 7, 5, 120));
-    const float cx1 = st.P(427, 0).x;
+    // 0.4.2 (a screen wider than 16:9): the column stands at the screen's left edge and the report at its right edge
+    // (lst, rst: the stage moved there), and the map between them takes the room: as large as the height allows.
+    Stage lst = st, rst = st;
+    lst.ox = 0, rst.ox = sz.x - 1280 * st.u;
+    const float cx1 = lst.P(427, 0).x;
     d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(13, 15, 11, 236));
     d->AddRectFilled(ImVec2(cx1, 0), ImVec2(cx1 + std::max(1.0f, st(1)), sz.y), IM_COL32(241, 234, 211, 40));
     // The logo, ghosted; the player's card and the match's line at the right (the chrome without its logo).
-    const float lw = kit::ArtAt(d, "logo", st.P(48, 45), st(56), IM_COL32(255, 255, 255, 70));
+    const float lw = kit::ArtAt(d, "logo", lst.P(48, 45), st(56), IM_COL32(255, 255, 255, 70));
     if (lw > 0)
-      kit::GameText(d, kit::GameFont::kHeadlineMedium, st(22), ImVec2(st.P(48, 0).x + lw + st(10), st.P(0, 52).y), IM_COL32(201, 183, 122, 90),
+      kit::GameText(d, kit::GameFont::kHeadlineMedium, st(22), ImVec2(lst.P(48, 0).x + lw + st(10), lst.P(0, 52).y), IM_COL32(201, 183, 122, 90),
                     "REBORN");
     std::vector<ServerInfo> keep;
     const ServerInfo* sv = JoinedServer(keep);
     const std::string map = joining_map_.empty() ? "Wake Island" : joining_map_;
     const int minutes = match_began_ > 0 ? int((ImGui::GetTime() - match_began_) / 60) : 0;
-    const bool edit = MenuChrome(d, io, st, fmt::format("MATCH RUNNING \xC2\xB7 {} MIN IN THE FIELD", minutes), true, false);
-    kit::Spaced(d, f.typed, st(10.5f), st.P(48, 105), kit::kKhakiDim, fmt::format("IN THE FIELD \xC2\xB7 {} \xC2\xB7 {} MIN", Upper(map), minutes), st(2));
-    kit::GameText(d, kit::GameFont::kHeadline, st(44), st.P(48, 118), kit::kCream, "PAUSED");
-    d->AddRectFilled(st.P(48, 190), st.P(90, 194), kit::kStamp);
+    const bool edit = MenuChrome(d, io, rst, fmt::format("MATCH RUNNING \xC2\xB7 {} MIN IN THE FIELD", minutes), true, false);
+    kit::Spaced(d, f.typed, st(10.5f), lst.P(48, 105), kit::kKhakiDim, fmt::format("IN THE FIELD \xC2\xB7 {} \xC2\xB7 {} MIN", Upper(map), minutes), st(2));
+    kit::GameText(d, kit::GameFont::kHeadline, st(44), lst.P(48, 118), kit::kCream, "MENU");
+    d->AddRectFilled(lst.P(48, 190), lst.P(90, 194), kit::kStamp);
     // The prompts first: a click on one is that button's press for the rest of the frame.
-    Prompts(d, st, st.P(48, 662), {{kit::Button::kA, "SELECT"}, {kit::Button::kB, pause_confirm_ >= 0 ? "BACK" : "RESUME"}}, in, 15);
-    MenuFoot(d, st);
+    Prompts(d, lst, lst.P(48, 662), {{kit::Button::kA, "SELECT"}, {kit::Button::kB, pause_confirm_ >= 0 ? "BACK" : "RESUME"}}, in, 15);
+    MenuFoot(d, rst);
     // ---- the rows
     const bool rows_have_input = pause_confirm_ < 0;
     if (rows_have_input) {
@@ -180,12 +185,12 @@
     }
     pause_row_ = std::clamp(pause_row_, 0, count - 1);
     int clicked = -1;
-    float y = st.P(0, 238).y;
+    float y = lst.P(0, 238).y;
     for (int i = 0; i < count; ++i) {
       const bool compact = i >= kPauseExit;
       if (i == kPauseExit) y += st(12);
       const float h = compact ? st(36) : st(43);
-      const ImVec2 a(st.P(48, 0).x, y), b(st.P(400, 0).x, y + h);
+      const ImVec2 a(lst.P(48, 0).x, y), b(lst.P(400, 0).x, y + h);
       const bool sel = i == pause_row_;
       const bool hover = rows_have_input && ImGui::IsMouseHoveringRect(a, b);
       if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) pause_row_ = i;
@@ -214,8 +219,16 @@
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
     }
     // ---- the field report, and the map beside it
-    FieldReport(d, st, in, sv, map, minutes);
-    PauseMap(d, io, st, in, rows_have_input);
+    FieldReport(d, rst, in, sv, map, minutes);
+    {
+      const float mx0 = lst.P(436, 0).x, mx1 = rst.P(788, 0).x;
+      // 4:3 ("a large 4:3 aspect, not a 1:1 square"): as wide as the room, as tall as the page allows
+      const float mw = std::max(st(260), std::min(mx1 - mx0 - st(16), st(640 - 93 - 78) * 4.0f / 3.0f));
+      ImVec2 box[2];
+      box[0] = ImVec2((mx0 + mx1 - mw - st(16)) * 0.5f, st.P(0, 93).y);
+      box[1] = ImVec2(box[0].x + mw + st(16), box[0].y + mw * 0.75f + st(78));
+      PauseMap(d, io, st, in, rows_have_input, box);
+    }
     // ---- the actions
     if (rows_have_input && in.accept) clicked = pause_row_;
     if (rows_have_input && in.back) {  // Start closed it already (OnDraw)

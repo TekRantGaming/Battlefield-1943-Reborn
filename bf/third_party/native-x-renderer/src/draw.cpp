@@ -2,6 +2,7 @@
 
 #include "draw.h"
 
+#include <set>
 #include <native_x_renderer/native_x_renderer.h>
 
 #include "blit.h"
@@ -665,6 +666,14 @@ void DrawPath::Draw(const StateTracker::Program& vertex_program, const StateTrac
   }
 }
 
+// HideCrosshair (native_x_renderer.h): until when the crosshair sheet's HUD draws are left out.
+namespace {
+std::atomic<int64_t> g_hide_crosshair_until{0};  // steady clock ticks
+}  // namespace
+void RecordHideCrosshair() {
+  g_hide_crosshair_until.store((std::chrono::steady_clock::now() + std::chrono::milliseconds(250)).time_since_epoch().count(),
+                               std::memory_order_relaxed);
+}
 namespace {
 // D168: the game's scoped picture by its shaders (the guest programs' hashes; one game, so one set), Battlefield 1943's
 // with a sniper scope up: its composite of the zoomed view, which blacks out all but the round view (962547C8BB566F8B
@@ -1479,6 +1488,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     }
     // D154: a model placed from another camera than the frame's, moved onto it (SetAttachedCameraMove).
     if (!stage) MoveAttached(reinterpret_cast<const uint32_t*>(&regs[0]), first, constants.float_bitmap, mapped_start);
+    if (!stage) MoveWeaponLayer(reinterpret_cast<const uint32_t*>(&regs[0]), first, constants.float_bitmap, mapped_start);
     // NXR_NEAR_DUMP=<seconds>,<frames> (a diagnosis aid): from that many seconds after the first draw, on that many
     // frames, every draw whose vertex shader's first perspective block is a near projection (near plane under half a
     // metre: first person models and the nearest scenery): its shader, the block's register and every float constant
@@ -1693,6 +1703,16 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   // offset that centers the target's guest area in its host size.
   const RenderScale& target_scale = sized->scale;
   float scale_x = target_scale.x, scale_y = target_scale.y, offset_x = 0.0f, offset_y = 0.0f;
+  // HideCrosshair: a HUD draw (no depth test) whose first texture is the crosshair sheet is left out.
+  if (!state.depth_enable && pixel_shader &&
+      g_hide_crosshair_until.load(std::memory_order_relaxed) > std::chrono::steady_clock::now().time_since_epoch().count()) {
+    if (const uint32_t mask = pixel_shader->GetUsedTextureMaskAfterTranslation()) {
+      uint32_t first = 0;
+      while (!(mask & (1u << first))) ++first;
+      const auto fetch = regs.GetTextureFetch(first);
+      if (uint32_t(fetch.format) == 6 && fetch.size_2d.width + 1 == 256 && fetch.size_2d.height + 1 == 256) return false;
+    }
+  }
   HudPlace place;
   place.align = aspect_align_;
   const bool hud_scaling = hud_scale_ != 1.0f || minimap_scale_ != 1.0f;
@@ -1879,6 +1899,47 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   const float blend_factors[4] = {regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_RED), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_GREEN),
                                   regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_BLUE), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_ALPHA)};
   context->SetBlendFactors(blend_factors);
+  // D169 research (NXR_SKY_PROBE=1, tests): each new shader pair drawn at the output's size, once, with its vertex
+  // constants c12 to c15 (where the terrain's world-view-projection is), to find the sky dome's camera.
+  if (output_sized && pixel_shader && render_target_count) {
+    static const bool probe = std::getenv("NXR_SKY_PROBE") != nullptr;
+    static std::set<uint64_t> seen;
+    static const bool probe2 = probe && std::string(std::getenv("NXR_SKY_PROBE")) == "2";
+    if (probe2 && hud_frame_ % 300 == 0 && hud_frame_ > 600 && !vertex_registers_.empty()) {
+      static uint64_t last_frame = 0;
+      static std::set<uint64_t> in_frame;
+      if (last_frame != hud_frame_) last_frame = hud_frame_, in_frame.clear();
+      if (in_frame.insert(vertex_shader->ucode_data_hash()).second) {
+        uint32_t matrix = 0;
+        bool transposed = false;
+        const bool found = CameraVote::FindMatrix(vertex_constants_.data(), vertex_registers_.data(),
+                                                  uint32_t(vertex_registers_.size()), matrix, transposed);
+        Mat4d mm{};
+        if (found) mm = CameraVote::MatrixAt(vertex_constants_.data(), matrix, transposed);
+        const double* m = found ? mm.data() : nullptr;
+        if (m)
+          REXLOG_INFO("[native_x_renderer] sky probe2: frame {} VS {:016X} depth {}{} matrix c{}{} rows {:.3f} {:.3f} {:.3f} {:.1f} | "
+                      "{:.3f} {:.3f} {:.3f} {:.1f} | {:.3f} {:.3f} {:.3f} {:.1f} | {:.3f} {:.3f} {:.3f} {:.1f}",
+                      hud_frame_, vertex_shader->ucode_data_hash(), state.depth_enable ? "test" : "off",
+                      state.depth_write ? "+write" : "", matrix, transposed ? " (transposed)" : "", m[0], m[1], m[2],
+                      m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+        else
+          REXLOG_INFO("[native_x_renderer] sky probe2: frame {} VS {:016X} depth {}{} no matrix", hud_frame_,
+                      vertex_shader->ucode_data_hash(), state.depth_enable ? "test" : "off", state.depth_write ? "+write" : "");
+      }
+    }
+    if (probe && !probe2 && seen.size() < 400) {
+      const uint64_t key = vertex_shader->ucode_data_hash() * 31 + pixel_shader->ucode_data_hash();
+      if (seen.insert(key).second) {
+        const float* c = reinterpret_cast<const float*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+        REXLOG_INFO("[native_x_renderer] sky probe: VS {:016X} PS {:016X} depth {}{} frame {} c12 {:.3f} {:.3f} {:.3f} {:.3f} | "
+                    "c13 {:.3f} {:.3f} {:.3f} {:.3f} | c14 {:.4f} {:.4f} {:.4f} {:.4f} | c15 {:.3f} {:.3f} {:.3f} {:.3f}",
+                    vertex_shader->ucode_data_hash(), pixel_shader->ucode_data_hash(), state.depth_enable ? "test" : "off",
+                    state.depth_write ? "+write" : "", hud_frame_, c[48], c[49], c[50], c[51], c[52], c[53], c[54], c[55],
+                    c[56], c[57], c[58], c[59], c[60], c[61], c[62], c[63]);
+      }
+    }
+  }
   // The grass prototype (grass.h): the main view's terrain draws.
   if (terrain_ && output_sized && pixel_shader && render_target_count && state.depth_enable) {
     CaptureTerrain(regs, *vertex_shader, viewport, scissor_rect, state);
@@ -1986,6 +2047,12 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         CameraVote::FindMatrix(vertex_constants_.data(), vertex_registers_.data(), count, matrix, transposed)) {
       reprojection = camera_vote_.Offer(CameraVote::MatrixAt(vertex_constants_.data(), matrix, transposed),
                                         CameraVote::MatrixAt(matched, matrix, transposed));
+      // The world's depth range (the motion blur's): of a draw far enough to be the world's (not the weapon's view).
+      GtaoProjection offered;
+      if (GtaoProjection::FromMatrix(CameraVote::MatrixAt(vertex_constants_.data(), matrix, transposed), offered) &&
+          offered.far_plane() > 20.0f) {
+        vote_z_[0] = viewport_info.z_min, vote_z_[1] = viewport_info.z_max;
+      }
     }
     if (object_motion_on_ && previous && vertex_shader->GetTextureBindingsAfterTranslation().empty()) {
       // D120: a draw that moved with the camera only (each object's own world-view-projection changes with the camera:
@@ -2324,6 +2391,114 @@ void RecordAttachedCameraMove(const float* position, const float* move, const fl
   for (int i = 0; i < 16; ++i) m.move[i] = move[i];
   m.at = std::chrono::steady_clock::now();
   g_attached_any.store(true, std::memory_order_relaxed);
+}
+
+// The first person weapon's picture moved in the view (SetWeaponLayerMove): the move, and until when it holds (the
+// game sets it each frame it applies; a quarter second without one ends it).
+namespace {
+std::mutex g_weapon_move_mutex;
+double g_weapon_move[16];
+std::atomic<float> g_weapon_move_py{0.0f};  // 1 / tan(half the weapon view's vertical field of view)
+std::chrono::steady_clock::time_point g_weapon_move_until{};
+std::atomic<bool> g_weapon_move_on{false};
+}  // namespace
+void RecordWeaponLayerMove(const float* move, float fov_degrees) {
+  std::lock_guard lock(g_weapon_move_mutex);
+  if (!move) {
+    g_weapon_move_on.store(false, std::memory_order_relaxed);
+    return;
+  }
+  for (int i = 0; i < 16; ++i) g_weapon_move[i] = move[i];
+  g_weapon_move_py.store(1.0f / std::tan(std::clamp(fov_degrees, 1.0f, 170.0f) * 0.5f * 3.14159265f / 180.0f), std::memory_order_relaxed);
+  g_weapon_move_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+  g_weapon_move_on.store(true, std::memory_order_relaxed);
+}
+void DrawPath::MoveWeaponLayer(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, uint8_t* mapped) {
+  if (!g_weapon_move_on.load(std::memory_order_relaxed)) return;
+  static std::atomic<uint32_t> s_calls{0}, s_few{0}, s_nomatrix{0}, s_noproj{0};
+  {
+    static auto at = std::chrono::steady_clock::now();
+    if (std::chrono::steady_clock::now() - at > std::chrono::seconds(3)) {
+      at = std::chrono::steady_clock::now();
+      REXLOG_INFO("[native_x_renderer] weapon layer: {} draws looked at, {} with under 4 constants, {} without a perspective matrix, {} not a projection",
+                  s_calls.exchange(0), s_few.exchange(0), s_nomatrix.exchange(0), s_noproj.exchange(0));
+    }
+  }
+  ++s_calls;
+  uint8_t numbers[256];
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < 4; ++i) {
+    uint64_t bits = float_bitmap[i];
+    while (bits) {
+      numbers[n++] = uint8_t((i << 6) + uint32_t(std::countr_zero(bits)));
+      bits &= bits - 1;
+    }
+  }
+  if (n < 4) {
+    ++s_few;
+    return;
+  }
+  std::array<uint8_t, 256 * 16> values;
+  for (uint32_t k = 0; k < n; ++k) std::memcpy(values.data() + k * 16, &regs[first + (uint32_t(numbers[k]) << 2)], 16);
+  uint32_t index = 0;
+  bool transposed = false;
+  if (!CameraVote::FindMatrix(values.data(), numbers, n, index, transposed)) {
+    ++s_nomatrix;
+    return;
+  }
+  const Mat4d w = CameraVote::MatrixAt(values.data(), index, transposed);
+  GtaoProjection p;
+  if (!GtaoProjection::FromMatrix(w, p)) {
+    ++s_noproj;
+    return;
+  }
+  const float near_plane = p.near_plane(), far_plane = p.far_plane();
+  // The weapon's view by its field of view (the world's camera reads near 0.1 and far 7.5 here too: its depth is
+  // mapped into a sliver of the range, so the planes do not tell them apart).
+  const float want_py = g_weapon_move_py.load(std::memory_order_relaxed);
+  if (!(std::abs(p.py - want_py) <= 0.01f * want_py) || !(near_plane > 0.0f && near_plane < 1.0f) || std::abs(p.b) < 1e-9f) {
+    static std::mutex said_mutex;
+    static std::set<int> said;  // each field of view once
+    std::lock_guard lock(said_mutex);
+    if (said.size() < 60 && said.insert(int(p.py * 40.0f) * 1000 + int(std::min(near_plane, 99.0f) * 10.0f)).second)
+      REXLOG_INFO("[native_x_renderer] weapon layer: not the weapon's (py {:.3f}, the weapon's {:.3f}; near {:.4f}, far {:.2f}, px {:.3f})",
+                  p.py, want_py, near_plane, far_plane, p.px);
+    return;
+  }
+  Mat4d move;
+  {
+    std::lock_guard lock(g_weapon_move_mutex);
+    if (std::chrono::steady_clock::now() > g_weapon_move_until) {
+      g_weapon_move_on.store(false, std::memory_order_relaxed);
+      return;
+    }
+    for (int i = 0; i < 16; ++i) move[i] = g_weapon_move[i];
+  }
+  // clip = P x view, with clip w = view z: P and its inverse from the projection's terms; the draw's matrix becomes
+  // P x move x P^-1 x itself (the move happens in the view's space, between the view and the projection).
+  const double px = p.px, py = p.py, cx = p.cx, cy = p.cy, a = p.a, b = p.b;
+  const Mat4d proj = {px, 0, cx, 0, 0, py, cy, 0, 0, 0, a, b, 0, 0, 1, 0};
+  const Mat4d inv = {1 / px, 0, 0, -cx / px, 0, 1 / py, 0, -cy / py, 0, 0, 0, 1, 0, 0, 1 / b, -a / b};
+  auto mul = [](const Mat4d& l, const Mat4d& r) {
+    Mat4d o{};
+    for (int i = 0; i < 4; ++i)
+      for (int j = 0; j < 4; ++j)
+        for (int k = 0; k < 4; ++k) o[i * 4 + j] += l[i * 4 + k] * r[k * 4 + j];
+    return o;
+  };
+  const Mat4d moved = mul(mul(mul(proj, move), inv), w);
+  float out[16];
+  for (int r = 0; r < 4; ++r)
+    for (int c = 0; c < 4; ++c) out[transposed ? c * 4 + r : r * 4 + c] = float(moved[r * 4 + c]);
+  std::memcpy(mapped + size_t(index) * 16, out, sizeof(out));
+  {
+    static auto at = std::chrono::steady_clock::now() - std::chrono::seconds(60);
+    if (std::chrono::steady_clock::now() - at > std::chrono::seconds(10)) {
+      at = std::chrono::steady_clock::now();
+      REXLOG_INFO("[native_x_renderer] weapon layer: a draw moved (near {:.3f}, far {:.2f}, px {:.3f}, py {:.3f}, block c{}{})",
+                  near_plane, far_plane, p.px, p.py, numbers[index], transposed ? ", columns" : "");
+    }
+  }
 }
 
 void DrawPath::MoveAttached(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, uint8_t* mapped) {

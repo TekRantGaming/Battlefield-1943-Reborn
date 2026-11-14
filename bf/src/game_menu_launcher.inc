@@ -1825,8 +1825,10 @@
       d->AddRectFilled(ImVec2(pa.x + st(28), ly + st(34)), ImVec2(pb.x - st(28), ly + st(35)), IM_COL32(201, 183, 122, 30));
       ly += st(44);
     }
+    // The BACK strip's click goes into the copy (GitHub issue 19, 14 Nov 2026: it was never read, so only Esc and B
+    // went back from Stats & Awards, Achievements and Leaderboards).
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, in_copy_ = in, 15);
-    if (in.back) BackToMenu(kRowStats, 4);  // back on the menu's Stats & Awards row
+    if (in.back || in_copy_.back) BackToMenu(kRowStats, 4);  // back on the menu's Stats & Awards row
   }
   Input in_copy_;
   // Achievements, ours (in place of the Xbox screen the game opened): the game's own list from its title data, with
@@ -1896,7 +1898,7 @@
                   fmt::format("PAGE {} OF {}", ach_scroll_ + 1, pages), st(2));
     Input cue = in;
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, cue, 15);
-    if (in.back) {  // back where it was opened: the pause, or the main menu's Achievements row
+    if (in.back || cue.back) {  // back where it was opened: the pause, or the main menu's Achievements row (issue 19)
       if (ach_from_pause_) page_ = Page::kPause, pause_row_ = kPauseAchievements, ach_from_pause_ = false;
       else BackToMenu(kRowAchievements, 6);
     }
@@ -2047,7 +2049,7 @@
     }
     Input cue = in;
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, cue, 15);
-    if (in.back) {
+    if (in.back || cue.back) {  // the BACK strip's click too (issue 19)
       if (lb_from_pause_) page_ = Page::kPause, pause_row_ = kPauseLeaderboards, lb_from_pause_ = false;
       else BackToMenu(kRowLeaderboards, 7);  // back on the menu's Leaderboards row
     }
@@ -2133,7 +2135,7 @@
     }
     Input cue = in;
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kA, "JOIN"}, {kit::Button::kB, "BACK"}}, cue, 15);
-    if (in.accept && n) clicked = fr_row_;
+    if ((in.accept || cue.accept) && n) clicked = fr_row_;  // the strips' clicks too (issue 19)
     if (clicked >= 0 && clicked < n && !rows[size_t(clicked)].gid.empty()) {
       for (const auto& sv : list_.servers())
         if (sv.gid == rows[size_t(clicked)].gid) {
@@ -2142,7 +2144,7 @@
           return;
         }
     }
-    if (in.back) BackToMenu(kRowBrowser, 2);  // back to the menu (no Join friends row since 12 Nov 2026)
+    if (in.back || cue.back) BackToMenu(kRowBrowser, 2);  // back to the menu (no Join friends row since 12 Nov 2026)
   }
   // The pause's Scoreboard, ours (in place of the game's, docs/MENUS-PLAN.md): every player on this server by score,
   // as their games send it to our backend (op match_score from MatchScoreTick), asked every 3 s on a worker.
@@ -2209,7 +2211,7 @@
     }
     Input cue = in;
     Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, cue, 15);
-    if (in.back) page_ = Page::kPause, pause_row_ = kPauseScoreboard;
+    if (in.back || cue.back) page_ = Page::kPause, pause_row_ = kPauseScoreboard;  // the strip's click too (issue 19)
   }
   // ---- Create Private Match, ours (in place of the game's console hosted match, docs/MENUS-PLAN.md section 7): our own
   // dedicated server on this PC (private_match.cpp) with our GameManager host inside it (gm_host.cpp), not listed in
@@ -2223,15 +2225,24 @@
   // Later that day: the match's name, whether the server browser shows it, and the router port as a box to tick
   // (UPnP) with the port typed when it is not ticked.
   static constexpr int kPmMap = 0, kPmName = 1, kPmNet = 2, kPmListed = 3, kPmUpnp = 4, kPmPort = 5, kPmHost = 6, kPmTick = 7,
-                       kPmRows = 8;
-  // The match's tick rate: 30 by default (the console's), 60, 75 and 100 experimental.
-  static constexpr int kPmTicks[] = {30, 60, 75, 100};
-  int pm_tick_ = 30;
+                       kPmPass = 8, kPmPassText = 9, kPmRows = 10;
+  // A password for the match (13 Nov 2026): a switch under the name, and its field while it is on.
+  bool pm_pass_on_ = false;
+  std::string pm_pass_;
+  // The match's tick rate: 60 by default again and no longer experimental ("can we finalize that now that it works
+  // well and make it default again?"), 30 the console's. 0.4.2 ("remove 75Hz and 100Hz from the
+  // Client, but keep it for dedicated server"): a match hosted from here is 30 or 60; a dedicated server can still run
+  // 75 or 100 (server/manager.py, --bf_tick_rate), and the game still joins one at its rate.
+  static constexpr int kPmTicks[] = {30, 60};
+  static constexpr int kPmTickCount = int(std::size(kPmTicks));
+  int pm_tick_ = 60;
   bool pm_lan_ = false, pm_listed_ = false;
   std::string pm_name_, pm_port_text_ = "18300";
   // The row takes typing now: the name, or the port when it is the player's to choose.
   bool PmPortTyped() const { return pm_lan_ || !pm_upnp_; }
-  bool PmTyping() const { return !pm_hosting_ && (pm_row_ == kPmName || (pm_row_ == kPmPort && PmPortTyped())); }
+  bool PmTyping() const {
+    return !pm_hosting_ && (pm_row_ == kPmName || pm_row_ == kPmPassText || (pm_row_ == kPmPort && PmPortTyped()));
+  }
   int pm_row_ = 0, pm_map_ = 0;
   bool pm_upnp_ = true;
   bool pm_hosting_ = false;  // our server runs for this game
@@ -2248,8 +2259,10 @@
     pm_listed_ = settings_.Get("private_match_listed", "0") == "1";
     pm_name_ = settings_.Get("private_match_name", "");
     pm_port_text_ = settings_.Get("private_match_port", "18300");
-    pm_tick_ = std::atoi(settings_.Get("private_match_tick", "30").c_str());
-    if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 30;
+    pm_pass_on_ = settings_.Get("private_match_password_on", "0") == "1";
+    pm_pass_ = settings_.Get("private_match_password", "");
+    pm_tick_ = std::atoi(settings_.Get("private_match_tick", "60").c_str());
+    if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 60;
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
@@ -2259,6 +2272,8 @@
     settings_.values["private_match_name"] = pm_name_;
     settings_.values["private_match_port"] = pm_port_text_;
     settings_.values["private_match_tick"] = std::to_string(pm_tick_);
+    settings_.values["private_match_password_on"] = pm_pass_on_ ? "1" : "0";
+    settings_.values["private_match_password"] = pm_pass_;
     settings_.Save();
   }
 
@@ -2272,8 +2287,12 @@
       // The game signs in to the match's own backend, which it can only choose before it starts (once it runs it is
       // signed in to the main one).
       if (!pre_game_ && own_backend_ != "127.0.0.1") {
-        pm_error_ = "A LAN match is started from here before the game itself runs: close the game, start it again and "
-                    "host the LAN match first.";
+        // 0.4.2: no refusal; the game starts again and hosts the match from Home (game_menu.cpp HostLanAtStartTick).
+        REXLOG_INFO("BF private match: a LAN match with the game already running: starting again to host it");
+        SavePrivateMatchChoices();
+        SetEnv("BF_HOST_LAN_AT_START", "1"), SetEnv("BF_RESTARTED", "1");
+        if (update::RestartSelf() && quit_) quit_();
+        else pm_error_ = "The game could not start again. Close it, start it again and host the LAN match first.";
         return;
       }
       UseOwnBackend("127.0.0.1");
@@ -2281,6 +2300,11 @@
     const std::string me = settings_.Get("player_name", "");
     // Through our profanity filter (text_filter.h): a listed match's name is everybody's to read.
     o.name = text_filter::Censor(!pm_name_.empty() ? pm_name_ : me.empty() ? "Custom match" : me + "'s match");
+    if (pm_pass_on_ && pm_pass_.empty()) {
+      pm_error_ = "Type the match's password, or switch Password off.";
+      return;
+    }
+    o.password = pm_pass_on_ ? pm_pass_ : std::string();
     o.tick = pm_tick_;
     // The host's own game runs at the match's rate, set before its timers are made. Once a match was played at
     // another, this run cannot change: the server would start, and the host's join would have to start the game again,
@@ -2359,6 +2383,8 @@
     // 30 against a 60 Hz match: 13 Nov 2026, "I cannot walk at 60Hz anymore, and player partially falls through
     // carrier".)
     sv.tick_hz = pm_tick_;
+    // The host's own game shows its match the password like any other (its join is then let in).
+    if (pm_pass_on_ && !pm_pass_.empty()) KnockMatch(sv.address, me, pm_pass_);
     pm_joining_ = true;
     exp_accepted_address_ = sv.address;  // its rate chosen on the Custom Match page, with that page's warning
     REXLOG_INFO("BF private match: registered as game {}; joining it", sv.gid);
@@ -2412,7 +2438,9 @@
     Prompts(d, st, st.P(48, 662), cues, in, 15);
     // The rows in the panel's order (13 Nov 2026, after the first look at it: the name first with its field under it,
     // UPnP and the port as a smaller pair under Network type, and no UPnP at all for a LAN match).
-    std::vector<int> order = {kPmName, kPmMap, kPmTick, kPmNet};
+    std::vector<int> order = {kPmName, kPmPass};
+    if (pm_pass_on_) order.push_back(kPmPassText);
+    order.insert(order.end(), {kPmMap, kPmTick, kPmNet});
     if (!pm_lan_) order.push_back(kPmListed);
     if (!pm_lan_) order.push_back(kPmUpnp);
     order.insert(order.end(), {kPmPort, kPmHost});
@@ -2429,11 +2457,13 @@
       ImGuiContext& g = *ImGui::GetCurrentContext();
       g.PlatformImeData.WantTextInput = true;
       g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
-      std::string& text = pm_row_ == kPmName ? pm_name_ : pm_port_text_;
-      const size_t most = pm_row_ == kPmName ? 32 : 5;
+      std::string& text = pm_row_ == kPmName ? pm_name_ : pm_row_ == kPmPassText ? pm_pass_ : pm_port_text_;
+      const size_t most = pm_row_ == kPmName ? 32 : pm_row_ == kPmPassText ? 24 : 5;
       for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
         const ImWchar c = io.InputQueueCharacters[i];
-        const bool ok = pm_row_ == kPmName ? (c >= 32 && c < 127 && c != '"' && c != '\\') : (c >= '0' && c <= '9');
+        const bool ok = pm_row_ == kPmName       ? (c >= 32 && c < 127 && c != '"' && c != '\\')
+                        : pm_row_ == kPmPassText ? (c > 32 && c < 127 && c != '"' && c != '\\')
+                                                 : (c >= '0' && c <= '9');
         if (ok && text.size() < most) text += char(c);
       }
       if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !text.empty()) text.pop_back();
@@ -2442,12 +2472,13 @@
     auto change = [&](int row, int step) {
       if (row == kPmMap) pm_map_ = (pm_map_ + 5 + step) % 5;
       if (row == kPmTick) {
-        int at = 1;
-        for (int k = 0; k < 4; ++k)
+        int at = 0;
+        for (int k = 0; k < kPmTickCount; ++k)
           if (kPmTicks[k] == pm_tick_) at = k;
-        pm_tick_ = kPmTicks[(at + 4 + step) % 4];
+        pm_tick_ = kPmTicks[(at + kPmTickCount + step) % kPmTickCount];
       }
       if (row == kPmNet) pm_lan_ = !pm_lan_;
+      if (row == kPmPass) pm_pass_on_ = !pm_pass_on_;
       if (row == kPmListed && !pm_lan_) pm_listed_ = !pm_listed_;
       if (row == kPmUpnp && !pm_lan_) pm_upnp_ = !pm_upnp_;
       SavePrivateMatchChoices();
@@ -2456,13 +2487,15 @@
     if (in.right && pm_row_ != kPmHost) change(pm_row_, 1);
     // ---- the rows, as the main menu's. By the row's own number (kPm...): its title, and its help in the band.
     static constexpr const char* kTitles[] = {"MAP",  "SERVER NAME", "NETWORK TYPE",  "SHOW IN BROWSER",
-                                              "UPNP", "PORT",        "HOST THE MATCH", "TICK RATE"};
+                                              "UPNP", "PORT",        "HOST THE MATCH", "TICK RATE",
+                                              "PASSWORD", "PASSWORD"};
     int clicked = -1;
     float y = rows_y;
     int number = 0;
     const std::string me = settings_.Get("player_name", "");
     for (const int i : order) {
-      const bool sub = i == kPmUpnp || i == kPmPort;  // the smaller pair under Network type
+      // The smaller rows: the pair under Network type, and the password's under the name.
+      const bool sub = i == kPmUpnp || i == kPmPort || i == kPmPass || i == kPmPassText;
       if (i == kPmHost) y += st(12);                  // a rule's worth of air before the action
       const float h = i == kPmName ? st(74) : sub ? st(29) : st(41);
       const float title_h = i == kPmName ? st(38) : h;
@@ -2476,7 +2509,7 @@
         d->AddRectFilled(r0, ImVec2(r0.x + st(5), r1.y), kit::kStamp);
       }
       // No rule between Network type and its pair, nor inside the pair: they read as one block.
-      const bool block = i == kPmNet || (i == kPmUpnp);
+      const bool block = i == kPmNet || i == kPmUpnp || i == kPmName || (i == kPmPass && pm_pass_on_);
       if (!block) d->AddRectFilled(ImVec2(r0.x, r1.y - 1), ImVec2(r1.x, r1.y), IM_COL32(241, 234, 211, 20));
       const ImU32 dim = sel ? kit::kInkSection : kit::kKhakiDim;
       if (!sub)
@@ -2486,8 +2519,9 @@
         // A short tick joins the pair to Network type above it.
         d->AddRectFilled(ImVec2(r0.x + st(58), r0.y - st(2)), ImVec2(r0.x + st(59), r0.y + h * 0.5f), IM_COL32(241, 234, 211, sel ? 0 : 60));
         d->AddRectFilled(ImVec2(r0.x + st(58), r0.y + h * 0.5f - 1), ImVec2(r0.x + st(68), r0.y + h * 0.5f), IM_COL32(241, 234, 211, sel ? 0 : 60));
-        kit::Spaced(d, f.typed, st(8.5f), ImVec2(r0.x + st(76), r0.y + h * 0.5f - st(5.5f)), sel ? kit::kInk : kit::kKhaki,
-                    kTitles[i], st(2));
+        if (i != kPmPassText)
+          kit::Spaced(d, f.typed, st(8.5f), ImVec2(r0.x + st(76), r0.y + h * 0.5f - st(5.5f)), sel ? kit::kInk : kit::kKhaki,
+                      kTitles[i], st(2));
       } else {
         const float cap = st(19);
         kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(r0.x + st(52), r0.y + (title_h - cap) * 0.5f),
@@ -2500,6 +2534,15 @@
         kit::Spaced(d, f.typed, st(7.5f), ImVec2(right - vw, mid - st(5)), off ? IM_COL32(120, 116, 100, 150) : dim, value, st(1.5f));
       };
       const std::string caret = std::fmod(ImGui::GetTime(), 1.0) < 0.5 ? "_" : " ";
+      auto draw_switch = [&](bool on) {  // an on/off switch at the row's right, ON or OFF said beside it
+        const float sw = st(26), sh2 = st(13);
+        const ImVec2 s0(right - sw, mid - sh2 * 0.5f), s1(right, mid + sh2 * 0.5f);
+        d->AddRectFilled(s0, s1, on ? kit::kGreen : IM_COL32(120, 116, 100, 140), sh2 * 0.5f);
+        d->AddCircleFilled(ImVec2(on ? s1.x - sh2 * 0.5f : s0.x + sh2 * 0.5f, mid), sh2 * 0.5f - st(2), kit::kCream, 20);
+        const std::string said = on ? "ON" : "OFF";
+        const float tw = kit::SpacedWidth(f.typed, st(7.5f), said, st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2(s0.x - st(8) - tw, mid - st(5)), dim, said, st(1.5f));
+      };
       if (i == kPmHost) {
         if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(right - st(20), mid), st(20));
       } else if (i == kPmName) {
@@ -2516,22 +2559,26 @@
       } else if (i == kPmMap) {
         value_text(kPmMapNames[pm_map_], true, false);
       } else if (i == kPmTick) {
-        value_text(std::to_string(pm_tick_) + (pm_tick_ == 30 ? "Hz - Default" : "Hz - Experimental"), true, false);
+        value_text(std::to_string(pm_tick_) + (pm_tick_ == 60 ? "Hz - Default" : pm_tick_ == 30 ? "Hz - Original" : "Hz - Experimental"),
+                   true, false);
       } else if (i == kPmNet) {
         value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
       } else if (i == kPmListed) {
         value_text(pm_lan_ ? "ON YOUR NETWORK" : pm_listed_ ? "YES" : "NO", true, pm_lan_);
       } else if (i == kPmUpnp) {
-        // An on/off switch: on, the router is asked to open the port.
-        const float sw = st(26), sh2 = st(13);
-        const ImVec2 s0(right - sw, mid - sh2 * 0.5f), s1(right, mid + sh2 * 0.5f);
-        const ImU32 track = pm_upnp_ ? kit::kGreen : IM_COL32(120, 116, 100, 140);
-        d->AddRectFilled(s0, s1, track, sh2 * 0.5f);
-        const float knob = sh2 * 0.5f - st(2);
-        d->AddCircleFilled(ImVec2(pm_upnp_ ? s1.x - sh2 * 0.5f : s0.x + sh2 * 0.5f, mid), knob, kit::kCream, 20);
-        const std::string said = pm_upnp_ ? "ON" : "OFF";
-        const float tw = kit::SpacedWidth(f.typed, st(7.5f), said, st(1.5f));
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2(s0.x - st(8) - tw, mid - st(5)), dim, said, st(1.5f));
+        draw_switch(pm_upnp_);  // on, the router is asked to open the port
+      } else if (i == kPmPass) {
+        draw_switch(pm_pass_on_);
+      } else if (i == kPmPassText) {
+        // The password's field, the row's width from the tick mark: shown as typed (it is the host's own).
+        const ImVec2 f0(r0.x + st(76), r0.y + st(4)), f1(right, r1.y - st(4));
+        d->AddRectFilled(f0, f1, sel ? IM_COL32(34, 36, 27, 22) : IM_COL32(0, 0, 0, 70));
+        d->AddRect(f0, f1, sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
+        const std::string shown = pm_pass_.empty() && !sel ? std::string("Type a password") : pm_pass_ + (sel ? caret : "");
+        d->PushClipRect(f0, f1, true);
+        d->AddText(f.ui_bold, st(10.5f), ImVec2(f0.x + st(8), f0.y + (f1.y - f0.y - st(10.5f) * 1.45f) * 0.5f),
+                   pm_pass_.empty() && !sel ? IM_COL32(241, 234, 211, 110) : sel ? kit::kInk : kit::kKhaki, shown.c_str());
+        d->PopClipRect();
       } else if (i == kPmPort) {
         // The port's field: typed when it is the player's to choose, greyed (Automatic) while the router is asked.
         const bool off = !PmPortTyped();
@@ -2545,7 +2592,7 @@
       y += h;
       // An experimental tick rate (every one above 30: TekRantGaming, 13 Nov 2026): the warning right under the
       // row, in red.
-      if (i == kPmTick && pm_tick_ != 30) {
+      if (i == kPmTick && pm_tick_ > 60) {  // 60 is the default now: only a rate above it warns
         const std::string warning = "Physics, weapons, vehicles and timers may behave oddly or break, your PC and every "
                                     "player's connection work harder, and players on older versions cannot join. Use "
                                     "30 Hz for a normal match.";
@@ -2576,9 +2623,12 @@
           "you want another. For an Online match, open it on your router for friends outside your home.",
           "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
           "server browser: the pause copies the address for you. The match ends when you leave it.",
-          "How many times a second the match is simulated. 30, the original game's, is the default. 60, 75 and 100 "
-          "are experimental: physics and timing may break, and they ask more of your PC and of every player's "
-          "connection. A player's game takes the match's rate when it joins."};
+          "How many times a second the match is simulated. 60 is the default; 30 is the original game's and asks "
+          "less of your PC and of every player's connection. A player's game takes the match's rate when it joins.",
+          "On, only players who type the match's password can join; the server browser shows a padlock by its name. "
+          "Off, anybody who sees the match can join.",
+          "The password players type to join: up to 24 letters, digits or signs, no spaces. Give it to your friends "
+          "yourself."};
       kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, kTitles[pm_row_], st(2));
       kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
                     kPmMapNames[pm_map_]);
@@ -2693,6 +2743,7 @@
     if (MenuDriverStage() != 2) return false;
     const std::string direct = REXCVAR_GET(bf_dev_auto_direct);
     if (REXCVAR_GET(bf_dev_auto_host)) {
+      LoadPrivateMatchChoices();  // the test profile's: LAN or online, tick rate, password
       pm_upnp_ = false;
       page_ = Page::kPrivateMatch, pm_row_ = kPmHost;
       HostPrivateMatch();

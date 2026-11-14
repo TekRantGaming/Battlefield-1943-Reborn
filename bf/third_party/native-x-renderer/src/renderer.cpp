@@ -22,6 +22,7 @@
 #include "night.h"
 #include "scope.h"
 #include "ssgi.h"
+#include "motion_blur.h"
 #include "upscaler.h"
 #include "fsr.h"
 #include "xess.h"
@@ -76,6 +77,13 @@
 REXCVAR_DEFINE_BOOL(native_x_renderer_replay_recorded_targets, false, "NativeXRenderer",
                     "Draws replayed from recorded command buffers render into the targets the recording device had "
                     "bound (D129) instead of the running device's (D131); for diagnosis");
+REXCVAR_DEFINE_STRING(native_x_renderer_motion_blur, "off", "NativeXRenderer",
+                      "Motion blur of the renderer's own on the main 3D view (motion_blur.h): off, low, medium or high "
+                      "(6, 10 or 16 taps); taken at once");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_motion_blur_strength, 50.0, "NativeXRenderer",
+                      "Motion blur: its strength, 0 to 100 (%): the exposure, of a sixtieth of a second");
+REXCVAR_DEFINE_BOOL(native_x_renderer_motion_blur_objects, true, "NativeXRenderer",
+                    "Motion blur: the objects that move on their own (soldiers, vehicles) blur by their own motion too");
 REXCVAR_DEFINE_BOOL(native_x_renderer, false, "NativeXRenderer",
                     "Draw the game with NativeXRenderer instead of the SDK's Xenos emulation (read at startup). Off "
                     "in the library; a game that is ready turns it on in its own configuration (POTCAWE: D56). "
@@ -115,6 +123,9 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_glow, 1.0, "NativeXRenderer",
                       "explosions; 0 none)");
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_lamps, 1.0, "NativeXRenderer",
                       "Night (D163): how strongly the level's lamps light their surroundings and glow (0 none)");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_sky, 1.0, "NativeXRenderer",
+                      "Night (D169): the night sky's stars, Milky Way and moon, made by the renderer (0 none, 1 the "
+                      "default)");
 REXCVAR_DEFINE_INT32(native_x_renderer_night_debug, 0, "NativeXRenderer",
                      "Night (D163), tests: 1 shows each pixel's place in the world (5 m checks), 2 the lights alone");
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_hitch_ms, 0.0, "NativeXRenderer",
@@ -327,6 +338,17 @@ bool GrassOn() {
 TerrainFrame g_terrain;  // this frame's terrain draws, for it
 bool g_scene_antialiased = false;  // this frame's scene copy antialiased already (Profile::scene_resolve_once, D94)
 Upscaler g_upscaler;   // NVIDIA DLSS (Phase 5, D46)
+// Motion blur (motion_blur.h, 0.4.2): made at its first use; the view's camera vote kept for it (the ambient
+// occlusion or the upscaler takes it first), and the time of its last frame.
+MotionBlur g_motion_blur;
+int g_motion_blur_state = 0;  // 0 not made, 1 made, -1 could not be
+Mat4d g_blur_vote;
+bool g_blur_voted = false;
+std::chrono::steady_clock::time_point g_blur_last{};
+int MotionBlurTaps() {
+  const std::string mode = REXCVAR_GET(native_x_renderer_motion_blur);
+  return mode == "low" ? 6 : mode == "medium" ? 10 : mode == "high" ? 16 : 0;
+}
 // Frame generation (D123): AMD's, and whether it is on; this frame's view inputs, taken at its end and prepared at
 // Present, after the 2D layer's motion (D124) is drawn over them; whether the view ended this frame; the 2D layer's
 // motion and its vertices' positions (a draw's).
@@ -880,7 +902,8 @@ void ExecuteDraw(const Command& c) {
   g_draw->SetJitter(jitter, g_upscaler.jitter_x(), g_upscaler.jitter_y(), g_profile->output_width,
                     g_profile->output_height);
   g_draw->SetSceneStart(g_auto_views && !g_scene_view && !g_auto_view_done, g_auto_upscaled_last_frame);
-  g_draw->SetObjectMotion(g_object_motion);
+  // The objects' own motion: the upscalers', or the motion blur's (taken at once from its settings).
+  g_draw->SetObjectMotion(g_object_motion || (MotionBlurTaps() > 0 && REXCVAR_GET(native_x_renderer_motion_blur_objects)));
   g_draw->SetCameraVote(g_camera_vote);
   g_draw->SetProjectionVote((g_gtao_on || g_ssgi_on) && g_scene_view && !g_gtao_done);
   // The terrain's draws: the grass's, and the night's lights' camera (D163).
@@ -923,6 +946,7 @@ void ExecuteDraw(const Command& c) {
       night.glow = float(std::clamp(REXCVAR_GET(native_x_renderer_night_glow), 0.0, 8.0));
       night.lamps = float(std::clamp(REXCVAR_GET(native_x_renderer_night_lamps), 0.0, 8.0));
       night.debug = REXCVAR_GET(native_x_renderer_night_debug);
+      night.sky = float(std::clamp(REXCVAR_GET(native_x_renderer_night_sky), 0.0, 4.0));
       NightFrame f;
       f.depth = depth ? g_night_depth.RawPtr() : nullptr;
       f.depth_uv[0] = to_u * g_night_depth_uv[0], f.depth_uv[1] = to_v * g_night_depth_uv[1];
@@ -1456,6 +1480,7 @@ void ApplyOpaqueEffects() {
   Mat4d vote;
   uint32_t votes = 0, offers = 0;
   const bool voted = !g_temporal && g_camera_vote && g_draw->TakeCameraVote(vote, votes, offers);
+  if (voted) g_blur_vote = vote, g_blur_voted = true;  // the motion blur's too, at the view's end
   bool applied = false;
   if (ao_on) {
     Gtao::Inputs in;
@@ -1983,6 +2008,7 @@ void UpscaleScene() {
     if (g_camera_vote && g_draw) {
       uint32_t votes = 0, offers = 0;
       voted = g_draw->TakeCameraVote(vote, votes, offers);
+      if (voted) g_blur_vote = vote, g_blur_voted = true;
       ++g_vote_stats.applications;
       if (voted) {
         ++g_vote_stats.voted;
@@ -2024,6 +2050,51 @@ void UpscaleScene() {
     }
     if (g_draw) g_draw->TargetsChanged();
   }
+  // Motion blur (motion_blur.h): on the view's colour as the game's post-processing will read it (the upscaled image
+  // with an upscaler), from the view's depth, the camera vote and the objects' own motion.
+  if (const int taps = MotionBlurTaps(); taps > 0 && g_scene_color && g_scene_depth && g_scene_depth->srv && g_draw &&
+                                         g_motion_blur_state >= 0 && !(g_queries_on && g_queries.open())) {
+    if (g_motion_blur_state == 0) g_motion_blur_state = g_motion_blur.Load(g_device->device()) ? 1 : -1;
+    // Without an upscaler or ambient occlusion nobody took the camera vote yet.
+    if (!g_blur_voted && g_camera_vote && !g_temporal) {
+      uint32_t votes = 0, offers = 0;
+      g_blur_voted = g_draw->TakeCameraVote(g_blur_vote, votes, offers);
+    }
+    HostTarget* blurred = upscaled && g_scene_color->reduced ? g_targets.Get(g_scene_color_surface) : g_scene_color;
+    const auto now = std::chrono::steady_clock::now();
+    const float seconds = g_blur_last.time_since_epoch().count() ? std::chrono::duration<float>(now - g_blur_last).count() : 1.0f / 60.0f;
+    g_blur_last = now;
+    if (g_motion_blur_state == 1 && blurred && blurred->texture && seconds < 0.25f) {
+      MotionBlur::Inputs in;
+      in.color = blurred->texture;
+      in.depth = g_scene_depth->texture;
+      in.depth_srv = g_scene_depth->srv;
+      in.width = blurred->scale.HostWidth(g_profile->output_width);
+      in.height = blurred->scale.HostHeight(g_profile->output_height);
+      in.depth_width = g_scene_depth->scale.HostWidth(g_profile->output_width);
+      in.depth_height = g_scene_depth->scale.HostHeight(g_profile->output_height);
+      in.reprojection = g_blur_voted ? &g_blur_vote : nullptr;
+      in.z_min = g_draw->vote_z_min();
+      in.z_max = g_draw->vote_z_max();
+      {
+        static auto at = std::chrono::steady_clock::now() - std::chrono::seconds(60);
+        if (now - at > std::chrono::seconds(10)) {
+          at = now;
+          REXLOG_INFO("[native_x_renderer] motion blur: camera vote {}, the world's depth range {:.5f} to {:.5f} (the last draw's {:.5f} to {:.5f}), frame {:.1f} ms",
+                      g_blur_voted ? "taken" : "none", in.z_min, in.z_max, g_draw->jittered_z_min(), g_draw->jittered_z_max(), seconds * 1000.0f);
+        }
+      }
+      if (REXCVAR_GET(native_x_renderer_motion_blur_objects))
+        in.object_motion = [](ITextureView* motion) {
+          if (g_draw) g_draw->DrawObjectMotion(motion, g_scene_depth->view);
+        };
+      in.strength = float(std::clamp(REXCVAR_GET(native_x_renderer_motion_blur_strength), 0.0, 100.0) / 100.0);
+      in.samples = taps;
+      in.frame_seconds = seconds;
+      if (g_motion_blur.Apply(g_device->context(), in)) g_draw->TargetsChanged();
+    }
+  }
+  g_blur_voted = false;
   PromoteReduced(upscaled ? g_scene_color : nullptr);
   // D162: the view's depth for the night at the scene's copy, which follows in this frame.
   // D168: the picture in picture scope's too, to leave the first person weapon out of the view it remembers.

@@ -86,8 +86,70 @@ struct ServerInfo {
   // begins with kPlayerHostTag (the backend passes descriptions through as they are), taken off here. The browser
   // draws a person before its name, a server rack before the others.
   bool player_hosted = false;
+  // A match with a password (Custom Match): its description says "[locked]" the same way. Its host only lets in a
+  // player whose game showed the password first (KnockMatch, gm_host.cpp).
+  bool locked = false;
 };
 inline constexpr const char* kPlayerHostTag = "[player host]";
+inline constexpr const char* kLockedTag = "[locked]";
+// The tags at a description's start taken off it, into the server's fields.
+inline void TakeDescriptionTags(ServerInfo& s) {
+  for (bool again = true; again;) {
+    again = false;
+    while (!s.description.empty() && s.description.front() == ' ') s.description.erase(s.description.begin());
+    for (const auto& [tag, field] : {std::pair<const char*, bool ServerInfo::*>{kPlayerHostTag, &ServerInfo::player_hosted},
+                                     std::pair<const char*, bool ServerInfo::*>{kLockedTag, &ServerInfo::locked}}) {
+      if (s.description.rfind(tag, 0) != 0) continue;
+      s.*field = true;
+      s.description.erase(0, std::strlen(tag));
+      again = true;
+    }
+  }
+}
+// A match's password as it goes over the network: not the words themselves (a 64 bit FNV-1a of them, in hex). It
+// keeps a password out of plain sight on the wire; it is no more than that.
+inline std::string MatchPasswordHash(const std::string& password) {
+  uint64_t h = 1469598103934665603ull;
+  for (const char c : "bf1943-match:" + password) h = (h ^ uint8_t(c)) * 1099511628211ull;
+  char text[20];
+  std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(h));
+  return text;
+}
+// The password shown to a match's host before joining: "BF43PASS", the player's name, a zero byte and the hash, to
+// the match's own UDP port; "BF43PSOK" back lets that player in for the next two minutes. 1 let in, 0 refused, -1
+// no answer (three tries, 0.5 s each).
+inline int KnockMatch(const std::string& address, const std::string& name, const std::string& password) {
+  const size_t colon = address.rfind(':');
+  if (colon == std::string::npos) return -1;
+  sockaddr_in to{};
+  to.sin_family = AF_INET, to.sin_port = htons(uint16_t(std::atoi(address.c_str() + colon + 1)));
+  if (inet_pton(AF_INET, address.substr(0, colon).c_str(), &to.sin_addr) != 1) return -1;
+  const auto s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+#if defined(_WIN32)
+  if (s == INVALID_SOCKET) return -1;
+  DWORD wait_ms = 500;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&wait_ms), sizeof(wait_ms));
+#else
+  if (s < 0) return -1;
+  timeval wait{0, 500000};
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof(wait));
+#endif
+  const std::string packet = "BF43PASS" + name + std::string(1, '\0') + MatchPasswordHash(password);
+  int answer = -1;
+  for (int attempt = 0; attempt < 3 && answer < 0; ++attempt) {
+    sendto(s, packet.data(), int(packet.size()), 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+    char reply[16] = {};
+    const int n = int(recv(s, reply, sizeof(reply), 0));
+    if (n >= 8 && std::memcmp(reply, "BF43PSOK", 8) == 0) answer = 1;
+    else if (n >= 8 && std::memcmp(reply, "BF43PSNO", 8) == 0) answer = 0;
+  }
+#if defined(_WIN32)
+  closesocket(s);
+#else
+  close(s);
+#endif
+  return answer;
+}
 
 // The end of the JSON object or array that starts at `at` (strings and nesting respected), or npos.
 inline size_t JsonEnd(const std::string& s, size_t at) {
@@ -353,11 +415,7 @@ class ServerList {
     s.players = std::atoi(JsonField(obj, "players").c_str());
     s.max_players = std::atoi(JsonField(obj, "max_players").c_str());
     s.description = JsonField(obj, "description");
-    if (s.description.rfind(kPlayerHostTag, 0) == 0) {
-      s.player_hosted = true;
-      s.description.erase(0, std::strlen(kPlayerHostTag));
-      while (!s.description.empty() && s.description.front() == ' ') s.description.erase(s.description.begin());
-    }
+    TakeDescriptionTags(s);
     s.next_map = JsonField(obj, "next_map");
     s.official = JsonField(obj, "official") == "true";
     s.night = kNightOps && JsonField(obj, "night") == "true";  // night_ops.h: none without Night Ops

@@ -136,6 +136,10 @@ float ArtAt(ImDrawList* d, const char* name, ImVec2 at, float h, ImU32 tint = IM
 ImVec2 ArtSize(const char* name);
 // The card paper (the game's own, from its logo cards) over a..b: the plain paper colour until it is there.
 void PaperArt(ImDrawList* d, ImVec2 a, ImVec2 b);
+// A manila folder's tab (0.4.2): slanted sides, rounded shoulders, standing on the line b.y. `front` is the open
+// folder's (the paper's colour, no line under it); the others are a darker manila behind it, lighter under the
+// pointer. The label's ink goes on either.
+void FolderTab(ImDrawList* d, ImVec2 a, ImVec2 b, float u, bool front, bool over);
 // The game's fonts: headline_large (Artbrush, headings), headline_medium (rows), normal_large and normal_medium
 // (Eurostile Bold Condensed: buttons, labels), list_header (Century Schoolbook Bold Italic: table headers), list_item,
 // headnumbers. Text with its capitals `cap` pixels high from `at` (the capitals' top left), `track` pixels added after

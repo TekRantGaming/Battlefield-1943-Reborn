@@ -44,6 +44,7 @@ struct NightSettings {
   float glow = 1.0f;        // D163: the effects' own light (muzzle flashes, tracers, fire, explosions); 0 none
   float lamps = 1.0f;       // D163: the lamps' light and glow; 0 none
   int debug = 0;            // D163, tests: 1 each pixel's place in the world, 2 the lights alone
+  float sky = 1.0f;         // D169: the night sky's stars, Milky Way and moon; 0 none
 };
 
 // D163: a light chosen for this frame (Night::Apply takes kMaxLights): a point light, or a spot when `direction` is set.
@@ -125,6 +126,7 @@ class Night {
       k.counts[0] = float(lights), k.counts[1] = float(sprites);
       k.counts[2] = float(desc.Width) / float(std::max(1u, desc.Height));  // the target's aspect, for round glows
       k.counts[3] = float(s.debug);
+      k.sky[0] = s.sky;
       // The effects' lights: found in the effects' layer's mip about 48 texels wide.
       const bool effect_lights = glow && f.camera;
       if (effect_lights && device && LightsPass(device)) {
@@ -267,6 +269,7 @@ layout(set = 0, binding = 0) uniform NightConstants {
   vec4 eye;     // xyz: the camera; w: the lamps' strength
   vec4 counts;  // x: lights, y: glows, z: the target's aspect, w: tests (1 the world's place, 2 the lights alone)
   vec4 glow2;   // x: the coarse mip the effects' lights are found in, y: their strength, z: 1 with them
+  vec4 skyp;    // D169: x: the night sky's strength (stars, Milky Way, moon); 0 none
   vec4 lights[72];   // 24 x (position, range), (colour, cos outer), (direction, cos inner)
   vec4 sprites[48];  // 24 x (uv, radius), (colour, the bulb's depth)
 };
@@ -357,6 +360,90 @@ void main() {
 layout(location = 0) in vec2 v_texcoord;
 layout(location = 0) out vec4 out_color;
 
+// D169: the night sky, made here (nothing drawn or licensed: TekRantGaming, 14 Nov 2026, "a nighttime skybox ... open
+// for us to distribute ... the stars look good. Not over the top"). `d` is a direction in the world (y up), `px` the
+// angle one pixel covers there. Stars on a grid of each cube face, one at most a cell, kept within its cell's middle
+// so a pixel looks in its own cell only; a faint Milky Way band; a moon with a soft halo.
+float Hash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+vec3 Hash33(vec3 p) {
+  p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+  p += dot(p, p.yxz + 33.33);
+  return fract((p.xxy + p.yxx) * p.zyx);
+}
+float Noise3(vec3 p) {
+  vec3 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(Hash13(i), Hash13(i + vec3(1, 0, 0)), f.x), mix(Hash13(i + vec3(0, 1, 0)), Hash13(i + vec3(1, 1, 0)), f.x), f.y),
+             mix(mix(Hash13(i + vec3(0, 0, 1)), Hash13(i + vec3(1, 0, 1)), f.x), mix(Hash13(i + vec3(0, 1, 1)), Hash13(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+float Fbm(vec3 p) {
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 4; ++i) {
+    v += a * Noise3(p);
+    p = p * 2.03 + 17.1;
+    a *= 0.5;
+  }
+  return v;
+}
+// One layer of stars: `cells` across a cube face, `chance` of a star in a cell, `bright` the brightest.
+vec3 StarLayer(vec3 d, float px, float cells, float chance, float bright, float seed) {
+  vec3 a = abs(d);
+  float face, m;
+  vec2 uv;
+  if (a.x >= a.y && a.x >= a.z) {
+    face = d.x > 0.0 ? 0.0 : 1.0; m = a.x; uv = d.yz;
+  } else if (a.y >= a.z) {
+    face = d.y > 0.0 ? 2.0 : 3.0; m = a.y; uv = d.xz;
+  } else {
+    face = d.z > 0.0 ? 4.0 : 5.0; m = a.z; uv = d.xy;
+  }
+  uv = uv / m * cells;
+  vec2 cell = floor(uv);
+  vec3 h = Hash33(vec3(cell, face * 7.0 + seed));
+  if (h.z > chance) return vec3(0.0);
+  vec2 at = cell + 0.25 + 0.5 * h.xy;  // the star, in the cell's middle half
+  float dist = length(uv - at) / cells * m;  // about the angle, on that face
+  float b = Hash13(vec3(cell * 1.7, face + seed * 3.1));
+  float strength = bright * pow(b, 6.0) + bright * 0.06;  // a few bright, many faint
+  float sigma = max(px * 0.55, 0.00035);
+  float shape = exp(-dist * dist / (2.0 * sigma * sigma));
+  // A star smaller than a pixel keeps its light: spread over the pixel, not lost.
+  strength *= min(1.0, 0.00045 / sigma) + 0.15;
+  float t = Hash13(vec3(cell * 3.3, face + seed * 5.7));
+  vec3 tint = t < 0.15 ? vec3(1.0, 0.80, 0.62) : t < 0.35 ? vec3(1.0, 0.93, 0.84) : t < 0.8 ? vec3(0.95, 0.97, 1.0) : vec3(0.78, 0.86, 1.0);
+  return tint * strength * shape;
+}
+vec3 NightSky(vec3 d, float px) {
+  vec3 c = vec3(0.0);
+  // The Milky Way: a soft band across the sky, patchy, with darker lanes; very faint.
+  const vec3 band_n = normalize(vec3(0.35, 0.42, 0.84));
+  float across = dot(d, band_n);
+  float band = exp(-across * across / (2.0 * 0.13 * 0.13));
+  float patches = Fbm(d * 5.0 + 3.0);
+  float lanes = smoothstep(0.42, 0.62, Fbm(d * 11.0 + 41.0)) * exp(-across * across / (2.0 * 0.05 * 0.05));
+  c += vec3(0.85, 0.88, 1.0) * band * (0.35 + 0.9 * patches) * (1.0 - 0.75 * lanes) * 0.0045;
+  // Stars: a sparse bright layer and denser faint ones, more of the faint ones in the band.
+  c += StarLayer(d, px, 34.0, 0.33, 0.85, 1.0);
+  c += StarLayer(d, px, 90.0, 0.22 + 0.25 * band, 0.16, 2.0);
+  c += StarLayer(d, px, 170.0, 0.10 + 0.35 * band, 0.06, 3.0);
+  // The moon: a small disc, not full white, a little texture, its edge darker, a soft halo round it.
+  const vec3 moon_d = normalize(vec3(-0.55, 0.38, 0.74));
+  const float moon_r = 0.0105;
+  float ang = acos(clamp(dot(d, moon_d), -1.0, 1.0));
+  vec3 rel = d - moon_d * dot(d, moon_d);
+  float rim = clamp(ang / moon_r, 0.0, 1.0);
+  float disc = 1.0 - smoothstep(moon_r - px * 1.2, moon_r + px * 0.6, ang);
+  float maria = Fbm(rel / moon_r * 1.6 + 7.0);
+  float surface = (0.78 + 0.22 * smoothstep(0.35, 0.65, maria)) * (1.0 - 0.28 * rim * rim);
+  c = mix(c, vec3(0.62, 0.66, 0.72) * surface, disc);
+  c += vec3(0.30, 0.38, 0.55) * (exp(-ang / 0.035) * 0.03 + exp(-ang / 0.18) * 0.008);
+  return c;
+}
+
 void main() {
   vec4 src = textureLod(colorTex, v_texcoord, 0.0);
   vec3 lin = pow(clamp(src.rgb, 0.0, 1.0), vec3(2.2));
@@ -376,6 +463,29 @@ void main() {
   }
   vec3 sky = (vec3(0.004, 0.009, 0.024) + luma * 0.03 * vec3(0.6, 0.75, 1.0)) * night.x;
   vec3 result = mix(moon, sky, haze);
+  // D169: the night sky where the view shows the sky (nothing within 5 km), where the day sky was clear blue (its
+  // clouds, grey or white, keep covering it), fading toward the horizon. The direction is taken for every pixel (the
+  // pixel's angle needs its neighbours').
+  if (skyp.x > 0.0 && inv_t.w > 0.5) {
+    vec2 ndc = v_texcoord * to_ndc.xy + to_ndc.zw;
+    vec3 ray = vec3(ndc, 1.0);
+    vec3 dir = normalize(vec3(dot(inv0.xyz, ray), dot(inv1.xyz, ray), dot(inv2.xyz, ray)));
+    float px = max(length(fwidth(dir)), 1e-5);
+    float open = 1.0 - smoothstep(2e-6, 2e-5, depth);
+    if (open > 0.0) {
+      float hi = max(lin.r, max(lin.g, lin.b)), lo = min(lin.r, min(lin.g, lin.b));
+      float clear = smoothstep(0.30, 0.60, hi > 1e-4 ? (hi - lo) / hi : 0.0);
+      float above = smoothstep(-0.02, 0.18, dir.y);
+      result += NightSky(dir, px) * open * mix(0.12, 1.0, clear) * above * skyp.x;
+    }
+    // Tests (night debug 3): red the sky test, green the clear sky test, blue the direction's height.
+    if (counts.w > 2.5 && counts.w < 3.5) {
+      float hi = max(lin.r, max(lin.g, lin.b)), lo = min(lin.r, min(lin.g, lin.b));
+      result = vec3(open, smoothstep(0.30, 0.60, hi > 1e-4 ? (hi - lo) / hi : 0.0), dir.y * 0.5 + 0.5) * 0.5;
+    }
+  } else if (counts.w > 2.5 && counts.w < 3.5) {
+    result = vec3(0.0, 0.0, 0.0);  // no camera: black
+  }
   // D163: the lights (the lamps, and what the effects light), on the surface the pixel shows (its place in the world
   // from its depth, its facing from its neighbours'), lighting its colour without most of the day's sun (the bright
   // and the shaded brought closer).
@@ -453,7 +563,7 @@ void main() {
   struct Constants {
     float night[4], flags[4], glow[4], to_ndc[4];
     float inverse[3][4];
-    float inverse_t[4], eye[4], counts[4], glow2[4];
+    float inverse_t[4], eye[4], counts[4], glow2[4], sky[4];
     float lights[kMaxLights * 3][4];
     float sprites[kMaxSprites * 2][4];
   };
