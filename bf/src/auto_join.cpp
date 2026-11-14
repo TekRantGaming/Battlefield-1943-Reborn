@@ -81,7 +81,6 @@ bool GameMenuPassing();
 void NoteMatchDevice(bool keyboard);  // game_menu.cpp: the device used in the match, for the HUD's prompts
 void NoteGameMenuSignal();  // game_menu.cpp: BF's own menu screen is up
 void ShowLostNotice();
-extern std::atomic<bool> g_smg_tune_hold;  // fov.cpp: the pause menu's sight sliders are open
 bool LauncherLetsGameSignIn();  // game_menu.cpp: BF signs in behind the launcher
 
 namespace {
@@ -1274,8 +1273,6 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     }
   }
   if (hidden) std::memset(p + 4, 0, 12);
-  // The pause menu's SMG sight sliders (fov.cpp): the aim held while they are open, so the gun stays at the eye.
-  if (hidden && bf1943::g_smg_tune_hold.load(std::memory_order_relaxed)) p[6] = 255;
   static const bool input_off = [] {
     const char* v = std::getenv("BF_AB_OFF");
     return v && std::string(v).find("input") != std::string::npos;

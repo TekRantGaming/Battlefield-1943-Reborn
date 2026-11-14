@@ -446,11 +446,6 @@ void PressStartForPlayer();  // auto_join.cpp
 void MarkExitChosen();
 void LeaveMatch();  // auto_join.cpp: Exit Game, the game's own command (doExitLevel)
 void SuicideNow();  // the game's own suicide command
-std::string SmgSightTuneText();                                 // fov.cpp: the SMG's sight tuning, for the screen
-std::string SmgSightTuneGun(double v[6]);                       // fov.cpp: the SMG held now and its values
-void SmgSightTuneSet(const double v[6], bool reset);            // fov.cpp: its values set
-extern std::atomic<bool> g_smg_tune_hold;                       // fov.cpp: the aim held for the pause menu's sliders
-bool SmgSightTakeSave(std::string& name, std::string& value);  // fov.cpp: a tuned value to save
 void GameCommand(const std::string& name, const std::string& args);  // auto_join.cpp: a command as the game's menu sends it
 std::map<std::string, std::pair<int, double>> TakeScoreEvents();  // auto_join.cpp: the HUD's score events
 bool LevelLoaded();
@@ -894,23 +889,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // A frame limit outside the game found since (the driver's read, or measured): the rate offered at most.
     if (SystemFrameCap() != applied_cap_) ApplyFrameRate();
     if (!open_) MenuSteps();  // tests: their bfb and bfa steps act while BF's own screen has the pad
-    if (!open_ || page_ != Page::kPause) g_smg_tune_hold.store(false, std::memory_order_relaxed);  // the sliders are the pause page's
-    // The SMG's sight tuning (fov.cpp, bf_smg_sight_tune): its values on the screen while aiming, and saved.
-    if (const std::string tune = SmgSightTuneText(); !tune.empty()) {
-      const kit::Fonts& tf = kit::GetFonts();
-      ImDrawList* fd = ImGui::GetForegroundDrawList();
-      const ImVec2 ds = ImGui::GetIO().DisplaySize;
-      const float size = std::max(14.0f, ds.y / 60.0f);
-      const ImVec2 box = tf.ui_bold->CalcTextSizeA(size, FLT_MAX, 0.0f, tune.c_str());
-      const ImVec2 at((ds.x - box.x) * 0.5f, ds.y * 0.14f);
-      fd->AddRectFilled(ImVec2(at.x - 12, at.y - 8), ImVec2(at.x + box.x + 12, at.y + box.y + 8), IM_COL32(10, 12, 8, 190));
-      fd->AddText(tf.ui_bold, size, at, IM_COL32(241, 234, 211, 255), tune.c_str());
-    }
-    {
-      std::string name, value;
-      if (SmgSightTakeSave(name, value)) settings_.values["cvar." + name] = value, smg_tune_dirty_at_ = ImGui::GetTime();
-      if (smg_tune_dirty_at_ > 0 && ImGui::GetTime() - smg_tune_dirty_at_ > 1.0) smg_tune_dirty_at_ = -1, settings_.Save();
-    }
     if (!open_) ReopenPause();
     // A new match: BF's pause list starts on its first row again.
     if (const int stage = MenuDriverStage(); stage != last_stage_) {
@@ -4021,15 +3999,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "With SMG aiming at Iron Sight: whether the crosshair shows while you aim down the "
                           "sights. Hidden is how the rifles and pistols aim. Applies at once.",
                           "bf_smg_sights_no_crosshair", "Shown", "Hidden"));
-#if defined(BF_INTERNAL_TOOLS)  // an internal build's only
-    rows.push_back(Toggle("HUD", "Sight alignment",
-                          "For lining the SMG's sights up yourself. On, with SMG aiming at Iron Sight: aim with an "
-                          "SMG in a match and nudge the gun with the keyboard. Arrow keys move it left, right, up "
-                          "and down; Page Up and Page Down forward and back; number pad 4 and 6 turn it, 8 and 2 "
-                          "tilt it, 7 and 9 roll it, 0 resets. Shift makes steps larger, Ctrl smaller. The values "
-                          "show on screen and are saved for that gun. Switch it off when you are done.",
-                          "bf_smg_sight_tune"));
-#endif
     rows.push_back(Slider("HUD", "HUD scale",
                           "The size of the HUD and the crosshair on foot and in vehicles. 100% is the game's own; the "
                           "three crosshairs over the slider show the size you pick. The minimap has its own size "
@@ -4589,7 +4558,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   static constexpr int kPauseResume = 0, kPauseSquad = 1, kPauseTeam = 2, kPauseScoreboard = 3, kPauseSettingsRow = 4,
                        kPauseControls = 5, kPauseLeaderboards = 6, kPauseAchievements = 7, kPauseExit = 8,
                        kPauseSuicide = 9;
-  double smg_tune_dirty_at_ = -1;  // the SMG's sight tuning changed a value: saved a second after the last change
   double team_suicide_at_ = -1;  // after a change of team: the suicide that sends the soldier to its new base
   void ChangeTeamNow() {
     const int mine = comms::Team();

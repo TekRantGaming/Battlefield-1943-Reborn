@@ -145,78 +145,6 @@
     }
   }
 
-  // The SMG's sight sliders (0.4.2, with Settings > Gameplay > Sight alignment on and an SMG in the hands): in place
-  // of the map and the report, the match undimmed behind them and the aim held, so the gun is seen moving. Each slider
-  // follows the mouse while its button is down; the values are the gun's own and saved (fov.cpp).
-  int sight_drag_ = -1;
-  // Whether the sight alignment is being tuned: an internal build's only (BF_INTERNAL_TOOLS; never a release's).
-  bool SightTuning() {
-#if defined(BF_INTERNAL_TOOLS)
-    return Truthy(Cvar("bf_smg_sight_tune")) && Truthy(Cvar("bf_smg_sights"));
-#else
-    return false;
-#endif
-  }
-  bool SightSliders(ImDrawList* d, ImGuiIO& io, const Stage& st) {
-    double v[6];
-    const std::string gun = SightTuning() ? SmgSightTuneGun(v) : std::string();
-    g_smg_tune_hold.store(!gun.empty(), std::memory_order_relaxed);
-    if (gun.empty()) {
-      sight_drag_ = -1;
-      return false;
-    }
-    const kit::Fonts& f = kit::GetFonts();
-    const ImVec2 a = st.P(880, 93), b = st.P(1232, 470);
-    kit::PaperArt(d, a, b);
-    const float x = a.x + st(18), x1 = b.x - st(18);
-    float y = a.y + st(16);
-    kit::Spaced(d, f.typed, st(8), ImVec2(x, y), kit::kInkSection, "SIGHT ALIGNMENT \xC2\xB7 " + Upper(gun), st(2));
-    y += st(20);
-    y += kit::Wrapped(d, f.ui, st(10.5f), ImVec2(x, y), kit::kInk,
-                      "Drag a slider until the front post's tip sits in the middle of the view. The aim is held "
-                      "while this is open. Saved for this gun.", x1 - x) + st(10);
-    struct Row {
-      const char* name;
-      double lo, hi;
-      const char* unit;
-      int digits;
-    };
-    static const Row kRows[6] = {{"Left / right", -0.15, 0.15, "m", 4}, {"Down / up", -0.10, 0.10, "m", 4},
-                                 {"Zoom (back / forward)", -0.25, 0.35, "m", 3}, {"Yaw (turn)", -15, 15, "deg", 2},
-                                 {"Pitch (tilt)", -15, 15, "deg", 2},  {"Roll", -15, 15, "deg", 2}};
-    if (!io.MouseDown[0]) sight_drag_ = -1;
-    bool changed = false;
-    for (int i = 0; i < 6; ++i) {
-      const Row& r = kRows[i];
-      const std::string value = fmt::format("{:+.{}f} {}", v[i], r.digits, r.unit);
-      d->AddText(f.ui_bold, st(11), ImVec2(x, y), kit::kInk, r.name);
-      d->AddText(f.ui_bold, st(11), ImVec2(x1 - kit::TextWidth(f.ui_bold, st(11), value), y), kit::kInk, value.c_str());
-      const float ty = y + st(26);
-      const ImVec2 t0(x, ty - st(9)), t1(x1, ty + st(9));
-      if (ImGui::IsMouseHoveringRect(t0, t1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) sight_drag_ = i;
-      if (sight_drag_ == i) {
-        const double at = std::clamp(double((io.MousePos.x - x) / (x1 - x)), 0.0, 1.0);
-        const double next = r.lo + (r.hi - r.lo) * at;
-        if (std::abs(next - v[i]) > 1e-6) v[i] = next, changed = true;
-      }
-      const float fx = x + (x1 - x) * float(std::clamp((v[i] - r.lo) / (r.hi - r.lo), 0.0, 1.0));
-      const float zx = x + (x1 - x) * float((0.0 - r.lo) / (r.hi - r.lo));
-      d->AddRectFilled(ImVec2(x, ty - st(1.5f)), ImVec2(x1, ty + st(1.5f)), kit::kRule);
-      d->AddRectFilled(ImVec2(zx - 1, ty - st(5)), ImVec2(zx + 1, ty + st(5)), kit::kInkFaint);  // zero
-      d->AddRectFilled(ImVec2(fx - st(3), ty - st(8)), ImVec2(fx + st(3), ty + st(8)), sight_drag_ == i ? kit::kStamp : kit::kInk);
-      y += st(46);
-    }
-    // Reset: the built in values.
-    const ImVec2 r0(x, y), r1(x + st(120), y + st(24));
-    const bool over = ImGui::IsMouseHoveringRect(r0, r1);
-    d->AddRectFilled(r0, r1, over ? kit::kPaperLight : kit::kPaperDim);
-    d->AddRect(r0, r1, kit::kBorder, 0, 0, 1.0f);
-    d->AddText(f.ui_bold, st(10.5f), ImVec2(r0.x + st(12), r0.y + (st(24) - st(10.5f) * 1.45f) * 0.5f), kit::kInk, "Reset this gun");
-    const bool reset = over && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-    if (changed || reset) SmgSightTuneSet(v, reset);
-    return true;
-  }
-
   void PauseA1Page(ImDrawList* d, ImGuiIO& io, const Input& in_raw) {
     NotePage("pause");
     Input in = in_raw;
@@ -225,9 +153,7 @@
     const ImVec2 sz = io.DisplaySize;
     const int count = int(std::size(kPauseRows));
     // The match behind, darkened; the column at the left darker, with a thin rule at its edge.
-    double tune_values[6];
-    const bool tuning = SightTuning() && !SmgSightTuneGun(tune_values).empty();
-    if (!tuning) d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(6, 7, 5, 120));
+    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(6, 7, 5, 120));
     // 0.4.2 (a screen wider than 16:9): the column stands at the screen's left edge and the report at its right edge
     // (lst, rst: the stage moved there), and the map between them takes the room: as large as the height allows.
     Stage lst = st, rst = st;
@@ -292,10 +218,9 @@
       y += h;
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
     }
-    // ---- the SMG's sight sliders, or the field report and the map beside it
-    if (SightSliders(d, io, rst)) {
-    } else {
-      FieldReport(d, rst, in, sv, map, minutes);
+    // ---- the field report, and the map beside it
+    FieldReport(d, rst, in, sv, map, minutes);
+    {
       const float mx0 = lst.P(436, 0).x, mx1 = rst.P(788, 0).x;
       // 4:3 ("a large 4:3 aspect, not a 1:1 square"): as wide as the room, as tall as the page allows
       const float mw = std::max(st(260), std::min(mx1 - mx0 - st(16), st(640 - 93 - 78) * 4.0f / 3.0f));

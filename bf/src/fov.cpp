@@ -13,15 +13,6 @@
 // other players are not affected (the camera manager is the client's). The first person weapon has a projection of its
 // own (RenderFov, 30 degrees), which this leaves alone.
 
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
 #include <string>
 #include <fmt/format.h>
 #include <rex/logging.h>
@@ -269,69 +260,12 @@ REX_EXTERN(sub_821F9318);  // (that): how far the zoom is in, 0 to 1
 // applies to the weapon's draws (NativeXRenderer SetWeaponLayerMove). The view only: the aim, the spread and the
 // server see nothing of it. The move is in metres and degrees, x right, y up, z forward.
 REXCVAR_DEFINE_BOOL(bf_smg_sights, false, "BF1943", "SMG zoom: the gun's own sights brought to the eye (Iron Sight) instead of the game's zoom in");
-// Each SMG's own move: "x,y,z,yaw,pitch,roll" (metres right, up, forward; degrees). The player lines them up with
-// bf_smg_sight_tune ("If you have a way to give me either slider or transpose control, I could line it up manually
-// faster"): while aiming with an SMG, the arrow keys move the gun left, right, up and down, Page Up and Page Down
-// forward and back, the number pad's 4 6 turn it left and right, 8 2 up and down, 7 9 roll it, and 0 puts the built in
-// values back; Shift makes the steps five times larger, Ctrl five times smaller. The values show on the screen
-// (game_menu.cpp draws SmgSightTuneText) and are saved for that gun.
+// Each SMG's own move: "x,y,z,yaw,pitch,roll" (metres right, up, forward; degrees), lined up by eye against the
+// same guns' sights in Battlefield: Bad Company 2.
 REXCVAR_DEFINE_STRING(bf_smg_sight_us, "-0.0725,0.0135,0.0,0,0,0", "BF1943", "Iron Sight: the Thompson's move, x,y,z,yaw,pitch,roll");
 REXCVAR_DEFINE_STRING(bf_smg_sight_jp, "-0.0725,0.0135,0.0,0,0,0", "BF1943", "Iron Sight: the Type 100's move, x,y,z,yaw,pitch,roll");
 REXCVAR_DEFINE_BOOL(bf_smg_sights_no_crosshair, true, "BF1943",
                     "Iron Sight: no crosshair while aiming down an SMG's sights, as with the rifles and pistols");
-REXCVAR_DEFINE_BOOL(bf_smg_sight_tune, false, "BF1943", "Iron Sight: line the SMG's sights up with the keyboard while aiming (arrows, Page Up/Down, number pad)");
-namespace {
-std::mutex g_tune_mutex;
-std::string g_tune_text;          // what the screen shows while tuning (empty: nothing)
-std::string g_tune_save_name, g_tune_save_value;  // a changed setting to save
-std::chrono::steady_clock::time_point g_tune_text_at{};
-}  // namespace
-namespace {
-// The SMG in the hands now, for the pause menu's sliders: 0 none, 1 the Thompson, 2 the Type 100; and when it was seen.
-std::atomic<int> g_tune_gun{0};
-std::atomic<int64_t> g_tune_gun_at{0};
-}  // namespace
-namespace bf1943 {
-// The pause menu's sight sliders ("If you can give me overlay sliders with pitch, yaw, roll and zoom, I can match it
-// by hand"): while they are open the aim is held for the player (auto_join.cpp presses the left trigger).
-std::atomic<bool> g_smg_tune_hold{false};
-// The SMG held now ("Thompson", "Type 100"; empty: none in the last half second) and its six values.
-std::string SmgSightTuneGun(double v[6]) {
-  const int gun = g_tune_gun.load(std::memory_order_relaxed);
-  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
-  if (!gun || now - g_tune_gun_at.load(std::memory_order_relaxed) > std::chrono::steady_clock::duration(std::chrono::milliseconds(500)).count())
-    return "";
-  const std::string text = gun == 2 ? REXCVAR_GET(bf_smg_sight_jp) : REXCVAR_GET(bf_smg_sight_us);
-  for (int i = 0; i < 6; ++i) v[i] = 0;
-  std::sscanf(text.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
-  return gun == 2 ? "Type 100" : "Thompson";
-}
-// Its values set (the sliders); `reset`: the built in ones.
-void SmgSightTuneSet(const double v[6], bool reset) {
-  const int gun = g_tune_gun.load(std::memory_order_relaxed);
-  if (!gun) return;
-  const char* name = gun == 2 ? "bf_smg_sight_jp" : "bf_smg_sight_us";
-  std::string value = fmt::format("{:.4f},{:.4f},{:.4f},{:.2f},{:.2f},{:.2f}", v[0], v[1], v[2], v[3], v[4], v[5]);
-  if (reset)
-    if (const auto* info = rex::cvar::GetFlagInfo(name)) value = info->default_value;
-  rex::cvar::SetFlagByName(name, value);
-  std::lock_guard lock(g_tune_mutex);
-  g_tune_save_name = name, g_tune_save_value = value;
-}
-// game_menu.cpp, each frame: the tuning's line for the screen, and a changed setting to save (true once).
-std::string SmgSightTuneText() {
-  std::lock_guard lock(g_tune_mutex);
-  if (std::chrono::steady_clock::now() - g_tune_text_at > std::chrono::milliseconds(300)) return "";
-  return g_tune_text;
-}
-bool SmgSightTakeSave(std::string& name, std::string& value) {
-  std::lock_guard lock(g_tune_mutex);
-  if (g_tune_save_name.empty()) return false;
-  name = std::move(g_tune_save_name), value = std::move(g_tune_save_value);
-  g_tune_save_name.clear();
-  return true;
-}
-}  // namespace bf1943
 namespace {
 // The held weapon's name (SoldierWeaponData: its name's first and last characters at +0x0C and +0x10).
 std::string WeaponName(const uint8_t* base, uint32_t data) {
@@ -414,68 +348,11 @@ void SmgSights(PPCContext& ctx, uint8_t* base, uint32_t soldier, double fov_degr
     for (char& ch : lower) ch = char(std::tolower(static_cast<unsigned char>(ch)));
     japanese = lower.find("thompson") == std::string::npos;
   }
-  const char* cvar_name = japanese ? "bf_smg_sight_jp" : "bf_smg_sight_us";
-  g_tune_gun.store(japanese ? 2 : 1, std::memory_order_relaxed);
-  g_tune_gun_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
   double v[6] = {0, 0, 0, 0, 0, 0};
   {
     const std::string text = japanese ? REXCVAR_GET(bf_smg_sight_jp) : REXCVAR_GET(bf_smg_sight_us);
     std::sscanf(text.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
   }
-#if defined(_WIN32)
-  // Only while this game's window is the one in front (the keys are read from the keyboard itself).
-  DWORD front_pid = 0;
-  GetWindowThreadProcessId(GetForegroundWindow(), &front_pid);
-#if defined(BF_INTERNAL_TOOLS)  // an internal build's only ("The sliders should be part of our internal build only")
-  const bool tune = REXCVAR_GET(bf_smg_sight_tune);
-#else
-  const bool tune = false;
-#endif
-  if (tune && blend > 0.5 && front_pid == GetCurrentProcessId()) {
-    // One step at a press, then repeated while the key is held (from 0.35 s, every 40 ms).
-    static std::map<int, std::chrono::steady_clock::time_point> next;
-    const auto now = std::chrono::steady_clock::now();
-    auto pressed = [&](int vk) {
-      if (!(GetAsyncKeyState(vk) & 0x8000)) {
-        next.erase(vk);
-        return false;
-      }
-      auto it = next.find(vk);
-      if (it == next.end()) {
-        next[vk] = now + std::chrono::milliseconds(350);
-        return true;
-      }
-      if (now < it->second) return false;
-      it->second = now + std::chrono::milliseconds(40);
-      return true;
-    };
-    const double scale = (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 5.0 : (GetAsyncKeyState(VK_CONTROL) & 0x8000) ? 0.2 : 1.0;
-    const double step = 0.001 * scale, turn = 0.25 * scale;
-    bool changed = false;
-    struct Key {
-      int vk, index;
-      double by;
-    };
-    const Key keys[] = {{VK_LEFT, 0, -step},   {VK_RIGHT, 0, step},   {VK_UP, 1, step},      {VK_DOWN, 1, -step},
-                        {VK_PRIOR, 2, step},   {VK_NEXT, 2, -step},   {VK_NUMPAD4, 3, -turn}, {VK_NUMPAD6, 3, turn},
-                        {VK_NUMPAD8, 4, turn}, {VK_NUMPAD2, 4, -turn}, {VK_NUMPAD7, 5, -turn}, {VK_NUMPAD9, 5, turn}};
-    for (const Key& key : keys)
-      if (pressed(key.vk)) v[key.index] += key.by, changed = true;
-    if (pressed(VK_NUMPAD0)) {
-      if (const auto* info = rex::cvar::GetFlagInfo(cvar_name))
-        std::sscanf(info->default_value.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
-      changed = true;
-    }
-    const std::string value = fmt::format("{:.4f},{:.4f},{:.4f},{:.2f},{:.2f},{:.2f}", v[0], v[1], v[2], v[3], v[4], v[5]);
-    if (changed) rex::cvar::SetFlagByName(cvar_name, value);
-    std::lock_guard lock(g_tune_mutex);
-    g_tune_text = fmt::format("SIGHT TUNING  {}   right {:+.4f}  up {:+.4f}  forward {:+.4f} m   turn {:+.2f}  tilt {:+.2f}  roll {:+.2f} deg\n"
-                              "Arrows: left/right/up/down   PgUp/PgDn: forward/back   Numpad 4 6: turn   8 2: tilt   7 9: roll   0: reset   Shift x5, Ctrl /5",
-                              japanese ? "Type 100" : "Thompson", v[0], v[1], v[2], v[3], v[4], v[5]);
-    g_tune_text_at = now;
-    if (changed) g_tune_save_name = cvar_name, g_tune_save_value = value;
-  }
-#endif
   if (blend <= 0.001) return;
   // "remove crosshair when iron sight is being used when zoomed-in, just like the pistols and rifles natively do"
   if (REXCVAR_GET(bf_smg_sights_no_crosshair) && blend > 0.3) native_x_renderer::HideCrosshair();
