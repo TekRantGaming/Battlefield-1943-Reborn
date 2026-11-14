@@ -33,6 +33,10 @@
 #include <rex/system/kernel_state.h>
 #if defined(BF_DEV_TOOLS)
 #include "dev_guest_memory.h"  // windows.h: VirtualQuery
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#include <time.h>
+#endif
 #endif
 
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
@@ -237,30 +241,114 @@ void InstallNullPageGuardOnce();  // crash_report.cpp: a server draws no frame, 
 void RunGameFixTest(PPCContext& ctx, uint8_t* base);  // game_fixes.cpp: the empty slot guard, tested once
 #endif
 }  // namespace bf1943
+// What the calling thread has cost so far (14 Nov 2026, the 60 Hz servers' "desyncing, rubber banding": the US
+// server's log had single ticks of 100 to 300 ms among ticks of half a millisecond, with nothing to say what they
+// waited for): its time on the processor, and how often it stopped running, by its own choice (a wait) and because
+// the system took the processor away. A tick that took long with little processor time was waiting, not working.
+struct ThreadCost {
+  double cpu_ms = 0;
+  long waits = 0, taken = 0;  // voluntary and involuntary context switches (Linux; 0 on Windows)
+};
+static ThreadCost ThreadCostNow() {
+  ThreadCost c;
+#if defined(_WIN32)
+  FILETIME made, ended, kernel, user;
+  if (GetThreadTimes(GetCurrentThread(), &made, &ended, &kernel, &user)) {
+    const auto ticks = [](const FILETIME& t) { return (uint64_t(t.dwHighDateTime) << 32) | t.dwLowDateTime; };
+    c.cpu_ms = double(ticks(kernel) + ticks(user)) / 10000.0;
+  }
+#else
+  timespec ts{};
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0) c.cpu_ms = double(ts.tv_sec) * 1000.0 + double(ts.tv_nsec) / 1e6;
+#if defined(RUSAGE_THREAD)
+  rusage u{};
+  if (getrusage(RUSAGE_THREAD, &u) == 0) c.waits = u.ru_nvcsw, c.taken = u.ru_nivcsw;
+#endif
+#endif
+  return c;
+}
+// The machine's processors as Linux counts them (/proc/stat's first line): all their time, and the part the host of
+// a virtual machine gave to others ("steal"). False elsewhere.
+static bool MachineTimes(double& total, double& stolen) {
+#if defined(_WIN32)
+  (void)total, (void)stolen;
+  return false;
+#else
+  std::ifstream stat("/proc/stat");
+  std::string name;
+  double v[8] = {};
+  if (!(stat >> name) || name != "cpu") return false;
+  for (double& x : v)
+    if (!(stat >> x)) return false;
+  total = 0;
+  for (double x : v) total += x;
+  stolen = v[7];
+  return true;
+#endif
+}
+
 // The server's own tick rate, logged every 30 s (a dedicated server only): how many ticks a second, the longest gap
 // between two and the tick's own time, so a server on a slow machine shows in its log (TekRantGaming's 7 Nov 2026 play test:
 // the frame rate fell on the larger maps of the official server, a Hetzner machine, and not on Wake Island).
-static void NoteServerTick(double work_ms) {
+// 14 Nov 2026: each stall is said as it happens too (a tick of 50 ms or more, or as long between two ticks), with
+// what the thread cost meanwhile, and each 30 s how many there were, the machine's processors, its load and what its
+// host took away.
+static void NoteServerTick(double work_ms, const ThreadCost& before, const ThreadCost& after) {
   bf1943::InstallNullPageGuardOnce();
   static Clock::time_point window{}, last{};
-  static uint32_t ticks = 0;
+  static uint32_t ticks = 0, slow25 = 0, slow100 = 0, gaps50 = 0, said = 0;
   static double longest_gap = 0, work_total = 0, work_longest = 0;
+  static ThreadCost last_after;
+  static double machine_total = 0, machine_stolen = 0;
+  static bool machine = false;
+  constexpr double kStallMs = 50.0;
+  constexpr uint32_t kSaidPerWindow = 20;
   const auto now = Clock::now();
   if (last != Clock::time_point{}) {
-    longest_gap = std::max(longest_gap, std::chrono::duration<double, std::milli>(now - last).count());
+    // From the last tick's end to this one's start: the game's own wait for the next tick, and whatever held it.
+    const double gap = std::chrono::duration<double, std::milli>(now - last).count();
+    longest_gap = std::max(longest_gap, gap);
+    const double between = gap - work_ms;
+    if (between >= kStallMs) {
+      ++gaps50;
+      if (said++ < kSaidPerWindow)
+        REXLOG_WARN("BF server stall: {:.0f} ms between two ticks ({:.1f} ms of it on the processor; the thread waited {} "
+                    "times and had the processor taken {} times)",
+                    between, before.cpu_ms - last_after.cpu_ms, before.waits - last_after.waits,
+                    before.taken - last_after.taken);
+    }
   } else {
     window = now;
+    machine = MachineTimes(machine_total, machine_stolen);
+    REXLOG_INFO("BF server: {} processors on this machine", std::thread::hardware_concurrency());
   }
+  if (work_ms >= kStallMs && said++ < kSaidPerWindow)
+    REXLOG_WARN("BF server stall: a tick took {:.0f} ms, {:.1f} ms of it on the processor (the thread waited {} times and "
+                "had the processor taken {} times): {}",
+                work_ms, after.cpu_ms - before.cpu_ms, after.waits - before.waits, after.taken - before.taken,
+                after.cpu_ms - before.cpu_ms >= work_ms * 0.7 ? "it was working" : "it was waiting");
   last = now;
+  last_after = after;
   ++ticks;
+  slow25 += work_ms >= 25.0, slow100 += work_ms >= 100.0;
   work_total += work_ms;
   work_longest = std::max(work_longest, work_ms);
   const double seconds = std::chrono::duration<double>(now - window).count();
   if (seconds < 30.0) return;
+  std::string host;
+  double total = 0, stolen = 0;
+  if (machine && MachineTimes(total, stolen) && total > machine_total) {
+    host = fmt::format("; the machine's host took {:.1f}% of its processor time", 100.0 * (stolen - machine_stolen) / (total - machine_total));
+    machine_total = total, machine_stolen = stolen;
+  }
+#if !defined(_WIN32)
+  double load[3] = {};
+  if (getloadavg(load, 3) >= 1) host += fmt::format(", load {:.2f}", load[0]);
+#endif
   REXLOG_INFO("BF server ticks: {:.1f} a second over {:.0f} s, longest gap {:.1f} ms; the tick's own work {:.2f} ms average, "
-              "{:.1f} ms longest",
-              ticks / seconds, seconds, longest_gap, work_total / ticks, work_longest);
-  window = now, ticks = 0, longest_gap = work_total = work_longest = 0;
+              "{:.1f} ms longest; {} ticks of 25 ms or more, {} of 100 ms or more, {} waits of 50 ms or more between ticks{}",
+              ticks / seconds, seconds, longest_gap, work_total / ticks, work_longest, slow25, slow100, gaps50, host);
+  window = now, ticks = slow25 = slow100 = gaps50 = said = 0, longest_gap = work_total = work_longest = 0;
 }
 
 #if defined(BF_DEV_TOOLS)
@@ -416,8 +504,10 @@ void DevTickets(uint8_t* base) {
 
 REX_HOOK_RAW(sub_824123F0) {
   const auto tick_start = Clock::now();
+  const bool is_server = REXCVAR_GET(server);
+  const ThreadCost cost_before = is_server ? ThreadCostNow() : ThreadCost{};
   __imp__sub_824123F0(ctx, base);
-  if (!REXCVAR_GET(server)) return;
+  if (!is_server) return;
 #if defined(BF_DEV_TOOLS)
   // BF_DEV_SERVER_SLOW=<ms> (tests): each server tick takes that much longer, as on a slow machine.
   static const double slow_ms = [] {
@@ -429,7 +519,8 @@ REX_HOOK_RAW(sub_824123F0) {
   DevTickets(base);
   bf1943::RunGameFixTest(ctx, base);  // game_fixes.cpp: BF_DEV_FIX_TEST=1, once
 #endif
-  NoteServerTick(std::chrono::duration<double, std::milli>(Clock::now() - tick_start).count());
+  NoteServerTick(std::chrono::duration<double, std::milli>(Clock::now() - tick_start).count(), cost_before,
+                 ThreadCostNow());
   bf1943::ModernModeTick(base);
   bf1943::GmHostStart();
   std::string next;
