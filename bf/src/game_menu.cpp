@@ -225,7 +225,11 @@ std::string g_plain_sharpness = "-1";
 // start, kept in the settings as ",fsr,xess,dlss," (",fsr4," before 0.4.3) (those that run; TAA runs everywhere). Empty: not known yet.
 // A choice this GPU does not run: anything else Off. FSR 4 is no longer offered at all (14 Nov 2026, TekRantGaming:
 // "remove fsr 4", 0.4.3): a choice of it becomes FSR 3.1 where that runs (or before the first answer), else Off.
+// 14 Nov 2026 (TekRantGaming, 0.4.4: "removes all temporal upscalers from the game u can keep fsr 1 and nvidia nis"):
+// no temporal upscaler is offered, so every choice of one becomes Off (the rows are gone, kTemporalUpscalers).
+inline constexpr bool kTemporalUpscalers = false;
 std::string TemporalFallback(const std::string& t, const std::string& supported) {
+  if (!kTemporalUpscalers) return "off";
   if (t == "fsr4") return supported.empty() || supported.find(",fsr,") != std::string::npos ? "fsr" : "off";
   if (supported.empty() || t == "off" || t == "taa" || supported.find("," + t + ",") != std::string::npos) return t;
   return "off";
@@ -3232,7 +3236,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     rows.push_back(aa_row);
     // The Upscaling section (13 Nov 2026): the temporal upscalers, their mode and their own sharpness. They work on
     // the 3D view before the game's post-processing, with the picture's motion, so they also steady shimmer that the
-    // antialiasing above cannot.
+    // antialiasing above cannot. Not offered since 0.4.4 (kTemporalUpscalers): FSR 1 and NIS below stay.
+    if (kTemporalUpscalers) {
     rows.push_back(Choice("Upscaling", "Upscaler",
                           "Antialiases, and in the modes below Native upscales, with what the last frames showed: the "
                           "steadiest picture. Only the upscalers your graphics card runs are listed: AMD FSR 3.1 and "
@@ -3265,6 +3270,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       rows.push_back(mode);
       rows.push_back(sharp);
     }
+    }  // kTemporalUpscalers
     // Upscaling: King Kong's Upscaler and Upscaler mode rows and their words (TekRantGaming, 11 Nov 2026, v0.2.1: AMD FSR 1 and
     // NVIDIA NIS, "copy exactly that"). NativeXRenderer scales the drawn picture up to the screen with them (D115, on
     // Vulkan, so NIS can run on Linux too: King Kong's NIS is in its Direct3D 12 presenter, Windows only). Off draws the

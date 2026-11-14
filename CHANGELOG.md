@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.4 (14 November 2026): temporal upscalers removed
+
+**Changed**
+- **The temporal upscalers are removed.** AMD FSR 3.1, Intel XeSS, NVIDIA DLSS and TAA are no longer in Settings, and
+  if you had one on, your game goes back to its normal antialiasing. The spatial upscalers AMD FSR 1 and NVIDIA NIS stay.
+
 ## 0.4.3 (14 November 2026): AMD FSR 4 removed
 
 **Changed**
