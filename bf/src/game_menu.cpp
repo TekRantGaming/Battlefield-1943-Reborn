@@ -3479,9 +3479,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "bf_smooth_bones"));
     // The level of detail's distance (frame_rate.cpp: each model's own switch distances times this).
     rows.push_back(Slider("Image", "Detail distance",
-                          "How far away models keep their detailed shape before they switch to simpler ones, and how "
-                          "far they are drawn at all. 1.00x is the original game's; 2.00x keeps detail twice as far. "
-                          "Applies within a second.",
+                          "How far away objects, buildings, vehicles, trees, bushes and rocks keep their detailed "
+                          "shape before they switch to simpler ones, and how far they are drawn at all. 1.00x is the "
+                          "original game's; 2.00x keeps them twice as far. Applies within a second.",
                           "bf_lod_distance", 1.0f, 2.0f, 0.25f,
                           [](float v) { return fmt::format("{:.2f}Ã", v); }, 2.0f));
     rows.push_back(Choice("Image", "Texture filtering", "Keeps the ground and distant textures sharp at steep angles.",
