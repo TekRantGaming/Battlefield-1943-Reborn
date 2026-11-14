@@ -31,12 +31,20 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
-#if defined(BF_DEV_TOOLS)
-#include "dev_guest_memory.h"  // windows.h: VirtualQuery
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>  // GetThreadTimes (the server's stall notes)
+#else
 #include <sys/resource.h>
 #include <time.h>
 #endif
+#if defined(BF_DEV_TOOLS)
+#include "dev_guest_memory.h"  // windows.h: VirtualQuery
 #endif
 
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
