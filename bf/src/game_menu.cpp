@@ -446,6 +446,7 @@ void PressStartForPlayer();  // auto_join.cpp
 void MarkExitChosen();
 void LeaveMatch();  // auto_join.cpp: Exit Game, the game's own command (doExitLevel)
 void SuicideNow();  // the game's own suicide command
+void ApplyLodDistance();  // frame_rate.cpp: the level of detail's distances scaled (each model's own)
 void GameCommand(const std::string& name, const std::string& args);  // auto_join.cpp: a command as the game's menu sends it
 std::map<std::string, std::pair<int, double>> TakeScoreEvents();  // auto_join.cpp: the HUD's score events
 bool LevelLoaded();
@@ -889,6 +890,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // A frame limit outside the game found since (the driver's read, or measured): the rate offered at most.
     if (SystemFrameCap() != applied_cap_) ApplyFrameRate();
     if (!open_) MenuSteps();  // tests: their bfb and bfa steps act while BF's own screen has the pad
+    ApplyLodDistance();
     if (!open_) ReopenPause();
     // A new match: BF's pause list starts on its first row again.
     if (const int stage = MenuDriverStage(); stage != last_stage_) {
@@ -3475,6 +3477,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "Your own weapon and hands in first person are not smoothed yet and can still step. "
                           "Animated things are drawn one tick behind. Off is the game's own animation.",
                           "bf_smooth_bones"));
+    // The level of detail's distance (frame_rate.cpp: each model's own switch distances times this).
+    rows.push_back(Slider("Image", "Detail distance",
+                          "How far away models keep their detailed shape before they switch to simpler ones, and how "
+                          "far they are drawn at all. 1.00x is the original game's; 2.00x keeps detail twice as far. "
+                          "Applies within a second.",
+                          "bf_lod_distance", 1.0f, 2.0f, 0.25f,
+                          [](float v) { return fmt::format("{:.2f}Ã", v); }, 2.0f));
     rows.push_back(Choice("Image", "Texture filtering", "Keeps the ground and distant textures sharp at steep angles.",
                           "anisotropic_override",
                           {{"Game", "-1"}, {"Off", "0"}, {"2\xC3\x97", "2"}, {"4\xC3\x97", "3"}, {"8\xC3\x97", "4"},

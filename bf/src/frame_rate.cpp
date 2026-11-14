@@ -24,11 +24,13 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
 #include <thread>
 
+#include <fmt/format.h>
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -317,10 +319,124 @@ REX_HOOK_RAW(sub_821F3248) {
   }
 }
 
+// The level of detail's distance ("double the LOD distance, and provide a graphics slider from 1.00x to 2.00x with
+// 0.25 steps"). Each model has a Render.MeshLodSettingsAsset (its *_lodsettings file): the distances in metres at which
+// it goes to its next, coarser mesh, and past the last of which it is not drawn. In memory (found by searching for the
+// Thompson's 8, 16, 32, 1000, 1024: run lod8): the object's class at +0 (0x82038A60), then LodDistance3 at +0x18,
+// LodDistance4 +0x1C, MinScreenArea +0x20, LodDistance2 +0x24, Ps3LodScale +0x28, LodDistance0 +0x2C, LodDistance1
+// +0x30, the five Enabled bytes from +0x34. (Render.EdgeModelLodScale, tried first, is the PlayStation 3's and does
+// nothing here: runs lod1 to lod5.)
+// A worker looks through the guest's memory for those objects every few seconds while a level is loaded (models
+// arrive as they are needed) and writes each one's own distances times bf_lod_distance; the game's own values are
+// kept, so the setting can change at any time. Not on a dedicated server (it draws nothing).
+REXCVAR_DEFINE_DOUBLE(bf_lod_distance, 2.0, "BF1943", "How far models keep their detail, 1.0 (the game's own) to 2.0 times as far");
+REXCVAR_DEFINE_DOUBLE(bf_dev_lod_scale, 0.0, "BF1943", "Developer: the level of detail's distances times this instead (0: not)");
+namespace bf1943 {
+bool LevelLoaded();  // auto_join.cpp
+}
+namespace {
+std::atomic<uint8_t*> g_guest_base{nullptr};
+#if defined(_WIN32)
+constexpr uint32_t kLodSettingsClass = 0x82038A60;
+constexpr uint32_t kLodOffsets[5] = {0x2C, 0x30, 0x24, 0x18, 0x1C};  // LodDistance0 to 4
+struct LodAsset {
+  float own[5];
+};
+uint32_t Load32Host(const uint8_t* p) { return uint32_t(p[0]) << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
+float LoadFloatHost(const uint8_t* p) {
+  const uint32_t bits = Load32Host(p);
+  float v;
+  std::memcpy(&v, &bits, 4);
+  return v;
+}
+void StoreFloatHost(uint8_t* p, float v) {
+  uint32_t bits;
+  std::memcpy(&bits, &v, 4);
+  p[0] = uint8_t(bits >> 24), p[1] = uint8_t(bits >> 16), p[2] = uint8_t(bits >> 8), p[3] = uint8_t(bits);
+}
+void LodWorker() {
+  std::map<uint32_t, LodAsset> assets;  // by guest address: the game's own distances
+  double applied = -1;
+  int passes = 0;
+  auto next_search = std::chrono::steady_clock::now();
+  for (;;) {
+    // Half a second at a time: a changed setting is written at once, the memory searched every 3 s at a level's
+    // start (six times), then every 8 s.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    uint8_t* base = g_guest_base.load(std::memory_order_relaxed);
+    if (!base || !bf1943::LevelLoaded()) {
+      passes = 0;
+      next_search = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+      continue;
+    }
+    const double dev = REXCVAR_GET(bf_dev_lod_scale);
+    const double factor = dev > 0 ? dev : std::clamp(REXCVAR_GET(bf_lod_distance), 1.0, 2.0);
+    const bool search = std::chrono::steady_clock::now() >= next_search;
+    if (!search && factor == applied) continue;
+    if (search) next_search = std::chrono::steady_clock::now() + std::chrono::seconds(passes < 6 ? 3 : 8);
+    const auto t0 = std::chrono::steady_clock::now();
+    size_t fresh = 0;
+    for (uint64_t at = 0x10000; search && at < 0xFFFF0000ull;) {
+      MEMORY_BASIC_INFORMATION info{};
+      if (!VirtualQuery(base + at, &info, sizeof(info))) break;
+      const uint64_t region = uint64_t(static_cast<uint8_t*>(info.BaseAddress) - base);
+      const uint64_t end = std::min<uint64_t>(region + info.RegionSize, 0xFFFF0000ull);
+      // The game's heaps only (read and write, private or mapped; not its code or guard pages).
+      if (info.State == MEM_COMMIT && info.Protect == PAGE_READWRITE) {
+        for (uint64_t a = (std::max(at, region) + 3) & ~3ull; a + 0x40 <= end; a += 4) {
+          const uint8_t* p = base + a;
+          if (p[0] != 0x82 || Load32Host(p) != kLodSettingsClass) continue;
+          if (assets.count(uint32_t(a))) continue;
+          LodAsset asset;
+          bool sane = true;
+          for (int i = 0; i < 5; ++i) {
+            asset.own[i] = LoadFloatHost(p + kLodOffsets[i]);
+            sane = sane && asset.own[i] >= 0.0f && asset.own[i] < 100000.0f;
+          }
+          // The five Enabled bytes are 0 or 1.
+          for (int i = 0; i < 5; ++i) sane = sane && p[0x34 + i] <= 1;
+          if (!sane) continue;
+          assets[uint32_t(a)] = asset;
+          ++fresh;
+        }
+      }
+      if (end <= at) break;
+      at = end;
+    }
+    if (fresh || factor != applied) {
+      for (const auto& [address, asset] : assets) {
+        uint8_t* p = base + address;
+        if (Load32Host(p) != kLodSettingsClass) continue;  // freed since
+        for (int i = 0; i < 5; ++i) StoreFloatHost(p + kLodOffsets[i], float(asset.own[i] * factor));
+      }
+      const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      if (!assets.empty())
+        REXLOG_INFO("BF level of detail: {} models' distances at {:.2f} times the game's ({} new; the search took {:.0f} ms)",
+                  assets.size(), factor, fresh, ms);
+      applied = factor;
+    }
+    if (search) ++passes;
+  }
+}
+#endif
+}  // namespace
+namespace bf1943 {
+// From the menu's frame: the worker started once the game's memory is known.
+void ApplyLodDistance() {
+#if defined(_WIN32)
+  static bool started = false;
+  if (!started && g_guest_base.load(std::memory_order_relaxed) && !REXCVAR_GET(server)) {
+    started = true;
+    std::thread(LodWorker).detach();
+  }
+#endif
+}
+}  // namespace bf1943
 REX_EXTERN(__imp__sub_82616750);
 REX_HOOK_RAW(sub_82616750) {
   const std::string name = GuestString(base, ctx.r4.u32);
   __imp__sub_82616750(ctx, base);
+  g_guest_base.store(base, std::memory_order_relaxed);
   // Every setting the game asks for by name, once each with its value (13 Nov 2026: which of them are the level of
   // detail's and the view distance's is not known yet; the log's list says). Dev builds only (600 lines).
 #if defined(BF_DEV_TOOLS)
