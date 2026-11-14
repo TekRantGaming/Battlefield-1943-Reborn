@@ -635,8 +635,13 @@ class Manager:
                         os.path.join(directory, 'broadcast.json')):
                 with contextlib.suppress(OSError):
                     os.remove(old)
+            # The last run's log and error output kept for one more start (14 Nov 2026: a crash of the US server left
+            # nothing behind, its log written over by the restart and its error output thrown away).
+            for name in ('server.log', 'game.out'):
+                with contextlib.suppress(OSError):
+                    os.replace(os.path.join(directory, name), os.path.join(directory, name + '.prev'))
             state = self.run.setdefault(n, {'restarts': [], 'wait_until': 0})
-            state['game'] = spawn(game, env=env, cwd=os.path.dirname(game_exe()))
+            state['game'] = spawn(game, env=env, cwd=os.path.dirname(game_exe()), output=os.path.join(directory, 'game.out'))
             state['host'] = spawn(host, output=os.path.join(directory, 'host.out'))
             state['wanted'], state['since'], state['why'] = True, time.time(), ''
             write_atomic(os.path.join(directory, 'pids.txt'), '%d\n%d\n' % (state['game'].pid, state['host'].pid))

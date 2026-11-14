@@ -42,8 +42,10 @@
 // "all servers are going to be 60 Hertz. So make sure that the game is loading up in the appropriate mode. We will no
 // longer be offering 30 Hertz server"), so a player's game starts at the official servers' rate and joins them without
 // a restart; 30 is the Xbox 360's, 75 and 100 experimental (the player is warned before joining one).
-REXCVAR_DEFINE_DOUBLE(bf_tick_rate, 60.0, "BF1943",
-                      "The game's simulation rate, ticks a second: 60 (the default), 30 (the Xbox 360's), or 75 or 100 "
+// 0.4.6.1 (TekRantGaming, 14 Nov 2026: "defaults the client to 30 Hz again"): 30 is the default once more; a server of
+// another rate is still joined by starting the game again at it.
+REXCVAR_DEFINE_DOUBLE(bf_tick_rate, 30.0, "BF1943",
+                      "The game's simulation rate, ticks a second: 30 (the Xbox 360's, the default), 60, or 75 or 100 "
                       "(experimental). A server runs at it; a player's game starts at it and takes the rate of the "
                       "server it joins");
 

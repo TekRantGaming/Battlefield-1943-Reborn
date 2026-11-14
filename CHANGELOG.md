@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.6.1 (14 November 2026): the game starts at 30 Hz again
+
+**Changed**
+- **The game starts at 30 Hz again**, the original game's rate. It still joins a 60 Hz server by starting again at
+  that rate, as before 0.4.6.
+
 ## 0.4.6 (14 November 2026): 60 Hz everywhere, Custom Match passwords, Iron Sight and motion blur
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. Earlier versions update to it by
