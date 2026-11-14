@@ -98,8 +98,8 @@ REXCVAR_DEFINE_BOOL(bf_wheel_bindable, false, "BF1943/Controls",
                     "The mouse wheel presses what the bindings name it for (WheelUp, WheelDown among a binding's keys); "
                     "false, as before the bindings had mouse columns: Toggle Weapon on foot");
 REXCVAR_DEFINE_STRING(bf_temporal, "off", "BF1943",
-                      "The temporal upscaler: off, fsr4 (AMD FSR 4.1), fsr (AMD FSR 3.1), xess (Intel XeSS), dlss "
-                      "(NVIDIA DLSS) or taa (the renderer's own)");
+                      "The temporal upscaler: off, fsr (AMD FSR 3.1), xess (Intel XeSS), dlss (NVIDIA DLSS) or taa (the "
+                      "renderer's own); fsr4 (AMD FSR 4) is no longer offered and becomes fsr");
 REXCVAR_DEFINE_STRING(bf_temporal_mode, "native", "BF1943",
                       "The temporal upscaler's mode: native (antialiasing at the display's resolution), quality, "
                       "balanced, performance or ultra_performance");
@@ -222,11 +222,16 @@ std::string g_plain_sharpness = "-1";
 // native_x_renderer_upscaler_sharpness); without one, the antialiasing is the finished picture's (bf_post_aa).
 // The temporal upscalers this GPU runs (14 Nov 2026, TekRantGaming: "all the upscalers that are offered only appear as
 // an option in the game if the user has a valid vendor that supports each version"): the renderer's answer at the last
-// start, kept in the settings as ",fsr4,fsr,xess,dlss," (those that run; TAA runs everywhere). Empty: not known yet.
-// A choice this GPU does not run: FSR 4 becomes FSR 3.1 where that runs, anything else Off.
+// start, kept in the settings as ",fsr,xess,dlss," (",fsr4," before 0.4.3) (those that run; TAA runs everywhere). Empty: not known yet.
+// A choice this GPU does not run: anything else Off. FSR 4 is no longer offered at all (14 Nov 2026, TekRantGaming:
+// "remove fsr 4", 0.4.3): a choice of it becomes FSR 3.1 where that runs (or before the first answer), else Off.
+// 14 Nov 2026 (TekRantGaming, 0.4.4: "removes all temporal upscalers from the game u can keep fsr 1 and nvidia nis"):
+// no temporal upscaler is offered, so every choice of one becomes Off (the rows are gone, kTemporalUpscalers).
+inline constexpr bool kTemporalUpscalers = false;
 std::string TemporalFallback(const std::string& t, const std::string& supported) {
+  if (!kTemporalUpscalers) return "off";
+  if (t == "fsr4") return supported.empty() || supported.find(",fsr,") != std::string::npos ? "fsr" : "off";
   if (supported.empty() || t == "off" || t == "taa" || supported.find("," + t + ",") != std::string::npos) return t;
-  if (t == "fsr4" && supported.find(",fsr,") != std::string::npos) return "fsr";
   return "off";
 }
 bool TemporalUpscalerOn() {
@@ -2904,7 +2909,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const std::string chosen = Cvar("bf_temporal");
     std::vector<std::pair<std::string, std::string>> out = {{"Off", "off"}};
     for (const auto& [title, value] : std::vector<std::pair<std::string, std::string>>{
-             {"AMD FSR 4", "fsr4"}, {"AMD FSR 3.1", "fsr"}, {"Intel XeSS", "xess"}, {"NVIDIA DLSS", "dlss"}})
+             {"AMD FSR 3.1", "fsr"}, {"Intel XeSS", "xess"}, {"NVIDIA DLSS", "dlss"}})
       if (supported.find("," + value + ",") != std::string::npos || value == chosen) out.push_back({title, value});
     out.push_back({"TAA", "taa"});
     return out;
@@ -3374,12 +3379,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     rows.push_back(aa_row);
     // The Upscaling section (13 Nov 2026): the temporal upscalers, their mode and their own sharpness. They work on
     // the 3D view before the game's post-processing, with the picture's motion, so they also steady shimmer that the
-    // antialiasing above cannot.
+    // antialiasing above cannot. Not offered since 0.4.4 (kTemporalUpscalers): FSR 1 and NIS below stay.
+    if (kTemporalUpscalers) {
     rows.push_back(Choice("Upscaling", "Upscaler",
                           "Antialiases, and in the modes below Native upscales, with what the last frames showed: the "
-                          "steadiest picture. Only the upscalers your graphics card runs are listed: AMD FSR 4 on a "
-                          "Radeon RX 9000, AMD FSR 3.1 and Intel XeSS where AMD's and Intel's libraries run on your "
-                          "card, NVIDIA DLSS on a GeForce RTX. TAA is the game's own plain temporal antialiasing, at "
+                          "steadiest picture. Only the upscalers your graphics card runs are listed: AMD FSR 3.1 and "
+                          "Intel XeSS where AMD's and Intel's libraries run on your card, NVIDIA DLSS on a GeForce "
+                          "RTX. TAA is the game's own plain temporal antialiasing, at "
                           "your display's resolution only, on any card. Replaces Antialiasing and the spatial "
                           "upscaler. Applies at the next start.",
                           "bf_temporal", TemporalChoices()));
@@ -3407,6 +3413,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       rows.push_back(mode);
       rows.push_back(sharp);
     }
+    }  // kTemporalUpscalers
     // Upscaling: King Kong's Upscaler and Upscaler mode rows and their words (TekRantGaming, 11 Nov 2026, v0.2.1: AMD FSR 1 and
     // NVIDIA NIS, "copy exactly that"). NativeXRenderer scales the drawn picture up to the screen with them (D115, on
     // Vulkan, so NIS can run on Linux too: King Kong's NIS is in its Direct3D 12 presenter, Windows only). Off draws the

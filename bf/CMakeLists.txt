@@ -10,6 +10,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(generated/rexglue.cmake)
 
+# 14 Nov 2026 (TekRantGaming: the exe's antivirus false positive, Trapmine "ml.score" on VirusTotal since 0.2.2): on
+# Windows the game calls the runtime's own SDL, which rexruntime.dll exports (our SDK copy, src/system/CMakeLists.txt),
+# instead of linking a second, complete SDL into bf1943.exe. That copy (pulled in whole by SDL's dynamic API table
+# from the voice chat's first SDL call) put SDL's window, keyboard hook and clipboard code in the exe; 0.2.1 without it
+# was clean, 0.2.2 with it flagged. SDL's headers stay; an SDL function the runtime does not export fails the link.
+if(WIN32 AND TARGET rex::runtime AND TARGET SDL3::Headers)
+    get_target_property(_bf_runtime_links rex::runtime INTERFACE_LINK_LIBRARIES)
+    list(REMOVE_ITEM _bf_runtime_links SDL3::SDL3-static)
+    list(APPEND _bf_runtime_links SDL3::Headers)
+    set_target_properties(rex::runtime PROPERTIES INTERFACE_LINK_LIBRARIES "${_bf_runtime_links}")
+endif()
+
 # Sources
 set(BF1943_SOURCES
     src/main.cpp
