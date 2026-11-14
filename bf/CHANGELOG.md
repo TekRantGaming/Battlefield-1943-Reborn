@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.5 (14 November 2026): bug fixes
+
+**Fixed**
+- General bug fixes.
+
 ## 0.4.4 (14 November 2026): temporal upscalers removed
 
 **Changed**

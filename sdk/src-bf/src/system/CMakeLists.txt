@@ -55,6 +55,24 @@ add_library(rex::kernel ALIAS rexruntime)
 
 set_target_properties(rexruntime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
 
+# 14 Nov 2026 (Battlefield 1943 Reborn): the runtime's SDL exported, every function of SDL's own list
+# (SDL_dynapi_procs.h), so a game program calls the one SDL the window, input and audio already run on instead of
+# linking a second, complete copy of its own (bf1943.exe did since its voice chat, and that copy's window, keyboard
+# hook and clipboard code drew an antivirus machine learning false positive). CMake merges this .def with the one
+# WINDOWS_EXPORT_ALL_SYMBOLS writes.
+if(WIN32)
+    file(STRINGS "${REXGLUE_ROOT}/thirdparty/sdl3/src/dynapi/SDL_dynapi_procs.h" _rex_sdl_procs
+         REGEX "^SDL_DYNAPI_PROC\\(")
+    set(_rex_sdl_def "EXPORTS\n")
+    foreach(_rex_sdl_line IN LISTS _rex_sdl_procs)
+        if(_rex_sdl_line MATCHES "^SDL_DYNAPI_PROC\\([^,]*,(SDL_[A-Za-z0-9_]+),")
+            string(APPEND _rex_sdl_def "    ${CMAKE_MATCH_1}\n")
+        endif()
+    endforeach()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/rexruntime_sdl.def" "${_rex_sdl_def}")
+    target_sources(rexruntime PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/rexruntime_sdl.def")
+endif()
+
 rex_target_pch(rexruntime
     <mutex>
     <unordered_map>
