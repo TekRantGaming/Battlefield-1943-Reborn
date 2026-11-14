@@ -3481,9 +3481,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     rows.push_back(Slider("Image", "Detail distance",
                           "How far away objects, buildings, vehicles, trees, bushes and rocks keep their detailed "
                           "shape before they switch to simpler ones, and how far they are drawn at all. 1.00x is the "
-                          "original game's; 2.00x keeps them twice as far. Applies within a second.",
-                          "bf_lod_distance", 1.0f, 2.0f, 0.25f,
-                          [](float v) { return fmt::format("{:.2f}Ã", v); }, 2.0f));
+                          "original game's. 2x carries soldiers, vehicles and ships across the whole map; 8x carries "
+                          "buildings and trees across it too, at a cost in frame rate. Applies within a second.",
+                          "bf_lod_distance", 1.0f, 8.0f, 1.0f,
+                          [](float v) { return fmt::format("{:.1f}\xC3\x97", v); }, 2.0f));
     rows.push_back(Choice("Image", "Texture filtering", "Keeps the ground and distant textures sharp at steep angles.",
                           "anisotropic_override",
                           {{"Game", "-1"}, {"Off", "0"}, {"2\xC3\x97", "2"}, {"4\xC3\x97", "3"}, {"8\xC3\x97", "4"},

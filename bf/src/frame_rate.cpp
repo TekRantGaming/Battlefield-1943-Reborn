@@ -333,7 +333,11 @@ REX_HOOK_RAW(sub_821F3248) {
 // (Tried before: Render.EdgeModelLodScale is the PlayStation 3's and does nothing here, runs lod1 to lod5; each
 // model's own Render.MeshLodSettingsAsset distances worked too, run lod9, but took a search of the heap every few
 // seconds for what this does in one place.)
-REXCVAR_DEFINE_DOUBLE(bf_lod_distance, 2.0, "BF1943", "How far models keep their detail, 1.0 (the game's own) to 2.0 times as far");
+// "continue with 8x instead of 10x": 1x to 8x in whole steps (the 1.5 steps asked for with 10x do not land on 8).
+// The game's own cut-offs are 1000 m for soldiers, vehicles and the carriers, 500 to 643 m for larger objects, 250 to
+// 350 m for buildings, palm trees and boulders (their lodsettings files); the map is 2048 m across, so 2x carries the
+// first across it, 4x the second, and 8x the buildings and trees. 2 by default (the doubling first asked for).
+REXCVAR_DEFINE_DOUBLE(bf_lod_distance, 2.0, "BF1943", "How far models keep their detail, 1.0 (the game's own) to 8.0 times as far");
 REXCVAR_DEFINE_DOUBLE(bf_dev_lod_scale, 0.0, "BF1943", "Developer: the level of detail's distance times this instead (0: not)");
 namespace bf1943 {
 bool LevelLoaded();  // auto_join.cpp
@@ -403,7 +407,7 @@ void LodWorker() {
                   uint32_t(settings - base), LoadFloatHost(settings + 0x10), ms);
     }
     const double dev = REXCVAR_GET(bf_dev_lod_scale);
-    const double factor = dev > 0 ? dev : std::clamp(REXCVAR_GET(bf_lod_distance), 1.0, 2.0);
+    const double factor = dev > 0 ? dev : std::clamp(REXCVAR_GET(bf_lod_distance), 1.0, 8.0);
     StoreFloatHost(settings + 0x10, float(1.0 / factor));  // each half second: the game may put its own back
     if (factor != applied) {
       applied = factor;
