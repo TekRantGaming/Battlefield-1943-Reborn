@@ -81,6 +81,17 @@
       "priority": 35
     },
     {
+      "id": "0474-vehicle-achievements",
+      "kind": "update",
+      "kicker": "0.4.7.4 · Achievements",
+      "title": "Five vehicle achievements",
+      "text": "On either side: Steel Behemoth (a tank), Road Warrior (a jeep), Naval Warfare (a boat), Air Superiority (a fighter plane) and Death From Above (call in the bombers from an air raid bunker). Each is worth 10 G, and Death From Above 20 G.",
+      "date": "2026-11-18",
+      "link": "https://github.com/TekRantGaming/Battlefield-1943-Reborn/blob/news/notes/0.4.7.4.md#extras",
+      "button": "Read more",
+      "priority": 34
+    },
+    {
       "id": "0474-chime-name",
       "kind": "update",
       "kicker": "0.4.7.4 · Extras",
