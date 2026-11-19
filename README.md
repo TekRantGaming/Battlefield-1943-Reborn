@@ -352,11 +352,14 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 
 - **Battlefield 1943** by DICE, published by Electronic Arts in 2009.
 - **Battlefield 1943 Reborn** by TekRantGaming and contributors (MIT, [LICENSE](LICENSE)): the port's own code.
-- **[@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy)**: ultrawide screens, mouse flying, free look in vehicles and
-  the mouse in the game's own input ([pull request 11](../../pull/11)); the mouse in every vehicle seat, Custom Match
+- **[@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy)**, the largest outside contributor (about 84% of the lines added
+  by contributors' merged pull requests, as of 19 November 2026): ultrawide screens, mouse flying, free look in
+  vehicles and the mouse in the game's own input ([pull request 11](../../pull/11)); the mouse in every vehicle seat, Custom Match
   with LAN, key bindings with two keys, HUD scale and minimap size, and the experimental tick rates
   ([pull request 16](../../pull/16)); Custom Match passwords, Iron Sight, motion blur and menu work
-  ([pull request 20](../../pull/20)); the server stall diagnostics ([pull request 22](../../pull/22)).
+  ([pull request 20](../../pull/20)); the server stall diagnostics ([pull request 22](../../pull/22)); the sky, weather
+  and wetness ([pull request 32](../../pull/32)); the hurricane, bots and Custom Match rules, 60 ticks as 30, vehicle
+  key bindings and wetness, soft sun shadows and night lights ([pull request 61](../../pull/61)).
 - **[@DiXN](https://github.com/DiXN)**: the big performance work, the renderer's own drawing thread, Future frame
   rendering, the audio crackling fix, the leaner Linux build and Wayland ([pull request 28](../../pull/28)).
 - **[@Erubadhron](https://github.com/Erubadhron)**: deploy map clicks that land where you click
