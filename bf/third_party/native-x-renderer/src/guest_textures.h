@@ -23,6 +23,8 @@
 #include <cstdint>
 #include <memory>
 
+#include <native_x_renderer/native_x_renderer.h>  // TextureUpscaleFn (D200)
+
 #include "Buffer.h"
 #include "DeviceContext.h"
 #include "recorder.h"
@@ -109,6 +111,8 @@ class GuestTextures final : public rex::graphics::TextureCache {
   uint32_t repatched_ = 0;  // the RepatchTextures count last served
   // D149: the HD pack's texture for a game texture's current data, or null.
   Diligent::ITextureView* HdView(HostTexture& texture);
+  Diligent::ITextureView* Upscaled(HostTexture& texture, TextureUpscaleFn upscale);  // D200
+  Diligent::ITextureView* UpscaledImage(HostTexture& texture, TextureUpscaleImageFn upscale);  // D200
   std::unordered_map<uint64_t, Diligent::RefCntAutoPtr<Diligent::ITexture>> hd_textures_;
 
   struct LoadPipeline {

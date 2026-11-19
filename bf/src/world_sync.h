@@ -18,6 +18,7 @@ struct Settings {
   float ground_fog = 0.0f;     // the ground fog, 0 to 1
   float wind = 0.3f;           // 0 calm to 1 a gale: how far the rain leans
   float cloud_height = 450.0f; // the cloud base over the sea, metres
+  bool dynamic_storm = false;  // the host builds a storm over the match and eases it (it sets the weather)
 };
 
 // The server joined ("ip:port", its host's port; "": none). From the menu's join.
@@ -30,10 +31,18 @@ struct Status {
   bool answered = false;  // the joined match's host keeps a world and answered lately
   bool admin = false;     // and lets this game change it
   Settings now;           // as it is now
+  // The match's rules (match_rules.cpp), from a host that tells them (19 Nov 2026):
+  int tickets = 0;          // each team's tickets at a round's start; 0: the level's own
+  int time_limit = 0;       // minutes a round lasts; 0: none
+  float time_left = -1;     // seconds left in the round when answered; -1: no limit or no round running
+  double answered_at = 0;   // when (world::Now()), for the time left since
 };
 Status Current();
 // An admin's change: sent to the host, which every player's game then follows.
 void Request(const Settings& settings);
+
+// Seconds on world_sync's clock (Status::answered_at's).
+double Now();
 
 // The in-game admin panel (F9) is open: the mouse and the keys are its own.
 bool AdminPanelOpen();

@@ -166,6 +166,7 @@ bool ViewLogOn() {
 // From fov.cpp's setFovY hook (the camera manager's copy of the renderer's view, sub_82294A58): the view's camera
 // transform (+0x40, run view1) at the moment it is handed back to the renderer.
 std::atomic<float> g_dev_view_pos[3];  // the rendered camera's position, every frame (the vehicle seeker)
+std::atomic<float> g_dev_view_rot[9];  // its rows (right, up, forward), for BF_DEV_BONELOG's offsets in the view
 
 void DevViewSample(uint8_t* base, uint32_t view) {
   {
@@ -174,6 +175,8 @@ void DevViewSample(uint8_t* base, uint32_t view) {
       g_dev_view_pos[0].store(BeFloat(a + 48), std::memory_order_relaxed);
       g_dev_view_pos[1].store(BeFloat(a + 52), std::memory_order_relaxed);
       g_dev_view_pos[2].store(BeFloat(a + 56), std::memory_order_relaxed);
+      for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) g_dev_view_rot[r * 3 + c].store(BeFloat(a + r * 16 + c * 4), std::memory_order_relaxed);
     }
   }
   // BF_DEV_VIEWFIND=<sample>: at that sample in a match, every place in guest memory that holds the view's camera

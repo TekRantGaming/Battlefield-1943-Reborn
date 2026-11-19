@@ -7,11 +7,11 @@
 // detect chose). The rows themselves are King Kong's (RowsOf). The mockup (runs\ui-designs, build2.py a1_settings)
 // is 1920 x 1080; sizes here are its at 720 lines, on the Stage.
 
-  static constexpr const char* kTabSubs[kTabCount] = {"WINDOW, RESOLUTION, FRAME RATE", "PRESETS, UPSCALING, LIGHTING",
+  static constexpr const char* kTabSubs[kTabCount] = {"WINDOW, RESOLUTION, FRAME RATE", "PRESETS, UPSCALING, IMAGE",
                                                       "VOLUME, VOICE CHAT", "KEYBOARD AND MOUSE, OR CONTROLLER",  // by device since 16 Nov
-                                                      "NAME, LANGUAGE, CHAT",
+                                                      "NAME, CAMERA, HUD",
                                                       // the sniper scope only in a build with it (scope_pip.h)
-                                                      kScopePip ? "LETTERED FLAGS, SNIPER SCOPE" : "LETTERED FLAGS"};
+                                                      "FOV, LIGHTING, HD TEXTURES"};
 
   // Back where the settings were opened from: the pause (a match running), else the menu (Home before the game runs).
   void BackFromSettings() {
@@ -113,10 +113,17 @@
         section = it.section;
         kit::Spaced(d, f.typed, st(10), ImVec2(tx0, y_row - sh + st(9)), kit::kInkSection, Upper(section), st(2));
         d->AddLine(ImVec2(tx0, y_row - st(3)), ImVec2(tx1, y_row - st(3)), kit::kRule, 1.0f);
-        if (!it.slots.empty()) {  // the bindings' columns: two keys, two mouse buttons
+        // The columns' names over the section, from its first binding (the "Keys for" or "Buttons for" row of a
+        // vehicle kind comes before them, 18 Nov 2026).
+        const SettingRow* first = nullptr;
+        for (int j = i; j < count && rows[size_t(j)].section == section && !first; ++j)
+          if (!rows[size_t(j)].slots.empty()) first = &rows[size_t(j)];
+        if (first && first->pad_glyphs) {  // the controller's column (its one box)
+          kit::Spaced(d, f.typed, st(8), ImVec2(tx1 - st(130), y_row - sh + st(9)), kit::kInkSection, "CONTROLLER", st(2));
+        } else if (first) {  // the bindings' columns: two keys, two mouse buttons
           const float bw = st(66), gap = st(6), pair = st(14);
           const float mouse_x = tx1 - 2 * bw - gap, keys_x = mouse_x - pair - 2 * bw - gap;
-          if (it.slots.size() == 5)
+          if (first->slots.size() == 5)
             kit::Spaced(d, f.typed, st(7), ImVec2(keys_x - 2 * pair - bw, y_row - sh + st(10)), kit::kInkSection, "CONTROLLER", st(1.2f));
           kit::Spaced(d, f.typed, st(8), ImVec2(keys_x, y_row - sh + st(9)), kit::kInkSection, "KEYBOARD", st(2));
           kit::Spaced(d, f.typed, st(8), ImVec2(mouse_x, y_row - sh + st(9)), kit::kInkSection, "MOUSE", st(2));
@@ -259,7 +266,7 @@
         // A binding: its four slots as boxes (13 Nov 2026). A click on one, or A on the one left and right are on,
         // makes it wait for a press; the waiting one is red.
         const int n = int(it.slots.size());
-        const float bw = n == 5 ? st(66) : st(82), gap = st(6), pair = st(14);
+        const float bw = it.pad_glyphs ? st(130) : n == 5 ? st(66) : st(82), gap = st(6), pair = st(14);
         for (int k = 0; k < n; ++k) {
           // from the right: the mouse's pair, the keyboard's pair, and (five slots) the controller's one
           const int from_right = n - 1 - k;
@@ -269,10 +276,16 @@
           const bool waiting = it.slot_capture == k, cursor = sel && it.slot_cursor == k;
           d->AddRectFilled(b0, b1, waiting ? kit::kStamp : cursor || over ? kit::kPaperLight : kit::kPaperDim);
           d->AddRect(b0, b1, cursor ? kit::kStamp : kit::kBorder, 0, 0, cursor ? st(2.0f) : 1.0f);
-          const std::string label = waiting ? "PRESS..." : it.slots[size_t(k)].empty() ? "-" : it.slots[size_t(k)];
-          const float lw = kit::TextWidth(f.ui_bold, st(12), label);
-          d->AddText(f.ui_bold, st(12), ImVec2((b0.x + b1.x - lw) * 0.5f, b0.y + (b1.y - b0.y - st(12) * 1.45f) * 0.5f),
-                     waiting ? kit::kCream : it.slots[size_t(k)].empty() ? kit::kInkFaint : kit::kInk, label.c_str());
+          // The controller's (pad_glyphs): its part's glyph, the height of the box less a margin all round.
+          if (it.pad_glyphs && !waiting && !it.slots[size_t(k)].empty() &&
+              PadSlotGlyph(d, it.slots[size_t(k)], ImVec2((b0.x + b1.x) * 0.5f, (b0.y + b1.y) * 0.5f), (b1.y - b0.y) * 0.72f) > 0) {
+          } else {
+            const std::string label = waiting ? (it.pad_glyphs && capture_.rfind("axis:", 0) == 0 ? "MOVE A STICK..." : "PRESS...")
+                                      : it.slots[size_t(k)].empty() ? "-" : it.slots[size_t(k)];
+            const float lw = kit::TextWidth(f.ui_bold, st(12), label);
+            d->AddText(f.ui_bold, st(12), ImVec2((b0.x + b1.x - lw) * 0.5f, b0.y + (b1.y - b0.y - st(12) * 1.45f) * 0.5f),
+                       waiting ? kit::kCream : it.slots[size_t(k)].empty() ? kit::kInkFaint : kit::kInk, label.c_str());
+          }
           if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && it.slot_click && capture_.empty()) {
             row_ = i;
             REXLOG_INFO("BF settings: {} / {} slot {} waits for a press", kTabNames[tab_], it.name, k + 1);

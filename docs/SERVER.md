@@ -50,12 +50,32 @@ Each server keeps its own clock and weather, and every player on it sees the sam
 - **Distance fog** (a haze that hides what is far; at 100 the sight is about a kilometre) and **Ground fog** (a low
   layer over the sea and the shore). Both show with either sky.
 - **Wind** (0 calm to 100 a gale): how far the rain leans.
-- **Cloud height** (200 to 1500 metres over the sea): where the clouds begin. Low, the planes fly through them and
+- **Cloud height** (100 to 1500 metres over the sea): where the clouds begin. Low, the planes fly through them and
   can hide in them.
 - **Admin player IDs**: players who may change all of the above while the server runs, with **F9** in the game. A
   player who presses F9 in a match without the right is shown their ID to send you.
 
 A match hosted from the game (Custom match) has the same settings under **Weather and time**, and its host is its admin.
+
+## Custom match: game mode, maps, tickets, match time and the storm
+
+A match hosted from the game (**Custom match**) also has:
+
+- **Game mode**: Conquest (Wake Island, Guadalcanal, Iwo Jima), Air Superiority (Coral Sea) or All modes. Each map
+  has one mode in the game, so the mode chooses the maps you can pick.
+- **Map rotation**: a list of its own. Switch it on and pick the maps one by one, or **Rotate all maps** (every map of
+  the mode). The match then plays them in turn, the next one after each round. Off, it plays the one map.
+- **Tickets**: each team's tickets at a round's start (the map's own is 130, Coral Sea 100).
+- **Match time**: how long a round lasts. When it is up, the team with fewer tickets loses; with both level, the next
+  ticket lost decides. Players see the time left over the ticket bars. Off, a round ends only when a team has no
+  tickets left.
+- **Dynamic storm** (under Weather and time): the weather builds from its setting to a full storm over each round and
+  eases again (over the match time, or half an hour without one); the wind goes with it unless set apart. The admin
+  panel (**F9**) shows the weather as it moves and can switch the storm.
+
+A dedicated server takes the same as `--bf_match_tickets=<n>`, `--bf_match_time_limit=<minutes>` and
+`--bf_world_dynamic_storm=true` on its command line; the server package's own host (`gmhost.py`) does not pass them
+yet.
 
 ## Updates
 

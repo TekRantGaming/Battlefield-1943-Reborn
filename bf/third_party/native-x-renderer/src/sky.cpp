@@ -1,6 +1,9 @@
 // NativeXRenderer - a sky of its own (sky.h).
 
 #include "sky.h"
+#include "storm.h"
+
+#include <mutex>
 
 #include <rex/logging.h>
 
@@ -14,6 +17,7 @@
 #include <string>
 
 #include "glsl.h"
+#include <native_x_renderer/native_x_renderer.h>  // LightningStrike
 
 namespace native_x_renderer {
 
@@ -214,6 +218,9 @@ void main() {
 }
 )";
 
+// D193: the player is on foot (SetEyeOnFoot; true until told otherwise).
+std::atomic<bool> g_eye_on_foot{true};
+
 // What both pixel shaders share: the constants, the ray of a view coordinate, and the sky's colour (Beachhead's
 // sky_color.gdshaderinc: the gradient, the sun, at night the stars and the moon, the cirrus).
 constexpr const char* kCommon = R"(#version 450
@@ -239,6 +246,14 @@ layout(std140, set = 0, binding = 0) uniform SkyConstants {
   vec4 flash;                // xyz the lightning's place (x, the height over the sea, z); w its light now
   vec4 cover_m[9];           // the rain's cover: three cascades' transforms from the world, three rows each
   vec4 rain;                 // x how far the rain leans (the tangent); y 1 with a cover map; the lens: z how many of the rain's drops, w of a splash's (view.z and view.w: how strongly each shows)
+  vec4 ssr;                  // D190: x the sea's reflection of the renderer's own (0 off, 1 on); y the wind, 0 to 1
+  vec4 bolt;                 // D192: x how many of the bolt's pieces (0: none); y its light now; z pixels a metre makes at 1 m
+  vec4 bolt_box;             // the view's pixels it may show in (x0, y0, x1, y1)
+  vec4 bolt_seg[144];        // each piece: its ends in the view's pixels (ax, ay, bx, by); their distances along the view, its half width (m), how bright
+  vec4 gale;                 // D194: x the storm's mist, 0 to 1 (the ground fog filled in, low on the ground under what is seen)
+  vec4 storm_a;              // D208: the hurricane (storm.h): its centre (x, z), its eye's radius and its rain shield's
+  vec4 storm_b;              // its strength, its bands' turn, 1 while there is one, its volutus (D211)
+  vec4 layers;               // D211: x the altocumulus's cover, y its brightness; z the clouds' shadows on (D214)
 };
 layout(set = 0, binding = 1) uniform sampler2D weatherTex;
 
@@ -311,6 +326,61 @@ vec3 sky_color(vec3 rd) {
     sky = mix(sky, moon_tex * 1.35, disc * night_amount);
     sky += moon_color.rgb * (0.10 * pow(max(moon_cos, 0.0), 400.0) + 0.035 * pow(max(moon_cos, 0.0), 24.0)) * night_amount;
   }
+  // D211: altocumulus, a mid-level layer 5 km up (the user, 19 Nov 2026: "Clouds should be able to form on multiple
+  // altitude layers, including cirrus high above"): small rounded cells in patches (two of the weather map's scales),
+  // drifting slower than the low clouds, their tops lit toward the sun, grey beneath.
+  if (rd.y > 0.01 && layers.x > 0.0) {
+    vec2 hit = rd.xz / rd.y * 5000.0 + drift.xy * 0.35;
+    float clump = smoothstep(0.35, 0.75, texture(weatherTex, hit / 26000.0 + 0.13).g);
+    float cells = texture(weatherTex, hit / 2400.0).r * 0.55 + texture(weatherTex, hit / 700.0 + 0.41).g * 0.45;
+    float c = smoothstep(1.0 - layers.x, 1.0 - layers.x + 0.18, cells) * clump;
+    vec2 to_sun = normalize(sun_dir.xz + vec2(1e-4));
+    float lit = texture(weatherTex, (hit - to_sun * 60.0) / 700.0 + 0.41).g;
+    float shade = clamp(0.55 + (cells - lit) * 3.0, 0.25, 1.0);
+    c *= smoothstep(0.01, 0.12, rd.y);
+    vec3 grey = mix(fog_color.rgb, mid_color.rgb, 0.5) * 0.9;
+    vec3 top = vec3(1.0) * (0.75 + 0.35 * sun_dir.w) * (1.0 - 0.92 * night_amount);
+    sky = mix(sky, mix(grey, top, shade) * layers.y, c * 0.85);
+  }
+  // D212: the hurricane's wall seen from outside it: the low layer's own clouds fade into the horizon's haze a few
+  // degrees up, so a storm a few kilometres off did not show. Toward the storm, over the angle its dense part takes,
+  // its towers at the eyewall (3 km tall as it forms, 10 km at full strength; the anvil's flat top): dark blue-grey
+  // in the sky's own colours, the top lit, the foot in the haze. Only while the eye is outside the dense part.
+  if (storm_b.z > 0.5 && rd.y > -0.02) {
+    vec2 to = storm_a.xy - eye.xz;
+    float dist = length(to);
+    float dense = storm_a.w * 0.75;
+    if (dist > dense * 0.9) {
+      float edge = max(dist - 1.8 * storm_a.z, 400.0);  // to the eyewall, where the towers stand
+      vec2 dir = normalize(rd.xz + vec2(1e-5));
+      float off = acos(clamp(dot(dir, to / dist), -1.0, 1.0));
+      float span = asin(clamp(dense / dist, 0.0, 1.0));
+      float across = off / max(span, 1e-3);
+      if (across < 1.0) {
+        float az = atan(dir.y, dir.x);
+        // Its towers 0.6 km tall as the storm forms, 2 km at full strength (D213: 3 and 10 km before, too large for the
+        // game's levels); an anvil's broad flat top.
+        float tall = 600.0 + 1400.0 * smoothstep(0.25, 1.0, storm_b.x * smoothstep(0.0, 1.0, 1.0 - dist / (4.0 * storm_a.w)));
+        float top = atan(tall / edge) * sqrt(max(1.0 - pow(across, 4.0), 0.0));
+        top *= 0.75 + 0.25 * texture(weatherTex, vec2(az * 3.0, 0.37)).r + 0.15 * texture(weatherTex, vec2(az * 17.0, 0.71)).g;
+        float el = asin(clamp(rd.y, -1.0, 1.0));
+        if (el < top) {
+          float h = clamp(el / max(top, 1e-3), 0.0, 1.0);
+          // Billows: the weather map at two scales, alike across and up (stretched up it streaked like a curtain).
+          float body = texture(weatherTex, vec2(az, el) * 5.0 + 0.1).r * 0.6 + texture(weatherTex, vec2(az, el) * 15.0 + 0.37).g * 0.4;
+          // In the sky's own colours: a dark blue-grey body, its top lit near the horizon's brightness.
+          vec3 base = mix(fog_color.rgb, horizon_color.rgb, 0.5);
+          vec3 dark = base * mix(0.32, 0.5, body) * vec3(0.85, 0.92, 1.05);
+          vec3 lit = horizon_color.rgb * 1.05;
+          vec3 wall = mix(dark, lit, smoothstep(0.75, 1.0, h) * (0.4 + 0.6 * body));
+          wall *= 1.0 - 0.9 * night_amount;
+          float amount = storm_b.x * smoothstep(1.0, 0.85, across) * smoothstep(top, top * 0.93, el);
+          float haze = 1.0 - exp(-edge / 30000.0);
+          sky = mix(sky, mix(wall, fog_color.rgb, haze * 0.8), amount * smoothstep(dense * 0.9, dense * 1.2, dist));
+        }
+      }
+    }
+  }
   // Cirrus: the ray to a plane 10 km up, the weather map stretched along the upper wind into streaks.
   float cirrus = moon_dir.w;
   if (rd.y > 0.01 && cirrus > 0.0) {
@@ -328,13 +398,15 @@ vec3 sky_color(vec3 rd) {
 
 // The clouds (Beachhead's cloud_core.gdshaderinc, without its towers and its storms): a layer between two altitudes on
 // a round planet, marched along the ray; premultiplied light in rgb and what shows through in a.
-constexpr const char* kCloudPS = R"(
+constexpr const char* kCloudBindings = R"(
 layout(set = 0, binding = 2) uniform sampler3D shapeTex;
 layout(set = 0, binding = 3) uniform sampler3D detailTex;
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec4 out_where;
-
+)";
+// The clouds' density where they are (D214: shared with the fog's pass, for the clouds' shadows on the ground).
+constexpr const char* kCloudShared = R"(
 const float PI = 3.14159265;
 const float PLANET_R = 6360000.0;
 const float shape_scale = 9000.0;
@@ -380,7 +452,14 @@ float cloud_density(vec3 p, vec3 cam, bool cheap) {
   wp += band * vec2(7300.0, 4100.0);
   vec2 wm = texture(weatherTex, wp / weather_scale).rg;
   float cover = clamp(coverage * mix(0.6 + wm.r * 0.8, (0.2 + wm.r * 1.6) * 0.66, lay), 0.0, 1.0);
+  // D208: the hurricane's cloud where it is: a whole deck under its strength, its layers merged into one.
+  float storm = storm_at(p.xz * max(misc.z, 1e-3), storm_a, storm_b);
+  cover = mix(cover, 1.0, 0.92 * storm);
+  lay *= 1.0 - storm;
+  // D211: in the storm's bands the low clouds tower (cumulonimbus: the tallest kind, the whole layer's depth).
+  float storm_type = smoothstep(0.2, 0.7, storm);
   float local_type = clamp(cloud_type + (wm.g - 0.5) * 0.8 + (wm.r - 0.5) * 0.6, 0.0, 1.0);
+  local_type = mix(local_type, 1.0, storm_type);
   float local_base = base_altitude + local_type * local_type * 400.0;
   local_base += (vnoise(wp / 3200.0 + 17.0) - 0.5) * mix(300.0, 0.0, lay);
   local_base += lay * (band * band_h - local_type * local_type * 400.0 + vnoise(wp / 2600.0 + 31.0) * 90.0);
@@ -408,10 +487,37 @@ float cloud_density(vec3 p, vec3 cam, bool cheap) {
       c = remap(c, erode * 0.7 * (1.0 - 0.25 * lay), 1.0, 0.0, 1.0);
     }
     if (!cheap) c = clamp(c * mix(2.2, 1.0, lay), 0.0, 1.0);  // crisp silhouettes in fair weather
+    // D217: under the storm a whole deck, its noise only its underside's texture (at 75% between the bands the cover
+    // alone left broken cumulus and blue sky, run stormsky1): filled in from 30% of its strength, whole by 70%.
+    c = mix(c, max(c, 0.55 + 0.45 * base), smoothstep(0.3, 0.7, storm) * smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(0.8, 1.0, h)));
     low = max(c, 0.0);
   }
-  return low * drift.w;
+  // D211: the volutus, a roll cloud along the storm's gust front (the user: "Cloud generation should match photoreal
+  // topical clouds too, including volutus clouds"): a long horizontal tube low in the layer just outside the rain
+  // shield, its cross-section 450 of the layer's units round, broken here and there along its length and eroded at its
+  // edges, while the storm comes in (storm_b.w).
+  if (storm_b.w > 0.0 && storm_b.z > 0.5) {
+    float ws = max(misc.z, 1e-3);
+    vec2 rel = p.xz * ws - storm_a.xy;
+    float ring = (storm_a.w * 1.05) / ws;
+    vec2 q = vec2(length(rel) / ws - ring, (alt - base_altitude - 380.0) * 1.3) / 450.0;
+    float tube = 1.0 - smoothstep(0.45, 1.0, length(q));
+    if (tube > 0.0) {
+      float along = atan(rel.y, rel.x) * ring;
+      float breaks = smoothstep(0.25, 0.55, vnoise(vec2(along / 2600.0, 3.7)));
+      vec4 s = textureLod(shapeTex, vec3(p.x, p.y * 2.0, p.z) / 3000.0, 0.0);
+      float roll = tube * breaks * (0.55 + 0.45 * s.r);
+      if (!cheap) {
+        vec3 d = textureLod(detailTex, p / detail_scale, 0.0).rgb;
+        roll = remap(roll, (d.r * 0.625 + d.g * 0.25 + d.b * 0.125) * 0.5, 1.0, 0.0, 1.0);
+      }
+      low = max(low, clamp(roll * 1.6, 0.0, 1.0) * storm_b.w);
+    }
+  }
+  return low * drift.w * (1.0 + 0.9 * storm);
 }
+)";
+constexpr const char* kCloudPS = R"(
 float hg(float cos_t, float g) {
   float g2 = g * g;
   return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * cos_t, 1.5));
@@ -654,6 +760,10 @@ void main() {
 constexpr const char* kFogShared = R"(
 layout(set = 0, binding = 2) uniform sampler2D depthTex;
 layout(set = 0, binding = 3) uniform sampler2DArray coverTex;
+layout(set = 0, binding = 4) uniform sampler2D sceneTex;  // D190: the scene as drawn before the fog (the sea's reflection)
+layout(set = 0, binding = 5) uniform sampler2D seaMaskTex;  // D190: where the sea is drawn (its depth; 0 elsewhere)
+layout(set = 0, binding = 6) uniform sampler2D seaAfterTex;  // D190: the picture just after the sea was drawn
+layout(set = 0, binding = 7) uniform sampler2D seaFloorTex;  // D190: the world's depth without the sea (0: not known)
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 // 1 where the world's point p is under cover: in the first cascade of the game's shadow map that holds it, something
@@ -676,6 +786,11 @@ vec3 ViewRay(vec2 px) {
   vec3 c = vec3(ndc, 1.0);
   return vec3(dot(inv0.xyz, c), dot(inv1.xyz, c), dot(inv2.xyz, c));
 }
+)";
+// D214: the clouds' textures in the fog's pass (the clouds' shadows on the ground).
+constexpr const char* kFogClouds = R"(
+layout(set = 0, binding = 8) uniform sampler3D shapeTex;
+layout(set = 0, binding = 9) uniform sampler3D detailTex;
 )";
 constexpr const char* kFogPS = R"(
 float ign(vec2 px) { return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715)))); }
@@ -734,15 +849,19 @@ void main() {
   float tau = fog_a.x > 0.0 ? haze_depth(fog_a.x, fog_a.y, eye_h, rd.y, L) : 0.0;
 
   // The ground fog: a layer from the sea up to its top, in patches that drift; marched for 2.5 km, its mean beyond.
+  // D194: in a full storm (gale.x) the mist the storm kicks up: the patches filled in, drifting faster, and the layer
+  // from the ground under what is seen, not the sea (2 m under it: so over the island too, not only the shore).
   float tau_low = 0.0;
   float top = fog_a.w;
   if (fog_a.z > 0.0 && fog_b.z > 0.5) {
+    float floor_h = nothing ? 0.0 : max(eye_h + rd.y * L - 2.0, 0.0) * gale.x;
+    float eh = eye_h - floor_h;  // the eye over the layer's floor
     float ta = 0.0, tb = L;
     if (abs(rd.y) > 1e-5) {
-      float t0 = -eye_h / rd.y, t1 = (top - eye_h) / rd.y;
+      float t0 = -eh / rd.y, t1 = (top - eh) / rd.y;
       ta = max(min(t0, t1), 0.0);
       tb = min(max(t0, t1), L);
-    } else if (eye_h < 0.0 || eye_h > top) {
+    } else if (eh < 0.0 || eh > top) {
       tb = -1.0;
     }
     const float reach = 2500.0;
@@ -751,11 +870,12 @@ void main() {
     if (tm > ta) {
       float dt = (tm - ta) / float(n);
       float t = ta + dt * dither;
-      vec2 wind = drift.xy * 0.15;
+      vec2 wind = drift.xy * (0.15 + 0.45 * gale.x);
       for (int i = 0; i < n; ++i) {
-        float h = eye_h + rd.y * t;
+        float h = eh + rd.y * t;
         vec2 xz = eye.xz + rd.xz * t + wind;
         float patches = smoothstep(0.32, 0.68, texture(weatherTex, xz / 900.0).r);
+        patches = mix(patches, 0.55 + 0.45 * patches, gale.x);
         float up = exp(-max(h, 0.0) / (top * 0.3)) * (1.0 - smoothstep(top * 0.6, top, h));
         // Thinner right at the eye, so that what is held in the hand stays clear.
         tau_low += fog_a.z * patches * up * dt * smoothstep(0.0, 6.0, t);
@@ -764,7 +884,7 @@ void main() {
     }
     if (tb > reach && tb > ta) {
       float from = max(ta, reach);
-      float h_mid = clamp(eye_h + rd.y * 0.5 * (from + tb), 0.0, top);
+      float h_mid = clamp(eh + rd.y * 0.5 * (from + tb), 0.0, top);
       tau_low += fog_a.z * 0.5 * exp(-h_mid / (top * 0.3)) * (tb - from);
     }
   }
@@ -799,7 +919,7 @@ void main() {
   vec3 haze = fog_color.rgb + sun_color.rgb * sun_dir.w * (1.0 - night_amount) * 0.3 * pow(max(sun_cos, 0.0), 8.0) +
               moon_light.rgb * 2.0;
   vec3 low = mix(haze, vec3(dot(haze, vec3(0.333))) * 1.08, 0.5);
-  vec3 rain = fog_color.rgb * 0.3;
+  vec3 rain_far = fog_color.rgb * 0.3;  // (named rain until 17 Nov 2026, it hid the constants' rain below: the streaks leant by a tenth or so of the fog's colour, whatever the wind)
   // (The rain's streaks take the haze's light as it is without the lightning: lit by a flash's quick strokes the
   // falling rain was seen in jumps, as under a strobe, "Rainfall still resets/pulls-up when lightning flashes",
   // 14 Nov 2026.)
@@ -841,23 +961,28 @@ void main() {
     float ang = atan(dot(off, e1), dot(off, e2));
     float eye_along = dot(eye_world.xyz, axis);
     float sum = 0.0;
-    for (int i = 0; i < 5; ++i) {
+    // A downpour (the user, 17 Nov 2026: "make the rain itself more visible/dense at 100% weather"): from 75% of the
+    // weather up, more drops in each column, longer and brighter, and a sixth cylinder further out.
+    float heavy = smoothstep(0.75, 1.0, amount);
+    for (int i = 0; i < 6; ++i) {
       float fi = float(i);
+      if (i == 5 && heavy < 0.01) break;
       float R = 3.0 * pow(1.8, fi);
       float t = R / max(flat_len, 0.05);
       float y = eye_along + along_ray * t;
-      float per_m = 14.0 / (1.0 + 0.7 * fi);
+      float per_m = 14.0 / (1.0 + 0.7 * fi) * (1.0 + 0.8 * heavy);  // (more columns in a downpour)
       float u = ang * R * per_m + fi * 17.3;
       float wpx = max(fwidth(u), 1e-4);
       if (t > seen || flat_len < 0.05) continue;
       if (Covered(eye_world.xyz + rd * t) > 0.5) continue;
       float col = floor(u);
       float h1 = h21(vec2(col, fi * 7.0 + 1.0)), h2 = h21(vec2(col, fi * 7.0 + 2.0)), h3 = h21(vec2(col, fi * 7.0 + 3.0));
-      float period = 1.2 + 1.3 * h2;
+      float period = (1.2 + 1.3 * h2) * (1.0 - 0.35 * heavy);
       float v = (y + tsec * (8.0 + 3.0 * h1)) / period + h3 * 10.0;
-      float on = step(1.0 - amount * 0.85, h21(vec2(col + floor(v) * 13.0, fi + 40.0)));
+      float on = step(1.0 - amount * 0.85 - 0.13 * heavy, h21(vec2(col + floor(v) * 13.0, fi + 40.0)));
+      if (i == 5) on *= heavy;
       float f = fract(v);
-      float len = 0.3 / period * (1.0 + 0.15 * fi);
+      float len = 0.3 / period * (1.0 + 0.15 * fi) * (1.0 + 0.45 * heavy);
       float along = smoothstep(0.0, len * 0.2, f) * (1.0 - smoothstep(len * 0.6, len, f));
       float half_w = 0.002 * per_m;  // half as thick as at first ("make the world rain itself about 50% thinner")
       float across = 1.0 - smoothstep(0.0, max(half_w, wpx), abs(fract(u) - 0.5 - (h1 - 0.5) * 0.6));
@@ -870,12 +995,16 @@ void main() {
     // the view upward, "Rainfall still looks like it's being pulled-up when lightning flashes", 14 Nov 2026.)
     // (Shown nearly up to where the eye looks along the rain: looking up, the streaks fan out from that point as
     // rain coming at the eye does. Hidden from further off, a look up into a storm showed no rain at all.)
-    streaks = min(sum, 1.0) * smoothstep(0.05, 0.16, flat_len);
-    rain_light = streak * streaks * 0.45;
-    float open = 1.0 - Covered(P + vec3(0.0, 0.3, 0.0));
+    // D195: thinner still within about 30 degrees of that point (the user, 18 Nov 2026: looking "toward the direction
+    // rain is coming from ... looks like the player is in a circular tunnel": the cylinders' streaks lined up in rings).
+    streaks = min(sum, 1.0) * smoothstep(0.05, 0.16, flat_len) * mix(0.25, 1.0, smoothstep(0.16, 0.5, flat_len));
+    rain_light = streak * streaks * (0.45 + 0.45 * heavy);
+    // (Not what faces down, a roof's or a porch's underside: 30 cm over a thin roof's underside is out in the rain
+    // above it, and rings, splashes and the wet showed on the inside of the roofs: the user, 17 Nov 2026.)
+    float open = facing.y < -0.5 ? 0.0 : 1.0 - Covered(P + vec3(0.0, 0.3, 0.0));
     if (!nothing && seen > 1.2) {
       wet = 1.0 - 0.12 * amount * open;
-      if (seen < 45.0 && facing.y > 0.96 && open > 0.5) {
+      if (seen < 45.0 && facing.y > 0.96 && open > 0.5 && P.y < eye_world.y - 0.05) {
         vec4 drop = Drop(P.xz, amount, tsec);
         float rr = length(P.xz - drop.xy);
         float ring = (1.0 - smoothstep(0.0, 0.012, abs(rr - drop.z * 0.13))) * (1.0 - drop.z) * (1.0 - drop.z);
@@ -906,8 +1035,11 @@ void main() {
           before = G;
           if (k == 1) continue;
           float away = wq * length(rq);
-          // Flat ground only (it hardly rises from one place to the next), not behind what this pixel shows.
-          if (away > 18.0 || away > seen + 0.05 || abs(G.y - was.y) > 0.5 * length(G.xz - was.xz) + 0.003) continue;
+          // Flat ground only (it hardly rises from one place to the next), not behind what this pixel shows, and
+          // under the eye: what lies flat and is seen from beneath (a ceiling, a roof's underside) faces down.
+          if (away > 18.0 || away > seen + 0.05 || abs(G.y - was.y) > 0.5 * length(G.xz - was.xz) + 0.003 ||
+              G.y > eye_world.y - 0.05)
+            continue;
           vec4 drop = Drop(G.xz, amount, tsec);
           if (drop.w < 0.5 || drop.z > 0.3 || Covered(G + vec3(0.0, 0.3, 0.0)) > 0.5) continue;
           float off = length(G.xz - drop.xy);
@@ -919,10 +1051,266 @@ void main() {
       }
     }
   }
+  // D190: the sea's reflection of the renderer's own (the user, 17 Nov 2026: "turn those reflections off and use our own
+  // SSR on them and the water"; the game's own is a day sky's cube map, which the draw path leaves out of the sea's
+  // shaders while this is on). The sea is the plane at its height (Sky::ReadSea): a pixel whose ray meets it before
+  // what the depth holds (or at it) shows the sea. Its facing: up, rippled by a few small waves (more with the wind,
+  // calmer far off). The reflected ray is marched through the view's depth (40 steps growing from about half a metre);
+  // where it passes behind what is drawn, that is what the sea shows. Where it leaves the view or meets only the sky:
+  // the sky drawn in its direction if that is in the view, else the sky's own palette that way. As much as Fresnel
+  // gives (2% straight down to all of it at a grazing look), taken from the game's own colour of the water.
+  vec3 sea_refl = vec3(0.0);
+  float sea_f = 0.0;
+  vec3 dbg_sky = vec3(0.0), dbg_own = vec3(0.0);  // D204 debug 7 to 9: the sky mirrored, where from, the water's own
+  float dbg_src = 0.0;
+  vec3 dbg_add = vec3(0.0);
+  float dbg_self = 0.0, dbg_f0 = 0.0, dbg_got = 0.0;
+  if (ssr.x > 0.0 && fog_b.z > 0.5 && rd.y < -1e-4 && eye_h > 0.05) {
+    float ts = eye_h / -rd.y;
+    // (Where the sea's draws are, when they could be drawn again (ssr.z); flat ground at the sea's height is not it.
+    // With them, the sea is wherever they are, its waves too: by the plane alone the crests near the eye, above it,
+    // were left out (the user, 17 Nov 2026: "isn't being used at near-field").)
+    bool masked = mod(ssr.z, 10.0) > 0.5;
+    bool sea_here = masked ? !nothing && textureLod(seaMaskTex, gl_FragCoord.xy / view.xy * ssr.w, 0.0).r > 0.0
+                           : nothing || ts <= L + 0.2 + 0.002 * L;
+    if (sea_here) {
+      if (masked) ts = fog_b.x / depth * rl;  // the surface drawn, its waves
+      vec3 S = eye_world.xyz + rd * ts;
+      float tsec = eye.w;
+      float amp = (0.05 + 0.14 * ssr.y) / (1.0 + ts / 150.0);
+      // (Waves alone, five of them, lay in even bands across the middle distance: run ssr_g1. Their phases are now
+      // shifted by a drifting noise, and two octaves of the noise's own slope are added.)
+      vec2 g = vec2(0.0);
+      vec2 warp = vec2(vnoise(S.xz * 0.045 + tsec * 0.02), vnoise(S.xz * 0.045 + 7.3 - tsec * 0.017)) * 6.0;
+      for (int k = 0; k < 5; ++k) {
+        float fk = float(k);
+        float a = fk * 2.399 + 0.6;
+        vec2 dir = vec2(cos(a), sin(a));
+        float freq = 0.55 * pow(1.7, fk);
+        float ph = dot(dir, S.xz) * freq - tsec * sqrt(9.81 * freq) * 0.6 + fk * 1.7 + warp.x * (0.5 + 0.3 * fk) + warp.y;
+        g += dir * (cos(ph) / (1.0 + fk * 0.6));
+      }
+      for (int k = 0; k < 2; ++k) {
+        float sc = k == 0 ? 0.35 : 1.1;
+        vec2 q = S.xz * sc + vec2(tsec * 0.13, -tsec * 0.09) * (1.0 + float(k));
+        const float e = 0.15;
+        float n0 = vnoise(q);
+        g += vec2(vnoise(q + vec2(e, 0.0)) - n0, vnoise(q + vec2(0.0, e)) - n0) / e * (k == 0 ? 0.9 : 0.5);
+      }
+      // (Ripples tilted the reflection so far that near the eye it broke up into bright smears of the beach and the
+      // hills, run sea_fix_a: their slope is held to 0.08 near, more freedom far off where a pixel covers more water.)
+      vec2 slope = g * amp;
+      float most = 0.08 + 0.1 * smoothstep(20.0, 200.0, ts);
+      slope *= min(1.0, most / max(length(slope), 1e-5));
+      vec3 N = normalize(vec3(-slope.x, 1.0, -slope.y));
+      vec3 R = reflect(rd, N);
+      R.y = max(R.y, 0.01);
+      R = normalize(R);
+      float cosv = clamp(dot(-rd, N), 0.0, 1.0);
+      // D204: far off, how much is reflected from the sea's mean surface, flat (a pixel there covers many ripples;
+      // they still turn the reflected ray above). Taken from the rippled facing alone, it stayed about half at a
+      // grazing look to the horizon, and the other half was the game's own water, which with our sky's small cube in
+      // it is a clipped pale cyan there (the user, 19 Nov 2026: "with SSR on the water, the horizon looks awful and
+      // blindingly bright blue at the horizon line"; run sea_dbg7: the sky mirrored 166 167 182, the strength 0.47,
+      // the game's own water 201 254 254).
+      cosv = mix(cosv, clamp(-rd.y, 0.0, 1.0), smoothstep(120.0, 600.0, ts));
+      sea_f = 0.02 + 0.98 * pow(1.0 - cosv, 5.0);
+      dbg_f0 = sea_f;
+      // The view's forward: from the world's offset from the eye to clip x, y and w (the inverse of inv0 to inv2).
+      mat3 to_clip = inverse(transpose(mat3(inv0.xyz, inv1.xyz, inv2.xyz)));
+      vec3 found = vec3(0.0);
+      float got = 0.0;
+      vec3 X = S + R * 0.05;
+      float step_len = 0.4 + ts * 0.004;
+      for (int i = 0; i < 40; ++i) {
+        X += R * step_len;
+        vec3 c = to_clip * (X - eye_world.xyz);
+        if (c.z <= 0.05) break;
+        vec2 uv = (c.xy / c.z - to_ndc.zw) / to_ndc.xy;
+        if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) break;
+        float dq = texelFetch(depthTex, ivec2(uv * view.xy), 0).r;
+        float wq = dq > 1e-6 ? fog_b.x / dq : 1e9;
+        if (c.z > wq && c.z - wq < max(1.0, step_len * 1.5) && wq > c.z * 0.85) {  // (not far nearer: the tower's near legs mirrored in the far sea, run glass_dbg)
+          // Where between the last step and this one it went behind (halved five times): the place itself, not up to
+          // a step past it (a step's error far out drew the shore as streaks).
+          vec3 lo = X - R * step_len, hi = X;
+          for (int b = 0; b < 5; ++b) {
+            vec3 m = 0.5 * (lo + hi);
+            vec3 cm = to_clip * (m - eye_world.xyz);
+            vec2 um = (cm.xy / cm.z - to_ndc.zw) / to_ndc.xy;
+            float dm = texelFetch(depthTex, ivec2(clamp(um, vec2(0.0), vec2(1.0)) * (view.xy - 1.0)), 0).r;
+            if (dm > 1e-6 && cm.z > fog_b.x / dm) hi = m; else lo = m;
+          }
+          vec3 ch = to_clip * (hi - eye_world.xyz);
+          uv = clamp((ch.xy / ch.z - to_ndc.zw) / to_ndc.xy, vec2(0.0), vec2(1.0));
+          // D204: not the sea itself. At a grazing look the ray climbs a centimetre a metre and went behind the game's
+          // own waves further out: the far water mirrored its own pale cyan at the horizon (run sea_dbg8: what was
+          // added there 208 254 254, the crests a quarter of it). What it meets within a metre of the sea, or on the
+          // sea's own draws, is passed and the march goes on.
+          if (hi.y - sea < 1.0 || (masked && textureLod(seaMaskTex, uv * ssr.w, 0.0).r > 0.0)) {
+            dbg_self = 1.0;
+            step_len *= 1.13;
+            continue;
+          }
+          vec2 edge = min(uv, 1.0 - uv);
+          got = smoothstep(0.0, 0.08, min(edge.x, edge.y));
+          found = textureLod(sceneTex, uv, 0.0).rgb;
+          break;
+        }
+        step_len *= 1.13;
+      }
+      // The sky that way: as drawn in the view, that way or the nearest sky above it in the picture (the sky the
+      // renderer draws, its clouds and its overcast); only where the view holds no sky there, its palette, greyed by
+      // the clouds' cover. (The palette alone is a clear sky's: under an overcast the sea shone blue as if the game's
+      // own sky were in it, the user, 17 Nov 2026: "isn't taking into account our sky".)
+      vec3 sky_way = mix(horizon_color.rgb, zenith_color.rgb, sqrt(clamp(R.y, 0.0, 1.0)));
+      sky_way = mix(sky_way, vec3(dot(sky_way, vec3(0.3, 0.55, 0.15))) * 0.9, smoothstep(0.2, 0.8, cloud.x)) * view.z;
+      vec3 cd = to_clip * R;
+      if (cd.z > 1e-4) {
+        vec2 uv = (cd.xy / cd.z - to_ndc.zw) / to_ndc.xy;
+        vec3 cu = to_clip * normalize(R + vec3(0.0, 0.25, 0.0));
+        vec2 up = cu.z > 1e-4 ? (cu.xy / cu.z - to_ndc.zw) / to_ndc.xy - uv : vec2(0.0, -1.0);
+        up = length(up) > 1e-5 ? normalize(up) : vec2(0.0, -1.0);
+        vec2 q = clamp(uv, vec2(0.0), vec2(1.0));
+        for (int k = 0; k < 24; ++k) {
+          // (Above the horizon only: the far sea past the game's draw distance holds no depth either, and taken for
+          // the sky it mirrored its own pale far water at the horizon, the user, 18 Nov 2026: "Water near the horizon
+          // is really pale blue during the day".)
+          if (texelFetch(depthTex, ivec2(q * (view.xy - 1.0)), 0).r <= 1e-6 && normalize(ViewRay(q * view.xy)).y > 0.002) {
+            sky_way = textureLod(sceneTex, q, 0.0).rgb;
+            dbg_src = 1.0;
+            break;
+          }
+          q += up * 0.025;
+          if (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, vec2(1.0)))) break;
+        }
+      }
+      sea_refl = mix(sky_way, found, got);
+      dbg_sky = sky_way;
+      dbg_got = got;
+      dbg_own = texelFetch(sceneTex, ivec2(gl_FragCoord.xy), 0).rgb;
+      sea_f *= ssr.x;
+      // Not over the foam the sea's own shader draws where it washes up on the shore (the user, 17 Nov 2026: "New
+      // water reflections are now hiding the shoreline wash animations"): in the shallows (under 0.6 m of water, from
+      // the world's depth without the sea), and where the water's colour is near white.
+      {
+        float fz = texelFetch(seaFloorTex, ivec2(gl_FragCoord.xy), 0).r;
+        if (fz > 1e-6) {
+          float under = (fog_b.x / fz * rl - ts) * -rd.y;  // the water's depth straight down
+          sea_f *= smoothstep(0.1, 0.6, under);  // (to 1.2 m a sandbar out at sea showed as a dark ring: run shore_on5)
+        }
+        vec3 own = texelFetch(sceneTex, ivec2(gl_FragCoord.xy), 0).rgb;
+        float most = max(max(own.r, own.g), own.b), least = min(min(own.r, own.g), own.b);
+        float foam = smoothstep(0.7, 0.88, least / max(most, 1e-4)) * smoothstep(0.25, 0.45, most);
+        // D204: near only (the far water's pale cyan was taken for foam and halved the reflection at the horizon; far
+        // shores are left to the shallows above).
+        foam *= 1.0 - smoothstep(120.0, 600.0, ts);
+        sea_f *= 1.0 - 0.9 * foam;
+        // The foam and the crests the game draws on its waves out at sea kept through the reflection (the user, 18
+        // Nov 2026: "the SSR hides the seafoam animation that's on the original water waves"): what of the water is
+        // brighter than the water round it (four places 6 pixels off, of a 1440 view) is added back over it.
+        float o = 6.0 * view.y / 1440.0;
+        vec2 at0 = gl_FragCoord.xy, last_px = view.xy - 1.0;
+        // D204: a place above the horizon is sky, not water round it (its darker sky made the horizon's row of water
+        // "brighter than round it"): the pixel's own colour stands in for it.
+        vec3 round_it = vec3(0.0);
+        for (int k = 0; k < 4; ++k) {
+          vec2 d = k == 0 ? vec2(o, 0.0) : k == 1 ? vec2(-o, 0.0) : k == 2 ? vec2(0.0, o) : vec2(0.0, -o);
+          vec2 p = clamp(at0 + d, vec2(0.0), last_px);
+          round_it += normalize(ViewRay(p)).y < -1e-4 ? texelFetch(sceneTex, ivec2(p), 0).rgb : own;
+        }
+        round_it *= 0.25;
+        sea_refl += max(own - round_it, vec3(0.0)) * 1.3;
+        dbg_add = max(own - round_it, vec3(0.0)) * 1.3;
+      }
+      // Not over what see-through was drawn over the sea after it (a flag, smoke, spray: the user, 17 Nov 2026: "Flags
+      // also now have a water shader on them"): where the picture is no longer what the sea left.
+      if (mod(ssr.z, 10.0) > 1.5) {
+        vec3 now = texelFetch(sceneTex, ivec2(gl_FragCoord.xy), 0).rgb;
+        vec3 then = texelFetch(seaAfterTex, ivec2(gl_FragCoord.xy), 0).rgb;
+        float differs = length(now - then) / (0.03 + max(max(then.r, then.g), then.b));
+        float kept = 1.0 - smoothstep(0.03, 0.12, differs);
+        // NXR_SEA_DEBUG=1: where it is left out (something drawn over the sea after it) in red.
+        if (ssr.z > 9.5 && kept < 0.5) { sea_refl = vec3(1.0, 0.0, 0.0) / max(view.z, 1e-3); sea_f = 1.0; kept = 1.0; }
+        sea_f *= kept;
+      }
+    }
+  }
   float t_fog = exp(-tau), t_low = exp(-tau_low), t_rain = exp(-tau_rain);
   // The low layer nearest, the haze behind it, the far rain behind both.
-  vec3 light = low * (1.0 - t_low) + t_low * (haze * (1.0 - t_fog) + t_fog * rain * (1.0 - t_rain));
-  out_color = vec4((light + rain_light) * view.z, t_low * t_fog * t_rain * wet * (1.0 + 0.45 * streaks));
+  vec3 light = low * (1.0 - t_low) + t_low * (haze * (1.0 - t_fog) + t_fog * rain_far * (1.0 - t_rain));
+  float shows = t_low * t_fog * t_rain;
+  // D192: the bolt (Sky::FillBolt lays its pieces out in the view's pixels): a white-hot core in a blue glow (Beachhead's
+  // bolt shader), hidden where the view's depth is nearer, seen through the haze between.
+  vec3 bolt_light = vec3(0.0);
+  if (bolt.x > 0.5 && all(greaterThanEqual(gl_FragCoord.xy, bolt_box.xy)) && all(lessThanEqual(gl_FragCoord.xy, bolt_box.zw))) {
+    float scene_w = nothing ? 1e9 : fog_b.x / depth;
+    float core = 0.0, glow = 0.0, at_w = 0.0;
+    int bn = int(bolt.x + 0.5);
+    for (int i = 0; i < bn; ++i) {
+      vec4 bs = bolt_seg[2 * i], bm = bolt_seg[2 * i + 1];
+      vec2 ab = bs.zw - bs.xy, ap = gl_FragCoord.xy - bs.xy;
+      float bt = clamp(dot(ap, ab) / max(dot(ab, ab), 1e-4), 0.0, 1.0);
+      float bw = mix(bm.x, bm.y, bt);
+      if (bw > scene_w) continue;
+      float bd = length(ap - ab * bt);
+      float hw = bm.z * bolt.z / bw;
+      // At least about a pixel and a half wide, dimmer for it (far off a bolt is thinner than a pixel).
+      float hc = max(hw, 0.75);
+      float c = (1.0 - smoothstep(hc * 0.35, hc, bd)) * bm.w * max(hw / hc, 0.4);
+      float hg = max(hw * 2.6, 2.0);
+      float g = exp(-bd * bd / (hg * hg)) * 0.3 * bm.w;
+      if (c + g > core + glow) at_w = bw;
+      core = max(core, c);
+      glow = max(glow, g);
+    }
+    if (core + glow > 0.0) {
+      float tb = fog_a.x > 0.0 ? exp(-haze_depth(fog_a.x, fog_a.y, eye_h, rd.y, at_w * rl)) : 1.0;
+      vec3 tint = vec3(0.62, 0.68, 1.0);
+      bolt_light = (mix(tint, vec3(1.0), smoothstep(0.35, 0.9, core)) * core * 6.0 + tint * glow * 1.5) * bolt.y * tb * t_low;
+    }
+  }
+  // D204 (native_x_renderer_sky_debug): 7 the sky the sea mirrors, 8 its strength (red: the sky's palette, green: the
+  // picture's sky; blue: what the march found), 9 the water's own colour under the reflection, 10 the reflection as
+  // added (sea_refl * sea_f * shows), 11 the crests added back, 12 the strength: red by Fresnel alone, green as
+  // drawn (after the foam and what was drawn over the sea), blue where the march passed the sea itself.
+  if (debug >= 7 && debug <= 12) {
+    vec3 c = debug == 7 ? dbg_sky : debug == 8 ? vec3(sea_f * (1.0 - dbg_src), sea_f * dbg_src, dbg_got)
+           : debug == 9 ? dbg_own : debug == 10 ? sea_refl * sea_f * shows : debug == 11 ? dbg_add
+           : vec3(dbg_f0, sea_f, dbg_self);
+    out_color = vec4(c, 0.0);
+    return;
+  }
+  // D214: the clouds' shadows on the ground (the user, 19 Nov 2026: "Can we get clouds to cast shadows onto the map
+  // from the direction of the sun?"): from the point seen toward the sun, the clouds' own density (their shared code,
+  // the cheap kind) at a quarter and three quarters of the layer's depth; what light gets through takes the direct
+  // sun's share off what shows of the scene (three quarters at the most: the sky's light stays). By day, the sun over
+  // 3 degrees; nothing for the sky.
+  float cloud_shade = 1.0;
+  if (!nothing && layers.z > 0.5 && sun_dir.w > 0.0 && sun_color.w < 0.5) {
+    vec3 ls = normalize(sun_dir.xyz);
+    if (ls.y > 0.05) {
+      float ws = max(misc.z, 1e-3);
+      vec3 q = (eye.xyz + rd * L) / ws;
+      float od = 0.0;
+      for (int k = 0; k < 2; k++) {
+        float h = cloud.z + cloud.w * (k == 0 ? 0.25 : 0.75);
+        float t = (h - q.y) / ls.y;
+        if (t > 0.0) od += cloud_density(q + ls * t, q + ls * t, true);
+      }
+      // (D215: darker, the user: "Let's make cloud shadow darker than that please", "Darker still", then "That's a
+      // little too dark": 6.0 and 0.91, between 4.5 and 0.88 (the ground 21% darker) and 7.5 and 0.93 (34%);
+      // D214's 2.2 and 0.75 (9%). Then "A bit darker": 6.75 and 0.92, about 31%.)
+      float through = exp(-od * 6.75);
+      // Under the weather's overcast there is little direct sun left to take (the sun's light 75% down at full
+      // weather, Fill): the shadows' most falls to 15% of it as the weather here closes in (D217: under a 100% storm
+      // the tank and the ground were left nearly black, runs vwet1 and vwet2).
+      float direct = 1.0 - 0.85 * smoothstep(0.3, 0.9, layers.w);
+      cloud_shade = mix(1.0, through, 0.92 * direct * smoothstep(0.05, 0.12, ls.y));
+    }
+  }
+  out_color = vec4((light + rain_light + bolt_light) * view.z + sea_refl * sea_f * shows,
+                   shows * wet * (1.0 + (0.45 + 0.35 * smoothstep(0.75, 1.0, fog_b.w)) * streaks) * (1.0 - sea_f) * cloud_shade);
 }
 )";
 // The view's lowest heights, for the sea's (Sky::ReadSea): each pixel of the small target the lowest of 4 x 4 places of
@@ -961,6 +1349,10 @@ void main() {
 // behind it as a small lens does (what shows in a drop is the picture around it, turned over).
 constexpr const char* kLensPS = R"(
 layout(set = 0, binding = 2) uniform sampler2D sceneTex;
+layout(set = 0, binding = 3) uniform sampler2D glassTex;       // D191: the panes' depth (0: no glass)
+layout(set = 0, binding = 4) uniform sampler2D worldDepthTex;  // the world's depth before the first person weapon
+layout(set = 0, binding = 5) uniform sampler2D viewDepthTex;   // the view's depth at its end
+layout(set = 0, binding = 6) uniform sampler2D reflectTex;     // the scene again, filtered
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 vec3 Beads(vec2 q, float scale, float t, float amount) {
@@ -986,7 +1378,8 @@ vec3 Runners(vec2 q, float t, float amount) {
   float id = floor(cx), fx = fract(cx) - 0.5;
   float r1 = h21(vec2(id, 3.0)), r2 = h21(vec2(id, 7.0));
   float pick = h21(vec2(id, 11.0));
-  float show = max(step(1.0 - amount * 0.2, pick) * view.z, step(1.0 - amount * 0.2 - rain.w * 0.3, pick) * view.w);
+  // (D217: more of them the harder it rains, 0.2 to 0.45 of the columns.)
+  float show = max(step(1.0 - amount * (0.2 + 0.25 * amount), pick) * view.z, step(1.0 - amount * 0.2 - rain.w * 0.3, pick) * view.w);
   float clock = t * (0.06 + 0.1 * r1) * (1.0 + 2.5 * rain.w) + r2;  // splashed water runs off fast
   // It runs in fits: quick, then nearly still.
   float y = fract(clock) + 0.015 * sin(clock * 40.0);
@@ -1015,6 +1408,15 @@ void main() {
   vec2 mid = (px - 0.5 * view.xy) / view.y;
   float clear = smoothstep(0.24, 0.46, length(mid * vec2(0.7, 1.0)));
   float sights = smoothstep(0.045, 0.1, length(mid));
+  // D195: in a vehicle (ssr.y) the drops are on its glass (the user, 18 Nov 2026: "For the planes, the camera droplet
+  // effect should be on the first-person cockpit glass"): where what is seen is more than about 2 m off, not on the
+  // cockpit's frame and instruments nearer than that (its glass writes no depth).
+  if (ssr.y > 0.5) {
+    vec2 c_uv = px / view.xy;
+    float z = max(textureLod(worldDepthTex, c_uv * cloud.xy, 0.0).r, textureLod(viewDepthTex, c_uv * cloud.zw, 0.0).r);
+    float on_glass = z > 1e-6 ? smoothstep(1.6, 2.6, 0.1 / z) : 1.0;
+    clear *= on_glass, sights *= on_glass;
+  }
   vec2 bend = (a.xy + b.xy * 0.5) * clear + r.xy * sights;
   float m_beads = clamp((a.z + b.z) * clear, 0.0, 1.0), m_runs = r.z * sights;
   float m = clamp(m_beads + m_runs, 0.0, 1.0);
@@ -1027,7 +1429,17 @@ void main() {
     blot = smoothstep(0.6, 0.82, vnoise(bq) * 0.7 + vnoise(bq * 2.3 + 5.7) * 0.3) * view.w * mix(0.3, 1.0, sights);
     bend += (vec2(vnoise(q * 14.0 + 1.7), vnoise(q * 14.0 + 9.2)) - 0.5) * 0.25 * blot;
   }
-  vec2 at = clamp(px + bend * 0.035 * view.y, vec2(0.5), view.xy - 0.5);
+  // D189, D193: a strong storm's shake: the picture moved by drift.zw (of the view's height) and turned a little about
+  // its middle by drift.y (the crosshair's aim stays where it is; the drops on the lens do not move), a touch larger
+  // (by the most the shake can take, so it does not breathe) so its corners stay filled.
+  vec2 from = px;
+  if (drift.x > 0.0) {
+    vec2 c = 0.5 * view.xy, d = px - c;
+    float ca = cos(drift.y), sa = sin(drift.y);
+    d = vec2(ca * d.x - sa * d.y, sa * d.x + ca * d.y) / (1.0 + drift.x * (0.0016 * view.x / view.y + 0.004));
+    from = c + d + drift.zw * view.y;
+  }
+  vec2 at = clamp(from + bend * 0.035 * view.y, vec2(0.5), view.xy - 0.5);
   vec3 seen = texelFetch(sceneTex, ivec2(at), 0).rgb;
   if (blot > 0.01) {  // the patch's blur: eight places around, further out the more water
     float reach = 0.007 * view.y * blot;
@@ -1056,6 +1468,92 @@ void main() {
     seen = mix(seen, soft, min(m * 1.4, 1.0));
     seen += soft * 0.22 * glint + vec3(dot(soft, vec3(0.333))) * 0.3 * glint * glint;
   }
+  // D191: the window glass's reflection of the renderer's own (the user, 17 Nov 2026: "use our own SSR on them"): where
+  // a pane is nearer than the world's opaque depth and nothing nearer covers it (the weapon), its place from its depth
+  // and its facing from its neighbours'; the reflected ray marched through the world's depth as the sea's (D190), else
+  // the sky drawn that way, else the sky's palette. Fresnel from 4%, the most it takes 85%. (cloud: the depths'
+  // shares of their textures here; ssr.z the exposure.)
+  {
+    vec2 g_uv = from / view.xy;
+    float gz = ssr.x > 0.5 ? textureLod(glassTex, g_uv, 0.0).r : 0.0;
+    vec2 gndc = g_uv * to_ndc.xy + to_ndc.zw;
+    vec3 gray = vec3(dot(inv0.xyz, vec3(gndc, 1.0)), dot(inv1.xyz, vec3(gndc, 1.0)), dot(inv2.xyz, vec3(gndc, 1.0)));
+    vec3 GP = eye_world.xyz + gray * (fog_b.x / max(gz, 1e-7));
+    vec3 GN = cross(dFdx(GP), dFdy(GP));
+    if (ssr.w > 0.5 && gz >= 0.999) seen = vec3(1.0, 1.0, 0.0);  // NXR_GLASS_DEBUG=2: the panes' coverage in yellow
+    if (ssr.w > 2.5 && all(lessThan(px, vec2(24.0)))) seen = vec3(1.0, 0.0, 1.0);  // =3: a corner mark, the pass ran
+    if (gz > 0.0) {
+      float wz = textureLod(worldDepthTex, g_uv * cloud.xy, 0.0).r;
+      float vz = textureLod(viewDepthTex, g_uv * cloud.zw, 0.0).r;
+      float nl = length(GN);
+      if (ssr.w > 2.5) {  // NXR_GLASS_DEBUG=3: why a pane fails (red: behind the world's depth, blue: covered at the
+                          // view's end, green: no facing; white: passes), brighter the further off
+        vec3 why = vec3(gz < wz * 0.9995 ? 0.3 + 0.7 * clamp((wz - gz) / max(wz, 1e-9) * 20.0, 0.0, 1.0) : 0.0,
+                        nl <= 1e-8 ? 1.0 : 0.0,
+                        vz > gz * 1.002 ? 0.3 + 0.7 * clamp((vz - gz) / max(gz, 1e-9) * 20.0, 0.0, 1.0) : 0.0);
+        seen = dot(why, vec3(1.0)) > 0.0 ? why : vec3(1.0);
+      } else if (gz >= wz * 0.9995 && vz <= gz * 1.002 && nl > 1e-8) {
+        vec3 rd = normalize(gray);
+        vec3 N = GN / nl;
+        if (dot(N, rd) > 0.0) N = -N;
+        vec3 R = normalize(reflect(rd, N));
+        float cosv = clamp(dot(-rd, N), 0.0, 1.0);
+        float F = min(0.04 + 0.96 * pow(1.0 - cosv, 5.0), 0.85);
+        mat3 to_clip = inverse(transpose(mat3(inv0.xyz, inv1.xyz, inv2.xyz)));
+        vec3 found = vec3(0.0);
+        float got = 0.0;
+        float wdist = fog_b.x / gz;
+        vec3 X = GP + R * 0.05;
+        float step_len = 0.25 + wdist * 0.004;
+        for (int i = 0; i < 36; ++i) {
+          X += R * step_len;
+          step_len *= 1.14;
+          vec3 c = to_clip * (X - eye_world.xyz);
+          if (c.z <= 0.05) break;
+          vec2 uv = (c.xy / c.z - to_ndc.zw) / to_ndc.xy;
+          if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) break;
+          float dq = textureLod(worldDepthTex, uv * cloud.xy, 0.0).r;
+          if (dq <= 1e-6) continue;
+          float wq = fog_b.x / dq;
+          if (c.z > wq && c.z - wq < max(0.8, step_len * 1.5) && wq > c.z * 0.85) {
+            vec2 edge = min(uv, 1.0 - uv);
+            got = smoothstep(0.0, 0.08, min(edge.x, edge.y));
+            found = textureLod(reflectTex, uv, 0.0).rgb;
+            break;
+          }
+        }
+        vec3 sky_way = mix(horizon_color.rgb, zenith_color.rgb, sqrt(clamp(R.y, 0.0, 1.0))) * ssr.z;
+        vec3 cd = to_clip * R;
+        if (cd.z > 1e-4) {
+          vec2 uv = (cd.xy / cd.z - to_ndc.zw) / to_ndc.xy;
+          if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0))) &&
+              textureLod(worldDepthTex, uv * cloud.xy, 0.0).r <= 1e-6) {
+            sky_way = textureLod(reflectTex, uv, 0.0).rgb;
+          }
+        }
+        seen = mix(seen, mix(sky_way, found, got), F);
+        if (ssr.w > 0.5) seen = mix(seen, vec3(1.0, 0.0, 1.0), 0.6);  // NXR_GLASS_DEBUG=1: the panes in magenta
+      } else if (ssr.w > 0.5) {
+        seen = mix(seen, vec3(0.0, 1.0, 1.0), 0.4);  // hidden panes in cyan
+      }
+    }
+  }
+  // D189: the storm's edges: blurred more toward the corners, and a little darker. D194 (the user, 18 Nov 2026: "I
+  // didn't see the edge vignette blur"): its own strength (misc.w: in a vehicle too), from nearer the middle, out to
+  // 1.6% of the view's height, two rings of eight places around, and 15% darker at the most.
+  if (misc.w > 0.0) {
+    float e = smoothstep(0.25, 0.75, length(mid * vec2(0.62, 1.0))) * misc.w;
+    if (e > 0.01) {
+      float reach = 0.016 * view.y * e;
+      vec3 sum = seen;
+      for (int n = 0; n < 16; ++n) {
+        float ang = 0.392699 * float(n) + 0.3;
+        vec2 p = clamp(at + vec2(cos(ang), sin(ang)) * reach * (n % 2 == 0 ? 1.0 : 0.45), vec2(0.5), view.xy - 0.5);
+        sum += texelFetch(sceneTex, ivec2(p), 0).rgb;
+      }
+      seen = mix(seen, sum / 17.0, min(e * 1.4, 1.0)) * (1.0 - 0.15 * e);
+    }
+  }
   out_color = vec4(seen * (1.0 + 0.03 * m - 0.12 * rim), 1.0);
 }
 )";
@@ -1070,12 +1568,15 @@ layout(location = 0) out vec4 out_color;
 // As the lens's drops ("Let's make it look similar to the lens droplets", then "make them look more wet reflective
 // and a bit 3D", 14 Nov 2026): xy the place within the drop (-1 to 1 across it), z how much of a drop is here, w the
 // shadow it casts beside itself.
-vec4 Bead(vec2 px, float cell, float count) {
+vec4 Bead(vec2 px, float cell, float count, float key) {
+  // (D217: the drops seeded by `key`, the cell's size at 1024 texels, not by its size here: a vehicle's colour and its
+  // normal map, copied at other sizes, get their drops in the same places.)
   vec2 g = px / cell;
   vec2 id = floor(g), f = fract(g) - 0.5;
-  vec2 rnd = vec2(h21(id + cell), h21(id + 37.3 + cell));
-  // (Half as many as at first: "it's a bit too much there too. Probably about 50% less droplets", 14 Nov 2026.)
-  float on = step(1.0 - count * 0.25, h21(id + 5.1 + cell));
+  vec2 rnd = vec2(h21(id + key), h21(id + 37.3 + key));
+  // (Half as many as at first: "it's a bit too much there too. Probably about 50% less droplets", 14 Nov 2026. D217:
+  // plenty again, "rain-drop sized, and plenty", 19 Nov 2026: 0.45 of the cells on the weapon, 0.6 on a vehicle.)
+  float on = step(1.0 - count * (rain.x > 0.5 ? 0.6 : 0.45), h21(id + 5.1 + key));
   float size = (0.12 + 0.22 * h21(id + 9.2)) * (0.6 + 0.4 * count);
   vec2 d = f - (rnd - 0.5) * 0.5;
   // A blob, not a circle (as the lens's): a little longer one way, with an uneven edge.
@@ -1094,7 +1595,9 @@ vec4 Run(vec2 px, float cell, float count, float t) {
   float cx = px.x / cell;
   float id = floor(cx), fx = fract(cx) - 0.5;
   float r1 = h21(vec2(id, 3.0)), r2 = h21(vec2(id, 7.0));
-  float on = step(1.0 - count * 0.3, h21(vec2(id, 11.0)));  // (as many runs as at first, asked back on 14 Nov 2026)
+  // (as many runs as at first, asked back on 14 Nov 2026; D217: "more frequent droplet runs", in 0.6 of the columns)
+  // (the wetter and the harder it rains, the more: to 85% of the columns)
+  float on = step(1.0 - min(count * 0.85 * (0.5 + 0.5 * rain.y), 0.85), h21(vec2(id, 11.0)));
   float clock = t * (0.012 + 0.02 * r1) + r2;
   float y = fract(clock);
   float dx = fx - 0.06 * sin(px.y / cell * 0.9 + r2 * 20.0);
@@ -1131,9 +1634,9 @@ void main() {
       out_color = c;
       return;
     }
-    float n_count = rain.z, n_scale = view.x / 1024.0;
-    vec4 na = Bead(px, 30.0 * n_scale, n_count), nb = Bead(px + 7.0, 15.0 * n_scale, n_count);
-    vec4 nrun = Run(px, 44.0 * n_scale, n_count, eye.w);
+    float n_count = rain.z, n_scale = view.x / 1024.0 * (rain.x > 0.5 ? 0.23 : clamp(view.y / view.x, 0.4, 1.0));  // (D217)
+    vec4 na = Bead(px, 30.0 * n_scale, n_count, 30.0), nb = Bead(px + 7.0 * n_scale, 15.0 * n_scale, n_count, 15.0);
+    vec4 nrun = Run(px, 30.0 * n_scale, n_count, eye.w);
     vec4 at = na.z >= nb.z ? na : nb;
     if (nrun.z > at.z) at = vec4(nrun.xy, nrun.z, 0.0);
     vec3 normal = c.rgb * 2.0 - 1.0;
@@ -1141,8 +1644,9 @@ void main() {
     out_color = vec4(normalize(normal) * 0.5 + 0.5, c.a);
     return;
   }
-  // The colour's drops only in the weapon's large colour texture (the smaller ones are other things).
-  if (view.x < 1000.0) {
+  // The colour's drops only in the weapon's large colour texture (the smaller ones are other things); a vehicle's
+  // texture that is not its colour and no normal map is left as it is (D217).
+  if ((view.x < 1000.0 && rain.x < 0.5) || rain.x > 1.5) {
     out_color = c;
     return;
   }
@@ -1154,9 +1658,15 @@ void main() {
     return;
   }
   float count = rain.z, show = view.z;
-  float scale = view.x / 1024.0;
-  vec4 a = Bead(px, 30.0 * scale, count), b = Bead(px + 7.0, 15.0 * scale, count);
-  vec4 run = Run(px, 44.0 * scale, count, eye.w);
+  // D217: on a vehicle's copy (twice its texture's size, its texture over several metres) the cells a quarter as
+  // large: drops of about 5 to 14 mm.
+  float scale = view.x / 1024.0 * (rain.x > 0.5 ? 0.23 : 1.0);
+  // A long weapon's texture (twice as wide as tall: the bazooka's, 1024 x 512) is spread over a longer model: its
+  // cells smaller by the texture's height over its width, so its drops come as small and as many as the Thompson's
+  // (the user, 19 Nov 2026: "The droplets on the thompson are dens enough, but not on things like the Bazooka").
+  if (rain.x < 0.5) scale *= clamp(view.y / view.x, 0.4, 1.0);
+  vec4 a = Bead(px, 30.0 * scale, count, 30.0), b = Bead(px + 7.0 * scale, 15.0 * scale, count, 15.0);
+  vec4 run = Run(px, 30.0 * scale, count, eye.w);  // (D217: columns 30 wide, 44 before: more runs)
   vec4 drop_at = a.z >= b.z ? a : b;
   if (run.z > drop_at.z) drop_at = vec4(run.xy, run.z, 0.0);
   vec2 n = drop_at.xy;
@@ -1230,10 +1740,31 @@ struct SkyConstantBlock {
   float last[3][4], last_to_ndc[4], misc[4];
   float eye_world[4], fog_a[4], fog_b[4], flash[4];
   float cover_m[9][4], rain[4];
+  float ssr[4];  // D190
+  float bolt[4], bolt_box[4], bolt_seg[144][4];  // D192
+  float gale[4];  // D194
+  float storm_a[4], storm_b[4];  // D208
+  float layers[4];               // D211
 };
 
+bool Sky::SeaSkyColours(float zenith[3], float horizon[3]) const {
+  if (last_fill_.size() != sizeof(SkyConstantBlock)) return false;
+  SkyConstantBlock k;
+  std::memcpy(&k, last_fill_.data(), sizeof(k));
+  const float grey = std::clamp((k.cloud[0] - 0.2f) / 0.6f, 0.0f, 1.0f);
+  const float g = grey * grey * (3.0f - 2.0f * grey);
+  for (float* out : {zenith, horizon}) {
+    const float* in = out == zenith ? k.zenith : k.horizon;
+    const float lum = (0.3f * in[0] + 0.55f * in[1] + 0.15f * in[2]) * 0.9f;
+    // (Times 0.62: the palette with the exposure came to about 1.0 at the horizon where the sky drawn there is about
+    // 0.64, and the sea's far band shone white, run shore_on4.)
+    for (int c = 0; c < 3; ++c) out[c] = (in[c] + (lum - in[c]) * g) * k.view[2] * 0.62f;
+  }
+  return true;
+}
+
 bool Sky::WetCopy(IDeviceContext* context, ITextureView* from, ITexture* to, float count, float show, bool tint,
-                  double seconds, bool skin) {
+                  double seconds, bool skin, bool vehicle, bool relief_only) {
   if (!from || !to || !Ready()) return false;
   const TextureDesc& desc = to->GetDesc();
   if (!wet_pso_) {
@@ -1272,7 +1803,21 @@ bool Sky::WetCopy(IDeviceContext* context, ITextureView* from, ITexture* to, flo
   k.view[0] = float(desc.Width), k.view[1] = float(desc.Height), k.view[2] = show, k.view[3] = tint ? (whole_colour_ ? 2.0f : 1.0f) : 0.0f;
   k.rain[2] = count;
   k.rain[3] = skin ? 1.0f : 0.0f;
-  k.eye[3] = float(std::fmod(seconds, 3600.0));
+  k.rain[0] = relief_only ? 2.0f : vehicle ? 1.0f : 0.0f;  // D217 (2: a vehicle's texture that is not its colour)
+  k.rain[1] = std::clamp(lens_rain_, 0.0f, 1.0f);  // D217: how hard it rains here (the runs' number)
+  // D217: the runs' own clock (the user, 19 Nov 2026: "The droplet runs should be a lot more frequent and faster when
+  // directly in the rain, but when under cover, the drying begins and the become less frequent and slower"): it runs at
+  // 0.3 to 2.5 times the world's by how wet the surface is (its share of drops: building in the rain, drying under
+  // cover), summed as the copies are made, so a change of pace never jumps a run along.
+  {
+    static double last = -1.0, clock = 0.0;
+    // (And by how hard it rains where the eye is, lens_rain_: "Speed and frequency of all droplet runs (including the
+    // player camera) should be tied to weather percentage too", 19 Nov 2026: 0.6 to 1.4 times.)
+    if (last >= 0.0 && seconds > last && seconds - last < 1.0)
+      clock += (seconds - last) * (0.3 + 2.2 * std::clamp(count, 0.0f, 1.0f)) * (0.6 + 0.8 * std::clamp(lens_rain_, 0.0f, 1.0f));
+    if (seconds != last) last = seconds;
+    k.eye[3] = float(std::fmod(clock, 3600.0));
+  }
   {
     void* data = nullptr;
     context->MapBuffer(constants_, MAP_WRITE, MAP_FLAG_DISCARD, data);
@@ -1298,15 +1843,27 @@ bool Sky::WetCopy(IDeviceContext* context, ITextureView* from, ITexture* to, flo
   return true;
 }
 
-bool Sky::Lens(IDeviceContext* context, ITexture* color, uint32_t width, uint32_t height) {
-  if (!color || !width || !height || lens_wet() < 0.01f || !Ready()) return false;
+bool Sky::Lens(IDeviceContext* context, ITexture* color, uint32_t width, uint32_t height, bool drops,
+               const GlassInputs* glass) {
+  if (!color || !width || !height || !Ready()) return false;
+  const bool glassy = glass && glass->mask && glass->world_depth && glass->view_depth &&
+                      last_fill_.size() == sizeof(SkyConstantBlock);
+  if ((!drops || lens_wet() < 0.01f) && sway_ < 0.005f && edge_ < 0.005f && !glassy) return false;
+  const bool depthy = glass && glass->world_depth && glass->view_depth;  // D195
   const TextureDesc& desc = color->GetDesc();
   if (!lens_pso_ || lens_format_ != desc.Format) {
     lens_pso_.Release(), lens_srb_.Release();
     SamplerDesc point;
     point.MinFilter = point.MagFilter = point.MipFilter = FILTER_TYPE_POINT;
     point.AddressU = point.AddressV = point.AddressW = TEXTURE_ADDRESS_CLAMP;
-    ImmutableSamplerDesc samplers[] = {{SHADER_TYPE_PIXEL, "sceneTex", point}};
+    SamplerDesc lin;
+    lin.MinFilter = lin.MagFilter = lin.MipFilter = FILTER_TYPE_LINEAR;
+    lin.AddressU = lin.AddressV = lin.AddressW = TEXTURE_ADDRESS_CLAMP;
+    ImmutableSamplerDesc samplers[] = {{SHADER_TYPE_PIXEL, "sceneTex", point},
+                                       {SHADER_TYPE_PIXEL, "glassTex", point},
+                                       {SHADER_TYPE_PIXEL, "worldDepthTex", point},
+                                       {SHADER_TYPE_PIXEL, "viewDepthTex", point},
+                                       {SHADER_TYPE_PIXEL, "reflectTex", lin}};
     GraphicsPipelineStateCreateInfo info;
     info.PSODesc.Name = "NativeXRenderer sky lens";
     info.PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
@@ -1320,7 +1877,7 @@ bool Sky::Lens(IDeviceContext* context, ITexture* color, uint32_t width, uint32_
     info.pPS = lens_ps_;
     info.PSODesc.ResourceLayout.DefaultVariableType = SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC;
     info.PSODesc.ResourceLayout.ImmutableSamplers = samplers;
-    info.PSODesc.ResourceLayout.NumImmutableSamplers = 1;
+    info.PSODesc.ResourceLayout.NumImmutableSamplers = 5;
     device_->CreateGraphicsPipelineState(info, &lens_pso_);
     if (lens_pso_) lens_pso_->CreateShaderResourceBinding(&lens_srb_, true);
     lens_format_ = desc.Format;
@@ -1344,12 +1901,60 @@ bool Sky::Lens(IDeviceContext* context, ITexture* color, uint32_t width, uint32_
   CopyTextureAttribs copy(color, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, lens_copy_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
   context->CopyTexture(copy);
   SkyConstantBlock k{};
+  // D191: the view's own constants (its rays, the sea's height, the sky's palette) under the lens's.
+  if (glassy) {
+    std::memcpy(&k, last_fill_.data(), sizeof(k));
+    k.ssr[0] = 1.0f;
+    k.ssr[2] = k.view[2];  // the exposure, before the lens takes view.z
+    static const float debug = [] {
+      const char* v = std::getenv("NXR_GLASS_DEBUG");
+      return v && *v >= '1' && *v <= '4' ? float(*v - '0') : 0.0f;
+    }();
+    k.ssr[3] = debug;
+    k.cloud[0] = glass->world_uv[0], k.cloud[1] = glass->world_uv[1];
+    k.cloud[2] = glass->view_uv[0], k.cloud[3] = glass->view_uv[1];
+    k.drift[0] = k.drift[1] = 0.0f;
+  } else {
+    k.ssr[0] = 0.0f;
+    if (depthy) {  // D195: the depths alone, for the drops on a vehicle's glass
+      k.cloud[0] = glass->world_uv[0], k.cloud[1] = glass->world_uv[1];
+      k.cloud[2] = glass->view_uv[0], k.cloud[3] = glass->view_uv[1];
+    }
+  }
+  k.ssr[1] = depthy && glass->cockpit ? 1.0f : 0.0f;  // D195
   k.view[0] = float(width), k.view[1] = float(height);
-  k.eye[3] = float(std::fmod(lens_seconds_, 3600.0));
+  // D217: the lens's drops on a clock paced by how hard it rains here (0.4 to 2.4 times the world's), summed so a change
+  // of pace never jumps them along.
+  {
+    static double last = -1.0, clock = 0.0;
+    if (last >= 0.0 && lens_seconds_ > last && lens_seconds_ - last < 1.0)
+      clock += (lens_seconds_ - last) * (0.4 + 2.0 * std::clamp(lens_rain_, 0.0f, 1.0f));
+    if (lens_seconds_ != last) last = lens_seconds_;
+    k.eye[3] = float(std::fmod(clock, 3600.0));
+  }
   k.rain[2] = lens_peak_;
   k.rain[3] = splash_peak_;
   k.view[2] = lens_peak_ > 0.0f ? std::clamp(lens_wet_ / lens_peak_, 0.0f, 1.0f) : 0.0f;
   k.view[3] = splash_peak_ > 0.0f ? std::clamp(splash_wet_ / splash_peak_, 0.0f, 1.0f) : 0.0f;
+  if (!drops) k.view[2] = k.view[3] = 0.0f;
+  // D193: the storm's shake (the user, 18 Nov 2026: "The screen wobble is incorrect. It should be lightly shaking the
+  // player camera when outside and not in a vehicle"; D189's was a slow lean of up to 0.6 degrees): how strong
+  // (drift.x), the picture's roll now (drift.y, radians, to about 0.09 degrees) and its offset (drift.zw, to about 0.16%
+  // of the view's height: 2 pixels at 1440): a quick jitter of 6 to 18 Hz, in buffets that come and go over a few
+  // seconds. On the wall clock, smooth whatever the world's clock does.
+  {
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const float buffet = float(0.65 + 0.35 * (0.6 * std::sin(t * 0.43) + 0.4 * std::sin(t * 1.07 + 1.3)));
+    const float jx = float(0.5 * std::sin(t * 41.0) + 0.3 * std::sin(t * 67.0 + 1.1) + 0.2 * std::sin(t * 109.0 + 2.3));
+    const float jy = float(0.5 * std::sin(t * 37.0 + 0.7) + 0.3 * std::sin(t * 73.0 + 2.9) + 0.2 * std::sin(t * 97.0 + 0.4));
+    const float jr = float(0.6 * std::sin(t * 47.0 + 1.9) + 0.4 * std::sin(t * 83.0 + 0.2));
+    const float s = sway_ * buffet;
+    k.drift[0] = sway_;
+    k.misc[3] = edge_;  // D194
+    k.drift[1] = s * 0.0016f * jr;
+    k.drift[2] = s * 0.0016f * jx;
+    k.drift[3] = s * 0.0016f * jy;
+  }
   {
     void* data = nullptr;
     context->MapBuffer(constants_, MAP_WRITE, MAP_FLAG_DISCARD, data);
@@ -1359,6 +1964,19 @@ bool Sky::Lens(IDeviceContext* context, ITexture* color, uint32_t width, uint32_
   if (auto* v = lens_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "SkyConstants")) v->Set(constants_);
   if (auto* v = lens_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "sceneTex"))
     v->Set(lens_copy_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
+  if (auto* v = lens_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "reflectTex"))
+    v->Set(lens_copy_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
+  {
+    ITextureView* none = no_scene_ ? no_scene_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
+    auto set = [&](const char* name, ITextureView* view) {
+      if (auto* v = lens_srb_->GetVariableByName(SHADER_TYPE_PIXEL, name)) {
+        if (view) v->Set(view);
+      }
+    };
+    set("glassTex", glassy ? glass->mask : none);
+    set("worldDepthTex", depthy ? glass->world_depth : none);
+    set("viewDepthTex", depthy ? glass->view_depth : none);
+  }
   context->SetRenderTargets(1, &target, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
   Viewport viewport;
   viewport.Width = float(width);
@@ -1380,6 +1998,262 @@ namespace {
 std::atomic<bool> g_lightning{true};
 }
 void SetSkyLightning(bool on) { g_lightning.store(on, std::memory_order_relaxed); }
+namespace {
+std::atomic<bool> g_cloud_shadows{true};  // D214
+}  // namespace
+void SetCloudShadows(bool on) { g_cloud_shadows.store(on, std::memory_order_relaxed); }
+namespace {
+std::atomic<bool> g_storm_sway{true};
+}
+void SetStormSway(bool on) { g_storm_sway.store(on, std::memory_order_relaxed); }
+void SetEyeOnFoot(bool on_foot) { g_eye_on_foot.store(on_foot, std::memory_order_relaxed); }
+namespace {
+std::atomic<bool> g_sea_reflection{true};
+}
+void SetSeaReflection(bool on) { g_sea_reflection.store(on, std::memory_order_relaxed); }
+bool SeaReflection() { return g_sea_reflection.load(std::memory_order_relaxed); }
+
+namespace {
+// One slot's flash, if it has one: when it starts on the world's clock, its strokes' strengths, where it is.
+struct SlotFlash {
+  double at = 0.0;
+  int strokes = 0;
+  float amp[4] = {};
+  float angle = 0.0f, far = 0.0f;
+  bool bolt = false;   // D192: a bolt to the ground
+  uint64_t shape = 0;  // its shape's seed
+};
+// D208: where the strikes may fall: the hurricane, the middle of the eye's 4 km square (the strikes' offsets are from
+// there), and where the players are gathered (the game's, SetPlayerGroups). Set each frame (renderer.cpp).
+struct StrikeWorld {
+  storm::Storm storm;
+  float square[2] = {};
+  float groups[16] = {};
+  int count = 0;
+};
+std::mutex g_strike_mutex;
+StrikeWorld g_strike;
+StrikeWorld StrikeContext() {
+  std::lock_guard lock(g_strike_mutex);
+  return g_strike;
+}
+
+bool FlashInSlot(int64_t s, double period, float storm, SlotFlash& f) {
+  uint64_t state = 0x1943ull ^ (uint64_t(s) * 0x9e3779b97f4a7c15ull);
+  if (Uniform(state) > 0.65f + 0.35f * storm) return false;
+  f.at = double(s) * period + Uniform(state) * (period - 2.0);
+  f.strokes = 1 + int(SplitMix(state) % 4);
+  f.angle = Uniform(state) * 6.2831853f;
+  // Most strike 1.5 to 10 km off; about one in six within 300 m to 1.5 km (17 Nov 2026, with the storm's sounds: a
+  // close strike's crack), the same draw split so the rest of each slot's numbers stay as they were.
+  const float u = Uniform(state);
+  f.far = u < 0.18f ? 300.0f + u / 0.18f * 1200.0f : 1500.0f + (u - 0.18f) / 0.82f * 8500.0f;
+  for (int k = 0; k < f.strokes; ++k) f.amp[k] = 0.45f + 0.55f * Uniform(state);
+  // D192: a bolt to the ground (Beachhead's lightning.gd, its ground and close strikes): always within 1.5 km (where
+  // the thunder is a close strike's crack), further out to 7 km now and then, more often the worse the storm; the
+  // rest stay flashes inside the cloud. Drawn after the slot's other numbers, which stay as they were.
+  const float b = Uniform(state);
+  f.bolt = f.far < 1500.0f || (f.far < 7000.0f && b < 0.35f + 0.4f * storm);
+  f.shape = SplitMix(state);
+  // D208: under the hurricane only, and near the players now and then (the user, 19 Nov 2026: "Thunder and lighting
+  // only happen directly under the storm itself too", "Lightning bolts should also have a higher chance to strike near
+  // a group of players, resulting in the close lightning audio being loud enough to startle the player"). Three in
+  // ten go to one of the players' groups, 60 to 400 m from it, as a bolt; the others stay where they were drawn. A
+  // strike falls only where the storm is strong: kept with the chance smoothstep(0.45, 0.85, its strength there).
+  // Drawn after the slot's other numbers, which stay as they were.
+  const StrikeWorld w = StrikeContext();
+  if (w.storm.on) {
+    float ox = std::sin(f.angle) * f.far, oz = std::cos(f.angle) * f.far;
+    const float near_group = Uniform(state);
+    const uint64_t pick = SplitMix(state);
+    const float ja = Uniform(state) * 6.2831853f, jr = 60.0f + 340.0f * Uniform(state);
+    const float keep = Uniform(state);
+    if (w.count > 0 && near_group < 0.3f) {
+      const int g = int(pick % uint64_t(w.count));
+      ox = w.groups[g * 2] + std::sin(ja) * jr - w.square[0];
+      oz = w.groups[g * 2 + 1] + std::cos(ja) * jr - w.square[1];
+      f.bolt = true;
+    }
+    else {
+      // D213: in the storm itself (a level-sized storm: placed in the 4 km square and kept only under the storm, most
+      // strikes were lost): within its rain shield, the same draws.
+      const float rr = w.storm.radius * std::sqrt(Uniform(state)), ra = Uniform(state) * 6.2831853f;
+      ox = w.storm.cx + std::sin(ra) * rr - w.square[0];
+      oz = w.storm.cz + std::cos(ra) * rr - w.square[1];
+    }
+    const float here = storm::At(w.storm, w.square[0] + ox, w.square[1] + oz);
+    if (keep > storm::Smooth(0.3f, 0.7f, here)) return false;
+    f.angle = std::atan2(ox, oz);
+    f.far = std::max(std::sqrt(ox * ox + oz * oz), 1.0f);
+  }
+  return true;
+}
+
+// D192: a bolt's channel (Beachhead's _build_bolt, _jag): from the cloud base straight down to the sea, jagged by
+// halving each piece with a sideways offset (5 halvings: 32 pieces), and a few branches off it that run down and
+// out, some splitting once more. Each piece: its two ends (world), its half width (metres), how bright it is.
+struct BoltPiece {
+  float a[3], b[3];
+  float half = 0.0f, bright = 1.0f;
+};
+constexpr int kBoltPieces = 72;
+void Jag(const float a[3], const float b[3], int levels, uint64_t& state, std::vector<std::array<float, 3>>& out) {
+  out.assign({{a[0], a[1], a[2]}, {b[0], b[1], b[2]}});
+  const float len = std::sqrt((b[0] - a[0]) * (b[0] - a[0]) + (b[1] - a[1]) * (b[1] - a[1]) + (b[2] - a[2]) * (b[2] - a[2]));
+  float off = len * 0.16f;
+  for (int l = 0; l < levels; ++l) {
+    std::vector<std::array<float, 3>> next;
+    next.reserve(out.size() * 2);
+    for (size_t i = 0; i + 1 < out.size(); ++i) {
+      const auto& p = out[i];
+      const auto& q = out[i + 1];
+      float dir[3] = {q[0] - p[0], q[1] - p[1], q[2] - p[2]};
+      const float dl = std::max(std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]), 1e-4f);
+      for (float& c : dir) c /= dl;
+      float rnd[3] = {Uniform(state) * 2.0f - 1.0f, Uniform(state) * 2.0f - 1.0f, Uniform(state) * 2.0f - 1.0f};
+      const float along = rnd[0] * dir[0] + rnd[1] * dir[1] + rnd[2] * dir[2];
+      float perp[3] = {rnd[0] - dir[0] * along, rnd[1] - dir[1] * along, rnd[2] - dir[2] * along};
+      const float pl = std::max(std::sqrt(perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]), 1e-4f);
+      const float k = off * (Uniform(state) * 2.0f - 1.0f) / pl;
+      next.push_back(p);
+      next.push_back({(p[0] + q[0]) * 0.5f + perp[0] * k, (p[1] + q[1]) * 0.5f + perp[1] * k, (p[2] + q[2]) * 0.5f + perp[2] * k});
+    }
+    next.push_back(out.back());
+    out.swap(next);
+    off *= 0.55f;
+  }
+}
+// The bolt of a strike `dist` metres off: its foot at `foot` (x, the sea's height, z), its top at the cloud base.
+std::vector<BoltPiece> BoltShape(uint64_t seed, const float foot[3], float base, float dist) {
+  uint64_t state = seed;
+  std::vector<BoltPiece> pieces;
+  const float width = 0.45f + dist * 0.0013f;  // (Beachhead's: wider far off, so it stays seen)
+  const float ground[3] = {foot[0], foot[1], foot[2]};
+  const float top[3] = {foot[0] + (Uniform(state) - 0.5f) * 0.1f * dist, base + 30.0f, foot[2] + (Uniform(state) - 0.5f) * 0.1f * dist};
+  auto add = [&](const std::vector<std::array<float, 3>>& pts, float half, float bright, bool taper) {
+    const size_t n = pts.size();
+    for (size_t i = 0; i + 1 < n && pieces.size() < size_t(kBoltPieces); ++i) {
+      BoltPiece p;
+      for (int c = 0; c < 3; ++c) p.a[c] = pts[i][c], p.b[c] = pts[i + 1][c];
+      const float t = taper ? 1.0f - 0.7f * float(i) / float(n) : 1.0f;
+      p.half = half * t, p.bright = bright * t;
+      pieces.push_back(p);
+    }
+  };
+  std::vector<std::array<float, 3>> main, branch, twig;
+  Jag(top, ground, 5, state, main);
+  add(main, width * 0.5f, 1.0f, false);
+  const int branches = 3 + int(SplitMix(state) % 3);
+  for (int b = 0; b < branches; ++b) {
+    const size_t at = size_t(float(main.size()) * (0.08f + 0.67f * Uniform(state)));
+    const auto& p = main[std::min(at, main.size() - 1)];
+    float rem[3] = {ground[0] - p[0], ground[1] - p[1], ground[2] - p[2]};
+    const float rl = std::max(std::sqrt(rem[0] * rem[0] + rem[1] * rem[1] + rem[2] * rem[2]), 1e-3f);
+    const float sa = Uniform(state) * 6.2831853f;
+    float d[3] = {rem[0] / rl * 0.6f + std::sin(sa) * 0.8f, rem[1] / rl * 0.6f + (Uniform(state) * 0.3f - 0.2f),
+                  rem[2] / rl * 0.6f + std::cos(sa) * 0.8f};
+    const float dl = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    const float len = rl * (0.15f + 0.25f * Uniform(state));
+    const float from[3] = {p[0], p[1], p[2]};
+    const float to[3] = {p[0] + d[0] / dl * len, p[1] + d[1] / dl * len, p[2] + d[2] / dl * len};
+    Jag(from, to, 3, state, branch);
+    add(branch, width * 0.5f * 0.45f, 0.6f, true);
+    if (Uniform(state) < 0.4f) {
+      const auto& q = branch[branch.size() / 2];
+      const float qf[3] = {q[0], q[1], q[2]};
+      const float qt[3] = {q[0] + (d[0] / dl + std::sin(sa) * 0.5f) * len * 0.5f, q[1] - len * 0.2f,
+                           q[2] + (d[2] / dl + std::cos(sa) * 0.5f) * len * 0.5f};
+      Jag(qf, qt, 2, state, twig);
+      add(twig, width * 0.5f * 0.28f, 0.45f, true);
+    }
+  }
+  return pieces;
+}
+// D211: lightning inside the clouds (the user's reference of a tropical storm, 19 Nov 2026: bolts branching through
+// the clouds): an in-cloud strike's channel crawls along under the cloud base, 1.5 to 4 km, dipping a little, with
+// four to six branches forking off sideways and down, some forking once more.
+std::vector<BoltPiece> CrawlerShape(uint64_t seed, const float start[3], float dist) {
+  uint64_t state = seed ^ 0xc4a71e5ull;
+  std::vector<BoltPiece> pieces;
+  const float width = (0.4f + dist * 0.0011f) * 1.6f;  // D212: 1.6 times (thin and faint seen across a storm)
+  const float a = Uniform(state) * 6.2831853f, len = 1500.0f + 2500.0f * Uniform(state);
+  const float end[3] = {start[0] + std::sin(a) * len, start[1] - 60.0f - 140.0f * Uniform(state), start[2] + std::cos(a) * len};
+  auto add = [&](const std::vector<std::array<float, 3>>& pts, float half, float bright) {
+    const size_t n = pts.size();
+    for (size_t i = 0; i + 1 < n && pieces.size() < size_t(kBoltPieces); ++i) {
+      BoltPiece q;
+      for (int c = 0; c < 3; ++c) q.a[c] = pts[i][c], q.b[c] = pts[i + 1][c];
+      const float t = 1.0f - 0.6f * float(i) / float(n);
+      q.half = half * t, q.bright = bright * t;
+      pieces.push_back(q);
+    }
+  };
+  std::vector<std::array<float, 3>> main, branch, twig;
+  Jag(start, end, 5, state, main);
+  add(main, width * 0.5f, 0.85f);
+  const int branches = 4 + int(SplitMix(state) % 3);
+  for (int b = 0; b < branches; ++b) {
+    const auto& q = main[std::min(size_t(float(main.size()) * (0.05f + 0.85f * Uniform(state))), main.size() - 1)];
+    const float side = (Uniform(state) < 0.5f ? -1.0f : 1.0f) * (0.6f + 0.9f * Uniform(state));
+    const float da = a + side, bl = len * (0.15f + 0.3f * Uniform(state));
+    const float from[3] = {q[0], q[1], q[2]};
+    const float to[3] = {q[0] + std::sin(da) * bl, q[1] - bl * (0.05f + 0.25f * Uniform(state)), q[2] + std::cos(da) * bl};
+    Jag(from, to, 3, state, branch);
+    add(branch, width * 0.5f * 0.45f, 0.55f);
+    if (Uniform(state) < 0.45f) {
+      const auto& r = branch[branch.size() / 2];
+      const float tf[3] = {r[0], r[1], r[2]};
+      const float tt[3] = {r[0] + std::sin(da + side * 0.5f) * bl * 0.4f, r[1] - bl * 0.15f, r[2] + std::cos(da + side * 0.5f) * bl * 0.4f};
+      Jag(tf, tt, 2, state, twig);
+      add(twig, width * 0.5f * 0.28f, 0.4f);
+    }
+  }
+  return pieces;
+}
+
+// How bright the bolt is dt seconds into its flash: each stroke a sharp light (it flickers, as Beachhead's return
+// strokes do), and faint between them until the flash is over. 0: no bolt now.
+float BoltLight(const SlotFlash& f, double dt) {
+  const double end = (f.strokes - 1) * 0.12 + 0.5;
+  if (dt < 0.0 || dt > end) return 0.0f;
+  float v = 0.0f;
+  for (int k = 0; k < f.strokes; ++k) {
+    const double since = dt - k * 0.12;
+    if (since >= 0.0) v = std::max(v, f.amp[k] * float((1.0 - std::exp(-since * 150.0)) * std::exp(-since * 14.0)));
+  }
+  return std::max(v, 0.1f * float(1.0 - dt / end));
+}
+}  // namespace
+
+void SetStrikeWorld(const storm::Storm& storm, float square_x, float square_z) {
+  std::lock_guard lock(g_strike_mutex);
+  g_strike.storm = storm, g_strike.square[0] = square_x, g_strike.square[1] = square_z;
+}
+void SetStrikeGroups(const float* xz, uint32_t count) {
+  std::lock_guard lock(g_strike_mutex);
+  g_strike.count = int(std::min<uint32_t>(xz ? count : 0, 8));
+  for (int i = 0; i < g_strike.count * 2; ++i) g_strike.groups[i] = xz[i];
+}
+
+uint32_t LightningStrikes(double from, double to, float weather, LightningStrike* out, uint32_t max) {
+  if (!g_lightning.load(std::memory_order_relaxed) || !out || max == 0 || to <= from) return 0;
+  const float storm = Smooth(0.6f, 0.95f, weather);
+  if (storm <= 0.0f || to < 0.0) return 0;
+  const double period = Lerp(16.0f, 5.0f, storm);
+  uint32_t n = 0;
+  for (int64_t s = std::max<int64_t>(0, int64_t(from / period) - 1); s <= int64_t(to / period) && n < max; ++s) {
+    SlotFlash f;
+    if (!FlashInSlot(s, period, storm, f) || f.at <= from || f.at > to) continue;
+    LightningStrike& o = out[n++];
+    o.at = f.at;
+    o.x = std::sin(f.angle) * f.far, o.z = std::cos(f.angle) * f.far;
+    o.strokes = f.strokes;
+    float sum = 0.0f;
+    for (int k = 0; k < f.strokes; ++k) sum += f.amp[k];
+    o.strength = std::min(1.0f, sum / 2.0f);
+  }
+  return n;
+}
 
 SkyFlash SkyFlashAt(double seconds, float weather) {
   SkyFlash out;
@@ -1395,14 +2269,14 @@ SkyFlash SkyFlashAt(double seconds, float weather) {
   const double period = Lerp(16.0f, 5.0f, storm);
   const int64_t slot = int64_t(seconds / period);
   for (int64_t s = slot; s >= slot - 1 && s >= 0; --s) {
-    uint64_t state = 0x1943ull ^ (uint64_t(s) * 0x9e3779b97f4a7c15ull);
-    if (Uniform(state) > 0.65f + 0.35f * storm) continue;
-    const double dt = seconds - (double(s) * period + Uniform(state) * (period - 2.0));
-    const int strokes = 1 + int(SplitMix(state) % 4);
-    const float angle = Uniform(state) * 6.2831853f, far = 1500.0f + Uniform(state) * 8500.0f;
+    SlotFlash f;
+    if (!FlashInSlot(s, period, storm, f)) continue;
+    const double dt = seconds - f.at;
+    const int strokes = f.strokes;
+    const float angle = f.angle, far = f.far;
     float light = 0.0f;
     for (int k = 0; k < strokes; ++k) {
-      const float amp = 0.45f + 0.55f * Uniform(state);
+      const float amp = f.amp[k];
       // Each stroke swells in a few hundredths of a second and dies away over half a second, so a flash is one
       // light that swells and fades with a slight flicker. (Strokes that each died within a tenth of a second
       // lit the sky and the fog in sharp separate flashes, and the rain seen against them between the flashes
@@ -1412,6 +2286,8 @@ SkyFlash SkyFlashAt(double seconds, float weather) {
       if (since >= 0.0 && since < 1.5)
         light += amp * 0.6f * float((1.0 - std::exp(-since * 45.0)) * std::exp(-since * 6.0));
     }
+    // D208: a strike far off lights the scene less (a quarter at 9 km), now that strikes are where the storm is.
+    light *= 1.0f - 0.75f * Smooth(1500.0f, 9000.0f, far);
     if (light > 0.004f) {
       out.light = light;
       out.x = std::sin(angle) * far, out.z = std::cos(angle) * far;
@@ -1467,11 +2343,11 @@ SkyLight SkyLightAt(double hour_in, float weather) {
 
 int TestSkyShaders() {
   return int(CompileGlsl(GlslStage::kVertex, kVS, "sky VS").empty()) +
-         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kCloudPS, "sky clouds PS").empty()) +
+         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + storm::kGlsl + kCloudBindings + kCloudShared + kCloudPS, "sky clouds PS").empty()) +
          int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kResolvePS, "sky clouds resolve PS").empty()) +
          int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kSkyPS, "sky PS").empty()) +
          int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kOverPS, "sky clouds over PS").empty()) +
-         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kFogShared + kFogPS, "sky fog PS").empty()) +
+         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kFogShared + kFogClouds + storm::kGlsl + kCloudShared + kFogPS, "sky fog PS").empty()) +
          int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kFogShared + kSeaPS, "sky sea PS").empty()) +
          int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kLensPS, "sky lens PS").empty()) +
          int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kWetPS, "sky wet PS").empty());
@@ -1484,11 +2360,13 @@ Sky::~Sky() {
 bool Sky::Load(IRenderDevice* device) {
   device_ = device;
   vs_ = MakeShader(device, SHADER_TYPE_VERTEX, kVS, "NativeXRenderer sky VS");
-  cloud_ps_ = MakeShader(device, SHADER_TYPE_PIXEL, std::string(kCommon) + kCloudPS, "NativeXRenderer sky clouds PS");
+  cloud_ps_ = MakeShader(device, SHADER_TYPE_PIXEL, std::string(kCommon) + storm::kGlsl + kCloudBindings + kCloudShared + kCloudPS,
+                         "NativeXRenderer sky clouds PS");
   resolve_ps_ = MakeShader(device, SHADER_TYPE_PIXEL, std::string(kCommon) + kResolvePS, "NativeXRenderer sky clouds resolve PS");
   sky_ps_ = MakeShader(device, SHADER_TYPE_PIXEL, std::string(kCommon) + kSkyPS, "NativeXRenderer sky PS");
   over_ps_ = MakeShader(device, SHADER_TYPE_PIXEL, std::string(kCommon) + kOverPS, "NativeXRenderer sky clouds over PS");
-  fog_ps_ = MakeShader(device, SHADER_TYPE_PIXEL, std::string(kCommon) + kFogShared + kFogPS, "NativeXRenderer sky fog PS");
+  fog_ps_ = MakeShader(device, SHADER_TYPE_PIXEL, std::string(kCommon) + kFogShared + kFogClouds + storm::kGlsl + kCloudShared + kFogPS,
+                       "NativeXRenderer sky fog PS");
   sea_ps_ = MakeShader(device, SHADER_TYPE_PIXEL, std::string(kCommon) + kFogShared + kSeaPS, "NativeXRenderer sky sea PS");
   lens_ps_ = MakeShader(device, SHADER_TYPE_PIXEL, std::string(kCommon) + kLensPS, "NativeXRenderer sky lens PS");
   wet_ps_ = MakeShader(device, SHADER_TYPE_PIXEL, std::string(kCommon) + kWetPS, "NativeXRenderer sky wet PS");
@@ -1583,6 +2461,111 @@ bool Sky::Ready() {
 }
 
 // The constants every pass shares: the camera, the time of day's sun, moon and colours, the clouds, the fog.
+static_assert(kBoltPieces * 2 == 144, "the fog shader's bolt_seg");
+
+// D192: the bolt in its flash now, if a strike has one, laid out in the view's pixels for the fog's pass. NXR_BOLT=<m>
+// (a developer's check): a bolt held on that far straight ahead of the camera.
+void Sky::FillBolt(const Inputs& in, SkyConstantBlock& k, float weather, float sea, float scale) {
+  k.bolt[0] = 0.0f;
+  static const float held = [] {
+    const char* v = std::getenv("NXR_BOLT");
+    return v ? float(std::atof(v)) : 0.0f;
+  }();
+  float light = 0.0f, x = 0.0f, z = 0.0f;
+  uint64_t seed = 0;
+  bool crawler = false;  // D211: an in-cloud strike's channel
+  // NXR_CRAWLER=<m> (a developer's check, D211): an in-cloud strike's channel held on that far straight ahead.
+  static const float held_crawler = [] {
+    const char* v = std::getenv("NXR_CRAWLER");
+    return v ? float(std::atof(v)) : 0.0f;
+  }();
+  if (held > 0.0f) {
+    const float ax = in.inverse[0][2], az = in.inverse[2][2];  // the view's middle, flat
+    const float al = std::max(std::sqrt(ax * ax + az * az), 1e-4f);
+    x = in.eye[0] + ax / al * held, z = in.eye[2] + az / al * held;
+    light = 1.0f, seed = 0x1943b0170ull;
+  } else if (held_crawler > 0.0f) {
+    const float ax = in.inverse[0][2], az = in.inverse[2][2];
+    const float al = std::max(std::sqrt(ax * ax + az * az), 1e-4f);
+    x = in.eye[0] + ax / al * held_crawler, z = in.eye[2] + az / al * held_crawler;
+    light = 0.7f, seed = 0x1943c4a7ull, crawler = true;
+  } else if (g_lightning.load(std::memory_order_relaxed)) {
+    const float storm = Smooth(0.6f, 0.95f, weather);
+    if (storm <= 0.0f || in.seconds < 0.0) return;
+    const double period = Lerp(16.0f, 5.0f, storm);
+    const int64_t slot = int64_t(in.seconds / period);
+    for (int64_t s = slot; s >= slot - 1 && s >= 0; --s) {
+      SlotFlash f;
+      if (!FlashInSlot(s, period, storm, f)) continue;
+      // D211: a flash inside the clouds within 9 km shows its channel crawling along the cloud base.
+      if (!f.bolt && f.far > 9000.0f) continue;
+      light = BoltLight(f, in.seconds - f.at) * (f.bolt ? 1.0f : 0.9f);  // (D212: 0.9, 0.7 before)
+      if (light <= 0.0f) continue;
+      crawler = !f.bolt;
+      // Where the sky lights it (Fill's flash, LightningStrikes): the strike's offset from the middle of the eye's
+      // 4 km square.
+      x = std::round(in.eye[0] / 4000.0f) * 4000.0f + std::sin(f.angle) * f.far;
+      z = std::round(in.eye[2] / 4000.0f) * 4000.0f + std::cos(f.angle) * f.far;
+      seed = f.shape;
+      break;
+    }
+  }
+  if (light <= 0.0f) return;
+  // None seen from in or over the clouds (the layer would hide it).
+  const float base = k.cloud[2] * scale;
+  light *= 1.0f - Smooth(base * 0.85f, base, in.eye[1] - sea);
+  if (light <= 0.0f) return;
+  const float dist = std::sqrt((x - in.eye[0]) * (x - in.eye[0]) + (z - in.eye[2]) * (z - in.eye[2]));
+  const float foot[3] = {x, sea, z};
+  const float start[3] = {x, sea + base - 40.0f, z};
+  const std::vector<BoltPiece> pieces = crawler ? CrawlerShape(seed, start, dist) : BoltShape(seed, foot, sea + base, dist);
+  const float w = float(in.width), h = float(in.height);
+  if (w < 1.0f || h < 1.0f || std::abs(in.to_ndc[0]) < 1e-6f || std::abs(in.to_ndc[1]) < 1e-6f) return;
+  // The view's pixels a metre across makes 1 m along the view.
+  const float* fy = in.forward[1];
+  const float per_m = std::sqrt(fy[0] * fy[0] + fy[1] * fy[1] + fy[2] * fy[2]) / std::abs(in.to_ndc[1]) * h;
+  auto clip = [&](const float p[3], float c[3]) {
+    const float d[3] = {p[0] - in.eye[0], p[1] - in.eye[1], p[2] - in.eye[2]};
+    for (int r = 0; r < 3; ++r) c[r] = in.forward[r][0] * d[0] + in.forward[r][1] * d[1] + in.forward[r][2] * d[2];
+  };
+  float box[4] = {1e9f, 1e9f, -1e9f, -1e9f};
+  int n = 0;
+  for (const BoltPiece& p : pieces) {
+    float ca[3], cb[3];
+    clip(p.a, ca), clip(p.b, cb);
+    constexpr float kNear = 1.0f;
+    if (ca[2] < kNear && cb[2] < kNear) continue;
+    if (ca[2] < kNear || cb[2] < kNear) {  // cut at 1 m in front of the eye
+      float* behind = ca[2] < kNear ? ca : cb;
+      const float* front = ca[2] < kNear ? cb : ca;
+      const float t = (kNear - behind[2]) / (front[2] - behind[2]);
+      for (int c = 0; c < 3; ++c) behind[c] += (front[c] - behind[c]) * t;
+    }
+    const float pa[2] = {(ca[0] / ca[2] - in.to_ndc[2]) / in.to_ndc[0] * w, (ca[1] / ca[2] - in.to_ndc[3]) / in.to_ndc[1] * h};
+    const float pb[2] = {(cb[0] / cb[2] - in.to_ndc[2]) / in.to_ndc[0] * w, (cb[1] / cb[2] - in.to_ndc[3]) / in.to_ndc[1] * h};
+    const float reach = std::max(p.half * 2.6f * per_m / std::min(ca[2], cb[2]), 2.0f) * 3.0f + 2.0f;
+    const float lo[2] = {std::min(pa[0], pb[0]) - reach, std::min(pa[1], pb[1]) - reach};
+    const float hi[2] = {std::max(pa[0], pb[0]) + reach, std::max(pa[1], pb[1]) + reach};
+    if (hi[0] < 0.0f || hi[1] < 0.0f || lo[0] > w || lo[1] > h) continue;  // off the view
+    float* seg = k.bolt_seg[2 * n];
+    seg[0] = pa[0], seg[1] = pa[1], seg[2] = pb[0], seg[3] = pb[1];
+    float* more = k.bolt_seg[2 * n + 1];
+    more[0] = ca[2], more[1] = cb[2], more[2] = p.half, more[3] = p.bright;
+    box[0] = std::min(box[0], lo[0]), box[1] = std::min(box[1], lo[1]);
+    box[2] = std::max(box[2], hi[0]), box[3] = std::max(box[3], hi[1]);
+    ++n;
+  }
+  if (n == 0) return;
+  k.bolt[0] = float(n), k.bolt[1] = light, k.bolt[2] = per_m;
+  k.bolt_box[0] = std::max(box[0], 0.0f), k.bolt_box[1] = std::max(box[1], 0.0f);
+  k.bolt_box[2] = std::min(box[2], w), k.bolt_box[3] = std::min(box[3], h);
+  if (seed != said_bolt_) {
+    said_bolt_ = seed;
+    REXLOG_INFO("[native_x_renderer] sky: a lightning bolt {:.0f} m off, {} of its {} pieces in view", dist, n,
+                pieces.size());
+  }
+}
+
 void Sky::Fill(const Inputs& in, SkyConstantBlock& k) {
   const float hour = float(std::fmod(std::fmod(in.hour, 24.0) + 24.0, 24.0));
   const float kPi = 3.14159265f;
@@ -1620,6 +2603,12 @@ void Sky::Fill(const Inputs& in, SkyConstantBlock& k) {
   k.sun_dir[3] = direct * ext * (1.0f - 0.75f * weather);
   StoreLinear(k.sun_color, sun_color, night);
   k.moon_dir[3] = 0.12f;  // the cirrus's cover (Beachhead's 0.25 streaked the whole sky: run sky10)
+  // D211: the hurricane's outflow: the cirrus thickens as it comes (to 0.4 of the sky); altocumulus in patches,
+  // more under a greyer sky, dimmer as the weather closes in.
+  k.moon_dir[3] += 0.28f * Smooth(0.25f, 0.7f, in.match_weather);
+  k.layers[0] = 0.22f + 0.3f * Smooth(0.1f, 0.6f, in.weather_outside), k.layers[1] = 1.0f - 0.35f * weather;
+  k.layers[2] = g_cloud_shadows.load(std::memory_order_relaxed) ? 1.0f : 0.0f;  // D214: the clouds' shadows
+  k.layers[3] = weather;  // D217: the weather here, for the clouds' shadows under an overcast
   StoreLinear(k.moon_color, kMoon, 0.0f);
   StoreLinear(k.moon_light, kMoon, 0.0f);
   for (int i = 0; i < 3; ++i) k.moon_light[i] *= moon_energy * 0.3f;
@@ -1634,15 +2623,30 @@ void Sky::Fill(const Inputs& in, SkyConstantBlock& k) {
   StoreLinear(k.zenith, grey(Mix(Mix(kZenith, kDuskZenith, warm * 0.3f * day), kNightZenith, night)), 0.0f);
   // Fair weather: cumulus from 1500 m, 1800 m deep at the most; a light wind carries them.
   // The weather brings more cloud (toward a whole cover) and denser.
-  k.cloud[0] = std::clamp(Lerp(in.coverage, 1.0f, 0.85f * weather), 0.0f, 1.0f);
-  k.cloud[1] = 0.5f, k.cloud[2] = 1500.0f, k.cloud[3] = 1800.0f;
+  // D208: the weather outside the hurricane; the clouds' shader adds the hurricane's own where it is.
+  const float outside = std::clamp(in.storm_b[2] > 0.5f ? in.weather_outside : weather, 0.0f, 1.0f);
+  k.cloud[0] = std::clamp(Lerp(in.coverage, 1.0f, 0.85f * outside), 0.0f, 1.0f);
+  for (int i = 0; i < 4; ++i) k.storm_a[i] = in.storm_a[i], k.storm_b[i] = in.storm_b[i];
+  {  // (D217, a check: what the sky's passes get of the storm, every 10 s)
+    static auto said = std::chrono::steady_clock::time_point{};
+    if (std::chrono::steady_clock::now() - said > std::chrono::seconds(10)) {
+      said = std::chrono::steady_clock::now();
+      REXLOG_INFO("[native_x_renderer] sky: the storm as the sky gets it: a {:.0f} {:.0f} {:.0f} {:.0f}, b {:.2f} {:.2f} {:.0f} "
+                  "{:.2f}; the weather here {:.2f}, outside {:.2f}, the cover {:.2f}, the eye {:.0f} {:.0f} {:.0f}, scale {:.2f}",
+                  in.storm_a[0], in.storm_a[1], in.storm_a[2], in.storm_a[3], in.storm_b[0], in.storm_b[1], in.storm_b[2],
+                  in.storm_b[3], in.weather, in.weather_outside, k.cloud[0], in.eye[0], in.eye[1], in.eye[2], k.misc[2]);
+    }
+  }
+  // Taller and fuller (the user, 16 Nov 2026: "more vertically dense. Right now they look thin and whispy"): the
+  // layer 2800 m deep in its own scale (was 1800) and its clouds of a taller kind (0.62, was 0.5).
+  k.cloud[1] = 0.62f, k.cloud[2] = 1500.0f, k.cloud[3] = 2800.0f;
   // In the world the layer is smaller by this (sky.h: the planes reach it), its base at the height set.
   const float scale = std::clamp(in.cloud_height, 100.0f, 3000.0f) / k.cloud[2];
   k.misc[2] = scale;
   k.drift[0] = float(std::fmod(in.seconds * 6.0, 50400.0)), k.drift[1] = float(std::fmod(in.seconds * 3.0, 50400.0));
   // How the clouds form and change: Beachhead's forming clock (atmosphere_view.gd's _evolve: 1 a second at its
   // 100% cloud generation speed), kept by the renderer at the rate set (renderer.cpp, World).
-  k.drift[2] = float(std::fmod(in.evolve, 1000.0)), k.drift[3] = 1.0f + 0.8f * weather;
+  k.drift[2] = float(std::fmod(in.evolve, 1000.0)), k.drift[3] = 1.0f + 0.8f * outside;
 
   // The fog. The distance fog's setting squared, to a sight of about 1 km at its most; the storm's mist adds to it
   // and brings a low layer of its own. The ground fog: to 28 m over the sea, a sight of about 60 m in its patches
@@ -1653,24 +2657,45 @@ void Sky::Fill(const Inputs& in, SkyConstantBlock& k) {
   // (The mist stays low, 300 m: thicker or higher it hid the storm's clouds whole, run fog6.)
   k.fog_a[0] = fog * fog * 0.0035f + mist * 0.0006f;
   k.fog_a[1] = Lerp(500.0f, 300.0f, mist * (1.0f - fog));
-  k.fog_a[2] = ground * ground * 0.06f + mist * 0.0035f;
-  k.fog_a[3] = Lerp(28.0f, 60.0f, mist * (1.0f - ground));
+  // D194: the storm's mist (the user, 18 Nov 2026: "low but thick Ground fog should be all over the map being kicked
+  // up by that 100% storm weather"): from 75% of the weather, the ground fog thicker (to a sight of about 60 m in it
+  // at the eye's height), lower (to 12 m) and everywhere (the shader fills its patches in and lays it on the ground).
+  const float gale = Smooth(0.75f, 1.0f, weather);
+  k.gale[0] = gale;
+  k.fog_a[2] = ground * ground * 0.06f + mist * 0.0035f + gale * 0.022f;
+  k.fog_a[3] = Lerp(Lerp(28.0f, 60.0f, mist * (1.0f - ground)), 12.0f, gale);
   k.fog_b[0] = in.depth_near;
   k.fog_b[1] = Smooth(0.45f, 0.9f, weather);
   k.fog_b[2] = sea_known_ ? 1.0f : 0.0f;
   // The rain here: from a little over half the weather; none over the clouds it falls from.
+  // (D212: the eye's height over the sea, as the cloud base is set: the user, 19 Nov 2026: "rain also shouldn't show
+  // when the camera is above the clouds". Taken over the world's 0 before, which on Guadalcanal, its sea at 173 m,
+  // put the fade 173 m low.)
   k.fog_b[3] = Smooth(0.55f, 0.95f, weather) *
-               (1.0f - Smooth(k.cloud[2] * scale, (k.cloud[2] + 0.3f * k.cloud[3]) * scale, k.eye[1]));
+               (1.0f - Smooth(k.cloud[2] * scale, (k.cloud[2] + 0.3f * k.cloud[3]) * scale, k.eye[1] - sea));
   // The rain's lean: the wind's setting, to 35 degrees at its most. Its cover.
-  k.rain[0] = 0.7f * std::clamp(in.wind, 0.0f, 1.0f);
+  // A strong storm drives it far harder (the user, 17 Nov 2026: "Wind setting should also drastically affect rain
+  // slant at 100% storm strength"): from 80% of the weather the lean grows to 2.1 (65 degrees) at full wind.
+  k.rain[0] = std::clamp(in.wind, 0.0f, 1.0f) * (0.7f + 1.4f * Smooth(0.8f, 1.0f, weather));
   k.rain[1] = in.cover ? 1.0f : 0.0f;
+  k.ssr[0] = SeaReflection() ? 1.0f : 0.0f;
+  k.ssr[1] = std::clamp(in.wind, 0.0f, 1.0f);
+  k.ssr[2] = sea_mask ? (sea_after ? 2.0f : 1.0f) : 0.0f;
+  static const bool sea_debug = [] {
+    const char* v = std::getenv("NXR_SEA_DEBUG");
+    return v && *v == '1';
+  }();
+  if (sea_debug) k.ssr[2] += 10.0f;
+  k.ssr[3] = sea_mask_uv[0];
   std::memcpy(k.cover_m, in.cover_m, sizeof(k.cover_m));
   // The lightning, in the middle of the cloud layer.
-  const SkyFlash flash = SkyFlashAt(in.seconds, weather);
+  const SkyFlash flash = SkyFlashAt(in.seconds, std::max(in.match_weather, weather));  // D208
   k.flash[0] = std::round(in.eye[0] / 4000.0f) * 4000.0f + flash.x;
   k.flash[1] = (k.cloud[2] + 0.45f * k.cloud[3]) * scale;
   k.flash[2] = std::round(in.eye[2] / 4000.0f) * 4000.0f + flash.z;
   k.flash[3] = flash.light;
+  FillBolt(in, k, std::max(in.match_weather, weather), sea, scale);  // D208
+  last_fill_.assign(reinterpret_cast<const uint8_t*>(&k), reinterpret_cast<const uint8_t*>(&k) + sizeof(k));
   if (!said_) {
     said_ = true;
     REXLOG_INFO("[native_x_renderer] sky: the view {}x{}; {:.1f} h: the sun {:.0f} degrees up, night {:.2f}; the eye at "
@@ -1680,7 +2705,8 @@ void Sky::Fill(const Inputs& in, SkyConstantBlock& k) {
 }
 
 bool Sky::FogWanted(const Inputs& in) {
-  return in.fog > 0.001f || in.ground_fog > 0.001f || in.weather > 0.45f || in.debug == 4 || in.debug == 5 || in.debug == 6;
+  return in.fog > 0.001f || in.ground_fog > 0.001f || in.weather > 0.45f || in.debug == 4 || in.debug == 5 || in.debug == 6 ||
+         SeaReflection();
 }
 
 // The sea's height from the small target's copy (made a few frames ago): the view's lowest heights; where the lowest
@@ -1697,7 +2723,10 @@ void Sky::ReadSea(IDeviceContext* context) {
   std::vector<float> seen;
   for (uint32_t y = 0; y < 18; ++y) {
     const float* row = reinterpret_cast<const float*>(static_cast<const uint8_t*>(mapped.pData) + y * mapped.Stride);
-    if (y == 17 && row[31] > 1.5e9f) eye_open_ = row[31] < 2.5e9f;
+    if (y == 17 && row[31] > 1.5e9f) {
+      eye_open_ = row[31] < 2.5e9f;
+      NoteEyeCovered(!eye_open_);  // (the weather's sounds: rain muffled under cover)
+    }
     for (uint32_t x = 0; x < 32; ++x)
       if (std::isfinite(row[x]) && row[x] < 1e8f) seen.push_back(row[x]);
   }
@@ -1724,9 +2753,18 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   point.AddressU = point.AddressV = point.AddressW = TEXTURE_ADDRESS_CLAMP;
   auto pipeline = [&](const char* name, IShader* ps, TEXTURE_FORMAT format, bool blend, RefCntAutoPtr<IPipelineState>& pso,
                       RefCntAutoPtr<IShaderResourceBinding>& srb) {
+    SamplerDesc clamp_linear;
+    clamp_linear.MinFilter = clamp_linear.MagFilter = clamp_linear.MipFilter = FILTER_TYPE_LINEAR;
+    clamp_linear.AddressU = clamp_linear.AddressV = clamp_linear.AddressW = TEXTURE_ADDRESS_CLAMP;
     ImmutableSamplerDesc samplers[] = {{SHADER_TYPE_PIXEL, "weatherTex", repeat},
                                        {SHADER_TYPE_PIXEL, "depthTex", point},
-                                       {SHADER_TYPE_PIXEL, "coverTex", point}};
+                                       {SHADER_TYPE_PIXEL, "coverTex", point},
+                                       {SHADER_TYPE_PIXEL, "sceneTex", clamp_linear},
+                                       {SHADER_TYPE_PIXEL, "seaMaskTex", point},
+                                       {SHADER_TYPE_PIXEL, "seaAfterTex", point},
+                                       {SHADER_TYPE_PIXEL, "seaFloorTex", point},
+                                       {SHADER_TYPE_PIXEL, "shapeTex", repeat},   // D214
+                                       {SHADER_TYPE_PIXEL, "detailTex", repeat}};
     GraphicsPipelineStateCreateInfo info;
     info.PSODesc.Name = name;
     info.PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
@@ -1746,7 +2784,7 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
     info.pPS = ps;
     info.PSODesc.ResourceLayout.DefaultVariableType = SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC;
     info.PSODesc.ResourceLayout.ImmutableSamplers = samplers;
-    info.PSODesc.ResourceLayout.NumImmutableSamplers = 3;
+    info.PSODesc.ResourceLayout.NumImmutableSamplers = 9;
     device_->CreateGraphicsPipelineState(info, &pso);
     if (pso) pso->CreateShaderResourceBinding(&srb, true);
   };
@@ -1765,6 +2803,19 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
     TextureData data(layers, 3);
     device_->CreateTexture(desc, &data, &no_cover_);
     if (!no_cover_) return false;
+  }
+  if (!no_scene_) {  // D190: the scene's place before it is copied: one black texel
+    TextureDesc desc;
+    desc.Name = "NativeXRenderer sky no scene";
+    desc.Type = RESOURCE_DIM_TEX_2D;
+    desc.Width = desc.Height = 1;
+    desc.Format = TEX_FORMAT_RGBA8_UNORM;
+    desc.Usage = USAGE_IMMUTABLE;
+    desc.BindFlags = BIND_SHADER_RESOURCE;
+    const uint32_t black = 0;
+    TextureSubResData texel{&black, 4};
+    TextureData data(&texel, 1);
+    device_->CreateTexture(desc, &data, &no_scene_);
   }
   if (!fog_pso_ || fog_format_ != color.Format) {
     fog_pso_.Release(), fog_srb_.Release();
@@ -1802,6 +2853,25 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
     lens_rain_ = k.fog_b[3];
     lens_seconds_ = in.seconds;
     const float aim = eye_open_ ? lens_rain_ : 0.0f;
+    // D189: a strong storm's sway (the user, 17 Nov 2026: "a minor screen wobble/lean and slight vignette blur on edges
+    // of player camera that sells the effect of a strong storm"): from 80% of the weather and a fresh wind up. D193:
+    // only on foot (SetEyeOnFoot) and in the open, none under cover or in a vehicle; two seconds to come, half a
+    // second to go.
+    {
+      const float storm = Smooth(0.8f, 1.0f, in.weather) * Smooth(0.35f, 1.0f, in.wind);
+      const bool out_on_foot = eye_open_ && g_eye_on_foot.load(std::memory_order_relaxed);
+      const float sway_aim = g_storm_sway.load(std::memory_order_relaxed) && out_on_foot ? storm : 0.0f;
+      sway_ += std::clamp(sway_aim - sway_, -dt / 0.5f, dt / 2.0f);
+      // D194: the blurred edges in the open whether on foot or in a vehicle; none under a roof.
+      const float edge_aim = g_storm_sway.load(std::memory_order_relaxed) && eye_open_ ? storm : 0.0f;
+      edge_ += std::clamp(edge_aim - edge_, -dt / 0.5f, dt / 2.0f);
+      static bool shaking = false;
+      if ((sway_ > 0.5f) != shaking) {
+        shaking = !shaking;
+        REXLOG_INFO("[native_x_renderer] sky: the storm's shake {} (on foot {}, in the open {})", shaking ? "on" : "off",
+                    g_eye_on_foot.load(std::memory_order_relaxed), eye_open_);
+      }
+    }
     lens_wet_ = aim > lens_wet_ ? std::min(aim, lens_wet_ + dt / 2.0f) : std::max(aim, lens_wet_ - dt / 4.0f);
     // (While it gets wetter the drops come one by one; drying, all there are fade together.)
     if (lens_wet_ >= lens_peak_ || lens_wet_ <= 0.0f || (aim > 0.0f && lens_wet_ == aim)) lens_peak_ = lens_wet_;
@@ -1872,6 +2942,48 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   if (!FogWanted(in)) return probed;
   ITextureView* target = in.color->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET);
   if (!target) return probed;
+  // D190: the scene as it is, for the sea's reflection (only while that is on).
+  if (SeaReflection()) {
+    const TextureDesc& cd = in.color->GetDesc();
+    if (!fog_scene_ || fog_scene_->GetDesc().Width != cd.Width || fog_scene_->GetDesc().Height != cd.Height ||
+        fog_scene_->GetDesc().Format != cd.Format) {
+      fog_scene_.Release();
+      TextureDesc copy;
+      copy.Name = "NativeXRenderer sky fog, the scene for the sea's reflection";
+      copy.Type = RESOURCE_DIM_TEX_2D;
+      copy.Width = cd.Width, copy.Height = cd.Height;
+      copy.Format = cd.Format;
+      copy.BindFlags = BIND_SHADER_RESOURCE;
+      device_->CreateTexture(copy, nullptr, &fog_scene_);
+    }
+    if (fog_scene_) {
+      context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+      CopyTextureAttribs copy(in.color, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, fog_scene_,
+                              RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->CopyTexture(copy);
+    }
+  }
+  if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "seaFloorTex")) {
+    ITextureView* none = no_scene_ ? no_scene_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
+    if (sea_floor) v->Set(sea_floor);
+    else if (none) v->Set(none);
+  }
+  if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "seaAfterTex")) {
+    ITextureView* none = no_scene_ ? no_scene_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
+    if (sea_after) v->Set(sea_after);
+    else if (none) v->Set(none);
+  }
+  if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "seaMaskTex")) {
+    ITextureView* none = no_scene_ ? no_scene_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
+    if (sea_mask) v->Set(sea_mask);
+    else if (none) v->Set(none);
+  }
+  if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "sceneTex")) {
+    ITexture* scene = fog_scene_ ? fog_scene_.RawPtr() : no_scene_.RawPtr();
+    if (scene) v->Set(scene->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
+  }
+  if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "shapeTex")) v->Set(shape_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));  // D214
+  if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "detailTex")) v->Set(detail_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
   draw(target, in.width, in.height, fog_pso_, fog_srb_);
   context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
   return true;

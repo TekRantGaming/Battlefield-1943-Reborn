@@ -52,9 +52,12 @@ namespace bf1943 {
 // gain moves a step a frame, about 0.3 s from one end to the other, so it never clicks.
 std::atomic<bool> g_game_audio_muted{false};
 void SetGameAudioMuted(bool muted) { g_game_audio_muted.store(muted, std::memory_order_relaxed); }
+void WeatherAudioFrame(float* frame, int samples, float game_db);  // weather_audio.cpp
 }  // namespace bf1943
 
-// XAudioSubmitRenderDriverFrame(driver, samples): each sample scaled by the master volume before the system has it.
+// XAudioSubmitRenderDriverFrame(driver, samples): each sample scaled by the master volume before the system has it,
+// and the weather's sounds added (weather_audio.cpp). The frame is each channel's 256 samples one after the other
+// (front left, front right, centre, LFE, back left, back right; the SDK's audio reads it so).
 extern "C" REX_FUNC(__imp__XAudioSubmitRenderDriverFrame) {
   static PPCFunc* original = RuntimeExport("__imp__XAudioSubmitRenderDriverFrame");
   static const bool off = [] {
@@ -72,15 +75,24 @@ extern "C" REX_FUNC(__imp__XAudioSubmitRenderDriverFrame) {
   const float from = gain, target = bf1943::g_game_audio_muted.load(std::memory_order_relaxed) ? 0.0f : 1.0f;
   if (gain < target) gain = std::min(target, gain + 1.0f / 56.0f);
   else if (gain > target) gain = std::max(target, gain - 1.0f / 56.0f);
-  if (ctx.r4.u32 && (volume < 0.999 || from < 0.999f || gain < 0.999f)) {
+  if (ctx.r4.u32) {
     uint8_t* p = base + ctx.r4.u32;
+    float frame[kFrameSamples];
+    double loud = 0.0;
+    for (uint32_t i = 0; i < kFrameSamples; ++i) {
+      const uint8_t* q = p + i * 4;
+      const uint32_t bits = uint32_t(q[0]) << 24 | uint32_t(q[1]) << 16 | uint32_t(q[2]) << 8 | q[3];
+      std::memcpy(&frame[i], &bits, 4);
+      if (!std::isfinite(frame[i])) frame[i] = 0.0f;
+      if (i / 256 != 3) loud += double(frame[i]) * frame[i];  // (not the LFE)
+      // The ramp along the frame's samples (each channel's own 256: i % 256; until 17 Nov it ran along the whole).
+      frame[i] = float(frame[i] * volume * (from + (gain - from) * (float(i % 256) / 256.0f)));
+    }
+    const float game_db = float(10.0 * std::log10(loud / (256.0 * 5.0) + 1e-12));
+    bf1943::WeatherAudioFrame(frame, 256, game_db);
     for (uint32_t i = 0; i < kFrameSamples; ++i, p += 4) {
-      uint32_t bits = uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
-      float v;
-      std::memcpy(&v, &bits, 4);
-      const float g = from + (gain - from) * (float(i / 6) / 256.0f);
-      v = float(v * volume * g);
-      std::memcpy(&bits, &v, 4);
+      uint32_t bits;
+      std::memcpy(&bits, &frame[i], 4);
       p[0] = uint8_t(bits >> 24), p[1] = uint8_t(bits >> 16), p[2] = uint8_t(bits >> 8), p[3] = uint8_t(bits);
     }
   }

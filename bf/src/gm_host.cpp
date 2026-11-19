@@ -74,7 +74,10 @@ REXCVAR_DEFINE_DOUBLE(bf_world_fog, 0.0, "BF1943/World", "The match's distance f
 REXCVAR_DEFINE_DOUBLE(bf_world_ground_fog, 0.0, "BF1943/World", "The match's ground fog, 0 to 1");
 REXCVAR_DEFINE_DOUBLE(bf_world_wind, 0.3, "BF1943/World", "The match's wind, 0 calm to 1 a gale");
 REXCVAR_DEFINE_DOUBLE(bf_world_cloud_height, 450.0, "BF1943/World",
-                      "The match's cloud base over the sea, metres (200 to 1500): low, the planes fly through the clouds");
+                      "The match's cloud base over the sea, metres (100 to 1500): low, the planes fly through the clouds");
+REXCVAR_DEFINE_BOOL(bf_world_dynamic_storm, false, "BF1943/World",
+                    "The match's weather builds to a storm over each round and eases again (from bf_world_weather; "
+                    "over the round's time limit, else over 30 minutes)");
 REXCVAR_DEFINE_STRING(bf_world_admins, "", "BF1943/World",
                       "Player IDs (as the game's settings show them, separated by commas) whose games may change the "
                       "match's world while it runs");
@@ -101,6 +104,13 @@ const char* BfVersion();  // pipeline_upload.cpp
 int TickRate();           // tick_rate.cpp: the simulation rate this server runs at (bf_tick_rate)
 std::vector<std::string> RotationTitles();  // server_rotation.cpp: the maps in turn, by title
 std::string CurrentMapTitle();              // server_rotation.cpp: the one running now
+struct MatchClock {  // match_rules.cpp: the match's rules and the round's clock
+  int tickets = 0;
+  int time_limit = 0;
+  float seconds_left = -1;
+  uint32_t round = 0;
+};
+MatchClock CurrentMatchClock();
 }  // namespace bf1943
 
 namespace {
@@ -431,12 +441,55 @@ class Host {
   // the clouds' two clocks as
   // doubles (drift seconds, forming). Big endian. Nothing is kept per asker. Last in both (15 Nov 2026; a game from
   // before it sends and reads none): the cloud base's height, metres, a float.
+  //
+  // The dynamic storm (the user, 19 Nov 2026: "an option for servers to enable dynamic storm, so the weather gradually
+  // changes over the time of the match"): while it is on, the weather goes from where it was when the storm began
+  // (its base) up to a full storm and back, smoothly, over the round's time limit (else over 30 minutes, and again),
+  // with a slow swell on the way; each new round starts it again from its base. The wind goes with it while it
+  // follows the weather (the two the same), as an admin's change does. After the cloud height: a byte, 1 on, in both;
+  // and in the answer then the match's rules (match_rules.cpp): tickets and the time limit in minutes (16 bits each,
+  // 0 the level's own and none) and the round's seconds left (a float, -1 none).
   struct World {
     bool started = false, day_night = false;
     double hour = 16, day_minutes = 0, cover = 0.35, rate = 0.33, weather = 0, fog = 0, ground_fog = 0, wind = 0.3, seconds = 0,
            evolve = 0, cloud_height = 450;
+    bool storm = false;
+    double storm_base = 0, storm_t = 0;
+    uint32_t round = 0;
     Clock::time_point at;
   } world;
+  void StormBegin() { world.storm_base = world.weather, world.storm_t = 0; }
+  void StormSet(double weather) {
+    if (std::abs(world.wind - world.weather) < 0.006) world.wind = weather;
+    world.weather = weather;
+  }
+  void StormStep(double dt) {
+    const bf1943::MatchClock clock = bf1943::CurrentMatchClock();
+    if (clock.round != world.round) {
+      const bool first = world.round == 0;
+      world.round = clock.round;
+      if (world.storm && !first) {
+        world.storm_t = 0;
+        StormSet(world.storm_base);
+        Note(fmt::format("world: a new round, the storm starts again from weather {:.0f}%", world.storm_base * 100));
+      }
+    }
+    if (!world.storm) return;
+    world.storm_t += dt;
+    const double period = clock.time_limit > 0 ? clock.time_limit * 60.0 : 30 * 60.0;
+    const double phase = std::fmod(world.storm_t, period) / period;
+    const double build = 0.5 - 0.5 * std::cos(2 * 3.14159265358979 * phase);  // 0, up to 1 halfway, 0 again
+    const double swell = 0.06 * std::sin(2 * 3.14159265358979 * world.storm_t / 290.0) * build;
+    StormSet(std::clamp(world.storm_base + (1.0 - world.storm_base) * build + swell, 0.0, 1.0));
+    // Said at each tenth of its course (the logs show it moving).
+    static double said = -1;
+    if (world.storm_t < said) said = -1;
+    if (world.storm_t - said >= period / 10 || said < 0) {
+      said = world.storm_t;
+      Note(fmt::format("world: the storm at {:.0f} s of {:.0f}: weather {:.0f}%, wind {:.0f}%", world.storm_t, period,
+                       world.weather * 100, world.wind * 100));
+    }
+  }
   void WorldAdvance() {
     const auto now = Clock::now();
     if (!world.started) {
@@ -450,18 +503,28 @@ class Host {
       world.fog = std::clamp(REXCVAR_GET(bf_world_fog), 0.0, 1.0);
       world.ground_fog = std::clamp(REXCVAR_GET(bf_world_ground_fog), 0.0, 1.0);
       world.wind = std::clamp(REXCVAR_GET(bf_world_wind), 0.0, 1.0);
-      world.cloud_height = std::clamp(REXCVAR_GET(bf_world_cloud_height), 200.0, 1500.0);
+      world.cloud_height = std::clamp(REXCVAR_GET(bf_world_cloud_height), 100.0, 1500.0);
+      world.storm = REXCVAR_GET(bf_world_dynamic_storm);
+      StormBegin();
+      const bf1943::MatchClock clock = bf1943::CurrentMatchClock();
       Note(fmt::format("world: day and night {}, {:.1f} h, a day in {:.0f} min, clouds {:.0f}% at rate {:.0f}%, weather "
-                       "{:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m",
+                       "{:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m, dynamic storm {}; "
+                       "tickets {}, time limit {}",
                        world.day_night ? "on" : "off", world.hour, world.day_minutes, world.cover * 100, world.rate * 100,
                        world.weather * 100, world.fog * 100, world.ground_fog * 100, world.wind * 100,
-                       world.cloud_height));
+                       world.cloud_height, world.storm ? "on" : "off",
+                       clock.tickets > 0 ? std::to_string(clock.tickets) : std::string("the level's own"),
+                       clock.time_limit > 0 ? fmt::format("{} min", clock.time_limit) : std::string("none")));
     }
     const double dt = std::chrono::duration<double>(now - world.at).count();
     world.at = now;
     if (world.day_night && world.day_minutes > 0) world.hour = std::fmod(world.hour + dt / (world.day_minutes * 60) * 24, 24.0);
     world.seconds += dt;
-    world.evolve += dt * world.rate;
+    // D213: the clouds form and change faster under the storm, 1 to 3 times the rate set (native-x-renderer's
+    // storm.h RateFactor: the players' games run their clock on between answers the same way).
+    const double storm_t = std::clamp((world.weather - 0.25) / 0.75, 0.0, 1.0);
+    world.evolve += dt * world.rate * (1.0 + 2.0 * storm_t * storm_t * (3.0 - 2.0 * storm_t));
+    StormStep(dt);
   }
   // A joined player from that address (the game's own socket has another port: the IP and the name) whose ID, the
   // low half of its XUID as eight hex digits, is in bf_world_admins.
@@ -516,29 +579,41 @@ class Host {
       const double hour = f32(), minutes = f32(), cover = f32(), rate = f32(), weather = f32(), fog = f32(),
                    ground_fog = f32(), wind = f32();
       double cloud_height = world.cloud_height;
-      if (at != Bytes::npos && at + 4 <= data.size()) cloud_height = std::clamp(f32(), 200.0, 1500.0);
+      if (at != Bytes::npos && at + 4 <= data.size()) cloud_height = std::clamp(f32(), 100.0, 1500.0);
+      // The dynamic storm's switch, from a game that sends it; while it stays on, it keeps the weather (the asker's is
+      // up to two seconds old), and the wind too while the asker's follows its weather.
+      bool storm = world.storm;
+      if (at != Bytes::npos && at < data.size()) storm = u8() != 0;
+      double weather_set = weather, wind_set = wind;
+      if (storm && world.storm) {
+        weather_set = world.weather;
+        if (std::abs(wind - weather) < 0.006) wind_set = world.wind;
+      }
       if (at != Bytes::npos) {
         const bool changed = world.day_night != (day_night != 0) || std::abs(world.hour - hour) > 0.01 ||
                              world.day_minutes != minutes || world.cover != cover || world.rate != rate ||
-                             world.weather != weather || world.fog != fog || world.ground_fog != ground_fog ||
-                             world.wind != wind || world.cloud_height != cloud_height;
+                             world.weather != weather_set || world.fog != fog || world.ground_fog != ground_fog ||
+                             world.wind != wind_set || world.cloud_height != cloud_height || world.storm != storm;
         world.day_night = day_night != 0;
         world.hour = std::fmod(std::max(hour, 0.0), 24.0);
         world.day_minutes = std::clamp(minutes, 0.0, 1440.0);
         world.cover = std::clamp(cover, 0.0, 1.0);
         world.rate = std::clamp(rate, 0.0, 1.0);
-        world.weather = std::clamp(weather, 0.0, 1.0);
+        world.weather = std::clamp(weather_set, 0.0, 1.0);
         world.fog = std::clamp(fog, 0.0, 1.0);
         world.ground_fog = std::clamp(ground_fog, 0.0, 1.0);
-        world.wind = std::clamp(wind, 0.0, 1.0);
+        world.wind = std::clamp(wind_set, 0.0, 1.0);
         world.cloud_height = cloud_height;
+        if (storm && !world.storm) StormBegin();
+        world.storm = storm;
         if (changed)
           Note(fmt::format("world: {} set day and night {}, {:.1f} h, a day in {:.0f} min, clouds {:.0f}% at rate {:.0f}%, "
-                           "weather {:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m",
+                           "weather {:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m, "
+                           "dynamic storm {}",
                            name.empty() ? "an admin" : name,
                            world.day_night ? "on" : "off", world.hour, world.day_minutes, world.cover * 100,
                            world.rate * 100, world.weather * 100, world.fog * 100, world.ground_fog * 100,
-                           world.wind * 100, world.cloud_height));
+                           world.wind * 100, world.cloud_height, world.storm ? "on" : "off"));
       }
     }
     Bytes reply = "BF43WRLR";
@@ -560,6 +635,16 @@ class Host {
       const float f = float(world.cloud_height);
       uint32_t bits;
       std::memcpy(&bits, &f, 4);
+      Put32(reply, bits);
+    }
+    {
+      const bf1943::MatchClock clock = bf1943::CurrentMatchClock();
+      reply += char(world.storm ? 1 : 0);
+      Put16(reply, uint32_t(std::clamp(clock.tickets, 0, 65535)));
+      Put16(reply, uint32_t(std::clamp(clock.time_limit, 0, 65535)));
+      const float left = clock.seconds_left;
+      uint32_t bits;
+      std::memcpy(&bits, &left, 4);
       Put32(reply, bits);
     }
     sendto(sock, reply.data(), int(reply.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));

@@ -13,6 +13,8 @@
 //           rate, weather, distance fog, ground fog, wind, and (15 Nov 2026) the cloud base's height in metres
 //   answer  "BF43WRLR", version, flags (1 day and night, 2 the asker is an admin), the same eight floats as they are
 //           now, the clouds' two clocks as doubles (drift seconds, forming), and the cloud base's height (a float)
+// 19 Nov 2026, last in both: the dynamic storm (a byte, 1 on), and in the answer then the match's rules: tickets (16 bits,
+// 0 the level's own), the time limit in minutes (16 bits, 0 none) and the round's seconds left (a float, -1 none).
 // The cloud height came later and stands last in both: a host from before it sends and reads none (450 m then).
 // Big endian. An admin is the game that shows the host's key (the game that started a private match has it), or a
 // joined player whose ID is in the host's list (bf_world_admins; a dedicated server's --admins).
@@ -52,6 +54,7 @@
 #include <vector>
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <native_x_renderer/native_x_renderer.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -64,9 +67,15 @@ const std::string& PlayerName();  // live_layers.cpp: the name played under onli
 uint32_t OnlinePlayerId();        // live_layers.cpp: the player's ID as a match's host sees it
 bool InMatch();                   // auto_join.cpp
 bool LauncherShowing();           // game_menu.cpp
+void StartWeatherAudio();         // weather_audio.cpp
 }  // namespace bf1943
 
 namespace bf1943::world {
+double Now() {
+  static const auto start = std::chrono::steady_clock::now();
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+
 namespace {
 
 #if defined(_WIN32)
@@ -86,11 +95,6 @@ bool g_have_request = false;
 Settings g_request;
 int g_request_sends = 0;
 std::atomic<bool> g_started{false};
-
-double Now() {
-  static const auto start = std::chrono::steady_clock::now();
-  return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-}
 
 void PutF32(std::string& b, float v) {
   uint32_t bits;
@@ -183,6 +187,7 @@ void Run() {
                         request.fog, request.ground_fog, request.wind})
           PutF32(ask, v);
         PutF32(ask, request.cloud_height);
+        ask += char(request.dynamic_storm ? 1 : 0);  // 19 Nov 2026, last: a host from before it reads none
         std::lock_guard lock(g_mutex);
         if (--g_request_sends <= 0) g_have_request = false;
       }
@@ -209,6 +214,14 @@ void Run() {
       s.now.cloud_rate = GetF32(buf + 22), s.now.weather = GetF32(buf + 26);
       s.now.fog = GetF32(buf + 30), s.now.ground_fog = GetF32(buf + 34), s.now.wind = GetF32(buf + 38);
       if (n >= 62) s.now.cloud_height = std::clamp(GetF32(buf + 58), 100.0f, 3000.0f);
+      // 19 Nov 2026, last: the dynamic storm, and the match's rules (tickets, time limit, the round's time left).
+      if (n >= 71) {
+        s.now.dynamic_storm = (buf[62] & 1) != 0;
+        s.tickets = int(buf[63]) << 8 | buf[64];
+        s.time_limit = int(buf[65]) << 8 | buf[66];
+        s.time_left = GetF32(buf + 67);
+      }
+      s.answered_at = now;
       native_x_renderer::WorldState w;
       w.valid = true;
       w.cloud_height = s.now.cloud_height;
@@ -240,6 +253,7 @@ void Run() {
 void StartOnce() {
   if (g_started.exchange(true)) return;
   std::thread(Run).detach();
+  StartWeatherAudio();  // weather_audio.cpp: the rain, wind and thunder follow this world
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -254,17 +268,46 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
   void OnDraw(ImGuiIO& io) override {
     const Status status = Current();
 #if defined(BF_DEV_TOOLS)
-    // BF_DEV_WORLD_PANEL=<seconds> (a test run has no keyboard): that long after this game became an admin the
-    // panel opens by itself, and five seconds later the weather is set to 60% through it.
+    // BF_DEV_WORLD_PANEL=<seconds> (a test run has no keyboard or mouse): that long after this game became an admin
+    // the panel opens by itself and is used as a player would, with a pretend pointer and keys: the weather's track
+    // is clicked at 60% and dragged to 40%, the cloud height's box clicked and 777 typed, the time's box clicked and
+    // 18:30:15 typed, each taken with Enter; what the host then keeps is logged (weather 40%, 777 m, 18:30:15 and on).
     if (const char* v = std::getenv("BF_DEV_WORLD_PANEL"); v && *v && status.admin) {
       static const double since = ImGui::GetTime();
       static int stage = 0;
       const double after = ImGui::GetTime() - since - std::atof(v);
-      if (stage == 0 && after > 0) stage = 1, open = true, edit_ = status.now, edited_at_ = -100;
-      if (stage == 1 && after > 5) {
-        stage = 2;
-        edit_ = status.now, edit_.weather = 0.6f, edited_at_ = ImGui::GetTime();
-        Request(edit_);
+      // Where the rows below are drawn: a row's track at a fraction, and its value's box.
+      const float du = io.DisplaySize.y / 720.0f;
+      const float tx0 = 16 * du + 14 * du, tx1 = 16 * du + 420 * du - 14 * du;
+      auto row_y = [&](int i) { return 120 * du + 48 * du + 44 * du * i; };
+      auto track = [&](int i, float at) { return ImVec2(tx0 + (tx1 - tx0) * at, row_y(i) + 30 * du); };
+      auto box = [&](int i) { return ImVec2(16 * du + 416 * du - 30 * du, row_y(i) + 11 * du); };
+      auto type = [&](const char* text) {
+        for (const char* c = text; *c; ++c) io.AddInputCharacter(ImWchar(*c));
+        io.AddKeyEvent(ImGuiKey_Enter, true);
+      };
+      static const double kAt[] = {0.0, 3.0, 3.3, 3.6, 6.0, 6.2, 6.4, 8.0, 8.2, 8.4, 11.0};
+      if (stage < int(std::size(kAt)) && after > kAt[stage]) {
+        switch (stage) {
+          case 0: open = true, edit_ = status.now, edited_at_ = -100; break;
+          case 1: io.MousePos = track(5, 0.6f), io.MouseDown[0] = true; break;  // weather: pressed at 60%
+          case 2: io.MousePos = track(5, 0.4f); break;                          // dragged to 40%
+          case 3: io.MouseDown[0] = false; break;
+          case 4: io.MousePos = box(9), io.MouseDown[0] = true; break;  // the cloud height's box
+          case 5: io.MouseDown[0] = false, type("777"); break;
+          case 6: io.AddKeyEvent(ImGuiKey_Enter, false); break;
+          case 7: io.MousePos = box(1), io.MouseDown[0] = true; break;  // the time's box
+          case 8: io.MouseDown[0] = false, type("18:30:15"); break;
+          case 9: io.AddKeyEvent(ImGuiKey_Enter, false); break;
+          case 10: {
+            const long t = std::lround(double(status.now.hour) * 3600.0) % 86400;
+            REXLOG_INFO("BF world: the panel's test (pointer and keys): the host keeps weather {:.0f}%, cloud height "
+                        "{:.0f} m, time {:02d}:{:02d}:{:02d}",
+                        status.now.weather * 100, status.now.cloud_height, t / 3600, t / 60 % 60, t % 60);
+            break;
+          }
+        }
+        ++stage;
       }
     }
 #endif
@@ -276,6 +319,19 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
     const float u = io.DisplaySize.y / 720.0f;
     const kit::Fonts& f = kit::GetFonts();
     ImDrawList* d = ImGui::GetForegroundDrawList();
+    // A match with a time limit (match_rules.cpp): the round's time left, for every player, over the ticket bars; at
+    // 0 with both teams level, overtime until the next ticket lost.
+    if (status.answered && status.time_left >= 0 && InMatch() && !LauncherShowing()) {
+      const long left = long(std::ceil(std::max(0.0, double(status.time_left) - (Now() - status.answered_at))));
+      char clock[32];
+      if (left > 0) std::snprintf(clock, sizeof(clock), "%ld:%02ld", left / 60, left % 60);
+      else std::snprintf(clock, sizeof(clock), "OVERTIME");
+      const float size = 17 * u, w = kit::TextWidth(f.ui_bold, size, clock) + 20 * u;
+      const ImVec2 a(io.DisplaySize.x * 0.5f - w * 0.5f, 34 * u), b(a.x + w, a.y + 23 * u);
+      d->AddRectFilled(a, b, IM_COL32(18, 22, 14, 190));
+      d->AddText(f.ui_bold, size, ImVec2(a.x + 10 * u, a.y + 2.5f * u),
+                 left > 0 && left <= 60 ? IM_COL32(236, 92, 76, 255) : kit::kCream, clock);
+    }
     if (!open) {
       // F9 without the right: said for four seconds, with the ID a server's owner would add.
       if (ImGui::GetTime() - told_at_ < 4 && told_at_ > 0) {
@@ -289,12 +345,16 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
       }
       return;
     }
-    if (LauncherShowing() || !status.answered || !status.admin || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-      open = false;
+    // Esc leaves a box being typed in first, then closes the panel.
+    const bool escape = ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    if (escape && typing_ >= 0) typing_ = -1;
+    else if (LauncherShowing() || !status.answered || !status.admin || escape) {
+      open = false, typing_ = -1;
       return;
     }
     // The host's values, except for a second after a change of ours (its answer is on the way).
     if (ImGui::GetTime() - edited_at_ > 1.5 && drag_ < 0) edit_ = status.now;
+    if (edit_.day_minutes > 0) kept_minutes_ = edit_.day_minutes;
 
     struct Row {
       const char* label;
@@ -302,19 +362,43 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
       float lo, hi, step;
       const char* help;
     };
-    float day_night = edit_.day_night ? 1.0f : 0.0f;
+    // The first row pauses the clock (16 Nov 2026: turning the day and night off "should just pause the time
+    // progression", not bring the game's own afternoon back): the time passes while the match has its clock and a day
+    // has a length.
+    const bool passed = edit_.day_night && edit_.day_minutes > 0;
+    float passes = passed ? 1.0f : 0.0f;
+    // The dynamic storm (19 Nov 2026): a switch, as the first row.
+    float storm = edit_.dynamic_storm ? 1.0f : 0.0f;
+    const Settings before = edit_;
+    // Every slider moves in steps of one (18 Nov 2026: "stepped by 1pt each, with time stepped at 1pt for each
+    // second"): a percent, a minute of a day's length, a metre of the cloud base, and a second of the time of day (the
+    // hour is kept in hours, so a second is 1/3600 of one; the last second of a day is 23:59:59).
+    static constexpr float kSecond = 1.0f / 3600.0f, kLastHour = 86399.0f / 3600.0f;
     Row rows[] = {
-        {"Day and night", &day_night, 0, 1, 1, "The light, the shadows and the sky follow the match's clock."},
-        {"Time of day", &edit_.hour, 0, 24, 0.25f, "12 is noon, 18 sunset, 0 midnight."},
-        {"A day lasts", &edit_.day_minutes, 0, 240, 5, "Minutes a whole day and night take. 0: the time stands still."},
+        {"Time passes", &passes, 0, 1, 1, "On, the match's clock runs. Off, the time stands still at the time of day."},
+        {"Time of day", &edit_.hour, 0, kLastHour, kSecond,
+         "12 is noon, 18 sunset, 0 midnight. Click the value to type it (18:30 or 18:30:15)."},
+        {"A day lasts", &edit_.day_minutes, 0, 240, 1, "Minutes a whole day and night take (typed: up to 1440). 0: the time stands still."},
         {"Cloud cover", &edit_.cloud_cover, 0, 1, 0.01f, "How much of the sky the volumetric clouds take."},
         {"Cloud change rate", &edit_.cloud_rate, 0, 1, 0.01f, "How fast the clouds form and dissolve."},
         {"Weather", &edit_.weather, 0, 1, 0.01f, "From fair to a storm: overcast, mist, rain, lightning."},
         {"Distance fog", &edit_.fog, 0, 1, 0.01f, "A haze that hides what is far."},
         {"Ground fog", &edit_.ground_fog, 0, 1, 0.01f, "A low layer over the sea and the shore."},
-        {"Wind", &edit_.wind, 0, 1, 0.01f, "From calm to a gale: how far the rain leans."},
-        {"Cloud height", &edit_.cloud_height, 200, 1500, 50, "The cloud base over the sea. Low, the planes fly through the clouds."},
+        {"Wind", &edit_.wind, 0, 1, 0.01f, "From calm to a gale: how far the rain leans. Follows the weather until set apart."},
+        {"Cloud height", &edit_.cloud_height, 100, 1500, 1, "The cloud base over the sea. Low, the planes fly through the clouds."},
+        {"Dynamic storm", &storm, 0, 1, 1,
+         "On, the weather builds to a storm over the match and eases again (shown live above). Weather moved: off."},
     };
+    constexpr int kStormRow = 10;
+    auto is_switch = [&](int i) { return i == 0 || i == kStormRow; };
+    // A value put on its row's steps: whole seconds, percents, minutes or metres.
+    auto snap = [](const Row& r, float v) {
+      if (r.step == kSecond) return std::min(std::round(v * 3600.0f) / 3600.0f, kLastHour);
+      return r.lo + std::round((v - r.lo) / r.step) * r.step;
+    };
+    // The mouse over a rectangle. Unclipped: the panel is drawn on the foreground list with no window of its own, so
+    // ImGui's clip would be its hidden 400 by 400 default window's, and most of the panel would not see the mouse.
+    auto over = [](ImVec2 a, ImVec2 b) { return ImGui::IsMouseHoveringRect(a, b, false); };
     const int count = int(std::size(rows));
     const float w = 420 * u, x0 = 16 * u, x1 = x0 + w, y0 = 120 * u, rh = 44 * u;
     const float y1 = y0 + 48 * u + rh * count + 64 * u;
@@ -324,44 +408,115 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
     d->AddText(f.ui_bold, 20 * u, ImVec2(x0 + 12 * u, y0 + 6 * u), kit::kCream, "MATCH ADMIN (F9)");
     if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) row_ = (row_ + count - 1) % count;
     if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) row_ = (row_ + 1) % count;
+    // Left and right: a step; with Shift, ten (sixty on the time: a minute).
     const int key_step = (ImGui::IsKeyPressed(ImGuiKey_RightArrow) ? 1 : 0) - (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) ? 1 : 0);
+    const bool key_shift = io.KeyShift;
     bool changed = false;
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) drag_ = -1;
+    // A value's box, typed in: a click on it, or a digit typed on its row, starts it; Enter takes it.
+    if (typing_ >= 0 && typing_ != row_) typing_ = -1;
+    {
+      ImGuiContext& g = *ImGui::GetCurrentContext();
+      g.PlatformImeData.WantTextInput = true;
+      g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
+      for (int k = 0; k < io.InputQueueCharacters.Size && !is_switch(row_); ++k) {
+        const ImWchar c = io.InputQueueCharacters[k];
+        if (!((c >= '0' && c <= '9') || c == ':' || c == '.')) continue;
+        if (typing_ != row_) typing_ = row_, typed_.clear();
+        if (typed_.size() < 8) typed_ += char(c);  // 18:30:15
+      }
+      if (typing_ >= 0 && ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+        if (typed_.empty()) typing_ = -1;
+        else typed_.pop_back();
+      }
+      if (typing_ >= 0 && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) {
+        if (!typed_.empty()) {
+          // The time as hours (18.5), hours and minutes (18:30) or with seconds too (18:30:15).
+          const size_t colon = typed_.find(':');
+          float v = float(std::atof(typed_.c_str()));
+          if (typing_ == 1 && colon != std::string::npos) {
+            const size_t colon2 = typed_.find(':', colon + 1);
+            v = float(std::atoi(typed_.c_str())) + float(std::atoi(typed_.c_str() + colon + 1)) / 60.0f +
+                (colon2 != std::string::npos ? float(std::atoi(typed_.c_str() + colon2 + 1)) / 3600.0f : 0.0f);
+          }
+          Row& r = rows[typing_];
+          if (typing_ == 1) v = std::clamp(v, 0.0f, kLastHour);
+          else if (typing_ == 2) v = std::clamp(v, 0.0f, 1440.0f);
+          else if (typing_ == 9) v = std::clamp(v, r.lo, r.hi);
+          else v = std::clamp(v / 100.0f, 0.0f, 1.0f);
+          v = snap(r, v);
+          if (v != *r.value) *r.value = v, changed = true;
+        }
+        typing_ = -1;
+      }
+    }
     for (int i = 0; i < count; ++i) {
       Row& r = rows[i];
       const float yy = y0 + 48 * u + rh * i;
       const ImVec2 a(x0 + 4 * u, yy), b(x1 - 4 * u, yy + rh - 2 * u);
-      const bool hover = ImGui::IsMouseHoveringRect(a, b);
-      if (hover && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) row_ = i;
+      const bool hover = over(a, b);
+      // The pointer picks the row, except while a box is typed in (its row stays until Enter, Esc or a click).
+      if (hover && typing_ < 0 && drag_ < 0 && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) row_ = i;
       if (i == row_) d->AddRectFilled(a, b, IM_COL32(93, 138, 50, 80));
       d->AddText(f.ui, 15 * u, ImVec2(a.x + 10 * u, yy + 2 * u), kit::kCream, r.label);
       char value[32];
-      if (i == 0) std::snprintf(value, sizeof(value), "%s", *r.value > 0.5f ? "On" : "Off");
-      else if (i == 1) std::snprintf(value, sizeof(value), "%02d:%02d", int(*r.value) % 24, int(*r.value * 60.0f) % 60);
-      else if (i == 2) std::snprintf(value, sizeof(value), *r.value <= 0 ? "Stands still" : "%.0f min", *r.value);
-      else if (i == 9) std::snprintf(value, sizeof(value), "%.0f m", *r.value);
-      else std::snprintf(value, sizeof(value), "%.0f%%", *r.value * 100.0f);
+      if (is_switch(i)) {
+        std::snprintf(value, sizeof(value), "%s", *r.value > 0.5f ? "On" : "Off");
+      } else if (i == 1) {
+        // The time to the second, as the slider steps it (rounded: a running clock's hour has fractions of one).
+        const long s = std::lround(double(*r.value) * 3600.0) % 86400;
+        std::snprintf(value, sizeof(value), "%02ld:%02ld:%02ld", s / 3600, s / 60 % 60, s % 60);
+      } else if (i == 2) {
+        std::snprintf(value, sizeof(value), *r.value <= 0 ? "Stands still" : "%.0f min", *r.value);
+      } else if (i == 9) {
+        std::snprintf(value, sizeof(value), "%.0f m", *r.value);
+      } else {
+        std::snprintf(value, sizeof(value), "%.0f%%", *r.value * 100.0f);
+      }
+      if (!is_switch(i)) {
+        // The value's box: clicked, it is typed in.
+        const ImVec2 v0(b.x - 92 * u, yy + 1 * u), v1(b.x - 6 * u, yy + 21 * u);
+        const bool typing = typing_ == i;
+        if (over(v0, v1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) row_ = i, typing_ = i, typed_.clear();
+        d->AddRect(v0, v1, typing ? kit::kGold : IM_COL32(232, 226, 204, 70), 0, 0, u);
+        if (typing) std::snprintf(value, sizeof(value), "%s%s", typed_.c_str(), std::fmod(ImGui::GetTime(), 1.0) < 0.5 ? "_" : " ");
+      }
       d->AddText(f.ui, 15 * u, ImVec2(b.x - 10 * u - kit::TextWidth(f.ui, 15 * u, value), yy + 2 * u), kit::kGreenBright, value);
       // The track: dragged with the mouse, stepped with left and right.
       const float tx0 = a.x + 10 * u, tx1 = b.x - 10 * u, ty = yy + 30 * u;
       d->AddRectFilled(ImVec2(tx0, ty - u), ImVec2(tx1, ty + u), IM_COL32(232, 226, 204, 60));
-      const float at = tx0 + (tx1 - tx0) * (*r.value - r.lo) / (r.hi - r.lo);
+      // A typed day's length past the track's end (up to 1440 minutes) keeps its knob at the end.
+      const float at = tx0 + (tx1 - tx0) * std::clamp((*r.value - r.lo) / (r.hi - r.lo), 0.0f, 1.0f);
       d->AddRectFilled(ImVec2(at - 3 * u, ty - 7 * u), ImVec2(at + 3 * u, ty + 7 * u), kit::kGold);
       float v = *r.value;
-      if (ImGui::IsMouseHoveringRect(ImVec2(tx0 - 6 * u, ty - 10 * u), ImVec2(tx1 + 6 * u, ty + 10 * u)) &&
+      // A click on the track (or its knob) sets the value there and holds it until the button is let go.
+      if (over(ImVec2(tx0 - 8 * u, ty - 9 * u), ImVec2(tx1 + 8 * u, ty + 12 * u)) &&
           ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        drag_ = i;
+        drag_ = i, row_ = i, typing_ = -1;
       }
       if (drag_ == i) {
-        v = r.lo + (r.hi - r.lo) * std::clamp((io.MousePos.x - tx0) / (tx1 - tx0), 0.0f, 1.0f);
-        v = r.lo + std::round((v - r.lo) / r.step) * r.step;
-      } else if (i == row_ && key_step) {
-        v = std::clamp(v + key_step * (i == 1 ? 0.5f : i == 2 || i == 9 ? r.step : i == 0 ? 1.0f : 0.05f), r.lo, r.hi);
+        v = snap(r, r.lo + (r.hi - r.lo) * std::clamp((io.MousePos.x - tx0) / (tx1 - tx0), 0.0f, 1.0f));
+      } else if (i == row_ && key_step && typing_ < 0) {
+        const float steps = is_switch(i) ? 1.0f : key_shift ? (i == 1 ? 60.0f : 10.0f) : 1.0f;
+        v = snap(r, std::clamp(snap(r, v) + key_step * steps * r.step, r.lo, std::max(r.hi, v)));
       }
-      if (i == 1 && v >= 24.0f) v = 23.75f;
       if (v != *r.value) *r.value = v, changed = true;
     }
-    edit_.day_night = day_night > 0.5f;
+    // The first row: on, the clock runs at the length it had (24 minutes if none); off, it stands. A change of the
+    // time or of a day's length gives the match its clock's light.
+    if ((passes > 0.5f) != passed) {
+      edit_.day_night = true;
+      edit_.day_minutes = passes > 0.5f ? (kept_minutes_ > 0 ? kept_minutes_ : 24.0f) : 0.0f;
+    } else if (edit_.hour != before.hour || edit_.day_minutes != before.day_minutes) {
+      edit_.day_night = true;
+    }
+    // The storm's switch; the weather moved by hand while the storm runs stops it (the storm would take it back).
+    edit_.dynamic_storm = storm > 0.5f;
+    if (edit_.dynamic_storm && before.dynamic_storm && edit_.weather != before.weather) edit_.dynamic_storm = false;
+    // The wind follows the weather while the two are the same (the user, 19 Nov 2026: "unless it's manually adjusted,
+    // so 100% weather should result in 100% wind"): a wind set apart from the weather stays where it was put.
+    if (edit_.weather != before.weather && edit_.wind == before.wind && std::abs(before.wind - before.weather) < 0.006f)
+      edit_.wind = edit_.weather;
     if (changed) {
       edited_at_ = ImGui::GetTime();
       Request(edit_);
@@ -372,13 +527,16 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
     d->AddText(f.ui, 12 * u, ImVec2(x0 + 12 * u, fy + 24 * u), IM_COL32(207, 198, 168, 255),
                "Every player of the match sees a change within two seconds.");
     d->AddText(f.ui, 12 * u, ImVec2(x0 + 12 * u, fy + 40 * u), IM_COL32(207, 198, 168, 255),
-               "Drag, or arrows: pick and change \xC2\xB7 F9 or Esc: close");
+               "Drag a slider, click a value to type it, or use the arrows \xC2\xB7 F9 or Esc: close");
   }
 
  private:
   Settings edit_;
   double edited_at_ = -100, told_at_ = 0;
   int row_ = 0, drag_ = -1;
+  int typing_ = -1;       // the row whose value is typed in
+  std::string typed_;
+  float kept_minutes_ = 24.0f;  // a day's length while the time stands still
 };
 
 AdminPanel* g_panel = nullptr;

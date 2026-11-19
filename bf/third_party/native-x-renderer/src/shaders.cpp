@@ -70,6 +70,7 @@ bool ShaderCache::Initialize(IRenderDevice* device, const RenderScale& scale) {
   features_.image_view_format_swizzle = false;
   translator_ = std::make_unique<rg::SpirvShaderTranslator>(features_, true, true, false);
   translator_->SetFractionalResolutionScale(scale_.x, scale_.y);
+  translator_->SetSoftShadowFetchConstant(soft_shadow_fetch_constant_);
   // Two workers: a level load translates about a hundred shaders at up to 2.7 ms each, and the game's
   // threads and DiligentCore's pipeline compilation threads (D28) need the cores at the same time. With 16 threads
   // or more, four (D128: Battlefield 1943 translates hundreds at a spawn).
@@ -169,6 +170,7 @@ void ShaderCache::Worker() {
   rg::SpirvShaderTranslator translator(features_, true, true, false);
   // The scale the shaders revert where they read pixel positions and resolved textures (the SDK's recomp change 30).
   translator.SetFractionalResolutionScale(scale_.x, scale_.y);
+  translator.SetSoftShadowFetchConstant(soft_shadow_fetch_constant_);  // D197
   while (!shutdown_.load(std::memory_order_acquire)) {
     Job job;
     {

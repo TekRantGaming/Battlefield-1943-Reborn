@@ -19,6 +19,7 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <string_view>
 
 namespace rex::input::mnk {
 
@@ -33,9 +34,15 @@ bool LastKeyAxes();
 // The triggers (0 or 255) and the left stick (-32767 to 32767, up positive) the keys gave at the last read.
 uint8_t LastKeyTrigger(bool right);
 int16_t LastKeyLeftStick(bool y);
+// The right stick the device gave at the last read: the keys' and the mouse's own (mnk_mouse), -32767 to 32767.
+int16_t LastKeyRightStick(bool y);
 // Tests: a key held as if pressed on the keyboard (a VirtualKey), with or without the window's focus (a test window
 // in the background has none).
 void SetTestKey(uint16_t virtual_key, bool down);
+// Where a bind's keys come from at each read: given a keybind_* setting's name and its own value, the keys to use
+// (Battlefield 1943: a set of keys for each kind of vehicle the player drives). None set: each setting's own value.
+using BindSource = std::string (*)(std::string_view name, const std::string& own);
+void SetBindSource(BindSource source);
 
 class MnkInputDriver final : public InputDriver,
                              public rex::ui::WindowInputListener,

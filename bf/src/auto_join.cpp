@@ -29,6 +29,7 @@
 #include <rex/hook.h>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/ui/keybinds.h>
+#include <native_x_renderer/native_x_renderer.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
@@ -63,6 +64,8 @@ void LookPad(uint8_t* gamepad, bool seated);                     // look.cpp
 bool LocalOnFoot();                                              // look.cpp: the vehicle seeker
 bool LocalSeated(const uint8_t* base);                           // look.cpp: in a vehicle, any seat
 void HudGlyphsTick(bool seated);                                 // hud_glyphs.cpp: the prompts drawn again on a change
+void SharpTextTick();                                            // sharp_text.cpp: Enhancements > HUD scale
+void SquadColorsTick(uint8_t* base);                             // squad_colors.cpp: the squad's icons in green
 void NoteLevelChange();                                          // modern_mode.cpp: scan the new level's values
 #if defined(BF_DEV_TOOLS)
 extern std::atomic<float> g_dev_camera[3];                       // look.cpp: the local camera's position
@@ -78,6 +81,7 @@ bool SpawnMouseActive();
 bool SpawnMouseCommand(const char* name, const char* args);    // flash_mouse.cpp: true, not to be passed on
 bool GameMenuEnabled();
 void GameMenuPad(uint16_t buttons, int16_t lx, int16_t ly);
+void GameMenuPadRaw(const uint8_t* gamepad);  // game_menu.cpp: the controller's whole state, for the controller page
 void ShowGameMenu();
 void ShowPauseMenu();
 void PressBf(const std::vector<uint16_t>& presses);
@@ -85,6 +89,7 @@ bool GameMenuPassing();
 void NoteMatchDevice(bool keyboard);  // game_menu.cpp: the device used in the match, for the HUD's prompts
 void NoteGameMenuSignal();  // game_menu.cpp: BF's own menu screen is up
 void ShowLostNotice();
+extern std::atomic<bool> g_smg_tune_hold;  // fov.cpp: the pause menu's sight sliders are open
 bool LauncherLetsGameSignIn();  // game_menu.cpp: BF signs in behind the launcher
 
 namespace {
@@ -1314,6 +1319,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     }
     bf1943::GameMenuPad(uint16_t(buttons & ~rex::input::mnk::LastKeyButtons()), key_axes ? 0 : int16_t(p[8] << 8 | p[9]),
                         key_axes ? 0 : int16_t(p[10] << 8 | p[11]));
+    bf1943::GameMenuPadRaw(p + 4);
     // Start in a match: our pause opens (game_menu.cpp, PausePage), in place of the game's, which never opens (the
     // Start is taken from the game's pad). The keyboard's Esc too (game_menu.cpp sees it while our menu is closed).
     const bool esc = bf1943::TakeEscapePress();
@@ -1396,11 +1402,15 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     }
   }
   if (hidden) std::memset(p + 4, 0, 12);
+  // The pause menu's SMG sight sliders (fov.cpp): the aim held while they are open, so the gun stays at the eye.
+  if (hidden && bf1943::g_smg_tune_hold.load(std::memory_order_relaxed)) p[6] = 255;
   static const bool input_off = [] {
     const char* v = std::getenv("BF_AB_OFF");
     return v && std::string(v).find("input") != std::string::npos;
   }();
   const bool seated = bf1943::LocalSeated(base);
+  native_x_renderer::NightVehicleSeated(seated);  // D178: a vehicle's lamps are on while someone is in it
+  native_x_renderer::SetEyeOnFoot(!seated && bf1943::LocalOnFoot());  // D193: the storm shakes the view only on foot
   bf1943::comms::NoteInWorld(seated || bf1943::LocalOnFoot());  // voice goes out only from the world
   bf1943::comms::ReadTeam(base, bf1943::LevelLoaded());  // team and squad chat (comms.cpp), the deploy screen too
   bf1943::CapturePointsTick(base, bf1943::LevelLoaded());  // the flags' letters and the pause menu's map
@@ -1413,6 +1423,8 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   if (!input_off)  // Settings > Controls
     bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, seated);
   bf1943::HudGlyphsTick(seated);  // hud_glyphs.cpp: the keyboard prompts follow the seat's keys
+  bf1943::SharpTextTick();        // sharp_text.cpp: the HUD's sharper copies drawn or not
+  bf1943::SquadColorsTick(base);  // squad_colors.cpp: the squad's icons a brighter green
   if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4, seated);
   // Capture native navigation before the mouse helper adds any kit/button pulses.
   const auto nav_axis = [&](int at) { return std::abs(int(int16_t(p[at] << 8 | p[at + 1]))) > 4915; };
@@ -1767,7 +1779,12 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
           }
           const double tx = double(target[0]) - pos[0], tz = double(target[2]) - pos[2];
           static SClock::time_point logged_at{};
-          if (now - logged_at > std::chrono::seconds(2)) {
+          // BF_SEEK_LOG=<s>: the place logged that often (2 s without it).
+          static const double log_every = [] {
+            const char* v = std::getenv("BF_SEEK_LOG");
+            return v && *v ? std::max(0.05, std::atof(v)) : 2.0;
+          }();
+          if (now - logged_at > std::chrono::duration<double>(log_every)) {
             logged_at = now;
             REXLOG_INFO("BF seek: at {:.1f} {:.1f} {:.1f}, {:.1f} m from {:.1f} {:.1f}", pos[0], pos[1], pos[2], target_dist,
                         target[0], target[2]);
@@ -1890,7 +1907,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
         }
         held |= w == "a" ? 0x1000 : w == "b" ? 0x2000 : w == "x" ? 0x4000 : w == "y" ? 0x8000 : w == "lb" ? 0x0100
                 : w == "rb" ? 0x0200 : w == "up" ? 0x0001 : w == "down" ? 0x0002 : w == "left" ? 0x0004
-                : w == "right" ? 0x0008 : 0;
+                : w == "right" ? 0x0008 : w == "ls" ? 0x0040 : w == "rs" ? 0x0080 : w == "back" ? 0x0020 : 0;
         if (w == "lt") p[6] = 0xFF;
         if (w == "rt") p[7] = 0xFF;
       }

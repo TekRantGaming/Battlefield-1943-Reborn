@@ -38,8 +38,10 @@ bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss);
 void NightLamps(const NightLamp* lamps, uint32_t count);
 void SetWorldState(const WorldState& state);
 WorldState CurrentWorldState();
-void NightSky(const NightSkyStyle& style);
 void NightModels(const NightModelLamps* models, uint32_t count);
+void NightVehicleSeated(bool seated);
+void SetMapArea(float x, float z, float reach);            // D208, D213
+void SetPlayerGroups(const float* xz, uint32_t count);     // D208
 // The stored pipelines made at start (D134).
 void StorageProgress(uint32_t* queued, uint32_t* done, uint32_t* loading, uint32_t* finished);
 void SetGameAspectBox(bool on);

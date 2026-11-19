@@ -110,11 +110,23 @@ bool LogSetting(const std::string& name) {
 // above 30 needs the frames between ticks drawn from interpolated positions.
 
 // Our menu's frame rate setting, live: 30 locks to the original timing, 0 is no limit.
+//
+// The original timing (Game.VsyncEnable on: the timer's mode 2) runs one game tick a frame. That is the Xbox's 30 ticks
+// a second only while the tick rate is 30: at 60 (tick_rate.cpp) a 30 FPS player's game ran 30 ticks of a sixtieth a
+// second, half time, and its own server (60 a second, in real time) pulled the soldier back every few frames (19 Nov
+// 2026, the user: "a smooth and playable experience no matter the framerate"; runs fps30 and fr_30r: 29.8 ticks a
+// second, 0.2 to 0.8 m a second walked against 4.5). So 30 locks only at 30 ticks a second; at any other rate it is our
+// own limit at 30 with the game's timer free (mode 0, its ticks from the elapsed time: two a frame at 30 FPS).
+namespace {
+double g_requested_fps = -1;  // the menu's choice (SetFrameRate), for LimitFrame to apply again when the rate changes
+}  // namespace
 void SetFrameRate(double fps) {
-  rex::cvar::SetFlagByName("bf_unlock_fps", fps == 30 ? "false" : "true");
+  g_requested_fps = fps;
+  const bool locked = fps == 30 && bf1943::TickRate() == 30;
+  rex::cvar::SetFlagByName("bf_unlock_fps", locked ? "false" : "true");
   rex::cvar::SetFlagByName("bf_max_fps", std::to_string(fps));
   if (REXCVAR_GET(server)) return;
-  if (g_vsync) *REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(g_vsync) = fps == 30 ? 1 : 0;
+  if (g_vsync) *REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(g_vsync) = locked ? 1 : 0;
   if (g_max_fps) StoreFloat(REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(g_max_fps), 0, 0.0f);
 }
 
@@ -214,6 +226,13 @@ void LimitFrame() {
     REXLOG_INFO("BF timer probe: frame {}: Sleep(1) took up to {:.1f} ms", probe_frames, longest);
   }
 #endif
+  // 30 FPS chosen and the tick rate settled after the choice (a server joined at another rate): locked or not again.
+  if (g_requested_fps == 30 && !REXCVAR_GET(server) &&
+      REXCVAR_GET(bf_unlock_fps) == (bf1943::TickRate() == 30)) {
+    REXLOG_INFO("BF frame rate: 30 at {} ticks a second: {}", bf1943::TickRate(),
+                bf1943::TickRate() == 30 ? "the original timing" : "our limit, the game's timer free");
+    SetFrameRate(30);
+  }
   if (!Unlocked()) return;
 #if defined(BF_DEV_TOOLS)
   // BF_DEV_NO_LIMIT=1 (tests): our limit never waits (does a load go faster without it?).
@@ -619,6 +638,10 @@ REX_HOOK_RAW(sub_821F3248) {
 // first across it, 4x the second, and 8x the buildings and trees. 2 by default (the doubling first asked for).
 REXCVAR_DEFINE_DOUBLE(bf_lod_distance, 2.0, "BF1943", "How far models keep their detail, 1.0 (the game's own) to 8.0 times as far");
 REXCVAR_DEFINE_DOUBLE(bf_dev_lod_scale, 0.0, "BF1943", "Developer: the level of detail's distance times this instead (0: not)");
+// (19 Nov 2026, D202: as the game runs, MaxBillboardCount 8192, BillboardScale 1, ShadowMaxLod 0, LodBlendOverlap 1.
+// BillboardScale is the size of the flat pictures far trees are drawn as, not where they switch: at 4 the far forests
+// stood four times as tall, at 0.25 a quarter, runs lod_bb4, lod_bb025. Only GlobalLodScale moves the switch: at 8x the
+// far forests of Guadalcanal are drawn as models, at 4x and less still as pictures, runs lod_g*.)
 namespace bf1943 {
 bool LevelLoaded();  // auto_join.cpp
 }
@@ -683,8 +706,10 @@ void LodWorker() {
         continue;
       }
       misses = 0;
-      REXLOG_INFO("BF level of detail: the game's mesh settings at {:08X} (GlobalLodScale {}; found in {:.0f} ms)",
-                  uint32_t(settings - base), LoadFloatHost(settings + 0x10), ms);
+      REXLOG_INFO("BF level of detail: the game's mesh settings at {:08X} (GlobalLodScale {}, MaxBillboardCount {}, "
+                  "BillboardScale {}, ShadowMaxLod {}, LodBlendOverlap {}; found in {:.0f} ms)",
+                  uint32_t(settings - base), LoadFloatHost(settings + 0x10), Load32Host(settings + 0x18),
+                  LoadFloatHost(settings + 0x1C), Load32Host(settings + 0x4C), LoadFloatHost(settings + 0x5C), ms);
     }
     const double dev = REXCVAR_GET(bf_dev_lod_scale);
     const double factor = dev > 0 ? dev : std::clamp(REXCVAR_GET(bf_lod_distance), 1.0, 8.0);

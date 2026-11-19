@@ -8,7 +8,12 @@
 // and a still mouse lets go: the mouse's speed is the plane's or the gun's turning speed.
 //
 // In a plane its x rolls (concept 6) and its y pitches (concept 5): mouse back is stick back, nose up. The rudder
-// (concept 4) stays on A and D. In a gun's or turret's seat (vehicle_mouse.cpp says which axes the seat has) its x
+// (concept 4) stays on A and D. 18 Nov 2026 (the user: "For planes, we want to be able to rebind the mouse's axes too,
+// so players who prefer to control the planes Pitch, Roll and Yaw with either mouse or keyboard inputs can freely
+// remap those"): each of the mouse's axes flies what bf_plane_mouse_x and bf_plane_mouse_y say (roll, pitch, yaw or
+// nothing), and the keys do the rest (the Air vehicles keys, vehicle_binds.cpp). In a plane what the mouse writes is
+// kept only where it is stronger than what the keys or a controller gave that axis (native_input.cpp), so they fly
+// together. In a gun's or turret's seat (vehicle_mouse.cpp says which axes the seat has) its x
 // turns the gun (concept 6) and its y raises it (concept 5): mouse up is gun up. 13 Nov 2026: the boat's gun was flown
 // like this by accident and was "exactly how we want all turrets and the AA gun to work".
 //
@@ -21,6 +26,7 @@
 #include <cmath>
 #include <cstdint>
 #include <mutex>
+#include <string>
 
 #include <rex/cvar.h>
 #include <rex/input/mnk/mnk_input_driver.h>
@@ -34,6 +40,12 @@ REXCVAR_DEFINE_DOUBLE(bf_plane_mouse_sensitivity, 1.0, "BF1943/Controls",
                       "Mouse sensitivity in planes, 0.1 to 5 (times): 1 is full stick for about 50 counts");
 REXCVAR_DEFINE_BOOL(bf_mouse_invert_y_flight, false, "BF1943/Controls",
                     "Mouse vertical inverted in planes (false: mouse back climbs, as a flight stick)");
+REXCVAR_DEFINE_STRING(bf_plane_mouse_x, "roll", "BF1943/Controls",
+                      "What the mouse's left and right flies in planes: roll, pitch, yaw or none");
+REXCVAR_DEFINE_STRING(bf_plane_mouse_y, "pitch", "BF1943/Controls",
+                      "What the mouse's forward and back flies in planes: pitch, roll, yaw or none");
+REXCVAR_DEFINE_BOOL(bf_mouse_invert_x_flight, false, "BF1943/Controls",
+                    "Mouse horizontal inverted in planes (false: mouse right rolls, yaws or pitches the positive way)");
 REXCVAR_DECLARE(bool, bf_mouse_invert_y_vehicle);       // input_settings.cpp
 REXCVAR_DECLARE(double, bf_mouse_vehicle_sensitivity);  // look.cpp
 REXCVAR_DECLARE(bool, bf_debug_vehicle_mouse);          // vehicle_mouse.cpp
@@ -50,19 +62,27 @@ struct State {
   std::mutex mutex;
   bool active = false;
   bool plane = false;    // flying (else a gun)
-  unsigned axes = 0;     // bit 0 concept 6, bit 1 concept 5
+  unsigned axes = 0;     // bit 0 concept 6, bit 1 concept 5, bit 2 concept 4 (a plane's yaw)
   uint32_t seat_key = 0;
   double x = 0, y = 0;   // the virtual stick, before clamping (Beachhead keeps pitch's excess)
   Clock::time_point updated{};
   Clock::time_point stick_until{};  // a controller's sticks have it until then
   Clock::time_point gun_until{};    // a gun's axes hold this long after its parts were last seen
   Clock::time_point plane_until{};  // a plane is held this long after its seat was last known (a hitch)
-  float roll6 = 0, pitch5 = 0;
+  float roll6 = 0, pitch5 = 0, yaw4 = 0;
   Clock::time_point steered_at{};
   Clock::time_point logged{};
 } g;
 
 float Axis(const uint8_t* p) { return float(int16_t(uint16_t(p[0]) << 8 | p[1])) / 32767.0f; }
+
+// What a mouse axis flies in a plane (bf_plane_mouse_x, _y): the axes bit of its concept (0 for nothing).
+unsigned FlownBy(const std::string& v) {
+  if (v == "roll") return 1;
+  if (v == "pitch") return 2;
+  if (v == "yaw") return 4;
+  return 0;
+}
 
 void Let_go() {
   g.active = false;
@@ -88,12 +108,13 @@ bool MouseStickSeat() {
   if (LocalSeat(seat) && seat.kind == SeatKind::kPlane && REXCVAR_GET(bf_plane_mouse_aim)) return true;
   return VehicleMouseAxes() != 0;
 }
-// For native_input.cpp: the stick for concepts 6 (roll, or a gun's turn) and 5 (pitch, positive up for a gun and nose
-// down for a plane, as the game has them without its own invert), worked out within 100 ms; axes says which to write.
-bool PlaneMouseConcepts(float& roll6, float& pitch5, unsigned& axes) {
+// For native_input.cpp: the stick for concepts 6 (roll, or a gun's turn), 5 (pitch, positive up for a gun and nose
+// down for a plane, as the game has them without its own invert) and 4 (a plane's yaw), worked out within 100 ms; axes
+// says which to write, plane whether it flies a plane (there the stronger of it and the game's own is kept).
+bool PlaneMouseConcepts(float& roll6, float& pitch5, float& yaw4, unsigned& axes, bool& plane) {
   std::lock_guard lock(g.mutex);
   if (!g.active || Clock::now() - g.steered_at > std::chrono::milliseconds(100)) return false;
-  roll6 = g.roll6, pitch5 = g.pitch5, axes = g.axes;
+  roll6 = g.roll6, pitch5 = g.pitch5, yaw4 = g.yaw4, axes = g.axes, plane = g.plane;
   return axes != 0;
 }
 
@@ -114,7 +135,14 @@ bool PlaneMouse(uint8_t* gamepad, double dx, double dy) {
   const unsigned gun = plane ? 0 : VehicleMouseAxes();
   // Another seat: the stick starts centred, and nothing is carried over.
   if (g.active && have_seat && seat.key != g.seat_key) Let_go();
-  unsigned axes = plane ? 3u : gun;
+  // A plane's: the concepts the mouse's axes fly. With none the keys and a controller fly it: the mouse's counts are
+  // taken and nothing is written (not the seat's own look either, whose concepts are the rudder and the pitch here).
+  const unsigned plane_axes = FlownBy(REXCVAR_GET(bf_plane_mouse_x)) | FlownBy(REXCVAR_GET(bf_plane_mouse_y));
+  if (plane && !plane_axes) {
+    if (g.active) Let_go();
+    return true;
+  }
+  unsigned axes = plane ? plane_axes : gun;
   // A gun's parts step with the game's ticks: its axes are held through a hitch.
   if (gun) g.gun_until = now + std::chrono::milliseconds(300);
   else if (!plane && g.active && !g.plane && have_seat && now < g.gun_until) axes = g.axes;
@@ -138,9 +166,12 @@ bool PlaneMouse(uint8_t* gamepad, double dx, double dy) {
   // any stick: but the keys give the left stick too (A and D the rudder, W and S the throttle), and what they gave is
   // not a controller's (12 Nov 2026: A or D held centred the mouse's stick). At a gun the right stick only (the left
   // drives a tank).
+  // The keys' right stick is no controller's either (18 Nov 2026: roll or pitch on keys while the mouse yaws).
   const float lx = !plane || rex::input::mnk::LastKeyLeftStick(false) ? 0.0f : Axis(gamepad + 4);
   const float ly = !plane || rex::input::mnk::LastKeyLeftStick(true) ? 0.0f : Axis(gamepad + 6);
-  if (std::max({std::fabs(lx), std::fabs(ly), std::fabs(Axis(gamepad + 8)), std::fabs(Axis(gamepad + 10))}) > 0.3f)
+  const float rx = rex::input::mnk::LastKeyRightStick(false) ? 0.0f : Axis(gamepad + 8);
+  const float ry = rex::input::mnk::LastKeyRightStick(true) ? 0.0f : Axis(gamepad + 10);
+  if (std::max({std::fabs(lx), std::fabs(ly), std::fabs(rx), std::fabs(ry)}) > 0.3f)
     g.stick_until = now + std::chrono::milliseconds(500);
   if (now < g.stick_until) {
     g.x = g.y = 0;
@@ -156,21 +187,38 @@ bool PlaneMouse(uint8_t* gamepad, double dx, double dy) {
   const double set = plane ? REXCVAR_GET(bf_plane_mouse_sensitivity) : REXCVAR_GET(bf_mouse_vehicle_sensitivity);
   const double sens = std::isfinite(set) ? std::clamp(set, 0.1, 5.0) : 1.0;
   const bool invert = plane ? REXCVAR_GET(bf_mouse_invert_y_flight) : REXCVAR_GET(bf_mouse_invert_y_vehicle);
-  if (std::isfinite(dx)) g.x += dx * sens * kPerCount;
+  const double invert_x = plane && REXCVAR_GET(bf_mouse_invert_x_flight) ? -1.0 : 1.0;
+  if (std::isfinite(dx)) g.x += dx * sens * kPerCount * invert_x;
   if (std::isfinite(dy)) g.y += dy * sens * kPerCount * (invert ? -1.0 : 1.0);
   g.x = std::clamp(g.x, -2.0, 2.0), g.y = std::clamp(g.y, -2.0, 2.0);
   // The mouse right: roll right, or the gun to the right. The mouse back (down): the stick back, a plane's nose up and
   // a gun down (concept 5 negative).
-  g.roll6 = float(std::clamp(g.x, -1.0, 1.0));
-  g.pitch5 = float(std::clamp(-g.y, -1.0, 1.0));
+  // In a plane each axis flies what it is set to: the mouse right is the positive way (roll right, yaw right, nose
+  // down), the mouse back the negative (nose up, as before; roll left, yaw left).
+  if (plane) {
+    double c[3] = {0, 0, 0};  // roll6, pitch5, yaw4
+    auto add = [&](unsigned bit, double v) {
+      if (bit) c[bit == 1 ? 0 : bit == 2 ? 1 : 2] += v;
+    };
+    add(FlownBy(REXCVAR_GET(bf_plane_mouse_x)), g.x);
+    add(FlownBy(REXCVAR_GET(bf_plane_mouse_y)), -g.y);
+    g.roll6 = float(std::clamp(c[0], -1.0, 1.0));
+    g.pitch5 = float(std::clamp(c[1], -1.0, 1.0));
+    g.yaw4 = float(std::clamp(c[2], -1.0, 1.0));
+  } else {
+    g.roll6 = float(std::clamp(g.x, -1.0, 1.0));
+    g.pitch5 = float(std::clamp(-g.y, -1.0, 1.0));
+    g.yaw4 = 0;
+  }
   // Only a stick off its centre steers (pull request 11's fix, dropped again by pull request 16 and put back in its
   // review): a centred mouse stick writes nothing, so a controller's gentle stick (under the 0.3 that marks a
   // controller in use) is the game's, in a plane and at a gun alike.
-  if (std::fabs(g.roll6) > 0.02f || std::fabs(g.pitch5) > 0.02f) g.steered_at = now;
+  if (std::fabs(g.roll6) > 0.02f || std::fabs(g.pitch5) > 0.02f || std::fabs(g.yaw4) > 0.02f) g.steered_at = now;
   if (REXCVAR_GET(bf_debug_vehicle_mouse) && now - g.logged > std::chrono::milliseconds(250) &&
-      (g.roll6 != 0 || g.pitch5 != 0)) {
+      (g.roll6 != 0 || g.pitch5 != 0 || g.yaw4 != 0)) {
     g.logged = now;
-    REXLOG_INFO("BF mouse stick: {} x {:.2f} y {:.2f} (axes {})", plane ? "plane" : "gun", g.roll6, g.pitch5, axes);
+    REXLOG_INFO("BF mouse stick: {} roll {:.2f} pitch {:.2f} yaw {:.2f} (axes {})", plane ? "plane" : "gun", g.roll6,
+                g.pitch5, g.yaw4, axes);
   }
   return true;
 }

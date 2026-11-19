@@ -474,6 +474,20 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
 
   EnsureBuildPointAvailable();
 
+  // Soft shadows: a fetch into the shadow map's taps' register ends them (a shadow map's tap sets them again, with
+  // the components written so far).
+  uint32_t soft_shadow_tap_mask_before = 0;
+  if (soft_shadow_register_ != UINT32_MAX && instr.result.storage_index == soft_shadow_register_) {
+    soft_shadow_tap_mask_before = soft_shadow_tap_mask_;
+  }
+  if (soft_shadow_register_ != UINT32_MAX &&
+      instr.result.storage_target == InstructionStorageTarget::kRegister &&
+      instr.result.GetUsedWriteMask() &&
+      (instr.result.storage_addressing_mode != InstructionStorageAddressingMode::kAbsolute ||
+       instr.result.storage_index == soft_shadow_register_)) {
+    soft_shadow_register_ = UINT32_MAX;
+  }
+
   // Handle the instructions for setting the register LOD.
   switch (instr.opcode) {
     case ucode::FetchOpcode::kSetTextureLod:
@@ -597,6 +611,8 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
     spv::Id image_2d_array_or_cube_signed = spv::NoResult;
     spv::Id image_3d_unsigned = spv::NoResult;
     spv::Id image_3d_signed = spv::NoResult;
+    // Soft shadows: the bindings of a fetch from the shadow map.
+    size_t fetch_sampler_index = SIZE_MAX, fetch_image_index = SIZE_MAX;
     if (instr.opcode != ucode::FetchOpcode::kGetTextureWeights) {
       bool bindings_set_up = true;
       // While GL_ARB_texture_query_lod specifies the value for
@@ -645,6 +661,8 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         return;
       }
       sampler = builder_->createLoad(sampler_bindings_[sampler_index].variable, spv::NoPrecision);
+      fetch_sampler_index = sampler_index;
+      fetch_image_index = image_2d_array_or_cube_unsigned_index;
       const TextureBinding& image_2d_array_or_cube_unsigned_binding =
           texture_bindings_[image_2d_array_or_cube_unsigned_index];
       image_2d_array_or_cube_unsigned =
@@ -999,6 +1017,27 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           spv::OpFMul, type_float_, layer_z, builder_->createUnaryOp(spv::OpConvertUToF, type_float_, layer_depth));
       coordinates[2] =
           builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450Floor, layer);
+      // Soft shadows (SetSoftShadowFetchConstant): a point fetch from the shadow map at a texel offset, into a
+      // temporary register: its coordinates without the offset kept for the compare that reads the register.
+      if (var_main_soft_shadow_coordinates_ != spv::NoResult &&
+          fetch_constant_index == soft_shadow_fetch_constant_ && !instr.attributes.unnormalized_coordinates &&
+          instr.attributes.mag_filter == xenos::TextureFilter::kPoint &&
+          instr.attributes.min_filter == xenos::TextureFilter::kPoint &&
+          (instr.attributes.offset_x || instr.attributes.offset_y) &&
+          instr.result.storage_target == InstructionStorageTarget::kRegister &&
+          instr.result.storage_addressing_mode == InstructionStorageAddressingMode::kAbsolute &&
+          fetch_sampler_index != SIZE_MAX && fetch_image_index != SIZE_MAX) {
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(coordinates[0]);
+        id_vector_temp_.push_back(coordinates[1]);
+        id_vector_temp_.push_back(coordinates[2]);
+        builder_->createStore(builder_->createCompositeConstruct(type_float3_, id_vector_temp_),
+                              var_main_soft_shadow_coordinates_);
+        soft_shadow_register_ = instr.result.storage_index;
+        soft_shadow_tap_mask_ = soft_shadow_tap_mask_before | instr.result.GetUsedWriteMask();
+        soft_shadow_sampler_index_ = fetch_sampler_index;
+        soft_shadow_image_index_ = fetch_image_index;
+      }
     }
     spv::Id texture_resolution_scaled = spv::NoResult;
     uint32_t revert_resolution_scale_axes = uint32_t(shader_resolution_scale_x_ > 1.0f) |
@@ -2269,6 +2308,185 @@ spv::Id SpirvShaderTranslator::QueryTextureLod(spv::Builder::TextureParameters& 
   }
   if_signed.makeEndIf();
   return if_signed.createMergePhi(lod_signed, lod_unsigned);
+}
+
+bool SpirvShaderTranslator::IsSoftShadowTapOperand(const InstructionOperand& operand) const {
+  return soft_shadow_register_ != UINT32_MAX && soft_shadow_tap_mask_ == 0b1111 &&
+         operand.storage_source == InstructionStorageSource::kRegister &&
+         operand.storage_addressing_mode == InstructionStorageAddressingMode::kAbsolute &&
+         operand.storage_index == soft_shadow_register_ && !operand.is_negated &&
+         !operand.is_absolute_value;
+}
+
+// Soft shadows (SetSoftShadowFetchConstant; NativeXRenderer D197). The game's filter is four point taps half a texel
+// round the receiver's place, compared with its depth and summed with bilinear weights: a shadow's edge one texel wide
+// whatever casts it. Here, from the same map and the same receiver depth:
+// - a blocker search: the 2x2 texels under the receiver (gathered) and eight gathers on a disc as wide as the penumbra
+//   of a blocker at the farthest searched distance; the texels nearer the light than the receiver (less a bias for
+//   the slope over the tap's distance) are blockers, their depths averaged;
+// - with none, the 2x2 texels' bilinear share as the game had it (a lone thin caster keeps its shadow);
+// - else 16 bilinear gathers on a disc whose radius is the penumbra of the blockers' average distance (the light's
+//   penumbra per metre times the distance, in uv), between the smallest and largest radius in texels.
+// The result, the shadowed share, goes to every component: the game's weights add up to one.
+spv::Id SpirvShaderTranslator::SoftShadowCompare(spv::Id receiver_depth, bool taps_first, spv::Id original,
+                                                 uint32_t component_count) {
+  if (soft_shadow_sampler_index_ == SIZE_MAX || soft_shadow_image_index_ == SIZE_MAX ||
+      var_main_soft_shadow_coordinates_ == spv::NoResult || !component_count) {
+    return original;
+  }
+  auto constant = [&](float value) { return builder_->makeFloatConstant(value); };
+  auto row = [&](int index) {
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantSoftShadow));
+    id_vector_temp_.push_back(builder_->makeIntConstant(index));
+    return builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassUniform, uniform_system_constants_, id_vector_temp_),
+        spv::NoPrecision);
+  };
+  auto component = [&](spv::Id vector, unsigned int index) {
+    return builder_->createCompositeExtract(vector, type_float_, index);
+  };
+  auto add = [&](spv::Id a, spv::Id b) { return builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, a, b); };
+  auto sub = [&](spv::Id a, spv::Id b) { return builder_->createNoContractionBinOp(spv::OpFSub, type_float_, a, b); };
+  auto mul = [&](spv::Id a, spv::Id b) { return builder_->createNoContractionBinOp(spv::OpFMul, type_float_, a, b); };
+  auto div = [&](spv::Id a, spv::Id b) { return builder_->createNoContractionBinOp(spv::OpFDiv, type_float_, a, b); };
+  auto fmax = [&](spv::Id a, spv::Id b) {
+    return builder_->createBinBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450FMax, a, b);
+  };
+  auto fmin = [&](spv::Id a, spv::Id b) {
+    return builder_->createBinBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450FMin, a, b);
+  };
+  auto dot4 = [&](spv::Id a, spv::Id b) { return builder_->createBinOp(spv::OpDot, type_float_, a, b); };
+
+  spv::Id row_0 = row(0);
+  spv::Id on = builder_->createBinOp(spv::OpFOrdGreaterThan, type_bool_, component(row_0, 3), const_float_0_);
+  SpirvBuilder::IfBuilder if_on(on, spv::SelectionControlDontFlattenMask, *builder_);
+  spv::Id soft_result;
+  {
+    spv::Id row_1 = row(1), row_2 = row(2);
+    spv::Id coordinates = builder_->createLoad(var_main_soft_shadow_coordinates_, spv::NoPrecision);
+    spv::Id u = component(coordinates, 0), v = component(coordinates, 1), layer = component(coordinates, 2);
+    // The cascade's numbers by the map's layer.
+    spv::Id first = builder_->createBinOp(spv::OpFOrdLessThan, type_bool_, layer, constant(0.5f));
+    spv::Id second = builder_->createBinOp(spv::OpFOrdLessThan, type_bool_, layer, constant(1.5f));
+    auto by_cascade = [&](spv::Id vector) {
+      return builder_->createTriOp(
+          spv::OpSelect, type_float_, first, component(vector, 0),
+          builder_->createTriOp(spv::OpSelect, type_float_, second, component(vector, 1), component(vector, 2)));
+    };
+    spv::Id depth_per_uv = by_cascade(row_0);
+    spv::Id depth_per_metre = by_cascade(row_1);
+    spv::Id penumbra_per_metre = component(row_1, 3);
+    spv::Id farthest = component(row_2, 0), slope = component(row_2, 1);
+    spv::Id image = builder_->createLoad(texture_bindings_[soft_shadow_image_index_].variable, spv::NoPrecision);
+    spv::Id sampler = builder_->createLoad(sampler_bindings_[soft_shadow_sampler_index_].variable, spv::NoPrecision);
+    // The map's size on the host (whatever its scale).
+    builder_->addCapability(spv::CapabilityImageQuery);
+    spv::Builder::TextureParameters size_query = {};
+    size_query.sampler = image;
+    size_query.lod = const_int_0_;
+    spv::Id size_int = builder_->createTextureQueryCall(spv::OpImageQuerySizeLod, size_query, false);
+    spv::Id size_x = builder_->createUnaryOp(spv::OpConvertSToF, type_float_,
+                                             builder_->createCompositeExtract(size_int, type_int_, 0));
+    spv::Id size_y = builder_->createUnaryOp(spv::OpConvertSToF, type_float_,
+                                             builder_->createCompositeExtract(size_int, type_int_, 1));
+    spv::Id texel = fmax(div(const_float_1_, size_x), div(const_float_1_, size_y));
+    spv::Id smallest = mul(component(row_2, 2), texel), largest = mul(component(row_2, 3), texel);
+    // uv of penumbra per depth unit between a blocker and the receiver; depth per uv of offset on the steepest slope.
+    spv::Id uv_per_depth = div(penumbra_per_metre, depth_per_uv);
+    spv::Id bias_per_uv = mul(depth_per_uv, slope);
+    spv::Id search = fmin(fmax(mul(mul(farthest, depth_per_metre), uv_per_depth), smallest), largest);
+
+    auto gather = [&](spv::Id tap_u, spv::Id tap_v) {
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(tap_u);
+      id_vector_temp_.push_back(tap_v);
+      id_vector_temp_.push_back(layer);
+      spv::Builder::TextureParameters parameters = {};
+      parameters.coords = builder_->createCompositeConstruct(type_float3_, id_vector_temp_);
+      parameters.component = const_int_0_;
+      // OpSampledImage must be in the same block as where its result is used.
+      parameters.sampler = builder_->createBinOp(
+          spv::OpSampledImage, builder_->makeSampledImageType(builder_->getTypeId(image)), image, sampler);
+      return builder_->createTextureCall(spv::NoPrecision, type_float4_, false, false, false, true, false,
+                                         parameters, spv::ImageOperandsMaskNone);
+    };
+    // The gathered texels nearer the light than `threshold`: 1 each.
+    auto nearer = [&](spv::Id depths, spv::Id threshold) {
+      id_vector_temp_.clear();
+      for (int i = 0; i < 4; ++i) id_vector_temp_.push_back(threshold);
+      spv::Id thresholds = builder_->createCompositeConstruct(type_float4_, id_vector_temp_);
+      return builder_->createTriOp(
+          spv::OpSelect, type_float4_,
+          builder_->createBinOp(spv::OpFOrdLessThan, type_bool_vectors_[3], depths, thresholds),
+          const_float_vectors_1_[3], const_float_vectors_0_[3]);
+    };
+    // A gather's bilinear weights in its order (i0 j1, i1 j1, i1 j0, i0 j0).
+    auto weights = [&](spv::Id tap_u, spv::Id tap_v) {
+      spv::Id a = builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450Fract,
+                                                   sub(mul(tap_u, size_x), constant(0.5f)));
+      spv::Id b = builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_, GLSLstd450Fract,
+                                                   sub(mul(tap_v, size_y), constant(0.5f)));
+      spv::Id not_a = sub(const_float_1_, a), not_b = sub(const_float_1_, b);
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(mul(not_a, b));
+      id_vector_temp_.push_back(mul(a, b));
+      id_vector_temp_.push_back(mul(a, not_b));
+      id_vector_temp_.push_back(mul(not_a, not_b));
+      return builder_->createCompositeConstruct(type_float4_, id_vector_temp_);
+    };
+    const float kGolden = 2.39996323f;
+    // The blocker search.
+    spv::Id centre_depths = gather(u, v);
+    spv::Id centre_blockers = nearer(centre_depths, receiver_depth);
+    spv::Id centre_shadow = dot4(centre_blockers, weights(u, v));
+    spv::Id count = dot4(centre_blockers, const_float_vectors_1_[3]);
+    spv::Id sum = dot4(centre_blockers, centre_depths);
+    const int kSearchTaps = 8;
+    for (int i = 0; i < kSearchTaps; ++i) {
+      float r = std::sqrt((float(i) + 0.5f) / float(kSearchTaps));
+      float angle = float(i) * kGolden + 0.3f;
+      spv::Id distance = mul(search, constant(r));
+      spv::Id depths = gather(add(u, mul(search, constant(r * std::cos(angle)))),
+                              add(v, mul(search, constant(r * std::sin(angle)))));
+      spv::Id blockers = nearer(depths, sub(receiver_depth, mul(distance, bias_per_uv)));
+      count = add(count, dot4(blockers, const_float_vectors_1_[3]));
+      sum = add(sum, dot4(blockers, depths));
+    }
+    spv::Id found = builder_->createBinOp(spv::OpFOrdGreaterThan, type_bool_, count, constant(0.5f));
+    SpirvBuilder::IfBuilder if_found(found, spv::SelectionControlDontFlattenMask, *builder_);
+    spv::Id filtered;
+    {
+      spv::Id blocker_depth = div(sum, count);
+      spv::Id radius = fmin(
+          fmax(mul(fmax(sub(receiver_depth, blocker_depth), const_float_0_), uv_per_depth), smallest), largest);
+      const int kFilterTaps = 16;
+      spv::Id shadow = const_float_0_;
+      for (int i = 0; i < kFilterTaps; ++i) {
+        float r = std::sqrt((float(i) + 0.5f) / float(kFilterTaps));
+        float angle = float(i) * kGolden;
+        spv::Id distance = mul(radius, constant(r));
+        spv::Id tap_u = add(u, mul(radius, constant(r * std::cos(angle))));
+        spv::Id tap_v = add(v, mul(radius, constant(r * std::sin(angle))));
+        spv::Id blockers = nearer(gather(tap_u, tap_v), sub(receiver_depth, mul(distance, bias_per_uv)));
+        shadow = add(shadow, dot4(blockers, weights(tap_u, tap_v)));
+      }
+      filtered = mul(shadow, constant(1.0f / float(kFilterTaps)));
+    }
+    if_found.makeEndIf();
+    spv::Id shadowed = if_found.createMergePhi(filtered, centre_shadow);
+    spv::Id value = taps_first ? sub(const_float_1_, shadowed) : shadowed;
+    if (component_count > 1) {
+      id_vector_temp_.clear();
+      for (uint32_t i = 0; i < component_count; ++i) id_vector_temp_.push_back(value);
+      soft_result =
+          builder_->createCompositeConstruct(type_float_vectors_[component_count - 1], id_vector_temp_);
+    } else {
+      soft_result = value;
+    }
+  }
+  if_on.makeEndIf();
+  return if_on.createMergePhi(soft_result, original);
 }
 
 }  // namespace rex::graphics

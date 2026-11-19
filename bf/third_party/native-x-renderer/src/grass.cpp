@@ -946,6 +946,30 @@ bool GrassProbeResult(uint32_t* id, float* ground) {
 }
 
 namespace {
+// D205: the ground under the camera, for the turned shadows' pivot. Asked through the same probe whenever it is free
+// (the developer tour's asks come first), with numbers from 2^23 up (a float holds them exactly; the tour's are small).
+constexpr uint32_t kCameraProbeBase = 0x800000;
+struct CameraGround {
+  float x = 0, z = 0, ground = 0;  // where it was last answered for, and the height
+  bool valid = false;
+  uint32_t next = 0;
+} g_camera_ground;
+}  // namespace
+
+bool GrassCameraGround(float x, float z, float* ground) {
+  std::lock_guard lock(g_probe.mutex);
+  if (!g_probe.asked) {
+    g_probe.x = x, g_probe.z = z, g_probe.id = kCameraProbeBase + (g_camera_ground.next++ & 0x3FFFFF);
+    g_probe.asked = true;
+  }
+  // An answer for a place within 40 m (a plane flies that in a few frames; the probe answers within a few).
+  const CameraGround& c = g_camera_ground;
+  if (!c.valid || std::hypot(c.x - x, c.z - z) > 40.0f) return false;
+  *ground = c.ground;
+  return true;
+}
+
+namespace {
 // D151: the level's grass map as the game gave it (GrassMap), taken by the next frame's placement.
 struct GrassMapData {
   std::mutex mutex;
@@ -1669,7 +1693,14 @@ bool Grass::Apply(IDeviceContext* context, const TerrainFrame& t, ITexture* colo
       float ground;
       std::memcpy(&ground, &v[1], 4);
       std::lock_guard lock(g_probe.mutex);
-      if (v[0] == g_probe.id) g_probe.asked = false, g_probe.answered = true, g_probe.ground = ground;
+      if (v[0] == g_probe.id && v[0] >= kCameraProbeBase) {  // D205: the camera's ground
+        g_probe.asked = false;
+        if (std::isfinite(ground) && ground > -1000.0f && ground < 5000.0f)
+          g_camera_ground.x = g_probe.x, g_camera_ground.z = g_probe.z, g_camera_ground.ground = ground,
+          g_camera_ground.valid = true;
+      } else if (v[0] == g_probe.id) {
+        g_probe.asked = false, g_probe.answered = true, g_probe.ground = ground;
+      }
       probe_copied_ = false;
     }
   }

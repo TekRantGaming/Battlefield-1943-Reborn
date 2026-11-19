@@ -2486,14 +2486,80 @@
                        // adjustment and time scale settings and sliders ... in the create match menu"): one row
                        // that opens its own list in the rail (the rail has no room for six more rows).
                        kPmWorld = 10, kPmDayNight = 11, kPmTime = 12, kPmDayLen = 13, kPmCloud = 14, kPmRate = 15,
-                       kPmWeather = 16, kPmFog = 17, kPmGroundFog = 18, kPmWind = 19, kPmCloudHeight = 20, kPmWorldBack = 21, kPmRows = 22;
+                       kPmWeather = 16, kPmFog = 17, kPmGroundFog = 18, kPmWind = 19, kPmCloudHeight = 20, kPmWorldBack = 21,
+                       // 18 Nov 2026, bots (bots.cpp; the user: "Let me play with them"): how many play.
+                       kPmBots = 22,
+                       // 19 Nov 2026 ("add match time and team ticket amount settings ... a map rotation selection as a
+                       // submenu in create match ... an option to select the game mode"; "an option for servers to
+                       // enable dynamic storm"): the game mode, the rotation's own list of rows (its switch, Rotate all
+                       // maps, a row a map), the tickets, the time limit, and the storm in the world's rows.
+                       kPmMode = 23, kPmRotation = 24, kPmTickets = 25, kPmTimeLimit = 26, kPmStorm = 27,
+                       kPmRotOn = 28, kPmRotAll = 29, kPmRotMap = 30 /* to 33, a map each */, kPmRotBack = 34,
+                       kPmRows = 35;
+  // The game modes. Each map has one in the game's data (its level holds that mode's objects and no other's: Wake
+  // Island, Guadalcanal and Iwo Jima Conquest, Coral Sea Air Superiority), so the mode chooses the maps that play it.
+  static constexpr const char* kPmModeNames[] = {"CONQUEST", "AIR SUPERIORITY", "ALL MODES"};
+  static bool PmMapInMode(int mode, int map) { return mode == 2 || (mode == 0 ? map < 3 : map == 3); }
+  static constexpr int kPmTicketSteps[] = {0, 25, 50, 75, 100, 130, 150, 200, 250, 300, 400, 500, 750, 1000};
+  static constexpr int kPmTimeSteps[] = {0, 5, 10, 15, 20, 25, 30, 40, 45, 60, 90, 120};
+  int pm_mode_ = 0;            // kPmModeNames
+  bool pm_rotation_ = false;   // the maps in turn (pm_rot_maps_) rather than the one map
+  int pm_rot_maps_ = 0xF;      // the rotation's maps, a bit each (kPmMapKeys' order)
+  int pm_tickets_ = 0;         // each team's tickets; 0: the map's own
+  int pm_time_limit_ = 0;      // minutes; 0: none, the round ends on tickets only
+  bool pm_storm_ = false;      // the dynamic storm
+  bool pm_maps_view_ = false;  // the rail shows the rotation's rows
+  // The rail scrolls when its rows are more than it holds: the selection kept in view, the wheel over it.
+  float pm_scroll_ = 0;
+  bool pm_scroll_follow_ = true;
+  static int PmStep(const int* steps, int count, int now, int step) {
+    int at = 0;
+    for (int k = 0; k < count; ++k)
+      if (steps[k] <= now) at = k;
+    return steps[std::clamp(at + step, 0, count - 1)];
+  }
+  // The rotation's maps of the chosen mode, in turn.
+  std::vector<int> PmRotationMaps() const {
+    std::vector<int> out;
+    for (int m = 0; m < 4; ++m)
+      if (PmMapInMode(pm_mode_, m) && (pm_rot_maps_ >> m & 1)) out.push_back(m);
+    return out;
+  }
+  bool PmRotationOn() const { return pm_rotation_ && !PmRotationMaps().empty(); }
+  // The maps the match plays, in turn (one when there is no rotation).
+  std::vector<int> PmMatchMaps() const {
+    std::vector<int> maps = PmRotationOn() ? PmRotationMaps() : std::vector<int>{};
+    if (maps.empty()) maps = {std::clamp(pm_map_, 0, 3)};
+    return maps;
+  }
+  std::string PmHeadline() const {
+    const std::vector<int> maps = PmMatchMaps();
+    if (maps.size() == 1) return kPmMapNames[maps[0]];
+    return fmt::format("{} MAPS IN TURN", maps.size());
+  }
+  // The first map of the chosen mode at or after `from`, going `step` (1 or -1).
+  int PmMapOfMode(int from, int step) const {
+    for (int k = 0; k < 4; ++k) {
+      const int m = ((from + step * k) % 4 + 4) % 4;
+      if (PmMapInMode(pm_mode_, m)) return m;
+    }
+    return 0;
+  }
+  int pm_bots_ = 0;  // bots in the match, each on the smaller side, within the room the players leave (0: none)
   bool pm_world_view_ = false;  // the rail shows the world's rows
   bool pm_dn_ = false;          // day and night
   float pm_time_ = 16.0f;       // the hour the match starts at
-  static constexpr int kPmDayLens[] = {0, 24, 48, 60, 120, 240};  // minutes a day takes; 0 stands still
   int pm_daylen_ = 0;
   int pm_cloud_ = 35, pm_rate_ = 33, pm_weather_ = 0, pm_fog_ = 0, pm_ground_fog_ = 0, pm_wind_ = 30;  // per cent
   int pm_cloud_height_ = 450;  // the cloud base over the sea, metres
+  // The wind follows the weather (19 Nov 2026, the user: "Weather percentage should also affect wind %, unless it's
+  // manually adjusted, so 100% weather should result in 100% wind") until the wind's own row is set apart from it;
+  // set back to the weather's value, it follows again.
+  bool pm_wind_manual_ = false;
+  void PmWeatherChanged() {
+    if (!pm_wind_manual_) pm_wind_ = pm_weather_;
+  }
+  void PmWindChanged() { pm_wind_manual_ = pm_wind_ != pm_weather_; }
   // A password for the match (13 Nov 2026): a switch under the name, and its field while it is on.
   bool pm_pass_on_ = false;
   std::string pm_pass_;
@@ -2545,6 +2611,62 @@
   }
   int pm_row_ = 0, pm_map_ = 0;
   bool pm_upnp_ = true;
+  // The world's rows are sliders with a box for the exact value (the user, 16 Nov 2026: "day and weather controls in
+  // custom match menu to be sliders ... box values for being able to type in exact values"): the row dragged now, the
+  // row whose box is typed in and what was typed.
+  int pm_drag_ = -1, pm_slide_edit_ = -1;
+  std::string pm_slide_text_;
+  struct PmSlide {
+    float lo, hi, step;  // the slider's ends and its steps
+    float most;          // the most a typed value may be
+  };
+  static bool PmSlideRow(int row) { return row == kPmTime || row == kPmDayLen || (row >= kPmCloud && row <= kPmCloudHeight); }
+  static PmSlide PmSlideOf(int row) {
+    if (row == kPmTime) return {0.0f, 23.75f, 0.25f, 23.99f};
+    if (row == kPmDayLen) return {0.0f, 240.0f, 1.0f, 1440.0f};
+    if (row == kPmCloudHeight) return {100.0f, 1500.0f, 10.0f, 1500.0f};
+    return {0.0f, 100.0f, 1.0f, 100.0f};
+  }
+  float PmSlideGet(int row) const {
+    switch (row) {
+      case kPmTime: return pm_time_;
+      case kPmDayLen: return float(pm_daylen_);
+      case kPmCloud: return float(pm_cloud_);
+      case kPmRate: return float(pm_rate_);
+      case kPmWeather: return float(pm_weather_);
+      case kPmFog: return float(pm_fog_);
+      case kPmGroundFog: return float(pm_ground_fog_);
+      case kPmWind: return float(pm_wind_);
+      case kPmCloudHeight: return float(pm_cloud_height_);
+    }
+    return 0.0f;
+  }
+  // `exact`: a typed value (kept as typed, within the row's bounds); else the slider's, on its steps.
+  void PmSlideSet(int row, float v, bool exact) {
+    const PmSlide s = PmSlideOf(row);
+    if (!exact) v = s.lo + std::round((v - s.lo) / s.step) * s.step;
+    v = std::clamp(v, s.lo, exact ? s.most : s.hi);
+    const int n = int(std::lround(v));
+    switch (row) {
+      case kPmTime: pm_time_ = v; break;
+      case kPmDayLen: pm_daylen_ = n; break;
+      case kPmCloud: pm_cloud_ = n; break;
+      case kPmRate: pm_rate_ = n; break;
+      case kPmWeather: pm_weather_ = n, PmWeatherChanged(); break;
+      case kPmFog: pm_fog_ = n; break;
+      case kPmGroundFog: pm_ground_fog_ = n; break;
+      case kPmWind: pm_wind_ = n, PmWindChanged(); break;
+      case kPmCloudHeight: pm_cloud_height_ = n; break;
+    }
+  }
+  std::string PmSlideText(int row) const {
+    switch (row) {
+      case kPmTime: return fmt::format("{:02d}:{:02d}", int(pm_time_), int(std::lround(pm_time_ * 60.0f)) % 60);
+      case kPmDayLen: return pm_daylen_ == 0 ? std::string("STILL") : fmt::format("{} MIN", pm_daylen_);
+      case kPmCloudHeight: return fmt::format("{} M", pm_cloud_height_);
+    }
+    return fmt::format("{}%", int(PmSlideGet(row)));
+  }
   bool pm_hosting_ = false;  // our server runs for this game
   bool pm_joining_ = false;  // this game's join to it started
   double pm_started_at_ = 0, pm_read_at_ = -100, pm_copied_at_ = -100;
@@ -2562,19 +2684,31 @@
     pm_pass_on_ = settings_.Get("private_match_password_on", "0") == "1";
     pm_pass_ = settings_.Get("private_match_password", "");
     pm_tick_ = std::atoi(settings_.Get("private_match_tick", "60").c_str());
+    pm_bots_ = std::clamp(std::atoi(settings_.Get("private_match_bots", "0").c_str()), 0, 24);
+    pm_mode_ = std::clamp(std::atoi(settings_.Get("private_match_mode", "0").c_str()), 0, 2);
+    pm_rotation_ = settings_.Get("private_match_rotation", "0") == "1";
+    pm_rot_maps_ = std::clamp(std::atoi(settings_.Get("private_match_rotation_maps", "15").c_str()), 0, 15);
+    if (pm_map_ == 4) pm_map_ = 0, pm_rotation_ = true, pm_rot_maps_ = 0xF, pm_mode_ = 2;  // before 19 Nov: all four in turn
+    if (!PmMapInMode(pm_mode_, pm_map_)) pm_mode_ = pm_map_ == 3 ? 1 : 0;  // the map chosen keeps its mode
+    pm_tickets_ = std::clamp(std::atoi(settings_.Get("private_match_tickets", "0").c_str()), 0, 9999);
+    pm_time_limit_ = std::clamp(std::atoi(settings_.Get("private_match_time_limit", "0").c_str()), 0, 600);
+    pm_storm_ = settings_.Get("private_match_dynamic_storm", "0") == "1";
+    pm_maps_view_ = false;
     if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 60;
     pm_edit_ = -1;  // the on screen keys never left open from an earlier visit
     pm_dn_ = settings_.Get("private_match_day_night", "0") == "1";
     pm_time_ = std::clamp(float(std::atof(settings_.Get("private_match_time", "16").c_str())), 0.0f, 23.5f);
     pm_daylen_ = std::atoi(settings_.Get("private_match_day_minutes", "0").c_str());
-    if (std::find(std::begin(kPmDayLens), std::end(kPmDayLens), pm_daylen_) == std::end(kPmDayLens)) pm_daylen_ = 0;
+    pm_daylen_ = std::clamp(pm_daylen_, 0, 1440);  // any length (the slider, or typed)
     pm_cloud_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_cover", "35").c_str()), 0, 100);
     pm_rate_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_rate", "33").c_str()), 0, 100);
     pm_weather_ = std::clamp(std::atoi(settings_.Get("private_match_weather", "0").c_str()), 0, 100);
     pm_fog_ = std::clamp(std::atoi(settings_.Get("private_match_fog", "0").c_str()), 0, 100);
     pm_ground_fog_ = std::clamp(std::atoi(settings_.Get("private_match_ground_fog", "0").c_str()), 0, 100);
     pm_wind_ = std::clamp(std::atoi(settings_.Get("private_match_wind", "30").c_str()), 0, 100);
-    pm_cloud_height_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_height", "450").c_str()), 200, 1500);
+    pm_wind_manual_ = settings_.Get("private_match_wind_manual", "0") == "1";
+    PmWeatherChanged();
+    pm_cloud_height_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_height", "450").c_str()), 100, 1500);
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
@@ -2584,6 +2718,13 @@
     settings_.values["private_match_name"] = pm_name_;
     settings_.values["private_match_port"] = pm_port_text_;
     settings_.values["private_match_tick"] = std::to_string(pm_tick_);
+    settings_.values["private_match_bots"] = std::to_string(pm_bots_);
+    settings_.values["private_match_mode"] = std::to_string(pm_mode_);
+    settings_.values["private_match_rotation"] = pm_rotation_ ? "1" : "0";
+    settings_.values["private_match_rotation_maps"] = std::to_string(pm_rot_maps_);
+    settings_.values["private_match_tickets"] = std::to_string(pm_tickets_);
+    settings_.values["private_match_time_limit"] = std::to_string(pm_time_limit_);
+    settings_.values["private_match_dynamic_storm"] = pm_storm_ ? "1" : "0";
     settings_.values["private_match_password_on"] = pm_pass_on_ ? "1" : "0";
     settings_.values["private_match_password"] = pm_pass_;
     settings_.values["private_match_day_night"] = pm_dn_ ? "1" : "0";
@@ -2595,17 +2736,26 @@
     settings_.values["private_match_fog"] = std::to_string(pm_fog_);
     settings_.values["private_match_ground_fog"] = std::to_string(pm_ground_fog_);
     settings_.values["private_match_wind"] = std::to_string(pm_wind_);
+    settings_.values["private_match_wind_manual"] = pm_wind_manual_ ? "1" : "0";
     settings_.values["private_match_cloud_height"] = std::to_string(pm_cloud_height_);
     settings_.Save();
   }
 
   void HostPrivateMatch() {
     bf1943::PrivateMatchOptions o;
-    if (pm_map_ < 4) o.maps = {kPmMapKeys[pm_map_]};
-    else o.maps = {"wake", "guadalcanal", "iwo", "coral"};
+    for (int m : PmMatchMaps()) o.maps.push_back(kPmMapKeys[m]);
+    o.tickets = pm_tickets_, o.time_limit = pm_time_limit_, o.dynamic_storm = pm_storm_;
     o.upnp = pm_upnp_;
-    o.lan = pm_lan_;
-    if (pm_lan_) {
+    // The test launcher (tools	est_progression.py: the test_progression setting, its own backend on this PC's
+    // loopback) already answers sign-in, matchmaking and the server list on the ports a LAN match's own backend
+    // needs (TCP 18241 and 18246), and the game is signed in to it: a LAN match is hosted through that backend there,
+    // not through one of its own (16 Nov 2026: hosting from the test launcher was refused, "another program on this PC
+    // already uses TCP 18241").
+    const bool test_backend = settings_.Get("test_progression", "") == "1" &&
+                              rex::cvar::GetFlagByName("bf_backend_registry").rfind("127.0.0.1:", 0) == 0;
+    if (pm_lan_ && test_backend) REXLOG_INFO("BF private match: a LAN match under the test launcher: through its backend");
+    o.lan = pm_lan_ && !test_backend;
+    if (o.lan) {
       // The game signs in to the match's own backend, which it can only choose before it starts (once it runs it is
       // signed in to the main one).
       if (!pre_game_ && own_backend_ != "127.0.0.1") {
@@ -2628,7 +2778,10 @@
     }
     o.password = pm_pass_on_ ? pm_pass_ : std::string();
     o.tick = pm_tick_;
-    o.day_night = pm_dn_, o.time = pm_time_, o.day_minutes = pm_daylen_;
+    o.bots = pm_bots_;
+    // The match always has its clock's light and sky (16 Nov 2026: the switch "should just pause the time progression",
+    // not bring the game's own afternoon back): off, the time stands still at the time of day.
+    o.day_night = true, o.time = pm_time_, o.day_minutes = pm_dn_ ? pm_daylen_ : 0;
     o.cloud_cover = pm_cloud_ / 100.0f, o.cloud_rate = pm_rate_ / 100.0f, o.weather = pm_weather_ / 100.0f;
     o.fog = pm_fog_ / 100.0f, o.ground_fog = pm_ground_fog_ / 100.0f, o.wind = pm_wind_ / 100.0f;
     o.cloud_height = float(pm_cloud_height_);
@@ -2660,7 +2813,9 @@
     }
     pm_hosting_ = true, pm_joining_ = false, pm_started_at_ = ImGui::GetTime(), pm_read_at_ = -100;
     pm_status_ = {};
-    REXLOG_INFO("BF private match: hosting ({})", kPmMapNames[pm_map_]);
+    REXLOG_INFO("BF private match: hosting ({}, {}; tickets {}, time limit {} min, dynamic storm {})", PmHeadline(),
+                kPmModeNames[pm_mode_], pm_tickets_ ? std::to_string(pm_tickets_) : std::string("the map's own"),
+                pm_time_limit_, pm_storm_ ? "on" : "off");
   }
 
   void EndPrivateMatch() {
@@ -2703,7 +2858,7 @@
     const std::string me = settings_.Get("player_name", "");
     sv.name = me.empty() ? "Custom match" : me + "'s match";
     sv.address = pm_status_.address;
-    sv.map = pm_map_ < 4 ? kPmMapTitles[pm_map_] : "Wake Island";
+    sv.map = kPmMapTitles[PmMatchMaps().front()];
     sv.max_players = 24;
     // Its tick rate is the one it was started at. (Left unsaid, Join took it for a 30 Hz server and set this game to
     // 30 against a 60 Hz match: 13 Nov 2026, "I cannot walk at 60Hz anymore, and player partially falls through
@@ -2744,7 +2899,9 @@
     const ImVec2 ha = st.P(427, 93), hb = st.P(1232, 620);
     const ImVec2 band(ha.x, hb.y - st(110));
     d->PushClipRect(ha, hb, true);
-    MapPicture(d, st.u * 1.5f, ha, ImVec2(hb.x, band.y), pm_map_ < 4 ? kPmMapTitles[pm_map_] : "Wake Island");
+    MapPicture(d, st.u * 1.5f, ha, ImVec2(hb.x, band.y),
+               pm_maps_view_ && pm_row_ >= kPmRotMap && pm_row_ < kPmRotMap + 4 ? kPmMapTitles[pm_row_ - kPmRotMap]
+                                                                             : kPmMapTitles[PmMatchMaps().front()]);
     d->PopClipRect();
     {  // the chip
       const std::string chip = pm_lan_ ? "YOUR OWN SERVER \xC2\xB7 ON YOUR NETWORK'S LAN TAB"
@@ -2787,22 +2944,27 @@
     // UPnP and the port as a smaller pair under Network type, and no UPnP at all for a LAN match).
     std::vector<int> order = {kPmName, kPmPass};
     if (pm_pass_on_) order.push_back(kPmPassText);
-    order.insert(order.end(), {kPmMap, kPmTick, kPmWorld, kPmNet});
+    order.push_back(kPmMode);
+    if (!PmRotationOn()) order.push_back(kPmMap);
+    order.insert(order.end(), {kPmRotation, kPmTickets, kPmTimeLimit, kPmTick, kPmBots, kPmWorld, kPmNet});
     if (!pm_lan_) order.push_back(kPmListed);
     if (!pm_lan_) order.push_back(kPmUpnp);
     order.insert(order.end(), {kPmPort, kPmHost});
-    if (pm_world_view_) order = {kPmDayNight, kPmTime, kPmDayLen, kPmCloud, kPmRate, kPmWeather, kPmFog, kPmGroundFog, kPmWind, kPmCloudHeight, kPmWorldBack};
+    if (pm_world_view_) order = {kPmDayNight, kPmTime, kPmDayLen, kPmCloud, kPmRate, kPmWeather, kPmStorm, kPmFog, kPmGroundFog, kPmWind, kPmCloudHeight, kPmWorldBack};
+    if (pm_maps_view_) order = {kPmRotOn, kPmRotAll, kPmRotMap, kPmRotMap + 1, kPmRotMap + 2, kPmRotMap + 3, kPmRotBack};
     {
       int at = 0;
       for (int k = 0; k < int(order.size()); ++k)
         if (order[size_t(k)] == pm_row_) at = k;
       if (std::find(order.begin(), order.end(), pm_row_) == order.end()) {
         if (pm_world_view_) pm_row_ = kPmDayNight, at = 0;
+        else if (pm_maps_view_) pm_row_ = kPmRotOn, at = 0;
+        else if (pm_row_ == kPmMap) pm_row_ = kPmRotation, at = int(std::find(order.begin(), order.end(), kPmRotation) - order.begin());
         else pm_row_ = kPmNet, at = int(std::find(order.begin(), order.end(), kPmNet) - order.begin());  // UPnP went with LAN
       }
       const int n = int(order.size());
-      if (in.up) pm_row_ = order[size_t((at + n - 1) % n)];
-      if (in.down) pm_row_ = order[size_t((at + 1) % n)];
+      if (in.up) pm_row_ = order[size_t((at + n - 1) % n)], pm_scroll_follow_ = true;
+      if (in.down) pm_row_ = order[size_t((at + 1) % n)], pm_scroll_follow_ = true;
     }
     if (PmTyping()) {  // the keyboard types straight into the row (as the browser's address)
       ImGuiContext& g = *ImGui::GetCurrentContext();
@@ -2821,36 +2983,98 @@
       if (editing && typed) PmEditClose(true);
       in.left = in.right = false;
     }
+    if (pm_slide_edit_ >= 0 && pm_slide_edit_ != pm_row_) pm_slide_edit_ = -1;
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) pm_drag_ = -1;
+    if (pm_world_view_ && PmSlideRow(pm_row_) && !pm_hosting_) {
+      // A digit typed on a slider's row starts its box; Enter takes the value, Esc or B leaves it as it was.
+      ImGuiContext& g = *ImGui::GetCurrentContext();
+      g.PlatformImeData.WantTextInput = true;
+      g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
+      for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
+        const ImWchar c = io.InputQueueCharacters[i];
+        if (!((c >= '0' && c <= '9') || c == ':' || c == '.')) continue;
+        if (pm_slide_edit_ != pm_row_) pm_slide_edit_ = pm_row_, pm_slide_text_.clear();
+        if (pm_slide_text_.size() < 6) pm_slide_text_ += char(c);
+      }
+      if (pm_slide_edit_ == pm_row_) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+          if (pm_slide_text_.empty()) pm_slide_edit_ = -1;
+          else pm_slide_text_.pop_back();
+        }
+        if (in.accept || ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
+          if (!pm_slide_text_.empty()) {
+            const size_t colon = pm_slide_text_.find(':');
+            float v = float(std::atof(pm_slide_text_.c_str()));
+            if (pm_row_ == kPmTime && colon != std::string::npos)
+              v = float(std::atoi(pm_slide_text_.c_str())) + float(std::atoi(pm_slide_text_.c_str() + colon + 1)) / 60.0f;
+            PmSlideSet(pm_row_, v, true);
+            SavePrivateMatchChoices();
+          }
+          pm_slide_edit_ = -1, in.accept = false;
+        }
+        if (in.back || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) pm_slide_edit_ = -1, in.back = false;
+        in.left = in.right = false;
+      }
+    }
     auto change = [&](int row, int step) {
-      if (row == kPmMap) pm_map_ = (pm_map_ + 5 + step) % 5;
+      if (row == kPmMap) pm_map_ = PmMapOfMode(pm_map_ + step, step);
+      if (row == kPmMode) {
+        pm_mode_ = (pm_mode_ + 3 + step) % 3;
+        if (!PmMapInMode(pm_mode_, pm_map_)) pm_map_ = PmMapOfMode(pm_map_, 1);
+      }
+      if (row == kPmRotation) pm_maps_view_ = true, pm_row_ = kPmRotOn, pm_scroll_ = 0, pm_scroll_follow_ = true;
+      if (row == kPmRotBack) pm_maps_view_ = false, pm_row_ = kPmRotation, pm_scroll_follow_ = true;
+      if (row == kPmRotOn) {
+        pm_rotation_ = !PmRotationOn();
+        if (pm_rotation_ && PmRotationMaps().empty())
+          for (int m = 0; m < 4; ++m) pm_rot_maps_ |= PmMapInMode(pm_mode_, m) ? 1 << m : 0;
+      }
+      if (row == kPmRotAll) {
+        pm_rotation_ = true;
+        for (int m = 0; m < 4; ++m) pm_rot_maps_ |= PmMapInMode(pm_mode_, m) ? 1 << m : 0;
+      }
+      if (row >= kPmRotMap && row < kPmRotMap + 4 && PmMapInMode(pm_mode_, row - kPmRotMap)) {
+        const int bit = 1 << (row - kPmRotMap);
+        // A map picked while the rotation is off starts it with that map alone.
+        if (!PmRotationOn()) {
+          for (int m = 0; m < 4; ++m)
+            if (PmMapInMode(pm_mode_, m)) pm_rot_maps_ &= ~(1 << m);
+          pm_rotation_ = true;
+        }
+        pm_rot_maps_ ^= bit;
+        if (PmRotationMaps().empty()) pm_rotation_ = false;
+      }
+      if (row == kPmTickets) pm_tickets_ = PmStep(kPmTicketSteps, int(std::size(kPmTicketSteps)), pm_tickets_, step);
+      if (row == kPmTimeLimit) pm_time_limit_ = PmStep(kPmTimeSteps, int(std::size(kPmTimeSteps)), pm_time_limit_, step);
+      if (row == kPmStorm) pm_storm_ = !pm_storm_;
       if (row == kPmTick) {
         int at = 0;
         for (int k = 0; k < kPmTickCount; ++k)
           if (kPmTicks[k] == pm_tick_) at = k;
         pm_tick_ = kPmTicks[(at + kPmTickCount + step) % kPmTickCount];
       }
+      if (row == kPmBots) pm_bots_ = std::clamp(pm_bots_ + step, 0, 24);
       if (row == kPmNet) pm_lan_ = !pm_lan_;
       if (row == kPmPass) pm_pass_on_ = !pm_pass_on_;
       if (row == kPmListed && !pm_lan_) pm_listed_ = !pm_listed_;
       if (row == kPmUpnp && !pm_lan_) pm_upnp_ = !pm_upnp_;
-      if (row == kPmWorld) pm_world_view_ = true, pm_row_ = kPmDayNight;
-      if (row == kPmWorldBack) pm_world_view_ = false, pm_row_ = kPmWorld;
-      if (row == kPmDayNight) pm_dn_ = !pm_dn_;
-      if (row == kPmTime) pm_time_ = std::fmod(pm_time_ + 24.0f + 0.5f * step, 24.0f);
+      if (row == kPmWorld) pm_world_view_ = true, pm_row_ = kPmDayNight, pm_scroll_ = 0, pm_scroll_follow_ = true;
+      if (row == kPmWorldBack) pm_world_view_ = false, pm_row_ = kPmWorld, pm_scroll_follow_ = true;
+      if (row == kPmDayNight) {
+        pm_dn_ = !pm_dn_;
+        if (pm_dn_ && pm_daylen_ == 0) pm_daylen_ = 24;  // the time passes: a day of 24 minutes unless set
+      }
+      if (row == kPmTime) pm_time_ = std::fmod(std::round(pm_time_ * 4.0f) / 4.0f + 24.0f + 0.25f * step, 24.0f);
       if (row == kPmDayLen) {
-        const int n = int(std::size(kPmDayLens));
-        int at = 0;
-        for (int k = 0; k < n; ++k)
-          if (kPmDayLens[k] == pm_daylen_) at = k;
-        pm_daylen_ = kPmDayLens[(at + n + step) % n];
+        pm_daylen_ = std::clamp(pm_daylen_ + 5 * step, 0, 240);
       }
       if (row == kPmCloud) pm_cloud_ = std::clamp(pm_cloud_ + 5 * step, 0, 100);
       if (row == kPmRate) pm_rate_ = std::clamp(pm_rate_ <= 5 && step < 0 ? pm_rate_ - 1 : pm_rate_ < 5 ? pm_rate_ + 1 : pm_rate_ + 5 * step, 0, 100);
-      if (row == kPmWeather) pm_weather_ = std::clamp(pm_weather_ + 5 * step, 0, 100);
+      if (row == kPmWeather) pm_weather_ = std::clamp(pm_weather_ + 5 * step, 0, 100), PmWeatherChanged();
       if (row == kPmFog) pm_fog_ = std::clamp(pm_fog_ + 5 * step, 0, 100);
       if (row == kPmGroundFog) pm_ground_fog_ = std::clamp(pm_ground_fog_ + 5 * step, 0, 100);
-      if (row == kPmWind) pm_wind_ = std::clamp(pm_wind_ + 5 * step, 0, 100);
-      if (row == kPmCloudHeight) pm_cloud_height_ = std::clamp(pm_cloud_height_ + 50 * step, 200, 1500);
+      if (row == kPmWind) pm_wind_ = std::clamp(pm_wind_ + 5 * step, 0, 100), PmWindChanged();
+      if (row == kPmCloudHeight) pm_cloud_height_ = std::clamp(pm_cloud_height_ + 50 * step, 100, 1500);
       SavePrivateMatchChoices();
     };
     if (in.left && pm_row_ != kPmHost) change(pm_row_, -1);
@@ -2858,22 +3082,58 @@
     // ---- the rows, as the main menu's. By the row's own number (kPm...): its title, and its help in the band.
     static constexpr const char* kTitles[] = {"MAP",  "SERVER NAME", "NETWORK TYPE",  "SHOW IN BROWSER",
                                               "UPNP", "PORT",        "HOST THE MATCH", "TICK RATE",
-                                              "PASSWORD", "PASSWORD", "WEATHER AND TIME", "DAY AND NIGHT",
+                                              "PASSWORD", "PASSWORD", "WEATHER AND TIME", "TIME PASSES",
                                               "TIME OF DAY", "A DAY LASTS", "CLOUD COVER", "CLOUD CHANGE RATE",
                                               "WEATHER", "DISTANCE FOG", "GROUND FOG", "WIND", "CLOUD HEIGHT",
-                                              "BACK TO THE MATCH"};
+                                              "BACK TO THE MATCH", "BOTS", "GAME MODE", "MAP ROTATION", "TICKETS",
+                                              "MATCH TIME", "DYNAMIC STORM", "ROTATION", "ROTATE ALL MAPS",
+                                              "WAKE ISLAND", "GUADALCANAL", "IWO JIMA", "CORAL SEA", "BACK TO THE MATCH"};
+    static_assert(std::size(kTitles) == kPmRows);
     int clicked = -1;
-    float y = rows_y;
+    bool slider_took_click = false;  // a click on a slider or its box is not the row's "change"
+    // The rows' heights: the smaller rows are the pair under Network type and the password's under the name.
+    auto is_sub = [](int i) { return i == kPmUpnp || i == kPmPort || i == kPmPass || i == kPmPassText; };
+    auto row_h = [&](int i) { return i == kPmName ? st(74) : is_sub(i) ? st(29) : st(41); };
+    // More rows than the rail holds (19 Nov 2026, the game mode, rotation, tickets and time rows): it scrolls, with
+    // the selection kept in view and the wheel over it.
+    const float avail = rb.y - rows_y;
+    const bool in_rail = io.MousePos.x >= ra.x && io.MousePos.x < rb.x && io.MousePos.y >= rows_y && io.MousePos.y < rb.y;
+    {
+      float total = 0, sel_top = 0, sel_h = 0;
+      for (const int i : order) {
+        if (i == kPmHost) total += st(12);
+        if (i == pm_row_) sel_top = total, sel_h = row_h(i);
+        total += row_h(i);
+      }
+      const float most = std::max(0.0f, total - avail);
+      if (in_rail && io.MouseWheel != 0 && !editing) pm_scroll_ -= io.MouseWheel * st(41) * 1.5f, pm_scroll_follow_ = false;
+      if (pm_scroll_follow_) {
+        if (sel_top < pm_scroll_) pm_scroll_ = sel_top;
+        if (sel_top + sel_h > pm_scroll_ + avail) pm_scroll_ = sel_top + sel_h - avail;
+        pm_scroll_follow_ = false;
+      }
+      pm_scroll_ = std::clamp(pm_scroll_, 0.0f, most);
+      const ImU32 cue = IM_COL32(241, 234, 211, 140);
+      if (pm_scroll_ > 0.5f) {
+        const ImVec2 c(rb.x - st(14), ra.y + st(64));
+        d->AddTriangleFilled(ImVec2(c.x - st(5), c.y + st(3)), ImVec2(c.x + st(5), c.y + st(3)), ImVec2(c.x, c.y - st(4)), cue);
+      }
+      if (pm_scroll_ < most - 0.5f) {
+        const ImVec2 c(rb.x - st(14), rb.y + st(9));
+        d->AddTriangleFilled(ImVec2(c.x - st(5), c.y - st(3)), ImVec2(c.x + st(5), c.y - st(3)), ImVec2(c.x, c.y + st(4)), cue);
+      }
+    }
+    d->PushClipRect(ImVec2(ra.x, rows_y), rb, true);
+    float y = rows_y - pm_scroll_;
     int number = 0;
     const std::string me = settings_.Get("player_name", "");
     for (const int i : order) {
-      // The smaller rows: the pair under Network type, and the password's under the name.
-      const bool sub = i == kPmUpnp || i == kPmPort || i == kPmPass || i == kPmPassText;
+      const bool sub = is_sub(i);
       if (i == kPmHost) y += st(12);                  // a rule's worth of air before the action
-      const float h = i == kPmName ? st(74) : sub ? st(29) : st(41);
+      const float h = row_h(i);
       const float title_h = i == kPmName ? st(38) : h;
       const ImVec2 r0(ra.x, y), r1(rb.x, y + h);
-      const bool hover = !editing && ImGui::IsMouseHoveringRect(r0, r1);
+      const bool hover = !editing && in_rail && ImGui::IsMouseHoveringRect(r0, r1);
       if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) pm_row_ = i;
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
       const bool sel = i == pm_row_;
@@ -2896,8 +3156,10 @@
           kit::Spaced(d, f.typed, st(8.5f), ImVec2(r0.x + st(76), r0.y + h * 0.5f - st(5.5f)), sel ? kit::kInk : kit::kKhaki,
                       kTitles[i], st(2));
       } else {
-        const float cap = st(19);
-        kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(r0.x + st(52), r0.y + (title_h - cap) * 0.5f),
+        // A slider's row: a smaller title over its track.
+        const float cap = PmSlideRow(i) ? st(14) : st(19);
+        kit::GameText(d, kit::GameFont::kHeadlineMedium, cap,
+                      ImVec2(r0.x + st(52), PmSlideRow(i) ? r0.y + st(5) : r0.y + (title_h - cap) * 0.5f),
                       sel ? kit::kInk : kit::kKhaki, kTitles[i]);
       }
       const float right = r1.x - st(18), mid = r0.y + title_h * 0.5f;
@@ -2930,38 +3192,79 @@
                    empty && !sel ? IM_COL32(241, 234, 211, 110) : sel ? kit::kInk : kit::kKhaki, shown.c_str());
         d->PopClipRect();
       } else if (i == kPmMap) {
-        value_text(kPmMapNames[pm_map_], true, false);
+        value_text(kPmMapNames[std::clamp(pm_map_, 0, 3)], pm_mode_ != 1, false);
+      } else if (i == kPmMode) {
+        value_text(kPmModeNames[pm_mode_], true, false);
+      } else if (i == kPmRotation) {
+        const size_t n = PmRotationMaps().size();
+        size_t of = 0;
+        for (int m = 0; m < 4; ++m) of += PmMapInMode(pm_mode_, m) ? 1 : 0;
+        value_text(!PmRotationOn() ? std::string("OFF") : n == of ? fmt::format("ALL {} MAPS", n)
+                                                        : fmt::format("{} {}", n, n == 1 ? "MAP" : "MAPS"),
+                   false, false);
+      } else if (i == kPmTickets) {
+        value_text(pm_tickets_ ? fmt::format("{} A TEAM", pm_tickets_)
+                               : pm_mode_ == 0 ? std::string("MAP'S OWN - 130")
+                               : pm_mode_ == 1 ? std::string("MAP'S OWN - 100") : std::string("EACH MAP'S OWN"),
+                   true, false);
+      } else if (i == kPmTimeLimit) {
+        value_text(pm_time_limit_ ? fmt::format("{} MIN", pm_time_limit_) : std::string("OFF - TICKETS ONLY"), true, false);
+      } else if (i == kPmStorm) {
+        draw_switch(pm_storm_);
+      } else if (i == kPmRotOn) {
+        draw_switch(PmRotationOn());
+      } else if (i == kPmRotAll) {
+        if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(right - st(20), mid), st(20));
+      } else if (i >= kPmRotMap && i < kPmRotMap + 4) {
+        const int m = i - kPmRotMap;
+        if (PmMapInMode(pm_mode_, m)) draw_switch(PmRotationOn() && (pm_rot_maps_ >> m & 1));
+        else value_text(m == 3 ? "AIR SUPERIORITY ONLY" : "CONQUEST ONLY", false, true);
+      } else if (i == kPmRotBack) {
+        if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(right - st(20), mid), st(20));
       } else if (i == kPmTick) {
         value_text(std::to_string(pm_tick_) + (pm_tick_ == 60 ? "Hz - Default" : pm_tick_ == 30 ? "Hz - Original" : "Hz - Experimental"),
                    true, false);
+      } else if (i == kPmBots) {
+        value_text(pm_bots_ == 0 ? std::string("NONE") : fmt::format("{} - {} A SIDE", pm_bots_, (pm_bots_ + 1) / 2),
+                   true, false);
       } else if (i == kPmWorld) {
-        value_text(!pm_dn_ && pm_weather_ == 0 ? std::string("AFTERNOON, FAIR")
-                                               : fmt::format("{}{}", pm_dn_ ? fmt::format("{:02d}:{:02d}", int(pm_time_), int(pm_time_ * 60) % 60)
-                                                                            : std::string("AFTERNOON"),
-                                                             pm_weather_ > 0 ? fmt::format(", WEATHER {}%", pm_weather_) : std::string()),
+        value_text(fmt::format("{}{}{}", PmSlideText(kPmTime), pm_dn_ && pm_daylen_ > 0 ? "" : ", TIME STILL",
+                               pm_storm_ ? std::string(", STORM")
+                               : pm_weather_ > 0 ? fmt::format(", WEATHER {}%", pm_weather_) : std::string(", FAIR")),
                    false, false);
       } else if (i == kPmDayNight) {
         draw_switch(pm_dn_);
-      } else if (i == kPmTime) {
-        value_text(fmt::format("{:02d}:{:02d}", int(pm_time_), int(pm_time_ * 60) % 60), true, !pm_dn_);
-      } else if (i == kPmDayLen) {
-        value_text(pm_daylen_ == 0 ? std::string("TIME STANDS STILL")
-                                   : pm_daylen_ % 60 == 0 ? fmt::format("{} H", pm_daylen_ / 60) : fmt::format("{} MIN", pm_daylen_),
-                   true, !pm_dn_);
-      } else if (i == kPmCloud) {
-        value_text(fmt::format("{}%", pm_cloud_), true, false);
-      } else if (i == kPmRate) {
-        value_text(fmt::format("{}%", pm_rate_), true, false);
-      } else if (i == kPmWeather) {
-        value_text(pm_weather_ == 0 ? std::string("FAIR") : fmt::format("{}%", pm_weather_), true, false);
-      } else if (i == kPmFog) {
-        value_text(pm_fog_ == 0 ? std::string("NONE") : fmt::format("{}%", pm_fog_), true, false);
-      } else if (i == kPmGroundFog) {
-        value_text(pm_ground_fog_ == 0 ? std::string("NONE") : fmt::format("{}%", pm_ground_fog_), true, false);
-      } else if (i == kPmWind) {
-        value_text(pm_wind_ == 0 ? std::string("CALM") : fmt::format("{}%", pm_wind_), true, false);
-      } else if (i == kPmCloudHeight) {
-        value_text(fmt::format("{} M", pm_cloud_height_), true, false);
+      } else if (PmSlideRow(i)) {
+        // A slider and, at its right, a box with the exact value: the slider dragged with the mouse (or stepped with
+        // left and right), the box clicked or a digit typed to write the value.
+        const PmSlide s = PmSlideOf(i);
+        const bool off = i == kPmDayLen && !pm_dn_;  // the time stands still: its length says nothing
+        const ImVec2 b0(right - st(62), mid - st(9)), b1(right, mid + st(9));
+        const float tx1 = b0.x - st(14), tx0 = r0.x + st(52), ty = r1.y - st(10);  // the track, under the title
+        const ImU32 ink = off ? IM_COL32(120, 116, 100, 150) : sel ? kit::kInk : kit::kKhaki;
+        const bool on_track = ImGui::IsMouseHoveringRect(ImVec2(tx0 - st(6), ty - st(9)), ImVec2(tx1 + st(6), ty + st(9)));
+        const bool on_box = ImGui::IsMouseHoveringRect(b0, b1);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && in_rail && !off && (on_track || on_box)) {
+          slider_took_click = true, pm_row_ = i;
+          if (on_track) pm_drag_ = i, pm_slide_edit_ = -1;
+          else pm_slide_edit_ = i, pm_slide_text_.clear();
+        }
+        if (pm_drag_ == i && !off) {
+          const float before = PmSlideGet(i);
+          PmSlideSet(i, s.lo + (s.hi - s.lo) * std::clamp((io.MousePos.x - tx0) / (tx1 - tx0), 0.0f, 1.0f), false);
+          if (PmSlideGet(i) != before) SavePrivateMatchChoices();
+        }
+        const float share = std::clamp((PmSlideGet(i) - s.lo) / (s.hi - s.lo), 0.0f, 1.0f);
+        const float knob = tx0 + (tx1 - tx0) * share;
+        d->AddRectFilled(ImVec2(tx0, ty - st(1)), ImVec2(tx1, ty + st(1)), sel ? IM_COL32(34, 36, 27, 70) : IM_COL32(241, 234, 211, 50));
+        if (!off) d->AddRectFilled(ImVec2(tx0, ty - st(1)), ImVec2(knob, ty + st(1)), sel ? kit::kStamp : kit::kKhakiDim);
+        d->AddRectFilled(ImVec2(knob - st(2.5f), ty - st(6)), ImVec2(knob + st(2.5f), ty + st(6)), ink);
+        const bool typing = pm_slide_edit_ == i;
+        d->AddRectFilled(b0, b1, typing ? IM_COL32(34, 36, 27, 30) : IM_COL32(0, 0, 0, sel ? 0 : 60));
+        d->AddRect(b0, b1, typing ? kit::kStamp : off ? IM_COL32(120, 116, 100, 90) : sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
+        const std::string shown = typing ? pm_slide_text_ + caret : PmSlideText(i);
+        const float vw = kit::SpacedWidth(f.typed, st(7.5f), shown, st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2((b0.x + b1.x - vw) * 0.5f, mid - st(5)), ink, shown, st(1.5f));
       } else if (i == kPmWorldBack) {
         if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(right - st(20), mid), st(20));
       } else if (i == kPmNet) {
@@ -3010,10 +3313,11 @@
         y += wh;
       }
     }
+    d->PopClipRect();
     // ---- the band: the chosen row's help, the green button
     {
       static constexpr const char* kAbout[] = {
-          "The map your match plays. All four in turn: the next map after each round, as on the Reborn servers.",
+          "The map your match plays, of the game mode above. To play several in turn, switch on Map rotation.",
           "The match's name in the server browser. Type it with the keyboard, or A for the on screen keys; left empty "
           "it is your name's match.",
           "Online: your match is on everybody's server browser, on the Community tab. LAN: for the PCs of your own "
@@ -3035,24 +3339,46 @@
           "yourself.",
           "The match's time of day, clouds and weather: every player sees the same. You can change them while the "
           "match runs, with the admin panel (F9).",
-          "On, the match has a clock: the light, the shadows and the sky follow the time of day, with dusk and "
-          "night. Off, it is the game's own afternoon.",
-          "The hour the match starts at: 12 is noon, 18 sunset, 0 midnight. Needs Day and night.",
-          "How long a whole day and night take in the match, or the time stands still at the hour above. Needs Day "
-          "and night.",
+          "On, the match's clock runs: the light, the shadows and the sky go through the day, dusk and night. Off, "
+          "the time stands still at the time of day below.",
+          "The hour the match starts at: 12 is noon, 18 sunset, 0 midnight. Drag the slider, or type it (18:30).",
+          "How many minutes a whole day and night take in the match while the time passes. Drag the slider, or type "
+          "up to 1440.",
           "How much of the sky the clouds take, for players who chose the volumetric sky.",
           "How fast the clouds form and dissolve. Lower is calmer and closer to real weather.",
           "From fair to a storm: more and denser cloud, a greyer sky and less sun; from about half, mist and far "
           "rain shafts; a little higher, rain; from about two thirds, lightning in the clouds.",
           "A haze that hides what is far: at 100% the sight is about a kilometre.",
           "A low layer of fog over the sea and the shore, in patches that drift.",
-          "From calm to a gale: the stronger the wind, the further the rain leans.",
+          "From calm to a gale: the stronger the wind, the further the rain leans. Follows the weather until set apart.",
           "How high over the sea the clouds begin, for players who chose the volumetric sky. Low, the planes fly "
           "through them and can hide in them.",
+          "Back to the match's other settings.",
+          "Computer players who fill the match, half on each side: they take flags and fight like players. They "
+          "spawn at their own side's flags and keep out of everybody's stats. Early days: they fight on foot only, so "
+          "Guadalcanal suits them best; they cannot leave Wake Island's carrier or fly yet.",
+          "The kind of match. Each map has its own in the game: Conquest on Wake Island, Guadalcanal and Iwo Jima "
+          "(take and hold the flags), Air Superiority on Coral Sea (fighters only). All modes: any of the four.",
+          "Off, your match plays the one map above, round after round. On, it plays the maps you pick here in turn, "
+          "the next one after each round. A opens the list.",
+          "Each team's tickets at a round's start: a team loses one for each of its soldiers who dies, and more "
+          "while the other team holds most flags. A team with none left loses. The map's own is 130 (Coral Sea 100).",
+          "How long a round lasts: when it is up, the team with fewer tickets loses (level, the next ticket lost "
+          "decides). Every player sees the time left over the ticket bars. Off, a round ends only when a team has no "
+          "tickets left.",
+          "On, the weather builds from the Weather setting to a full storm over each round and eases again (over the "
+          "match time, else over half an hour). The wind goes with it unless set apart. You can switch it with F9.",
+          "On, the match plays the maps below in turn. Off, the one map of the match's other settings.",
+          "Every map of the game mode in the rotation.",
+          "Wake Island in the rotation: Conquest.",
+          "Guadalcanal in the rotation: Conquest.",
+          "Iwo Jima in the rotation: Conquest.",
+          "Coral Sea in the rotation: Air Superiority.",
           "Back to the match's other settings."};
+      static_assert(std::size(kAbout) == kPmRows);
       kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, kTitles[pm_row_], st(2));
       kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
-                    kPmMapNames[pm_map_]);
+                    PmHeadline());
       const ImVec2 q0(hb.x - st(20) - st(190), band.y + st(18)), q1(q0.x + st(190), q0.y + st(40));
       const bool error = !pm_error_.empty();
       kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error ? kit::kRed : kit::kInkFaint,
@@ -3066,6 +3392,12 @@
       PmEditOpen(pm_row_);
       in.accept = false;
     }
+    if (slider_took_click) clicked = -1;
+    // Enter or A on a slider's row opens its box for typing (left and right step it).
+    if (in.accept && pm_world_view_ && PmSlideRow(pm_row_) && !(pm_row_ == kPmDayLen && !pm_dn_)) {
+      pm_slide_edit_ = pm_row_, pm_slide_text_.clear(), in.accept = false;
+    }
+    if (clicked >= 0 && PmSlideRow(clicked)) clicked = -1;  // a click elsewhere on the row only picks it
     if (in.accept) clicked = pm_row_;
     if (clicked >= 0) {
       pm_row_ = clicked;
@@ -3073,7 +3405,8 @@
       else change(clicked, 1);
     }
     if (in.back) {
-      if (pm_world_view_) pm_world_view_ = false, pm_row_ = kPmWorld;  // the world's rows: back to the match's
+      if (pm_maps_view_) pm_maps_view_ = false, pm_row_ = kPmRotation, pm_scroll_follow_ = true;  // the rotation's rows
+      else if (pm_world_view_) pm_world_view_ = false, pm_row_ = kPmWorld, pm_scroll_follow_ = true;  // the world's rows: back to the match's
       else BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
     }
   }
@@ -3184,7 +3517,7 @@
     kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection,
                 fmt::format("STARTING \xC2\xB7 {} S", int(t)), st(2));
     kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
-                  kPmMapNames[pm_map_]);
+                  PmHeadline());
     kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error.empty() ? kit::kInkFaint : kit::kRed,
                  error.empty() ? std::string("Your PC is starting the match's server. You join it as soon as it is up.") : error,
                  hb.x - band.x - st(40));
@@ -3363,7 +3696,6 @@
       joined_gid_.clear();
       comms::NoteJoined("");
       world::NoteJoined("");
-      SetJoinedServerNight(false);
       failed_ = false, joined_from_start_ = true;
       page_ = Page::kJoining;
       StartGameFromLauncher();
@@ -3381,7 +3713,6 @@
     joined_gid_.clear();
     comms::NoteJoined("");  // no server: no voice or text chat in the tutorial
     world::NoteJoined("");
-    SetJoinedServerNight(false);  // nor a Night Ops server's night
     failed_ = false;
     joined_from_start_ = false;
     page_ = Page::kJoining;

@@ -201,7 +201,8 @@
     for (const MapPlayer& m : players) {
       const ImVec2 c = to_screen(m.x, m.z);
       if (c.x < m0.x || c.x > m1.x || c.y < m0.y || c.y > m1.y) continue;
-      const ImU32 fill = m.enemy ? IM_COL32(214, 58, 44, 255) : m.squad ? IM_COL32(96, 196, 120, 255) : IM_COL32(66, 140, 232, 255);
+      // The squad's a brighter green (TekRantGaming, 18 Nov 2026), as the game's own icons now (squad_colors.cpp).
+      const ImU32 fill = m.enemy ? IM_COL32(214, 58, 44, 255) : m.squad ? IM_COL32(70, 235, 90, 255) : IM_COL32(66, 140, 232, 255);
       arrow(c, m.fx * kFacing, m.fz * kFacing, st(6.5f), fill);
     }
     // ---- the player: where the camera is, and where it looks

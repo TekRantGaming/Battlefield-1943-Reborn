@@ -470,7 +470,7 @@ def clean_config(raw):
             with contextlib.suppress(TypeError, ValueError):
                 entry[key] = max(0, min(top, int(s.get(key, entry[key]))))
         with contextlib.suppress(TypeError, ValueError):
-            entry['cloud_height'] = max(200, min(1500, int(s.get('cloud_height', entry['cloud_height']))))
+            entry['cloud_height'] = max(100, min(1500, int(s.get('cloud_height', entry['cloud_height']))))
         entry['admins'] = ','.join(a for a in (''.join(c for c in part if c in '0123456789abcdefABCDEF').upper()[:8]
                                                for part in str(s.get('admins') or '').replace(';', ',').replace(' ', ',').split(','))
                                    if a)[:400]

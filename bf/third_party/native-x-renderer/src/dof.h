@@ -6,10 +6,18 @@
 // what is nearer than the focus is blurred, more the nearer it is: the gun at the eye goes soft and what is aimed at
 // stays sharp, as a lens focused on the target shows it.
 //   - a pixel's blur radius comes from its distance (the view's depth, Battlefield 1943's as 0.1 / metres): none from
-//     `focus` on, the most at `nearest` and nearer, times the zoom's blend;
-//   - the colour is gathered over a disc of the largest radius: `taps` points on a spiral, turned differently in each
-//     pixel. A tap counts where its own blur reaches this pixel, so the soft gun spreads over the sharp world behind
-//     its edge and the sharp world does not leak into the gun.
+//     0.7 m on (a front sight), the most at 0.15 m and nearer (the back of the gun at the eye), eased between, times
+//     the zoom's blend; and none in the middle of the view, where the sights line up (D196: "less strong toward the
+//     front of the weapon ... stronger toward the back ... keeping the sights clear");
+//   - NXR_DOF_SHOW=1 paints the distance under 3 m in bands instead (red under 0.15 m, orange, yellow, green, cyan,
+//     blue, magenta, white from 1.4 m); 2 on the left half of the view only;
+//   - the colour is gathered at half size over a disc of the largest radius: `taps` points on a Vogel spiral, the
+//     same in every pixel and frame (D196: at first at full size, turned differently in each pixel, which left the
+//     blur grainy). A tap counts where its own blur reaches this texel, so the soft gun spreads over the sharp world
+//     behind its edge and the sharp world does not leak into the gun;
+//   - a small tent smooths the gathered texels, and the result is blended over the full size colour by each pixel's
+//     own radius (from the full size depth: the gun's edge against what is in focus stays where it is) or by how far
+//     the gun's blur spreads over it.
 
 #pragma once
 
@@ -45,11 +53,15 @@ class DepthOfField {
 
  private:
   Diligent::IRenderDevice* device_ = nullptr;
-  Diligent::RefCntAutoPtr<Diligent::IShader> vs_, ps_;
-  Diligent::RefCntAutoPtr<Diligent::IPipelineState> pso_;
-  Diligent::RefCntAutoPtr<Diligent::IShaderResourceBinding> srb_;
+  struct Pass {
+    Diligent::RefCntAutoPtr<Diligent::IPipelineState> pso;
+    Diligent::RefCntAutoPtr<Diligent::IShaderResourceBinding> srb;
+  };
+  Diligent::RefCntAutoPtr<Diligent::IShader> vs_, composite_ps_;
+  Pass passes_[3];  // the half size colour and radius, the gather, the fill
+  Pass composite_;  // made for the colour's format
   Diligent::RefCntAutoPtr<Diligent::IBuffer> constants_;
-  Diligent::RefCntAutoPtr<Diligent::ITexture> source_;
+  Diligent::RefCntAutoPtr<Diligent::ITexture> half_, blur_;  // half the view's size
   Diligent::TEXTURE_FORMAT format_ = Diligent::TEX_FORMAT_UNKNOWN;
   bool failed_ = false, said_ = false;
 };

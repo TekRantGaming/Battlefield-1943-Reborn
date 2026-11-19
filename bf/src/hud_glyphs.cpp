@@ -47,6 +47,8 @@ std::string PadFamily();                // game_menu.cpp: the controller in use 
 // input_settings.cpp: the controller buttons the remapping turns into a game button, and the keys that press one.
 std::vector<std::string> ButtonsPressing(const std::string& game_button);
 std::vector<const char*> KeybindsPressing(const std::string& button, bool seated);
+std::string ActiveBind(std::string_view infantry_cvar);  // vehicle_binds.cpp: the keys of the seat's binding set
+bool SquadBrightGreen();  // squad_colors.cpp: the squad's colour drawn green
 
 namespace {
 
@@ -64,6 +66,10 @@ struct Atlas {
 };
 
 constexpr const char* kFlagAtlas = "minimap_icons";
+// The squad list's kit badges in hud_root_cq (Infantry's bullet, the Rifleman's scope, the Engineer's wrench: blue
+// rings, run hud_kit3's dump of the atlas), x, y, width, height: drawn in the squad's green (squad_colors.cpp; the
+// user, 18 Nov 2026, the squad list's kit icons green "Yes, those too").
+constexpr int kKitBadges[3][4] = {{341, 133, 24, 24}, {353, 91, 24, 24}, {185, 315, 24, 24}};
 
 const std::vector<Atlas>& Atlases() {
   static const std::vector<Atlas> atlases = {
@@ -146,7 +152,7 @@ std::string KeyFor(const std::string& button, bool seated) {
   if (button == "rs_click") game = "rs";
   for (const std::string& pad : ButtonsPressing(game))
     for (const char* bind : KeybindsPressing(pad, seated)) {
-      const std::string keys = rex::cvar::GetFlagByName(bind);
+      const std::string keys = ActiveBind(bind);  // the seat's binding set's (vehicle_binds.cpp)
       for (size_t at = 0; at <= keys.size();) {
         size_t comma = keys.find(',', at);
         if (comma == std::string::npos) comma = keys.size();
@@ -197,12 +203,16 @@ bool Choose(const std::string& set, const std::string& button, bool seated, Choi
   return set != "xbox_series" && Choose("xbox_series", button, seated, out);
 }
 
-// `p` drawn into the rectangle, fitted and centred, bilinear, over a cleared rectangle.
+// `p` drawn into the rectangle, fitted and centred, bilinear, over a cleared rectangle. A tenth of the rectangle is
+// left clear on each side (18 Nov 2026, the user: "Press B to enter boat"'s round B was cut flat at its top, bottom and
+// sides): our pictures are trimmed to their edges, and the HUD shows a little less than the atlas's rectangle (the
+// game's own B leaves a pixel clear round it in its 26 pixels).
 void Draw(std::vector<uint8_t>& rgba, uint32_t width, const Rect& r, const Picture& p, int turns) {
   for (int y = r.y; y < r.y + r.h; ++y)
     for (int x = r.x; x < r.x + r.w; ++x) std::fill_n(&rgba[(size_t(y) * width + x) * 4], 4, uint8_t(0));
   const int pw = turns & 1 ? p.h : p.w, ph = turns & 1 ? p.w : p.h;
-  const float k = std::min(float(r.w) / pw, float(r.h) / ph);
+  const float margin = 0.1f * float(std::min(r.w, r.h));
+  const float k = std::min((float(r.w) - 2 * margin) / pw, (float(r.h) - 2 * margin) / ph);
   const float dw = pw * k, dh = ph * k, ox = r.x + (r.w - dw) * 0.5f, oy = r.y + (r.h - dh) * 0.5f;
   auto texel = [&](int sx, int sy, int c) -> float {  // the picture turned by `turns` quarter turns clockwise
     sx = std::clamp(sx, 0, pw - 1), sy = std::clamp(sy, 0, ph - 1);
@@ -271,6 +281,24 @@ const std::vector<uint8_t>& Untouched(const Atlas& atlas, const uint8_t* guest) 
   return rgba;
 }
 
+// The kit badges' blue (130, 169, 223 at full strength, mixed with white and dark at their edges) as the squad's
+// green, R, G, B, A texels `s` times the game's size: each texel's share of blue (its red below its blue) made green.
+void GreenKitBadges(std::vector<uint8_t>& rgba, uint32_t width, int s) {
+  constexpr float kBlue[3] = {130.0f, 169.0f, 223.0f}, kGreen[3] = {77.0f, 255.0f, 92.0f};
+  for (const auto& r : kKitBadges)
+    for (int y = r[1] * s; y < (r[1] + r[3]) * s; ++y)
+      for (int x = r[0] * s; x < (r[0] + r[2]) * s; ++x) {
+        uint8_t* t = &rgba[(size_t(y) * width * s + x) * 4];
+        const float red = t[0], blue = t[2];
+        if (t[3] == 0 || blue < 24 || blue < red + 8 || blue < t[1]) continue;
+        // The texel as grey (blue, blue, blue) mixed with the blue at the texel's brightness, `share` of it.
+        const float share = std::clamp((1.0f - red / blue) * kBlue[2] / (kBlue[2] - kBlue[0]), 0.0f, 1.0f);
+        const float bright = blue / kBlue[2];
+        for (int c = 0; c < 3; ++c)
+          t[c] = uint8_t(std::clamp(blue + (kGreen[c] * bright - blue) * share, 0.0f, 255.0f));
+      }
+}
+
 // NativeXRenderer's patcher (D142): a known atlas gets the chosen style's pictures. Each one is taken in every style
 // (D160), so a later style or seat draws it again (`again`: offered again, its data unchanged since, so it is not
 // hashed again); in the Xbox 360 style a first load is left as it is and a texture offered again gets its own
@@ -318,8 +346,10 @@ bool Patch(uint32_t width, uint32_t height, const uint8_t* guest, std::vector<ui
   const std::string set = StyleSet();
   const bool seated = g_seated.load(std::memory_order_relaxed);
   std::lock_guard lock(g_mutex);
-  if (set.empty() && !again && !hd) return true;
+  const bool kits = atlas->name == std::string_view("hud_root_cq") && SquadBrightGreen();
+  if (set.empty() && !again && !hd && !kits) return true;
   start(*atlas);
+  if (kits) GreenKitBadges(rgba, width, s);
   int drawn = 0;
   if (!set.empty())
     for (const Rect& r : atlas->rects) {
@@ -333,7 +363,8 @@ bool Patch(uint32_t width, uint32_t height, const uint8_t* guest, std::vector<ui
   for (size_t i = 0; i < rgba.size(); i += 4) std::swap(rgba[i], rgba[i + 2]);
   if (hd) return true;  // said once, at the game's own size
   if (set.empty()) {
-    REXLOG_INFO("BF prompts: the game's {} atlas has its own pictures again", atlas->name);
+    if (again) REXLOG_INFO("BF prompts: the game's {} atlas has its own pictures again", atlas->name);
+    if (kits) REXLOG_INFO("BF HUD: the squad list's kit badges drawn green");
   } else {
     std::string keys;  // the keyboard's choices for the log: the HUD's hints are what the issue was about
     if (set == "keyboard")

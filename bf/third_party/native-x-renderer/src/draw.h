@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <span>
 #include <thread>
@@ -149,6 +150,10 @@ class DrawPath {
   void SetScopeFrame(bool watch, int log) { scope_watch_ = watch, scope_log_ = log, scope_logged_ = 0; }
   // The game's own sky is not drawn (sky.h draws another): Battlefield 1943's sky dome and the haze laid over it.
   void SetSkipGameSky(bool on) { skip_game_sky_ = on; }
+  // D190: the sea's reflection is the renderer's own: the game's cube map left out of the sea's shaders.
+  void SetOwnSeaReflection(bool on) { own_sea_reflection_ = on; }
+  // D191: the window glass's reflection is the renderer's own: the cube map left out of its shaders, its draws kept.
+  void SetOwnGlassReflection(bool on) { own_glass_reflection_ = on; }
   // The game's shadow map as what receives shadows last got it (the world's draws, not the first person weapon's):
   // its view (Battlefield 1943: three cascades, a layer each) and each cascade's transform from the world (three
   // rows: x and y within -0.5 to 0.5 inside it, z the depth it is compared with; shadowed where z is the greater).
@@ -163,6 +168,9 @@ class DrawPath {
   // camera, so its linear part is the view's): for the renderer's own sky in a view that shows no terrain (the
   // terrain's draws are where the sky's camera otherwise comes from). False if no dome was drawn this frame yet.
   bool DomeCamera(float m[4][4]) const;
+  // The camera's place in the world as the game's lit shaders last had it (and the frame of that), for a view with
+  // no terrain in it; false before any.
+  bool WorldCamera(float eye[3], uint64_t* frame = nullptr) const;
   // Wetness on the first person weapon and hands ("weapons and objects drip and have a realistic wetness that dries
   // when not directly in rain or water", tried there first; 14 Nov 2026). Their colour texture (Battlefield 1943: the
   // pixel shader's texture 2, 1024 x 1024 DXT1) is drawn with a wet copy of itself in its place: darker, with beads
@@ -171,6 +179,8 @@ class DrawPath {
   struct WetRequest {
     Diligent::RefCntAutoPtr<Diligent::ITextureView> original, copy;  // copy: the one to draw over, if there is one
     bool skin = false;  // the hands': wet, without drops
+    bool vehicle = false;  // D217: a vehicle's: its copy twice as fine, its drops raindrop-sized
+    bool relief_only = false;  // D217: a vehicle's other texture: drops raised only if it is a normal map
   };
   // How many beads there are (0 to 1) and how strongly the wetness shows (0 to 1; drying fades it); tint_slot (a
   // developer's check, -1: none): that texture of the weapon's pixel shaders is drawn red instead.
@@ -281,10 +291,12 @@ class DrawPath {
   // The grass prototype (grass.h): the main view's terrain draws are kept in `terrain` (null: none).
   void SetTerrainCapture(TerrainFrame* terrain) { terrain_ = terrain; }
   // D169: the sky dome's camera kept in `sky` (null: none), the first of a frame's.
-  void SetSkyCapture(SkyCamera* sky) { sky_ = sky; }
   // D163: the night's lamps on models: a main view draw that writes depth with one of these index counts reports its
   // world-view-projection (column form) to `report`; null: none.
   // `index_counts` holds pairs: an index count, the first register of the model's world matrix.
+  // D217: the vehicles' bodies, by their draws' index counts (pairs as SetModelLamps's: an index count, a register),
+  // wet in the rain as the first person weapon is (their colour texture drawn with a wet copy); null: none.
+  void SetWetModels(const std::vector<uint32_t>* index_counts) { wet_models_ = index_counts; }
   void SetModelLamps(const std::vector<uint32_t>* index_counts, void (*report)(uint32_t, const Mat4d&)) {
     model_lamp_counts_ = index_counts;
     model_lamp_report_ = report;
@@ -309,6 +321,8 @@ class DrawPath {
   // The float constants that hold a texture's size (Profile::texture_size_constants, D93).
   // D164: pixel shaders that read their pixel position get it as the host pixel's centre less one guest pixel.
   void SetParamGenTexelCentre(bool on) { param_gen_texel_centre_ = on; }
+  // D197: the shadow map's fetch constant for soft shadows (Profile::soft_shadow_fetch_constant), before Initialize.
+  void SetSoftShadowFetchConstant(uint32_t fetch_constant) { soft_shadow_fetch_constant_ = fetch_constant; }
   void SetTextureSizeConstants(const Profile::TextureSizeConstant* constants, uint32_t count) {
     texture_size_constants_ = std::span(constants, count);
   }
@@ -316,6 +330,25 @@ class DrawPath {
   // `depth`'s (the depth-stencil view of the main view's depth target), over the camera's motion. Returns
   // how many were drawn. Binds its own targets (the next draw binds its own again).
   uint32_t DrawObjectMotion(Diligent::ITextureView* motion, Diligent::ITextureView* depth);
+  // D191: the window glass's draws of this frame drawn again into `mask` (R32 float, cleared to 0 by the caller): each
+  // pixel the nearest pane's depth, untested (the reflection's pass tests it against the world's depth). The count.
+  uint32_t DrawGlassMask(Diligent::ITextureView* mask, bool sea = false, Diligent::ITextureView* depth = nullptr);
+  uint32_t glass_draw_count() const { return uint32_t(glass_draws_.size()); }
+  uint32_t sea_draw_count() const { return uint32_t(sea_draws_.size()); }  // D190: the sea's, the same way
+  // D190: the picture as it was just after the sea's last draw this frame (null: not taken), before anything
+  // see-through drawn over it (a flag, smoke); TakeSeaAfter takes it now if the sea was the last drawn.
+  Diligent::ITexture* sea_after() const;
+  bool sea_after_due() const { return sea_after_due_; }
+  // D190: the renderer's sky for the sea's own sky cube: its zenith and horizon as shown (exposure in), RGB.
+  void SetSeaSky(const float zenith[3], const float horizon[3]);
+  // D205: the sea's height (the renderer's sky reads it), for the turned shadows' pivot; NaN when not known.
+  void SetSeaLevel(float sea) { sea_level_ = sea; }
+  void TakeSeaAfter();
+  static bool IsSeaShader(uint64_t ps) {
+    return ps == 0x60BD629ABC6BFCFCull || ps == 0xBEAD02FECCE1E2EAull || ps == 0x2715129AEB1C7AE7ull ||
+           ps == 0xED75062BA2E66F5Dull || ps == 0xC7F420106FAD9628ull || ps == 0xFEFCD04010C7CA86ull ||
+           ps == 0x1139C2856EADF277ull || ps == 0xF819F26C2C47D01Bull;
+  }
 
   struct Stats {
     uint32_t draws = 0, drawn = 0, no_targets = 0, failed = 0;
@@ -381,6 +414,9 @@ class DrawPath {
                       const Diligent::Viewport& viewport, const Diligent::Rect& scissor, const PipelineState& state);
   // Keeps a draw that moved for DrawObjectMotion (D48).
   struct MotionDraw;
+  void KeepGlassDraw(rex::graphics::SpirvShader& vertex_shader, uint64_t vertex_modification, const PipelineState& state,
+                     const Diligent::Viewport& viewport, const Diligent::Rect& scissor, Diligent::IBuffer* index_buffer,
+                     uint64_t index_offset, Diligent::VALUE_TYPE index_type, uint32_t vertex_count, bool sea = false);
   void KeepMotionDraw(rex::graphics::SpirvShader& vertex_shader, uint64_t vertex_modification,
                       const PipelineState& state, const uint8_t* previous_constants,
                       const Diligent::Viewport& viewport, const Diligent::Rect& scissor,
@@ -557,7 +593,6 @@ class DrawPath {
   const std::vector<uint32_t>* model_lamp_counts_ = nullptr;  // D163
   void (*model_lamp_report_)(uint32_t, const Mat4d&) = nullptr;
   TerrainFrame* terrain_ = nullptr;  // the grass prototype's (grass.h)
-  SkyCamera* sky_ = nullptr;         // D169
   std::vector<std::pair<GtaoProjection, uint32_t>> projections_;
   std::vector<std::pair<float, float>> projection_ranges_;  // each candidate's viewport depth range (its first draw's)
   // The last vote's winner, the camera's reprojection (D120).
@@ -565,12 +600,39 @@ class DrawPath {
   Mat4d camera_winner_{};
   std::span<const Profile::TextureSizeConstant> texture_size_constants_;
   bool param_gen_texel_centre_ = false;
+  // D197: soft shadows. The fetch constant (UINT32_MAX: none) and the translated shaders' constants for them
+  // (SystemConstants::soft_shadow), worked out once a frame from the cascades (UpdateSoftShadows).
+  uint32_t soft_shadow_fetch_constant_ = UINT32_MAX;
+  float soft_shadow_[4][4] = {};
+  void UpdateSoftShadows();
   // native_x_renderer_alpha_to_coverage (D69, D114): blended by the alpha on surfaces the game draws with MSAA
   // (`msaa`), at 1x (`one`); else the shader's dither.
   struct {
     bool msaa = true, one = false;
   } alpha_to_coverage_blend_;
   bool skip_game_sky_ = false;
+  bool own_sea_reflection_ = false;
+  float sea_level_ = std::numeric_limits<float>::quiet_NaN();  // D205
+  bool sea_after_due_ = false;
+  Diligent::RefCntAutoPtr<Diligent::ITexture> sea_after_source_, sea_after_;
+  uint64_t sea_after_frame_ = ~0ull;
+  bool own_glass_reflection_ = false;
+  struct GlassDraw {
+    Pipeline* pipeline;
+    size_t data;  // in glass_data_: the vertex constants, then the system, bool/loop and fetch constants
+    uint32_t constants_size;
+    Diligent::Viewport viewport;
+    Diligent::Rect scissor;
+    Diligent::IBuffer* index_buffer;
+    uint64_t index_offset;
+    Diligent::VALUE_TYPE index_type;
+    uint32_t vertex_count;
+  };
+  std::vector<GlassDraw> glass_draws_, sea_draws_, last_glass_;
+  std::vector<uint8_t> last_glass_data_;  // (NXR_GLASS_DEBUG: the first glass draw's vertex constants, for the log)
+  std::vector<uint8_t> glass_data_, sea_data_;
+  Diligent::RefCntAutoPtr<Diligent::IShader> glass_pixel_shader_;
+  bool glass_pixel_shader_failed_ = false;
   OutdoorLight outdoor_light_;
   float game_light_dir_[3] = {};
   bool game_light_dir_valid_ = false;
@@ -580,6 +642,12 @@ class DrawPath {
   // of the cascade's linear part (which cascade a caster's matrix belongs to).
   float draw_shadow_[3][3][4] = {};  // the draw's own, kept if its pixel shader tells the camera's place
   bool draw_shadow_valid_ = false;
+  // D218: this frame's cascade transforms as a listed receiver got them, to find them in the vertex constants of a
+  // receiver the light table does not list; and where each such vertex shader has them (its first register).
+  float frame_shadow_[3][3][4] = {};
+  uint64_t frame_shadow_frame_ = ~0ull;
+  std::unordered_map<uint64_t, uint32_t> unlisted_receivers_;
+  float shadow_turn_keep_ = 1.0f;  // D218: how much of the turn is kept at the camera's height (1 low, 0 high up)
   uint64_t shadow_turn_frame_ = 0;
   bool shadow_turn_frame_valid_ = false;
   float dome_m_[4][4] = {};
@@ -589,19 +657,30 @@ class DrawPath {
     Diligent::RefCntAutoPtr<Diligent::ITextureView> original, copy;
     float count = -1.0f, show = -1.0f;  // what the copy was made with
     bool skin = false;
+    bool vehicle = false;               // D217
+    bool relief_only = false;           // D217
     uint64_t used = 0;                  // the frame it was last drawn with or asked for
-    double seconds = -1.0;              // and when: the water runs, so the copy is made anew some 15 times a second
+    double seconds = -1.0;              // and when: the water runs, so the copy is made anew 60 times a second (D217; 15 before)
     bool asked = false;
   };
   std::vector<WetCopy> wet_copies_;
   float wet_count_ = 0.0f, wet_show_ = 0.0f;
   double wet_seconds_ = 0.0;
   int wet_tint_ = -1;
+  // D190: the sea's own sky cube (fetch 6 of Wake Island's and Coral Sea's sea shaders) as the renderer's sky.
+  Diligent::IDeviceObject* SeaSkyView(uint32_t stage, uint32_t fetch_constant, Diligent::IDeviceObject* view,
+                                      const rex::graphics::SpirvShader& pixel_shader);
+  Diligent::RefCntAutoPtr<Diligent::ITexture> sea_sky_cube_;
+  float sea_sky_[2][3] = {};
+  bool sea_sky_dirty_ = true;
   Diligent::IDeviceObject* WetView(uint32_t stage, uint32_t fetch_constant, Diligent::IDeviceObject* view,
                                    const rex::graphics::SpirvShader& pixel_shader, const rex::graphics::RegisterFile& regs);
   // This draw is the first person weapon's or hands' (ClassifyWeapon): in the nearest depth range, with another
   // field of view than the world's (the world's: the last seen in a draw of a farther range).
   bool weapon_draw_ = false;
+  bool vehicle_draw_ = false;                        // D217: this draw is a vehicle's body (wet_models_)
+  bool vehicle_relief_ = false;                      // D217: this texture of it is not its colour
+  const std::vector<uint32_t>* wet_models_ = nullptr;  // D217
   uint32_t weapon_constants_ = 0;  // how many float constants the weapon's draw's vertex shader takes (bones: many)
   float world_py_ = 0.0f;
   uint64_t world_py_frame_ = ~uint64_t(0);
@@ -610,6 +689,9 @@ class DrawPath {
   float seen_shadow_[3][3][4] = {};
   bool seen_shadow_valid_ = false;
   float seen_camera_[3] = {};
+  float world_camera_[3] = {};
+  uint64_t world_camera_frame_ = 0;
+  bool world_camera_valid_ = false;
   bool seen_camera_valid_ = false;
   struct ShadowTurn {
     bool on = false;
@@ -618,6 +700,7 @@ class DrawPath {
     float receiver[3][3][4] = {};
     float inverse[3][3][3] = {};
   } shadow_turn_;
+  float last_miss_[12] = {};  // NXR_SHADOW_LOG: the last caster's rows no cascade was found for
   void LatchShadowTurn();
   ObjectMotion object_motion_;
   Diligent::RefCntAutoPtr<Diligent::IShader> motion_pixel_shader_;  // created on first use

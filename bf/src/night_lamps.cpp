@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -164,6 +165,9 @@ struct LampPart {
   float r = 1.0f, g = 0.76f, b = 0.46f;  // its colour (a warm lamp, about 2700 K, unless given)
   float flicker = 0.0f, spin = 0.0f;     // D170: firelight's waver; a turning beam (radians a second)
 };
+// D177: a street lamp's sodium light (the user, 16 Nov 2026: "like sodium ... lightbulbs would from street lights"):
+// a deep amber, about 2100 K.
+#define BF_SODIUM 1.0f, 0.56f, 0.17f
 // D170 colours: firelight, a lantern's flame, a red aviation light.
 constexpr float kFire[3] = {1.0f, 0.52f, 0.20f};
 constexpr float kLantern[3] = {1.0f, 0.68f, 0.36f};
@@ -179,9 +183,9 @@ LampPart Beam(float x, float y, float z, float dx, float dy, float dz, float ran
   l.r = 1.0f, l.g = 0.92f, l.b = 0.78f, l.spin = spin;
   return l;
 }
-// A work lamp hanging under a roof, shining down (a warm electric light).
+// A work lamp hanging under a roof, shining down (a sodium lamp, as the street lamps: D177).
 LampPart Down(float x, float y, float z, float range, float inner, float outer, float strength, float glow) {
-  return LampPart{x, y, z, 0.0f, -1.0f, 0.0f, range, inner, outer, strength, glow};
+  return LampPart{x, y, z, 0.0f, -1.0f, 0.0f, range, inner, outer, strength, glow, BF_SODIUM};
 }
 
 struct LampModel {
@@ -194,8 +198,8 @@ const std::vector<LampModel>& Models() {
   // The lamppost's glasses (Level04_light): centres -0.48 / 0.48, 6.35, 0.42; each faces (-/+0.15, -0.93, 0.35).
   static const std::vector<LampModel> models = {
       {"objects/beach_objects/lamppost_01/lamppost_01/",
-       {{-0.48f, 6.33f, 0.42f, -0.15f, -0.93f, 0.35f, 18.0f, 40.0f, 75.0f, 5.5f, 0.10f},
-        {0.48f, 6.33f, 0.43f, 0.15f, -0.93f, 0.35f, 18.0f, 40.0f, 75.0f, 5.5f, 0.10f}}},
+       {{-0.48f, 6.33f, 0.42f, -0.15f, -0.93f, 0.35f, 22.0f, 40.0f, 75.0f, 8.0f, 0.09f, BF_SODIUM},
+        {0.48f, 6.33f, 0.43f, 0.15f, -0.93f, 0.35f, 22.0f, 40.0f, 75.0f, 8.0f, 0.09f, BF_SODIUM}}},
       {"objects/beach_objects/bomb_lamp/bomb_lamp/", {{0.0f, 0.27f, 0.0f, 0.0f, 0.0f, 0.0f, 9.0f, 0.0f, 0.0f, 2.0f, 0.05f}}},
       // D170 (TekRantGaming, 14 Nov 2026, the night maps' lighting): each from the model's own parts
       // (tools/level_objects.py for where they stand, the meshes' part bounds for where on them).
@@ -222,6 +226,10 @@ const std::vector<LampModel>& Models() {
       // The radio masts: a red light at the top (6.75 m and 4.8 m).
       {"objects/beach_objects/antenna_01/antenna_01", {Lamp(0.0f, 6.85f, 0.0f, 2.5f, 0.9f, 0.10f, kRed)}},
       {"objects/beach_objects/antenna_02/antenna_02", {Lamp(0.0f, 4.9f, 0.0f, 2.5f, 0.9f, 0.09f, kRed)}},
+      // D195: the large buoys that mark the edge of the play area (Wake 61, Iwo Jima 35, Guadalcanal 32; the user, 18 Nov
+      // 2026: "keep the buoys that mark the edges of the maps lit"): a red light on the top of each (its mesh: 1.6 m
+      // across, 6.13 m over its origin at the sea), seen from far off.
+      {"objects/street_objects/buoylarge_t01v01_br/buoylarge_t01v01_static", {Lamp(0.0f, 6.0f, 0.0f, 4.0f, 1.4f, 0.22f, kRed)}},
       // Wake's water towers: a red light on the tank (its top 7.28 m).
       {"objects/street_objects/watertower_t01v01_br/watertower_t01v01_br", {Lamp(0.0f, 7.45f, 0.0f, 2.5f, 0.9f, 0.09f, kRed)}},
       // The airfields' hangars: two work lamps under the roof (8.1 m), their pools inside the walls (+-13 m by +-10 m).
@@ -260,50 +268,8 @@ const std::vector<LampModel>& Models() {
 
 void NightJeeps();
 
-// D169: each night map's own sky (the night maps brief, 14 Nov 2026: "a unique night sky per map"), by its level
-// folder. Wake Island: a clear Pacific night, the Milky Way bright, a small white moon. Guadalcanal: damp jungle air,
-// the faint stars lost in a grey green haze, a bigger yellowed moon. Iwo Jima: volcanic dust and the smoke of the
-// fighting, few stars, a moon reddened by it, the horizon a dull warm brown. Any other level: the renderer's own clear
-// sky. The moon stands where the level's sun is (the renderer finds it in the game's sky, so its shadows and the sea's
-// glint agree); the directions here are for when it cannot.
-void NightSkyForLevel(const std::string& folder) {
-  std::string lower = folder;
-  for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
-  native_x_renderer::NightSkyStyle s;
-  auto set3 = [](float* o, float a, float b, float c) { o[0] = a, o[1] = b, o[2] = c; };
-  const char* name = "clear (default)";
-  if (lower.find("wake") != std::string::npos) {
-    name = "Wake Island, a clear Pacific night";
-    set3(s.moon_direction, -0.55f, 0.52f, 0.66f);
-    s.moon_radius = 0.0100f;
-    set3(s.moon_color, 0.64f, 0.68f, 0.74f);
-    s.stars = 1.0f, s.milky_way = 1.15f;
-    set3(s.horizon_color, 0.003f, 0.006f, 0.014f);
-    s.horizon_height = 0.14f, s.cloud_dim = 0.12f, s.seed = 0.0f;
-  } else if (lower.find("guadal") != std::string::npos) {
-    name = "Guadalcanal, humid jungle haze";
-    set3(s.moon_direction, 0.62f, 0.21f, -0.45f);
-    s.moon_radius = 0.0128f;
-    set3(s.moon_color, 0.70f, 0.65f, 0.52f);
-    s.stars = 0.48f, s.milky_way = 0.25f;
-    set3(s.horizon_color, 0.008f, 0.012f, 0.011f);
-    s.horizon_height = 0.30f, s.cloud_dim = 0.06f, s.seed = 11.0f;
-  } else if (lower.find("iwo") != std::string::npos) {
-    name = "Iwo Jima, volcanic dust and smoke";
-    set3(s.moon_direction, 0.30f, 0.17f, 0.80f);
-    s.moon_radius = 0.0120f;
-    set3(s.moon_color, 0.72f, 0.50f, 0.36f);
-    s.stars = 0.36f, s.milky_way = 0.12f;
-    set3(s.horizon_color, 0.016f, 0.009f, 0.005f);
-    s.horizon_height = 0.26f, s.cloud_dim = 0.08f, s.seed = 23.0f;
-  }
-  native_x_renderer::NightSky(s);
-  REXLOG_INFO("BF level {}: night sky {}", folder, name);
-}
-
 // The level's main partition's bytes (levels/<map>.dbx): its lamps to the renderer (none if it has none).
 void NightLampsFromLevel(const uint8_t* data, size_t size, const std::string& folder) {
-  NightSkyForLevel(folder);
   std::vector<Placed> placed;
   if (!Reader(data, size).Read(placed)) {
     native_x_renderer::NightLamps(nullptr, 0);
@@ -313,6 +279,20 @@ void NightLampsFromLevel(const uint8_t* data, size_t size, const std::string& fo
   }
   std::vector<native_x_renderer::NightLamp> lamps;
   uint32_t objects = 0;
+#if defined(BF_DEV_TOOLS)
+  // BF_DEV_FIND_OBJECT=<text> (tests): where the level places each object whose blueprint has that text (lower case),
+  // the first 40 (D191: the window glass's buildings, to put a camera by them).
+  if (const char* find = std::getenv("BF_DEV_FIND_OBJECT"); find && *find) {
+    int said = 0;
+    for (const Placed& p : placed) {
+      std::string lower = p.blueprint;
+      for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+      if (lower.find(find) == std::string::npos || said++ >= 40) continue;
+      REXLOG_INFO("BF level {}: {} at {:.1f} {:.1f} {:.1f} (forward {:.2f} {:.2f})", folder, p.blueprint, p.m[12], p.m[13],
+                  p.m[14], p.m[8], p.m[10]);
+    }
+  }
+#endif
   for (const Placed& p : placed) {
     std::string lower = p.blueprint;
     for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
@@ -354,7 +334,16 @@ void NightLampsFromLevel(const uint8_t* data, size_t size, const std::string& fo
 // index counts; the farthest left out, its counts small enough to be another model's), two lamps at the front of each
 // (the bodies' boxes: the Willys from z -1.97 to 1.81, 0.3 to 1.54 m up, its lamps in the grille; the Kurogane's on its
 // wings, z to 1.97), pointing ahead and a little down. Their own space: x right, y up, z forward.
+// D177: where the tanks' headlights are in their hulls' space (x right, y up, z forward; BF_DEV_TANK_LAMPS in a dev
+// build: "sx,sy,sz,cx,cy,cz", to place them by eye).
+float kShermanLamp[3] = {0.85f, 1.45f, 2.55f};
+float kChiHaLamp[3] = {0.0f, 1.15f, 2.45f};
 void NightJeeps() {
+#if defined(BF_DEV_TOOLS)
+  if (const char* v = std::getenv("BF_DEV_TANK_LAMPS"); v && *v)
+    std::sscanf(v, "%f,%f,%f,%f,%f,%f", &kShermanLamp[0], &kShermanLamp[1], &kShermanLamp[2], &kChiHaLamp[0], &kChiHaLamp[1],
+                &kChiHaLamp[2]);
+#endif
   auto lamp = [](float x, float y, float z) {
     native_x_renderer::NightLamp l;
     l.position[0] = x, l.position[1] = y, l.position[2] = z;
@@ -368,16 +357,23 @@ void NightJeeps() {
   std::vector<native_x_renderer::NightModelLamps> models;
   // Their main body's matrix: the third part's (the parts in alphabetical order, Glass01 and Glass02 first; the
   // landing boat's Left_MG and Left_MG_pivot), c23 to c25 (run nightboat4: c16 the camera, c17 on rigid rows).
-  auto add = [&](uint32_t indices, float x, float y, float z) {
+  auto add = [&](uint32_t indices, float x, float y, float z, uint32_t matrix_register = 23) {
     native_x_renderer::NightModelLamps m;
     m.index_count = indices;
-    m.matrix_register = 23;
+    m.matrix_register = matrix_register;
     m.lamps[0] = lamp(-x, y, z), m.lamps[1] = lamp(x, y, z);
-    m.lamp_count = 2;
+    m.lamp_count = x != 0.0f ? 2 : 1;
     models.push_back(m);
   };
   for (uint32_t n : {18861u, 9975u, 4545u}) add(n, 0.30f, 0.95f, 1.70f);  // Willys MB
   for (uint32_t n : {17403u, 8985u, 4308u}) add(n, 0.62f, 1.03f, 1.85f);  // Kurogane
+  // D177, the tanks (the user, 16 Nov 2026: the lights "along with tanks and wheeled vehicles"): their one material's
+  // draw (US_ShermanM4_tank_Mesh, ChiHa_mb_Mesh: the triangle counts of their levels of detail 0 to 2, from each
+  // level's data file's first subset, times three), the Hull's matrix (the Sherman's parts Barrel, Hook1, Hook2, Hull:
+  // the fourth, c26; the Chi-Ha's Hull the first, c17). The Sherman's two headlights on its glacis' corners; the
+  // Chi-Ha's one, in the middle of its hull's front.
+  for (uint32_t n : {29745u, 14685u, 7416u}) add(n, kShermanLamp[0], kShermanLamp[1], kShermanLamp[2], 26);
+  for (uint32_t n : {29418u, 14535u, 7281u}) add(n, kChiHaLamp[0], kChiHaLamp[1], kChiHaLamp[2], 17);
 #if defined(BF_DEV_TOOLS)
   // BF_DEV_NIGHT_BOAT_LAMPS=1 (tests): the landing boat (gen_Landingcraft, Main_Body, 19242 and 9303 indices; its box z
   // -4.57 to 4.71, up to 2.39 m) gets two at its +z end, high: the model lamps' placement checked at the carrier's spawn.

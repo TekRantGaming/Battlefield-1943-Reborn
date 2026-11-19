@@ -408,9 +408,13 @@ void CreateSpawnMouseOverlay(rex::ui::ImGuiDrawer* drawer) {
 // sub_8241FA58(map, r4 a vector, r5 the item, r6 the picture's rectangle, ...): one icon drawn on a map of the game's
 // (capture_points.cpp: the item's place in the world is at item - 0x30 with the item at r5 + 160). Logged while the
 // deploy screen is up (bf_debug_spawn_mouse), to find how its map places the world on the screen.
+namespace bf1943 {
+void SquadColorsMapIcon(uint8_t* base, uint32_t vec);  // squad_colors.cpp
+}
 REX_EXTERN(__imp__sub_8241FA58);
 REX_HOOK_RAW(sub_8241FA58) {
   using namespace bf1943;
+  SquadColorsMapIcon(base, ctx.r4.u32);  // the squad's icons in green (squad_colors.cpp)
   if (g_active.load(std::memory_order_relaxed) && REXCVAR_GET(bf_debug_spawn_mouse)) {
     const uint32_t map = ctx.r3.u32, vec = ctx.r4.u32, item = ctx.r5.u32, rect = ctx.r6.u32;
     std::lock_guard lock(g.mutex);

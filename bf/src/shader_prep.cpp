@@ -513,6 +513,21 @@ bool ReadFbrbEntries(const fs::path& archive, const std::vector<std::string>& na
   return true;
 }
 
+// Every entry whose name starts with `prefix` and ends with `suffix`, at one read of the archive (sharp_text.cpp: the
+// game's font atlases). False when the archive could not be read.
+bool ReadFbrbMatching(const fs::path& archive, const std::string& prefix, const std::string& suffix,
+                      std::map<std::string, std::vector<uint8_t>>& out) {
+  out.clear();
+  Archive a;
+  if (!LoadArchive(archive, a)) return false;
+  for (const auto& [name, at] : a.entries)
+    if (name.size() >= prefix.size() + suffix.size() && name.compare(0, prefix.size(), prefix) == 0 &&
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0 &&
+        size_t(at.first) + at.second <= a.data.size())
+      out[name].assign(a.data.begin() + at.first, a.data.begin() + at.first + at.second);
+  return true;
+}
+
 // ---- pictures from the player's game files for our menus (SERVERS-PLAN.md section 2): never shipped, made once
 // into the user's cache after the game is installed. The server browser's map pictures are each level's own loading
 // screen picture (levels\<map>\ui\multiplayer-00.fbrb, Levels/<Map>/UI/Load_Image_<Name>.res), 512 pixels wide.

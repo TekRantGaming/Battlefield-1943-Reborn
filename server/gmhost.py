@@ -1024,7 +1024,7 @@ class World:
         self.weather = clamp(args.weather, 0, 1)
         self.fog, self.ground_fog = clamp(args.fog, 0, 1), clamp(args.ground_fog, 0, 1)
         self.wind = clamp(args.wind, 0, 1)
-        self.cloud_height = clamp(args.cloud_height, 200, 1500)
+        self.cloud_height = clamp(args.cloud_height, 100, 1500)
         # Player IDs as the game shows them (eight hex digits, the low half of the XUID).
         self.admins = {a.strip().upper().rjust(8, '0') for a in args.admins.replace(';', ',').replace(' ', ',').split(',')
                        if a.strip()}
@@ -1077,7 +1077,7 @@ class World:
                 if len(data) >= at + 37:
                     height = struct.unpack_from('>f', data, at + 33)[0]
                     if math.isfinite(height):
-                        self.cloud_height = max(200.0, min(1500.0, height))
+                        self.cloud_height = max(100.0, min(1500.0, height))
                 if self.said() != before:
                     self.host.note('world: %s set %s' % (name or 'an admin', self.said()))
             reply = b'BF43WRLR' + bytes([1, (1 if self.day_night else 0) | (2 if admin else 0)]) + struct.pack(
@@ -1564,7 +1564,7 @@ def main():
     ap.add_argument('--ground-fog', type=float, default=0.0, help='the ground fog, 0 to 1')
     ap.add_argument('--wind', type=float, default=0.3, help='the wind, 0 calm to 1 a gale: how far the rain leans')
     ap.add_argument('--cloud-height', type=float, default=450.0,
-                    help='the cloud base over the sea, metres (200 to 1500): low, the planes fly through the clouds')
+                    help='the cloud base over the sea, metres (100 to 1500): low, the planes fly through the clouds')
     ap.add_argument('--admins', default='',
                     help="player IDs (as the game shows them, separated by commas) who may change the world in game")
     ap.add_argument('--admin-key', default='', help='a key that makes the game showing it an admin; empty: none')

@@ -12,7 +12,6 @@
 /bf/**/*.dds
 /bf/**/*.wav
 /bf/**/*.xma
-
 # Pictures in the game's folders: only our own (the button glyphs, the TRG Studios logo, the Linux icon, our own
 # achievements' pictures from tools/make_reborn_achievements.py).
 /bf/**/*.png
@@ -39,3 +38,6 @@ __pycache__/
 # System files
 Thumbs.db
 .DS_Store
+
+# A developer's own build switches (bf/CMakeLists.txt includes it when it is there): BF_INTERNAL_TOOLS and the like.
+/bf/local.cmake

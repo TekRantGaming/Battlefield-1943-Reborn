@@ -1,4 +1,4 @@
-// Field of view (Settings > Display > Camera > Field of view, bf_fov): the camera's horizontal field of view at 16:9.
+// Field of view (Settings > Gameplay > Camera > Field of view, bf_fov): the camera's horizontal field of view at 16:9.
 //
 // The game's camera manager (the singleton at 0x82AF3BA0) keeps the current vertical field of view in degrees and
 // blends it toward each request every frame (a camera change, or a weapon's zoom: aim down sights narrows it); then
@@ -13,6 +13,15 @@
 // other players are not affected (the camera manager is the client's). The first person weapon has a projection of its
 // own (RenderFov, 30 degrees), which this leaves alone.
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <string>
 #include <fmt/format.h>
 #include <rex/logging.h>
@@ -42,13 +51,28 @@ REXCVAR_DEFINE_BOOL(bf_scope_pip, false, "BF1943",
                     "Sniper scope (Settings > Enhancements, experimental): picture in picture, only the scope's lens "
                     "zooms in and the world around it stays in view (NativeXRenderer D168)");
 REXCVAR_DEFINE_DOUBLE(bf_fov, 0.0, "BF1943",
-                      "The camera's horizontal field of view at 16:9 in degrees (60 to 120); 0: the game's own, 85.6");
-// Vehicles' own slider (TekRantGaming, 12 Nov 2026): the camera while the local soldier sits in a vehicle.
+                      "The camera's horizontal field of view at 16:9 in degrees (86 to 120); 0: the game's own, 85.6");
+// Vehicles' own slider (TekRantGaming, 12 Nov 2026): the camera while the local soldier sits in a vehicle. Since
+// 18 Nov 2026 only with Custom FOV on (bf_weapon_fov_custom, Settings > Enhancements > Field of view); off,
+// vehicles follow bf_fov.
 REXCVAR_DEFINE_DOUBLE(bf_fov_vehicle, 0.0, "BF1943",
-                      "The camera's horizontal field of view in vehicles, at 16:9 in degrees (60 to 120); 0: the game's own");
+                      "The camera's horizontal field of view in vehicles, at 16:9 in degrees (86 to 120), with bf_weapon_fov_custom; 0: the game's own");
+// The first person weapon's own (the user, 18 Nov 2026: "Weapon FOV" and "ADS FOV", 86 to 120 degrees): the camera width
+// the weapon and the hands are drawn as seen through, on the camera slider's scale (86: the game's own look; wider
+// draws the gun smaller), from the hip and aiming down its sights, blended by the zoom. On foot; in a vehicle the
+// first person view follows the vehicles' slider as before. Before them the weapon followed the camera's slider, and it
+// still does unless Custom FOV is on (Settings > Enhancements > Field of view; the user, 18 Nov 2026: "The player's
+// base FOV setting should automatically affect the weapon FOVs ... off by default").
+REXCVAR_DEFINE_BOOL(bf_weapon_fov_custom, false, "BF1943",
+                    "Custom FOV: the first person weapon drawn at Weapon FOV and ADS FOV (bf_weapon_fov, bf_ads_fov) and vehicles at bf_fov_vehicle; false: all at the camera's field of view (bf_fov)");
+REXCVAR_DEFINE_DOUBLE(bf_weapon_fov, 86.0, "BF1943",
+                      "The first person weapon's field of view from the hip: the camera width it is drawn at, at 16:9 in degrees (86 to 120)");
+REXCVAR_DEFINE_DOUBLE(bf_ads_fov, 86.0, "BF1943",
+                      "The first person weapon's field of view while aiming down sights: the camera width it is drawn at, at 16:9 in degrees (86 to 120)");
 
 namespace bf1943 {
 bool LocalSeatedNow();  // hud_glyphs.cpp: the local soldier sits in a vehicle (from the pad hook)
+bool BombViewActive();  // vehicle_views.cpp: the plane's bomb view is shown
 // The game's own vertical field of view this frame (radians, before our mapping), zoom included: look.cpp scales the
 // mouse by how far a zoom narrows it.
 std::atomic<float> g_game_fov{0.0f};
@@ -85,18 +109,21 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr uint32_t kCameraFovCaller = 0x82294CB0;  // sub_82294A58's call of setFovY
 constexpr uint32_t kSecondViewCaller = 0x822948E4;  // sub_82294818's call of sub_82623DB8 (at 0x822948E0)
 
-// The slider that applies now: the vehicle's while the soldier sits in one, else the camera's.
-double Chosen() { return bf1943::LocalSeatedNow() ? REXCVAR_GET(bf_fov_vehicle) : REXCVAR_GET(bf_fov); }
+// The slider that applies now: the vehicle's while the soldier sits in one with Custom FOV on, else the camera's.
+double Chosen() {
+  return bf1943::LocalSeatedNow() && REXCVAR_GET(bf_weapon_fov_custom) ? REXCVAR_GET(bf_fov_vehicle) : REXCVAR_GET(bf_fov);
+}
 
-// `weight`: how much of the mapping applies (1 all of it, 0 none: the value as the game has it).
-double Mapped(double radians, double weight = 1.0) {
-  const double chosen = Chosen();
+// `weight`: how much of the mapping applies (1 all of it, 0 none: the value as the game has it); `chosen`: the
+// horizontal field of view at 16:9 the game's own (85.6) is mapped to, 0 none.
+double MappedAs(double radians, double chosen, double weight) {
   if (chosen <= 0.0 || !(radians > 0.0 && radians < kPi)) return radians;
-  const double h = std::clamp(chosen, 60.0, 120.0) * kPi / 180.0;
+  const double h = std::clamp(chosen, 86.0, 120.0) * kPi / 180.0;
   const double tan_v = std::tan(h * 0.5) * 9.0 / 16.0;  // the vertical half angle's tangent at 16:9
   const double k = 1.0 + (tan_v / std::tan(27.5 * kPi / 180.0) - 1.0) * std::clamp(weight, 0.0, 1.0);
   return 2.0 * std::atan(k * std::tan(radians * 0.5));
 }
+double Mapped(double radians, double weight = 1.0) { return MappedAs(radians, Chosen(), weight); }
 // The same mapping for a value in degrees (the first person weapon's own projection).
 double MappedDegrees(double degrees, double weight) { return Mapped(degrees * kPi / 180.0, weight) * 180.0 / kPi; }
 // How much of the mapping the first person weapon's projection takes: all of it unzoomed, none through a scope. A
@@ -175,6 +202,9 @@ REX_HOOK_RAW(sub_82583248) {
       native_x_renderer::NoteScopeView(on_foot, right, up, back,
                                        float(std::tan(std::clamp(own_rendered, 0.1, 3.0) * 0.5)), float(zoom));
     }
+    // The plane's bomb view (vehicle_views.cpp): the air raid bomber's bomb sight's own field of view, 55 degrees
+    // (the planes' views have 45), then the vehicles' slider as for any view.
+    if (bf1943::BombViewActive()) ctx.f1.f64 = 55.0 * kPi / 180.0;
     ctx.f1.f64 = Mapped(ctx.f1.f64);
   }
   __imp__sub_82583248(ctx, base);
@@ -260,12 +290,69 @@ REX_EXTERN(sub_821F9318);  // (that): how far the zoom is in, 0 to 1
 // applies to the weapon's draws (NativeXRenderer SetWeaponLayerMove). The view only: the aim, the spread and the
 // server see nothing of it. The move is in metres and degrees, x right, y up, z forward.
 REXCVAR_DEFINE_BOOL(bf_smg_sights, false, "BF1943", "SMG zoom: the gun's own sights brought to the eye (Iron Sight) instead of the game's zoom in");
-// Each SMG's own move: "x,y,z,yaw,pitch,roll" (metres right, up, forward; degrees), lined up by eye against the
-// same guns' sights in Battlefield: Bad Company 2.
-REXCVAR_DEFINE_STRING(bf_smg_sight_us, "-0.0725,0.0135,0.0,0,0,0", "BF1943", "Iron Sight: the Thompson's move, x,y,z,yaw,pitch,roll");
-REXCVAR_DEFINE_STRING(bf_smg_sight_jp, "-0.0725,0.0135,0.0,0,0,0", "BF1943", "Iron Sight: the Type 100's move, x,y,z,yaw,pitch,roll");
+// Each SMG's own move: "x,y,z,yaw,pitch,roll" (metres right, up, forward; degrees). The player lines them up with
+// bf_smg_sight_tune ("If you have a way to give me either slider or transpose control, I could line it up manually
+// faster"): while aiming with an SMG, the arrow keys move the gun left, right, up and down, Page Up and Page Down
+// forward and back, the number pad's 4 6 turn it left and right, 8 2 up and down, 7 9 roll it, and 0 puts the built in
+// values back; Shift makes the steps five times larger, Ctrl five times smaller. The values show on the screen
+// (game_menu.cpp draws SmgSightTuneText) and are saved for that gun.
+REXCVAR_DEFINE_STRING(bf_smg_sight_us, "-0.0707,0.0193,0.0813,-0.09,0.05,-3.37", "BF1943", "Iron Sight: the Thompson's move, x,y,z,yaw,pitch,roll");
+REXCVAR_DEFINE_STRING(bf_smg_sight_jp, "-0.0774,0.0155,-0.1342,0.57,-0.05,-3.99", "BF1943", "Iron Sight: the Type 100's move, x,y,z,yaw,pitch,roll");
 REXCVAR_DEFINE_BOOL(bf_smg_sights_no_crosshair, true, "BF1943",
                     "Iron Sight: no crosshair while aiming down an SMG's sights, as with the rifles and pistols");
+REXCVAR_DEFINE_BOOL(bf_smg_sight_tune, false, "BF1943", "Iron Sight: line the SMG's sights up with the keyboard while aiming (arrows, Page Up/Down, number pad)");
+namespace {
+std::mutex g_tune_mutex;
+std::string g_tune_text;          // what the screen shows while tuning (empty: nothing)
+std::string g_tune_save_name, g_tune_save_value;  // a changed setting to save
+std::chrono::steady_clock::time_point g_tune_text_at{};
+}  // namespace
+namespace {
+// The SMG in the hands now, for the pause menu's sliders: 0 none, 1 the Thompson, 2 the Type 100; and when it was seen.
+std::atomic<int> g_tune_gun{0};
+std::atomic<int64_t> g_tune_gun_at{0};
+}  // namespace
+namespace bf1943 {
+// The pause menu's sight sliders ("If you can give me overlay sliders with pitch, yaw, roll and zoom, I can match it
+// by hand"): while they are open the aim is held for the player (auto_join.cpp presses the left trigger).
+std::atomic<bool> g_smg_tune_hold{false};
+// The SMG held now ("Thompson", "Type 100"; empty: none in the last half second) and its six values.
+std::string SmgSightTuneGun(double v[6]) {
+  const int gun = g_tune_gun.load(std::memory_order_relaxed);
+  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  if (!gun || now - g_tune_gun_at.load(std::memory_order_relaxed) > std::chrono::steady_clock::duration(std::chrono::milliseconds(500)).count())
+    return "";
+  const std::string text = gun == 2 ? REXCVAR_GET(bf_smg_sight_jp) : REXCVAR_GET(bf_smg_sight_us);
+  for (int i = 0; i < 6; ++i) v[i] = 0;
+  std::sscanf(text.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+  return gun == 2 ? "Type 100" : "Thompson";
+}
+// Its values set (the sliders); `reset`: the built in ones.
+void SmgSightTuneSet(const double v[6], bool reset) {
+  const int gun = g_tune_gun.load(std::memory_order_relaxed);
+  if (!gun) return;
+  const char* name = gun == 2 ? "bf_smg_sight_jp" : "bf_smg_sight_us";
+  std::string value = fmt::format("{:.4f},{:.4f},{:.4f},{:.2f},{:.2f},{:.2f}", v[0], v[1], v[2], v[3], v[4], v[5]);
+  if (reset)
+    if (const auto* info = rex::cvar::GetFlagInfo(name)) value = info->default_value;
+  rex::cvar::SetFlagByName(name, value);
+  std::lock_guard lock(g_tune_mutex);
+  g_tune_save_name = name, g_tune_save_value = value;
+}
+// game_menu.cpp, each frame: the tuning's line for the screen, and a changed setting to save (true once).
+std::string SmgSightTuneText() {
+  std::lock_guard lock(g_tune_mutex);
+  if (std::chrono::steady_clock::now() - g_tune_text_at > std::chrono::milliseconds(300)) return "";
+  return g_tune_text;
+}
+bool SmgSightTakeSave(std::string& name, std::string& value) {
+  std::lock_guard lock(g_tune_mutex);
+  if (g_tune_save_name.empty()) return false;
+  name = std::move(g_tune_save_name), value = std::move(g_tune_save_value);
+  g_tune_save_name.clear();
+  return true;
+}
+}  // namespace bf1943
 namespace {
 // The held weapon's name (SoldierWeaponData: its name's first and last characters at +0x0C and +0x10).
 std::string WeaponName(const uint8_t* base, uint32_t data) {
@@ -324,13 +411,30 @@ bool HeldWeapon(PPCContext& ctx, uint8_t* base, uint32_t soldier, uint32_t& data
 // "Let's remove all of the game's native depth of field, and make our own higher quality DoF with toggle-able ADS
 // Depth of Field": every weapon's zoom levels lose the game's foreground blur (ZoomBlur, once for each weapon's
 // data), and the renderer is told how far the aim is in for its own (NativeXRenderer dof.h).
+// The bazookas (the user, 18 Nov 2026: "remove the crosshair dot on the bazookas when ADS-ing"): no crosshair while
+// their sight is up, as with the rifles' own sights.
 void AdsDepthOfField(uint8_t* base, uint32_t data, double blend) {
   static std::mutex seen_mutex;
-  static std::set<uint32_t> seen;
+  static std::set<uint32_t> seen, launchers;
+  bool launcher;
   {
     std::lock_guard lock(seen_mutex);
-    if (seen.size() < 256 && seen.insert(data).second) ZoomBlur(base, data, true);
+    if (seen.size() < 256 && seen.insert(data).second) {
+      ZoomBlur(base, data, true);
+      std::string lower = WeaponName(base, data);
+      for (char& ch : lower) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+      // (The US one is "m18_us", the M18 recoilless rifle.)
+      const bool is_launcher = lower.find("m18") != std::string::npos || lower.find("bazooka") != std::string::npos ||
+                               lower.find("rocket") != std::string::npos ||
+                               lower.find("launcher") != std::string::npos || lower.find("type4") != std::string::npos ||
+                               lower.find("type 4") != std::string::npos || lower.find("type_4") != std::string::npos;
+      if (is_launcher) launchers.insert(data);
+      REXLOG_INFO("BF ADS: holding {}{}", lower.empty() ? "a weapon without a name" : lower,
+                  is_launcher ? " (a launcher: no crosshair while aiming)" : "");
+    }
+    launcher = launchers.count(data) != 0;
   }
+  if (launcher && blend > 0.3) native_x_renderer::HideCrosshair();
   native_x_renderer::SetAdsBlend(float(blend));
 }
 void SmgSights(uint8_t* base, uint32_t data, double blend, double fov_degrees) {
@@ -361,11 +465,68 @@ void SmgSights(uint8_t* base, uint32_t data, double blend, double fov_degrees) {
     for (char& ch : lower) ch = char(std::tolower(static_cast<unsigned char>(ch)));
     japanese = lower.find("thompson") == std::string::npos;
   }
+  const char* cvar_name = japanese ? "bf_smg_sight_jp" : "bf_smg_sight_us";
+  g_tune_gun.store(japanese ? 2 : 1, std::memory_order_relaxed);
+  g_tune_gun_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
   double v[6] = {0, 0, 0, 0, 0, 0};
   {
     const std::string text = japanese ? REXCVAR_GET(bf_smg_sight_jp) : REXCVAR_GET(bf_smg_sight_us);
     std::sscanf(text.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
   }
+#if defined(_WIN32)
+  // Only while this game's window is the one in front (the keys are read from the keyboard itself).
+  DWORD front_pid = 0;
+  GetWindowThreadProcessId(GetForegroundWindow(), &front_pid);
+#if defined(BF_INTERNAL_TOOLS)  // an internal build's only ("The sliders should be part of our internal build only")
+  const bool tune = REXCVAR_GET(bf_smg_sight_tune);
+#else
+  const bool tune = false;
+#endif
+  if (tune && blend > 0.5 && front_pid == GetCurrentProcessId()) {
+    // One step at a press, then repeated while the key is held (from 0.35 s, every 40 ms).
+    static std::map<int, std::chrono::steady_clock::time_point> next;
+    const auto now = std::chrono::steady_clock::now();
+    auto pressed = [&](int vk) {
+      if (!(GetAsyncKeyState(vk) & 0x8000)) {
+        next.erase(vk);
+        return false;
+      }
+      auto it = next.find(vk);
+      if (it == next.end()) {
+        next[vk] = now + std::chrono::milliseconds(350);
+        return true;
+      }
+      if (now < it->second) return false;
+      it->second = now + std::chrono::milliseconds(40);
+      return true;
+    };
+    const double scale = (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 5.0 : (GetAsyncKeyState(VK_CONTROL) & 0x8000) ? 0.2 : 1.0;
+    const double step = 0.001 * scale, turn = 0.25 * scale;
+    bool changed = false;
+    struct Key {
+      int vk, index;
+      double by;
+    };
+    const Key keys[] = {{VK_LEFT, 0, -step},   {VK_RIGHT, 0, step},   {VK_UP, 1, step},      {VK_DOWN, 1, -step},
+                        {VK_PRIOR, 2, step},   {VK_NEXT, 2, -step},   {VK_NUMPAD4, 3, -turn}, {VK_NUMPAD6, 3, turn},
+                        {VK_NUMPAD8, 4, turn}, {VK_NUMPAD2, 4, -turn}, {VK_NUMPAD7, 5, -turn}, {VK_NUMPAD9, 5, turn}};
+    for (const Key& key : keys)
+      if (pressed(key.vk)) v[key.index] += key.by, changed = true;
+    if (pressed(VK_NUMPAD0)) {
+      if (const auto* info = rex::cvar::GetFlagInfo(cvar_name))
+        std::sscanf(info->default_value.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+      changed = true;
+    }
+    const std::string value = fmt::format("{:.4f},{:.4f},{:.4f},{:.2f},{:.2f},{:.2f}", v[0], v[1], v[2], v[3], v[4], v[5]);
+    if (changed) rex::cvar::SetFlagByName(cvar_name, value);
+    std::lock_guard lock(g_tune_mutex);
+    g_tune_text = fmt::format("SIGHT TUNING  {}   right {:+.4f}  up {:+.4f}  forward {:+.4f} m   turn {:+.2f}  tilt {:+.2f}  roll {:+.2f} deg\n"
+                              "Arrows: left/right/up/down   PgUp/PgDn: forward/back   Numpad 4 6: turn   8 2: tilt   7 9: roll   0: reset   Shift x5, Ctrl /5",
+                              japanese ? "Type 100" : "Thompson", v[0], v[1], v[2], v[3], v[4], v[5]);
+    g_tune_text_at = now;
+    if (changed) g_tune_save_name = cvar_name, g_tune_save_value = value;
+  }
+#endif
   if (blend <= 0.001) return;
   // "remove crosshair when iron sight is being used when zoomed-in, just like the pistols and rifles natively do"
   if (REXCVAR_GET(bf_smg_sights_no_crosshair) && blend > 0.3) native_x_renderer::HideCrosshair();
@@ -504,12 +665,26 @@ REX_HOOK_RAW(sub_821FAAF0) {
   // turns in place, an outside one goes round the vehicle).
   bf1943::g_first_person.store(ctx.f1.f64 > 0.0 ? 1 : 0, std::memory_order_relaxed);
   bf1943::g_first_person_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
-  if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) ctx.f1.f64 = MappedDegrees(ctx.f1.f64, WeaponMapWeight());
+  // The weapon in the hands and how far its zoom is in (HeldWeapon works on a copy of the registers).
+  uint32_t data = 0;
+  double blend = 0;
+  const bool held = first_person_weapon && HeldWeapon(ctx, base, soldier, data, blend);
+  if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) {
+    if (bf1943::LocalSeatedNow() || !REXCVAR_GET(bf_weapon_fov_custom)) {
+      // In a vehicle (its own slider with Custom FOV on), or on foot without Custom FOV: the camera's slider.
+      ctx.f1.f64 = MappedDegrees(ctx.f1.f64, WeaponMapWeight());
+    } else {
+      // On foot: Weapon FOV from the hip, ADS FOV aimed in (a Thompson's own is 43.5 degrees high from the hip, 25.1
+      // aimed in: run wfov1), each on the camera slider's scale.
+      const double hip = std::clamp(REXCVAR_GET(bf_weapon_fov), 86.0, 120.0);
+      const double ads = std::clamp(REXCVAR_GET(bf_ads_fov), 86.0, 120.0);
+      const double chosen = hip + (ads - hip) * (held ? blend : 0.0);
+      ctx.f1.f64 = MappedAs(ctx.f1.f64 * kPi / 180.0, chosen, WeaponMapWeight()) * 180.0 / kPi;
+    }
+  }
   if (first_person_weapon) {  // with the field of view the weapon's view gets this frame
     const double answer = ctx.f1.f64;
-    uint32_t data = 0;
-    double blend = 0;
-    if (HeldWeapon(ctx, base, soldier, data, blend)) {
+    if (held) {
       AdsDepthOfField(base, data, blend);
       SmgSights(base, data, blend, answer);
     }

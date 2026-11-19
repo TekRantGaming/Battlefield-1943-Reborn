@@ -103,7 +103,7 @@ try {
         $shareable = Join-Path $user "cache\shaders\shareable"; New-Item -ItemType Directory -Force $shareable | Out-Null
         Get-ChildItem $SeedCache -File | Where-Object { $_.Extension -in ".xsh", ".xpso" } | Copy-Item -Destination $shareable
     }
-    Get-ChildItem $bin | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $(Split-Path -Leaf $_.Path)" } |
+    Get-ChildItem $bin -File | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $(Split-Path -Leaf $_.Path)" } |
         Set-Content (Join-Path $dir "hashes.txt") -Encoding ascii
 
     if (-not $Interactive) {

@@ -123,7 +123,7 @@ const char* ChannelLabel(Channel c) { return c == comms::kTeam ? "TEAM" : c == c
 ImU32 ChannelColor(Channel c, float alpha) {
   const int a = int(std::clamp(alpha, 0.0f, 1.0f) * 255);
   if (c == comms::kTeam) return IM_COL32(120, 180, 255, a);
-  if (c == comms::kSquad) return IM_COL32(130, 225, 120, a);
+  if (c == comms::kSquad) return IM_COL32(90, 245, 100, a);  // the squad's brighter green (squad_colors.cpp)
   return IM_COL32(235, 235, 228, a);
 }
 

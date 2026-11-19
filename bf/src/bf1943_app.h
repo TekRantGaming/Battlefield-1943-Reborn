@@ -62,6 +62,8 @@ void CreateWorldAdminPanel(rex::ui::ImGuiDrawer* drawer);               // world
 void CreateSpawnMouseOverlay(rex::ui::ImGuiDrawer* drawer);             // flash_mouse.cpp
 void CreateGraphicsPanel(rex::ui::ImGuiDrawer* drawer, rex::ui::Window* window);  // f8_panel.cpp
 void InstallHudGlyphs();                                                     // hud_glyphs.cpp
+void InstallSharpText(const std::filesystem::path& game_dir);                // sharp_text.cpp
+void InstallVehicleBinds();  // vehicle_binds.cpp: the keyboard's keys from the seat's binding set
 void InstallLook(rex::ui::Window* window);                               // look.cpp
 void InstallPlaytestMark(rex::ui::Window* window);                       // playtest_mark.cpp: BF_MARK_FILE
 void InstallCrashReports(const std::filesystem::path& user_root);        // crash_report.cpp
@@ -367,6 +369,8 @@ class Bf1943App : public rex::ReXApp {
     if (!REXCVAR_GET(server)) bf1943::CreateSpawnMouseOverlay(drawer);  // the deploy screen's pointer
     if (!REXCVAR_GET(server)) bf1943::CreateGraphicsPanel(drawer, window());  // F8 (f8_panel.cpp)
     if (!REXCVAR_GET(server)) bf1943::InstallHudGlyphs();  // the game's prompts in the chosen style (hud_glyphs.cpp)
+    if (!REXCVAR_GET(server)) bf1943::InstallSharpText(paths_.game_data_root);  // the game's text sharper (sharp_text.cpp)
+    if (!REXCVAR_GET(server)) bf1943::InstallVehicleBinds();  // each vehicle kind's keys (vehicle_binds.cpp)
     bf1943::InstallLook(window());  // the camera and look system (look.cpp)
     bf1943::InstallPlaytestMark(window());  // R marks a moment in a watched play test (playtest_mark.cpp)
     // The SDK's own overlays stay shut (TekRantGaming, 10 Nov 2026): F3 its debug overlay, F4 its settings and the backtick

@@ -16,6 +16,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -149,7 +150,11 @@ void NoteLevelChange();  // modern_mode.cpp: the new level's data gets the serve
 void TeamBalanceRoundOver();    // team_balance.cpp: nothing moves between a round's end and the next level
 void TeamBalanceLevelChange();  // team_balance.cpp: a new level, a new round
 void TeamBalanceTick(PPCContext& ctx, uint8_t* base);  // team_balance.cpp: once a second
+void BotsLevelChange();                               // bots.cpp: the old level's spawn points and bots gone
+void BotsTick(PPCContext& ctx, uint8_t* base);        // bots.cpp: every tick
 void ServerStatsTick();  // server_stats.cpp: each player's counts to the host's file, every 5 s
+void MatchRulesRoundOver();                         // match_rules.cpp: the round's clock stops
+void MatchRulesTick(PPCContext& ctx, uint8_t* base);  // match_rules.cpp: the time limit
 }  // namespace bf1943
 
 namespace bf1943 {
@@ -179,6 +184,7 @@ REX_HOOK_RAW(sub_82413900) {
   __imp__sub_82413900(ctx, base);
   if (!REXCVAR_GET(server)) return;
   bf1943::TeamBalanceRoundOver();
+  bf1943::MatchRulesRoundOver();
   std::lock_guard lock(g.mutex);
   Parse();
   // One map: the same one again (else the server stayed on the end of round screen).
@@ -233,6 +239,7 @@ REX_HOOK_RAW(sub_823F7168) {
     REXLOG_INFO("BF rotation: the game changes the level to {} (lr {:08X})", asked.empty() ? "its own" : asked,
                 uint32_t(ctx.lr));
     bf1943::TeamBalanceLevelChange();
+    bf1943::BotsLevelChange();
     return __imp__sub_823F7168(ctx, base);
   }
   {
@@ -249,6 +256,7 @@ REX_HOOK_RAW(sub_823F7168) {
   ctx.r3 = call.r3;
   bf1943::NoteLevelChange();  // the new level's data: the modern mode's values again (modern_mode.cpp)
   bf1943::TeamBalanceLevelChange();
+  bf1943::BotsLevelChange();
   WriteCurrent(next);
 }
 
@@ -485,6 +493,11 @@ void DevMoveSpawns(uint8_t* base) {
   auto be = [](const uint8_t* m) { return uint32_t(m[0]) << 24 | uint32_t(m[1]) << 16 | uint32_t(m[2]) << 8 | m[3]; };
   int moved = 0;
   std::string where;
+  static const bool near_on = [] {
+    const char* v = std::getenv("BF_DEV_MOVE_SPAWNS_NEAR");
+    return v && *v == '1';
+  }();
+  static int near_said = 0;
 #if !defined(_WIN32)
   (void)be;
   static bool told = false;
@@ -507,7 +520,24 @@ void DevMoveSpawns(uint8_t* base) {
         uint8_t* m = base + p;
         const uint32_t x = be(m);
         for (const auto& f : cfg.from) {
-          if (x != f[0] || be(m + 4) != f[1] || be(m + 8) != f[2]) continue;
+          if (x != f[0] || be(m + 4) != f[1] || be(m + 8) != f[2]) {
+            // BF_DEV_MOVE_SPAWNS_NEAR=1: the scans also name every three floats within 15 m of a given position (and its height to 5 cm) (the copies
+            // the game spawns from, when they are not the level file's exact values).
+            if (near_on && near_said < 80) {
+              float q[3];
+              for (int i = 0; i < 3; ++i) {
+                const uint32_t u = be(m + i * 4), t = f[i];
+                float a, b;
+                std::memcpy(&a, &u, 4), std::memcpy(&b, &t, 4);
+                q[i] = std::abs(a - b) < (i == 1 ? 0.05f : 15.0f) ? a : NAN;
+              }
+              if (!std::isnan(q[0]) && !std::isnan(q[1]) && !std::isnan(q[2])) {
+                ++near_said;
+                REXLOG_INFO("BF dev spawns: near a given position at {:08X}: {:.4f} {:.4f} {:.4f} ({:08X} {:08X} {:08X})", uint32_t(p), q[0], q[1], q[2], be(m), be(m + 4), be(m + 8));
+              }
+            }
+            continue;
+          }
           for (int i = 0; i < 3; ++i) {
             const uint32_t w = cfg.to[i];
             m[i * 4] = uint8_t(w >> 24), m[i * 4 + 1] = uint8_t(w >> 16), m[i * 4 + 2] = uint8_t(w >> 8),
@@ -675,6 +705,8 @@ REX_HOOK_RAW(sub_824123F0) {
   bf1943::GmHostStart();
   bf1943::ServerStatsTick();
   bf1943::TeamBalanceTick(ctx, base);  // team_balance.cpp: an uneven match evened, a player who has died at a time
+  bf1943::BotsTick(ctx, base);  // bots.cpp: the bots made, spawned and driven
+  bf1943::MatchRulesTick(ctx, base);  // match_rules.cpp: a round's time limit
   std::string next;
   {
     std::lock_guard lock(g.mutex);
@@ -717,6 +749,7 @@ REX_HOOK_RAW(sub_824123F0) {
   __imp__sub_823F7168(call, base);
   bf1943::NoteLevelChange();  // the new level's data: the modern mode's values again (modern_mode.cpp)
   bf1943::TeamBalanceLevelChange();
+  bf1943::BotsLevelChange();
   REXLOG_INFO("BF rotation: changing level to {} ({}), the pause between rounds over", TitleOf(next), next);
   WriteCurrent(next);
 }

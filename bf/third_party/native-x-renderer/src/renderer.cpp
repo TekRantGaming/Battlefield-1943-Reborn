@@ -74,6 +74,7 @@
 #include <memory>
 #include <map>
 #include <mutex>
+#include <set>
 #include <span>
 #include <string>
 
@@ -91,10 +92,10 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_replay_recorded_targets, false, "NativeXRe
                     "Draws replayed from recorded command buffers render into the targets the recording device had "
                     "bound (D129) instead of the running device's (D131); for diagnosis");
 REXCVAR_DEFINE_BOOL(native_x_renderer_ads_dof, true, "NativeXRenderer",
-                    "Depth of field of the renderer's own while the player aims down the sights (dof.h): what is "
-                    "near, the gun at the eye, is blurred; taken at once");
+                    "Depth of field of the renderer's own while the player aims down the sights (dof.h): the back "
+                    "of the gun at the eye is blurred, less toward its front, the sights in the middle not; taken at once");
 REXCVAR_DEFINE_STRING(native_x_renderer_dof_quality, "medium", "NativeXRenderer",
-                      "Depth of field: low, medium or high (12, 24 or 40 taps); taken at once");
+                      "Depth of field: low, medium or high (24, 48 or 80 taps, gathered at half size); taken at once");
 REXCVAR_DEFINE_STRING(native_x_renderer_motion_blur, "off", "NativeXRenderer",
                       "Motion blur of the renderer's own on the main 3D view (motion_blur.h): off, low, medium or high "
                       "(6, 10 or 16 taps); taken at once");
@@ -133,8 +134,18 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_wind, 0.3, "NativeXRenderer",
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_cloud_height, 450.0, "NativeXRenderer",
                       "The clouds' base over the sea, metres (100 to 3000): low enough, the planes fly through them "
                       "(with native_x_renderer_world_own; a match's server sets its own)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_cloud_shadows, true, "NativeXRenderer",
+                    "The clouds cast their shadows on the ground by day (D214)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_lightning, true, "NativeXRenderer",
                     "Lightning: a storm's flashes in the clouds, on the fog and on the ground");
+REXCVAR_DEFINE_BOOL(native_x_renderer_reflections, true, "NativeXRenderer",
+                    "Reflections of the renderer's own on the sea (screen space; the game's day sky cube map left out "
+                    "of its shaders, D190)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_glass_reflections, false, "NativeXRenderer",
+                    "Experimental (D191): the window glass's reflections of the renderer's own in place of the game's "
+                    "day sky cube map; with native_x_renderer_reflections");
+REXCVAR_DEFINE_BOOL(native_x_renderer_storm_sway, true, "NativeXRenderer",
+                    "A strong storm's shake: on foot in the open the view shakes lightly in the gusts, its edges blurred (D189, D193)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_rain_lens, true, "NativeXRenderer",
                     "Rain on the lens: while you stand in the rain, drops gather on the view and run down it");
 REXCVAR_DEFINE_BOOL(native_x_renderer_wetness, true, "NativeXRenderer",
@@ -155,7 +166,7 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_sky_sun_moves, true, "NativeXRenderer",
                     "sky's sun and moon");
 REXCVAR_DEFINE_INT32(native_x_renderer_sky_debug, 0, "NativeXRenderer",
                      "Developer: 1 paints the pixels the sky takes in one flat colour; 4 the fog's distances in "
-                     "bands, 5 its heights over the sea");
+                     "bands, 5 its heights over the sea; 7 to 10 the sea's reflection (D204)");
 REXCVAR_DEFINE_INT32(native_x_renderer_msaa, 1, "NativeXRenderer",
                      "Multisampling of the game's view (its targets of the output's size): 1 (none), 2 or 4 samples");
 REXCVAR_DEFINE_BOOL(native_x_renderer, false, "NativeXRenderer",
@@ -185,21 +196,15 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_frame_generation, false, "NativeXRenderer"
                     "AMD FSR 3.1 frame generation (read at startup, D123): a frame between each two of the game's, "
                     "presented before the game's. Needs DLSS or FSR 3.1 (their 3D view and motion vectors) and a game "
                     "running at half the display's refresh rate; with V-Sync the two are shown a refresh apart");
-REXCVAR_DEFINE_BOOL(native_x_renderer_night, false, "NativeXRenderer",
-                    "Night (D162): the finished scene drawn as a moonlit night, before the HUD (Battlefield 1943 "
-                    "Reborn's Night Ops servers)");
-REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_brightness, 1.0, "NativeXRenderer",
-                      "Night: how bright the moonlight is (1 the default, 0.5 darker, 2 brighter)");
-REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_haze, 700.0, "NativeXRenderer",
-                      "Night: the distance in metres at which the night haze hides about two thirds of the view");
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_glow, 1.0, "NativeXRenderer",
-                      "Night (D163): how strongly the effects keep their own light (muzzle flashes, tracers, fire, "
+                      "Night's lights (D163): how strongly the effects keep their own light (muzzle flashes, tracers, fire, "
                       "explosions; 0 none)");
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_lamps, 1.0, "NativeXRenderer",
-                      "Night (D163): how strongly the level's lamps light their surroundings and glow (0 none)");
-REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_sky, 1.0, "NativeXRenderer",
-                      "Night (D169): the night sky's stars, Milky Way and moon, made by the renderer (0 none, 1 the "
-                      "default)");
+                      "Night's lights (D163): how strongly the level's lamps light their surroundings and glow (0 none)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_lamp_bloom, true, "NativeXRenderer",
+                    "Night's lights (D183): a soft bloom round a lit lamp's glass");
+REXCVAR_DEFINE_BOOL(native_x_renderer_lens_flare, true, "NativeXRenderer",
+                    "Night's lights (D183): a subtle lens flare, halo and haze from the brightest lamps in view");
 REXCVAR_DEFINE_INT32(native_x_renderer_night_debug, 0, "NativeXRenderer",
                      "Night (D163), tests: 1 shows each pixel's place in the world (5 m checks), 2 the lights alone");
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_hitch_ms, 0.0, "NativeXRenderer",
@@ -364,10 +369,19 @@ uint64_t g_night_depth_frame = ~0ull;
 bool g_night_pending = false;  // the scene's copy was made: the night follows the game's composite
 // D162: the world's depth from before the first person weapon (the profile's AO depth copy), and its frame.
 Diligent::RefCntAutoPtr<Diligent::ITexture> g_night_world;
+Diligent::RefCntAutoPtr<Diligent::ITexture> g_glass_mask;  // D191: the window glass's depth, for its reflection
+Diligent::RefCntAutoPtr<Diligent::ITexture> g_sea_mask;  // D190: where the sea is drawn, for its reflection
 uint64_t g_night_world_frame = ~0ull;
 float g_night_world_uv[2] = {1.0f, 1.0f};  // the view's share of it
 // D163: the effects' layer (the game's half size pass of its emissive particles, copied with its mips), its frame.
 Diligent::RefCntAutoPtr<Diligent::ITexture> g_night_glow;
+// D179: the effects' layer as it was before the effects were drawn into it (a copy of its whole texture, taken at
+// the first draw into it after the game's sky dome's), whose layer it is, and the two views of them at the
+// layer's size the difference is made from.
+Diligent::RefCntAutoPtr<Diligent::ITexture> g_night_glow_before, g_night_glow_a, g_night_glow_b;
+uint64_t g_night_glow_before_frame = ~0ull;
+const HostTarget* g_night_glow_before_of = nullptr;
+const HostTarget* g_night_glow_dome_into = nullptr;  // the sky dome's draws went into this target, this frame
 uint64_t g_night_glow_frame = ~0ull;
 uint64_t g_night_glow_frames = 0;  // frames with one since the last log line
 // D163: the camera from the terrain's draws (world to clip, the terrain's viewport and NDC transform), its frame, and
@@ -395,6 +409,10 @@ struct NightModelDraw {
   Mat4d m;
 };
 std::vector<NightModelDraw> g_night_model_draws;
+std::atomic<bool> g_night_vehicle_seated{false};  // D178: the player sits in a vehicle (NightVehicleSeated)
+// D208: the level's middle (SetMapArea), where the hurricane comes to; (0, 0) until a level's points are known.
+std::atomic<float> g_map_x{0.0f}, g_map_z{0.0f}, g_map_reach{1200.0f};  // (D213: its reach, 1200 m until known)
+std::atomic<bool> g_map_known{false};
 uint64_t g_night_models_placed = 0;  // models placed with their lamps since the last log line
 void ReportNightModelDraw(uint32_t index_count, const Mat4d& m) {
   if (g_night_model_draws.size() < 48) g_night_model_draws.push_back({index_count, m});
@@ -405,16 +423,12 @@ std::vector<NightSprite> g_night_frame_sprites;
 // cycle of pull request 32 in their place, the lights kept). How dark the cycle's hour is for them: 0 by day, rising as
 // the sun nears the horizon, 1 once it is 6 degrees down (set with the outdoor light, read on every draw: no lock).
 std::atomic<float> g_cycle_dark{0.0f};
-// The night's lights' strength: 1 with the old night look (native_x_renderer_night, D162), else the cycle's darkness.
-float NightLightsAmount() {
-  if (REXCVAR_GET(native_x_renderer_night)) return 1.0f;
-  return g_cycle_dark.load(std::memory_order_relaxed);
-}
-// The night pass runs (its depths, the effects' layer, the lamps' camera): the old night look, or the cycle's dark.
+// The night's lights' strength: the cycle's darkness.
+float NightLightsAmount() { return g_cycle_dark.load(std::memory_order_relaxed); }
+// The night pass runs (its depths, the effects' layer, the lamps' camera): while the cycle is dark enough for them.
 bool NightPassOn() { return NightLightsAmount() > 0.01f; }
 bool NightLightsWanted();
 bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings& s);
-void BuildNightSky(NightFrame& f, float to_u, float to_v);
 Gtao g_gtao;           // ambient occlusion at the end of the main view's opaque draws (D132)
 bool g_gtao_on = false;
 bool g_gtao_done = false;  // the opaque effects ran in this frame's view
@@ -433,11 +447,6 @@ bool GrassOn() {
   return g_grass_ready;
 }
 TerrainFrame g_terrain;  // this frame's terrain draws, for it
-SkyCamera g_sky;         // D169: this frame's sky dome camera
-// D169: the level's night sky (NightSky), under the lamps' lock, and the render thread's copy.
-NightSkyStyle g_night_sky_style;
-uint64_t g_night_sky_version = 0, g_night_sky_render_version = ~0ull;
-NightSkyStyle g_night_sky_render;
 bool g_scene_antialiased = false;  // this frame's scene copy antialiased already (Profile::scene_resolve_once, D94)
 Upscaler g_upscaler;   // NVIDIA DLSS (Phase 5, D46)
 // Motion blur (motion_blur.h, 0.4.2): made at its first use; the view's camera vote kept for it (the ambient
@@ -472,6 +481,14 @@ bool g_lens_due = false;
 Sky::Inputs g_last_sky_in;
 bool g_last_sky_valid = false, g_sky_late = false;
 void ApplyLateSky();  // the fog ran in this frame's view: the rain on the lens may follow once
+void TrackSkyEye(float eye[3], bool fresh);
+// The view's camera for ListenerView (the weather's sounds): its eye, and its matrix's rows to the picture's x and to
+// its depth (`a` rows 0 and 2: the right and the forward in the world, scaled).
+void NoteListener(const float eye[3], const double a[3][3]) {
+  const float right[3] = {float(a[0][0]), float(a[0][1]), float(a[0][2])};
+  const float forward[3] = {float(a[2][0]), float(a[2][1]), float(a[2][2])};
+  NoteListenerView(eye, right, forward);
+}
 bool FogOn() { return g_fog_wanted && SkyLoaded(); }
 void ApplyFog();
 MotionBlur g_motion_blur;
@@ -617,7 +634,8 @@ WorldState World() {
       shown = true, shown_seconds = w.cloud_seconds, shown_evolve = w.cloud_evolve;
     } else {
       shown_seconds += dt * (1.0 + std::clamp((w.cloud_seconds - shown_seconds) * 0.5, -0.2, 0.2));
-      shown_evolve += dt * w.cloud_rate * (1.0 + std::clamp((w.cloud_evolve - shown_evolve) * 0.5, -0.2, 0.2));
+      shown_evolve += dt * w.cloud_rate * storm::RateFactor(w.weather) *  // (D213: the host's rate under the storm)
+                      (1.0 + std::clamp((w.cloud_evolve - shown_evolve) * 0.5, -0.2, 0.2));
     }
     w.cloud_seconds = shown_seconds, w.cloud_evolve = shown_evolve;
   } else {
@@ -638,7 +656,7 @@ WorldState World() {
       w.wind = float(REXCVAR_GET(native_x_renderer_wind));
       w.cloud_height = float(REXCVAR_GET(native_x_renderer_cloud_height));
     }
-    own_evolve += dt * w.cloud_rate;
+    own_evolve += dt * w.cloud_rate * storm::RateFactor(w.weather);  // D213
     if (w.day_night && w.day_minutes > 0.0) own_hours += dt / (w.day_minutes * 60.0) * 24.0;
     w.hour = (own ? REXCVAR_GET(native_x_renderer_time_of_day) : 16.0) + own_hours;
     w.cloud_seconds = std::chrono::duration<double>(now - start).count();
@@ -646,7 +664,76 @@ WorldState World() {
   }
   if (!w.day_night) w.hour = SkyGameHour();
   w.hour = std::fmod(std::fmod(w.hour, 24.0) + 24.0, 24.0);
+  // D211: the weather eased to what is set (the user, 19 Nov 2026: "The cloud weather change should happen smoothly,
+  // not immediate and jumpy like it currently does"): each of the weather, the cloud cover, the fogs, the wind and the
+  // cloud base moves toward its set value with a time constant of 8 s, the shares at most 4% a second (5% the wind,
+  // 25 m a second the base): a whole change of the weather takes about 25 s. Taken at once on the first look, when the
+  // world's source changes (joining, leaving) and after five seconds without a look.
+  {
+    static std::mutex ease_mutex;
+    static bool have = false, was_valid = false;
+    static WorldState shown;
+    static auto eased_at = now;
+    std::lock_guard lock(ease_mutex);
+    const double edt = std::chrono::duration<double>(now - eased_at).count();
+    eased_at = now;
+    if (!have || w.valid != was_valid || edt > 5.0) {
+      shown = w, have = true, was_valid = w.valid;
+    } else {
+      const float k = float(1.0 - std::exp(-std::max(edt, 0.0) / 8.0));
+      auto ease = [&](float& s, float target, float most) {
+        const float lim = most * float(edt);
+        s += std::clamp((target - s) * k, -lim, lim);
+      };
+      ease(shown.weather, w.weather, 0.04f);
+      ease(shown.cloud_cover, w.cloud_cover, 0.04f);
+      ease(shown.fog, w.fog, 0.04f);
+      ease(shown.ground_fog, w.ground_fog, 0.04f);
+      ease(shown.wind, w.wind, 0.05f);
+      ease(shown.cloud_height, w.cloud_height, 25.0f);
+    }
+    w.weather = shown.weather, w.cloud_cover = shown.cloud_cover, w.fog = shown.fog, w.ground_fog = shown.ground_fog;
+    w.wind = shown.wind, w.cloud_height = shown.cloud_height;
+  }
+  // D208: the match's weather is the hurricane's stage (storm.h); the weather here is the storm's where the camera is
+  // (the weather outside it while no camera is known yet). The lightning's strikes are told where they may fall.
+  w.storm = w.weather;
+  {
+    const storm::Storm s = storm::Of(w.storm, w.cloud_seconds, g_map_x.load(std::memory_order_relaxed),
+                                     g_map_z.load(std::memory_order_relaxed), g_map_reach.load(std::memory_order_relaxed));
+    float eye[3], right[3], forward[3];
+    double age = 1e9;
+    if (ListenerView(eye, right, forward, &age) && age < 5.0) {
+      w.weather = storm::WeatherAt(s, eye[0], eye[2]);
+      SetStrikeWorld(s, std::round(eye[0] / 4000.0f) * 4000.0f, std::round(eye[2] / 4000.0f) * 4000.0f);
+      static std::atomic<int64_t> said{0};
+      const int64_t now_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+      if (s.on && now_s - said.load(std::memory_order_relaxed) >= 10) {
+        said.store(now_s, std::memory_order_relaxed);
+        REXLOG_INFO("[native_x_renderer] storm (D208): the match's weather {:.0f}%, the hurricane's centre at {:.0f}, {:.0f} "
+                    "({:.0f} m from the camera; the level's middle {:.0f}, {:.0f}{}), its eye {:.0f} m, its rain shield {:.0f} m, "
+                    "strength {:.2f}; the weather here {:.0f}%",
+                    w.storm * 100.0f, s.cx, s.cz, std::hypot(eye[0] - s.cx, eye[2] - s.cz), g_map_x.load(), g_map_z.load(),
+                    g_map_known.load() ? "" : ", not known", s.eye, s.radius, s.gain, w.weather * 100.0f);
+      }
+    } else if (s.on) {
+      w.weather = s.outside;
+    }
+  }
   return w;
+}
+
+// D208: the sky's view of the hurricane: the weather outside it and its two vectors for the clouds (storm::kGlsl).
+void StormInputs(const WorldState& world, Sky::Inputs& in) {
+  const storm::Storm s = storm::Of(world.storm, world.cloud_seconds, g_map_x.load(std::memory_order_relaxed),
+                                   g_map_z.load(std::memory_order_relaxed), g_map_reach.load(std::memory_order_relaxed));
+  in.match_weather = world.storm;
+  in.weather_outside = s.outside;
+  in.storm_a[0] = s.cx, in.storm_a[1] = s.cz, in.storm_a[2] = s.eye, in.storm_a[3] = s.radius;
+  in.storm_b[0] = s.gain, in.storm_b[1] = s.spin, in.storm_b[2] = s.on ? 1.0f : 0.0f;
+  // D211: the volutus (the roll cloud along the storm's gust front) while the storm comes in, gone once it is over the
+  // level.
+  in.storm_b[3] = storm::Smooth(0.33f, 0.5f, world.storm) * (1.0f - storm::Smooth(0.85f, 0.97f, world.storm));
 }
 
 void ScopeProbe(const char* when, ITexture* texture) {
@@ -958,6 +1045,7 @@ enum class Binding { kUnknown, kDepthOnly, kWithColor };
 }  // namespace native_x_renderer::renderer
 namespace native_x_renderer {
 void DumpNextDraws(int count);  // draw.cpp
+bool ObjectMotionBlurPaused();  // native_x_renderer.cpp: SetObjectMotionBlurPaused within a quarter second
 }
 namespace native_x_renderer::renderer {
 namespace {
@@ -1258,6 +1346,7 @@ void ExecuteDraw(const Command& c) {
     // D164, before the stored pipelines are read (Initialize), which take it too.
     draw->SetParamGenTexelCentre(g_profile->param_gen_texel_centre &&
                                  REXCVAR_GET(native_x_renderer_param_gen_texel_centre));
+    draw->SetSoftShadowFetchConstant(g_profile->soft_shadow_fetch_constant);  // D197
     if (!kernel || !kernel->memory() ||
         !draw->Initialize(*g_device, *g_registers, *kernel->memory(), g_resolved, g_scale,
                           StoragePath(kernel->title_id()))) {
@@ -1292,6 +1381,7 @@ void ExecuteDraw(const Command& c) {
           TextureDesc d = w.original->GetTexture()->GetDesc();
           d.Name = "NativeXRenderer wet copy";
           d.Format = TEX_FORMAT_RGBA8_UNORM;
+          if (w.vehicle) d.Width *= 2, d.Height *= 2;  // D217: raindrop-sized drops on a vehicle's texture
           d.MipLevels = 0;  // all of them
           d.Usage = USAGE_DEFAULT;
           d.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
@@ -1315,7 +1405,7 @@ void ExecuteDraw(const Command& c) {
         RefCntAutoPtr<ITextureView> from;
         w.original->GetTexture()->CreateView(plain, &from);
         if (from && g_own_sky.WetCopy(g_device->context(), from, copy->GetTexture(), g_draw->wet_count(), g_draw->wet_show(),
-                                  g_draw->wet_tint() >= 0, g_draw->wet_seconds(), w.skin)) {
+                                  g_draw->wet_tint() >= 0, g_draw->wet_seconds(), w.skin, w.vehicle, w.relief_only)) {
           g_draw->SetWetCopy(w.original, copy);
         } else {
           static bool said_failed = false;
@@ -1390,14 +1480,24 @@ void ExecuteDraw(const Command& c) {
   // The objects' own motion: the upscalers', or the motion blur's (taken at once from its settings).
   g_draw->SetObjectMotion(g_object_motion || (MotionBlurTaps() > 0 && REXCVAR_GET(native_x_renderer_motion_blur_objects)));
   g_draw->SetCameraVote(g_camera_vote);
-  g_draw->SetSkipGameSky(SkyOn() && REXCVAR_GET(native_x_renderer_sky_debug) == 0);
+  // (D204: the sea's debug views, 7 and up, keep the frame as played.)
+  g_draw->SetSkipGameSky(SkyOn() && (REXCVAR_GET(native_x_renderer_sky_debug) == 0 || REXCVAR_GET(native_x_renderer_sky_debug) >= 7));
   {
     // The game's own daylight by the sky's hour (sky.h's SkyLightAt, DrawPath::SetOutdoorLight).
     DrawPath::OutdoorLight light;
     const WorldState world = World();
     const int sky_debug = REXCVAR_GET(native_x_renderer_sky_debug);
     SetSkyLightning(REXCVAR_GET(native_x_renderer_lightning));
+    SetCloudShadows(REXCVAR_GET(native_x_renderer_cloud_shadows));  // D214
+    SetStormSway(REXCVAR_GET(native_x_renderer_storm_sway));
+    SetSeaReflection(REXCVAR_GET(native_x_renderer_reflections) && SkyOn());
+    g_draw->SetOwnSeaReflection(SeaReflection());
+    if (float z[3], h[3]; SeaReflection() && g_own_sky.SeaSkyColours(z, h)) g_draw->SetSeaSky(z, h);
+    if (float sea; g_own_sky.SeaLevel(&sea)) g_draw->SetSeaLevel(sea);  // D205
+    // D191 (experimental, off: not yet seen working in a match): the window glass's own reflection.
+    g_draw->SetOwnGlassReflection(SeaReflection() && REXCVAR_GET(native_x_renderer_glass_reflections));
     g_fog_wanted = world.fog > 0.001f || world.ground_fog > 0.001f || world.weather > 0.45f || sky_debug == 4 || sky_debug == 5 ||
+                   SeaReflection() ||
                    sky_debug == 6 || REXCVAR_GET(native_x_renderer_rain_lens) || REXCVAR_GET(native_x_renderer_wetness) ||
                    REXCVAR_GET(native_x_renderer_sky);  // (the clouds over the view are laid with it)  // (the lens's water needs the sea's height)
     // D175: the night's lights come on as the cycle's sun sets (from 4 degrees up) and are full 6 degrees under.
@@ -1416,7 +1516,7 @@ void ExecuteDraw(const Command& c) {
       for (int i = 0; i < 3; ++i) light.key[i] = at.key[i], light.sky[i] = at.sky[i], light.ground[i] = at.ground[i];
       for (int i = 0; i < 3; ++i) light.painted[i] = at.painted[i];
       // The storm's lightning: for its moment the sky's light on everything, and the painted sky, flash blue-white.
-      if (const float flash = SkyFlashAt(world.cloud_seconds, world.weather).light; flash > 0.0f) {
+      if (const float flash = SkyFlashAt(world.cloud_seconds, world.storm).light; flash > 0.0f) {  // (D208: the match's)
         const float tint[3] = {0.72f, 0.8f, 1.0f};
         for (int i = 0; i < 3; ++i) {
           light.sky[i] += flash * 0.9f * tint[i];
@@ -1463,10 +1563,8 @@ void ExecuteDraw(const Command& c) {
   g_draw->SetProjectionVote((g_gtao_on || g_ssgi_on) && g_scene_view && !g_gtao_done);
   // The terrain's draws: the grass's, and the night's lights' camera (D163).
   g_draw->SetTerrainCapture(g_scene_view && !g_gtao_done && (GrassOn() || NightLightsWanted() || SkyOn() || FogOn()) ? &g_terrain : nullptr);
-  // D169: the sky dome's, for the night sky (it may come after the opaque effects).
-  g_draw->SetSkyCapture(g_scene_view && REXCVAR_GET(native_x_renderer_night) && REXCVAR_GET(native_x_renderer_night_sky) > 0.0
-                            ? &g_sky
-                            : nullptr);
+  // D217: the same models' bodies wet in the rain, by day or night.
+  g_draw->SetWetModels(g_scene_view && !g_night_model_counts.empty() ? &g_night_model_counts : nullptr);
   // D163: the models with lamps (a jeep's headlights), at night.
   g_draw->SetModelLamps(g_scene_view && !g_night_model_counts.empty() && NightPassOn() &&
                                 REXCVAR_GET(native_x_renderer_night_lamps) > 0.0
@@ -1476,6 +1574,51 @@ void ExecuteDraw(const Command& c) {
   std::array<DrawPath::Copy, 2> copies;
   for (uint32_t i = 0; i < c.copy_count; ++i) {
     copies[i] = {c.copies[i].address, c.data.data() + c.copies[i].offset, c.copies[i].size};
+  }
+  // D179: the effects' layer before the effects: the game draws its sky dome into the half size layer first
+  // (E059F66662ECF0A4; not drawn with a sky of the renderer's own, but its draws still come by here), then the
+  // effects. At the first other draw into that target, its texture is kept.
+  if (NightPassOn() && c.programs[1] && targets[0] && !targets[0]->depth && targets[0]->samples == 1 &&
+      targets[0]->texture && REXCVAR_GET(native_x_renderer_night_glow) > 0.0) {
+    const bool dome = g_draw->PixelShaderHash(*c.programs[1]) == 0xE059F66662ECF0A4ull;
+    if (dome && targets[0]->guest_width != g_profile->output_width) {
+      g_night_glow_dome_into = targets[0];
+    } else if (!dome && g_night_glow_dome_into == targets[0] &&
+               g_night_glow_before_frame != g_device->frames_presented()) {
+      using namespace Diligent;
+      const TextureDesc& have = targets[0]->texture->GetDesc();
+      if (!g_night_glow_before || g_night_glow_before->GetDesc().Width != have.Width ||
+          g_night_glow_before->GetDesc().Height != have.Height || g_night_glow_before->GetDesc().Format != have.Format) {
+        g_night_glow_before.Release();
+        TextureDesc d;
+        d.Name = "NativeXRenderer night effects' layer before them";
+        d.Type = RESOURCE_DIM_TEX_2D;
+        d.Width = have.Width, d.Height = have.Height;
+        d.Format = have.Format;
+        d.Usage = USAGE_DEFAULT;
+        d.BindFlags = BIND_SHADER_RESOURCE;
+        g_device->device()->CreateTexture(d, nullptr, &g_night_glow_before);
+      }
+      if (g_night_glow_before) {
+        MsaaRead(targets[0]);
+        g_device->context()->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+        CopyTextureAttribs copy{targets[0]->texture, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, g_night_glow_before,
+                                RESOURCE_STATE_TRANSITION_MODE_TRANSITION};
+        g_device->context()->CopyTexture(copy);
+        g_night_glow_before_frame = g_device->frames_presented();
+        g_night_glow_before_of = targets[0];
+        g_draw->TargetsChanged();
+      }
+    }
+  }
+  // D195: which pixel shaders draw the effects (into the effects' layer after its sky dome), named once each.
+  if (NightPassOn() && c.programs[1] && targets[0] && targets[0] == g_night_glow_dome_into) {
+    static std::mutex said_mutex;
+    static std::set<uint64_t> said;
+    const uint64_t h = g_draw->PixelShaderHash(*c.programs[1]);
+    std::lock_guard lock(said_mutex);
+    if (h != 0xE059F66662ECF0A4ull && said.size() < 64 && said.insert(h).second)
+      REXLOG_INFO("[native_x_renderer] night: an effect drawn by pixel shader {:016X}", h);
   }
   g_draw->TakePackedRead();
   g_draw->Draw(c.programs[0] ? *c.programs[0] : StateTracker::kNoProgram,
@@ -1491,8 +1634,6 @@ void ExecuteDraw(const Command& c) {
     HostTarget* t = targets[0];
     if (t->texture && t->view && t->samples == 1) {
       NightSettings night;
-      night.brightness = float(std::clamp(REXCVAR_GET(native_x_renderer_night_brightness), 0.1, 4.0));
-      night.haze_m = float(std::clamp(REXCVAR_GET(native_x_renderer_night_haze), 50.0, 20000.0));
       const bool depth = g_night_depth && g_night_depth_frame == g_device->frames_presented();
       // The depth's coordinates from the target's: its texture may be larger than the output (the EDRAM's pitch).
       const TextureDesc& desc = t->texture->GetDesc();
@@ -1502,15 +1643,15 @@ void ExecuteDraw(const Command& c) {
       // Each depth with its own share of its texture (with an upscaler the textures can differ from the target's).
       const float to_u = view_w > 0 ? float(desc.Width) / view_w : 1.0f;
       const float to_v = view_h > 0 ? float(desc.Height) / view_h : 1.0f;
-      // D175: with the old night look (D162) the moonlit grade, its haze and sky (D169); at the cycle's night the scene
-      // as the cycle drew it, with the lights only, as strong as the hour is dark.
-      const bool old_night = REXCVAR_GET(native_x_renderer_night);
+      // D175: the scene as the cycle drew it, with the lights only, as strong as the hour is dark.
       const float amount = NightLightsAmount();
-      night.grade = old_night ? 1.0f : 0.0f;
       night.glow = float(std::clamp(REXCVAR_GET(native_x_renderer_night_glow), 0.0, 8.0)) * amount;
       night.lamps = float(std::clamp(REXCVAR_GET(native_x_renderer_night_lamps), 0.0, 8.0)) * amount;
       night.debug = REXCVAR_GET(native_x_renderer_night_debug);
-      night.sky = old_night ? float(std::clamp(REXCVAR_GET(native_x_renderer_night_sky), 0.0, 4.0)) : 0.0f;
+      night.bloom = REXCVAR_GET(native_x_renderer_lamp_bloom) ? 1.0f : 0.0f;
+      night.flare = REXCVAR_GET(native_x_renderer_lens_flare) ? 1.0f : 0.0f;
+      // D177: the cycle's midnight draws the scene about a twelfth as bright as the game's day.
+      night.scene_gain = 1.0f + 11.0f * g_cycle_dark.load(std::memory_order_relaxed);
       NightFrame f;
       f.depth = depth ? g_night_depth.RawPtr() : nullptr;
       f.depth_uv[0] = to_u * g_night_depth_uv[0], f.depth_uv[1] = to_v * g_night_depth_uv[1];
@@ -1521,8 +1662,7 @@ void ExecuteDraw(const Command& c) {
         f.glow = g_night_glow->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
         f.glow_uv[0] = to_u, f.glow_uv[1] = to_v;
       }
-      // D169: the sky's directions; D163: the camera and the lamps it shows.
-      BuildNightSky(f, to_u, to_v);
+      // D163: the camera and the lamps it shows.
       if (BuildNightCamera(f, to_u, to_v, night)) {
         f.lights = g_night_frame_lights.data(), f.light_count = uint32_t(g_night_frame_lights.size());
         f.sprites = g_night_frame_sprites.data(), f.sprite_count = uint32_t(g_night_frame_sprites.size());
@@ -1841,33 +1981,6 @@ bool NightToNdc(float out[4], float to_u, float to_v, float view_w, float view_h
   out[3] = (vp.TopLeftY * 2.0f / vp.Height + 1.0f - ndc_offset[1]) / ndc_scale[1];
   return true;
 }
-// D169: the night sky's directions this frame, from the sky dome's camera (any way the view looks), and the level's
-// sky style.
-void BuildNightSky(NightFrame& f, float to_u, float to_v) {
-  {
-    std::lock_guard lock(g_night_lamps_mutex);
-    if (g_night_sky_render_version != g_night_sky_version) {
-      g_night_sky_render = g_night_sky_style;
-      g_night_sky_render_version = g_night_sky_version;
-    }
-  }
-  f.sky_style = &g_night_sky_render;
-  if (!g_sky.valid) return;
-  // The moon where the game's sun is (its shadows and the sea's glint agree), unless the level's style says otherwise.
-  static bool sun_kept = false;
-  static float sun[3] = {};
-  if (g_sky.sun_valid) sun_kept = true, std::memcpy(sun, g_sky.sun, sizeof(sun));
-  if (sun_kept && g_night_sky_render.moon_at_sun) f.sun_valid = true, std::memcpy(f.sun, sun, sizeof(f.sun));
-  double inv[3][3];
-  if (!InverseXYW(g_sky.m, inv)) return;
-  const float view_w = g_scene_depth ? float(g_scene_depth->scale.HostWidth(g_profile->output_width)) : g_sky.viewport.Width;
-  const float view_h = g_scene_depth ? float(g_scene_depth->scale.HostHeight(g_profile->output_height)) : g_sky.viewport.Height;
-  if (!NightToNdc(f.sky_to_ndc, to_u, to_v, view_w, view_h, g_sky.viewport, g_sky.ndc_scale, g_sky.ndc_offset)) return;
-  for (int r = 0; r < 3; ++r)
-    for (int c = 0; c < 3; ++c) f.sky_inverse[r][c] = float(inv[r][c]);
-  f.sky_camera = true;
-}
-
 // D163: this frame's camera for the night pass (`to_u`, `to_v`: the night target's texture coordinates to the view's
 // 0 to 1), and the lamps it lights and shows: the nearest whose light reaches into the view, and the nearest bulbs in
 // it. False without this frame's camera.
@@ -1890,11 +2003,6 @@ bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings
   if (!NightToNdc(f.to_ndc, to_u, to_v, cam.view_width, cam.view_height, cam.viewport, cam.ndc_scale, cam.ndc_offset))
     return false;
   f.camera = true;
-  if (!f.sky_camera) {  // D169: no sky dome drawn this frame: the terrain's directions
-    std::memcpy(f.sky_to_ndc, f.to_ndc, sizeof(f.sky_to_ndc));
-    std::memcpy(f.sky_inverse, f.inverse, sizeof(f.sky_inverse));
-    f.sky_camera = true;
-  }
   // The lamps: their light where its sphere meets the view (clip -w <= x, y <= w, w >= 0), nearest first; their bulbs
   // where they are in the view, nearest first.
   g_night_frame_lights.clear();
@@ -1934,6 +2042,60 @@ bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings
              std::abs(o[7] - mm[7]) < 0.05 && std::abs(o[11] - mm[11]) < 0.05;
     }
     if (seen) continue;
+    // D178: a vehicle's lamps are on only while someone is in it (the user, 16 Nov 2026). The player's own: the game
+    // says when the player sits in a vehicle (NightVehicleSeated), and it is the model nearest the camera then (within
+    // 14 m: the third person camera stands behind it). Any other: one that drives (over 0.5 m/s, its lamps kept on 6 s
+    // after it stops); an empty one never moves by itself.
+    {
+      struct Track {
+        double p[3];
+        double seen_at, moved_at;
+      };
+      static std::vector<Track> tracks;
+      static const auto t0 = std::chrono::steady_clock::now();
+      const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      static uint64_t swept = ~0ull;
+      if (swept != g_device->frames_presented()) {
+        swept = g_device->frames_presented();
+        std::erase_if(tracks, [now](const Track& k) { return now - k.seen_at > 3.0; });
+      }
+      Track* track = nullptr;
+      double best = 9.0;  // the same vehicle as last frame: within 3 m of where one was
+      for (Track& k : tracks) {
+        const double q = (k.p[0] - T[0]) * (k.p[0] - T[0]) + (k.p[1] - T[1]) * (k.p[1] - T[1]) + (k.p[2] - T[2]) * (k.p[2] - T[2]);
+        if (q < best && k.seen_at < now) best = q, track = &k;
+      }
+      if (!track) {
+        tracks.push_back({{T[0], T[1], T[2]}, now, -1e9});
+        track = &tracks.back();
+      } else {
+        const double dt = now - track->seen_at;
+        if (dt > 1e-4 && dt < 0.5 && std::sqrt(best) / dt > 0.5) track->moved_at = now;
+        track->p[0] = T[0], track->p[1] = T[1], track->p[2] = T[2], track->seen_at = now;
+      }
+      // NXR_VEHICLE_LAMPS_ON=1 (tests): every vehicle's lamps on, empty or not, to see them from outside (the
+      // developer camera moves only the soldier's view, not a vehicle's).
+      static const bool all_on = [] {
+        const char* v = std::getenv("NXR_VEHICLE_LAMPS_ON");
+        return v && *v == '1';
+      }();
+      bool on = all_on || now - track->moved_at < 6.0;
+      if (!on && g_night_vehicle_seated.load(std::memory_order_relaxed)) {
+        // The nearest model with lamps to the camera, within 14 m: the player's own.
+        auto far2 = [&](const Mat4d& o) {
+          const double x = o[3] - f.eye[0], y = o[7] - f.eye[1], z = o[11] - f.eye[2];
+          return x * x + y * y + z * z;
+        };
+        const double mine = far2(mm);
+        on = mine < 14.0 * 14.0;
+        for (size_t e = 0; e < g_night_model_draws.size() && on; ++e) {
+          bool known = false;
+          for (const NightModelLamps& k : g_night_models_render) known = known || k.index_count == g_night_model_draws[e].index_count;
+          if (known && far2(g_night_model_draws[e].m) < mine - 0.01) on = false;
+        }
+      }
+      if (!on) continue;
+    }
     ++placed_models;
     {
       static uint64_t logged_at = 0;
@@ -1992,21 +2154,25 @@ bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings
     const NightLamp& l = lamps[i];
     const float dx = l.position[0] - f.eye[0], dy = l.position[1] - f.eye[1], dz = l.position[2] - f.eye[2];
     const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-    bool in_view = distance < l.range + 250.0f;
+    // D195 (the user, 18 Nov 2026: the light "projected by vehicle headlights and lamps/light sources" seen "from
+    // across the entire map"): every lamp whose light reaches into the view, however far (was its range + 250 m).
+    bool in_view = true;
     for (int p = 0; p < 5 && in_view; ++p) {
       const float n = std::sqrt(planes[p][0] * planes[p][0] + planes[p][1] * planes[p][1] + planes[p][2] * planes[p][2]);
       const float side = planes[p][0] * l.position[0] + planes[p][1] * l.position[1] + planes[p][2] * l.position[2] + planes[p][3];
       if (n > 0.0f && side < -l.range * n) in_view = false;
     }
     if (in_view) lit.push_back({distance, i});
-    if (l.glow > 0.0f && distance < 400.0f) shown.push_back({distance, i});
+    // D195 (the user, 18 Nov 2026: "The lamp lights should also be able to be seen from across the entire map"): every
+    // bulb, however far (was 400 m); the nearest in view are taken below.
+    if (l.glow > 0.0f) shown.push_back({distance, i});
   }
   auto nearest = [](std::vector<Near>& v, size_t keep) {
     std::sort(v.begin(), v.end(), [](const Near& x, const Near& y) { return x.distance < y.distance; });
     if (v.size() > keep) v.resize(keep);
   };
   nearest(lit, Night::kMaxLights);
-  nearest(shown, Night::kMaxSprites * 2);
+  nearest(shown, shown.size());  // (all of them, nearest first: those out of view are passed over below)
   {
     static uint64_t logged_at = 0;
     const uint64_t frame = g_device->frames_presented();
@@ -2049,15 +2215,39 @@ bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings
     NightSprite o;
     o.uv[0] = (nx - f.to_ndc[2]) / f.to_ndc[0];
     o.uv[1] = (ny - f.to_ndc[3]) / f.to_ndc[1];
-    // A halo eight times the bulb's radius, and never under four pixels of the target across.
-    const float halo = l.glow * 8.0f;
+    // A halo six times the bulb's radius, and never under four pixels of the target across.
+    const float halo = l.glow * 6.0f;
     const float min_uv = 4.0f / std::max(1.0f, cam.view_width / std::max(to_u, 1e-3f));
     o.radius[0] = std::max(std::abs(halo * row_x / cw / f.to_ndc[0]), min_uv);
     o.radius[1] = std::max(std::abs(halo * row_y / cw / f.to_ndc[1]), min_uv * std::abs(f.to_ndc[0] / f.to_ndc[1]));
     o.depth = 0.1f / cw;
-    const float through = std::exp(-n.distance / std::max(s.haze_m, 1.0f));  // the haze between
-    for (int c = 0; c < 3; ++c) o.color[c] = l.color[c] * 0.35f * through;
+    // The air between: a bulb 2 km away keeps about a third (D195; was 700 m, which left the far side of a map dark).
+    const float through = std::exp(-n.distance / 1800.0f);
+    // D177: a hooded lamp or a headlight shows its bulb to those it shines toward: from the side less, from behind
+    // only its spill.
+    float seen = 1.0f;
+    if (l.direction[0] * l.direction[0] + l.direction[1] * l.direction[1] + l.direction[2] * l.direction[2] > 0.25f) {
+      const float d = std::max(n.distance, 1e-3f);
+      const float toward = (l.direction[0] * (f.eye[0] - p[0]) + l.direction[1] * (f.eye[1] - p[1]) +
+                            l.direction[2] * (f.eye[2] - p[2])) / d;
+      const float t = std::clamp((toward + 0.25f) / 0.75f, 0.0f, 1.0f);
+      seen = 0.08f + 0.92f * t * t * (3.0f - 2.0f * t);
+    }
+    for (int c = 0; c < 3; ++c) o.color[c] = l.color[c] * 0.35f * through * seen;
+    // D183: the bulb in the world, for its glass to glow; the lens flare's strength from how bright it shows and how
+    // near it is (a lamp across the map flares little).
+    std::memcpy(o.world, p, sizeof(o.world));
+    o.bulb = std::clamp(l.glow, 0.04f, 1.0f);
+    const float lum = 0.2126f * o.color[0] + 0.7152f * o.color[1] + 0.0722f * o.color[2];
+    const float closeness = n.distance / 35.0f;
+    o.flare = std::clamp(lum * 0.25f / (1.0f + closeness * closeness), 0.0f, 1.0f);
     g_night_frame_sprites.push_back(o);
+  }
+  // D183: the four strongest flares first (the shader flares only the first four); the rest flare none.
+  {
+    std::vector<NightSprite>& v = g_night_frame_sprites;
+    std::stable_sort(v.begin(), v.end(), [](const NightSprite& a, const NightSprite& b) { return a.flare > b.flare; });
+    for (size_t i = 4; i < v.size(); ++i) v[i].flare = 0.0f;
   }
   return true;
 }
@@ -2083,8 +2273,41 @@ void CopyNightGlow(HostTarget* source, const Blitter::Rect& from) {
     if (!g_night_glow) return;
   }
   const Blitter::Rect to{0, 0, from.width, from.height};
-  g_blit.Copy(g_device->context(), source->srv, Blitter::Source::kColor, from,
-              g_night_glow->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), to, Blitter::Options{});
+  // D179: the layer began with something in it (the game's sky dome drawn into it, or with a sky of the renderer's own
+  // whatever it held before): only what the effects added is their light. Without it the whole layer was added to
+  // the picture whenever an effect was drawn: the sky flashed with every shot (the user, 16 Nov 2026).
+  bool alone = false;
+  if (g_night_glow_before && g_night_glow_before_frame == g_device->frames_presented() &&
+      g_night_glow_before_of == source) {
+    auto make = [&](RefCntAutoPtr<ITexture>& t, const char* name) {
+      if (t && t->GetDesc().Width == from.width && t->GetDesc().Height == from.height) return;
+      t.Release();
+      TextureDesc d;
+      d.Name = name;
+      d.Type = RESOURCE_DIM_TEX_2D;
+      d.Width = from.width, d.Height = from.height;
+      d.Format = TEX_FORMAT_RGBA16_FLOAT;
+      d.Usage = USAGE_DEFAULT;
+      d.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+      g_device->device()->CreateTexture(d, nullptr, &t);
+    };
+    make(g_night_glow_a, "NativeXRenderer night effects with their ground");
+    make(g_night_glow_b, "NativeXRenderer night effects' ground");
+    if (g_night_glow_a && g_night_glow_b) {
+      g_blit.Copy(g_device->context(), source->srv, Blitter::Source::kColor, from,
+                  g_night_glow_a->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), to, Blitter::Options{});
+      g_blit.Copy(g_device->context(), g_night_glow_before->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE),
+                  Blitter::Source::kColor, from, g_night_glow_b->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), to,
+                  Blitter::Options{});
+      alone = g_night.Subtract(g_device->device(), g_device->context(),
+                               g_night_glow_a->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE),
+                               g_night_glow_b->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE),
+                               g_night_glow->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET));
+    }
+  }
+  if (!alone)
+    g_blit.Copy(g_device->context(), source->srv, Blitter::Source::kColor, from,
+                g_night_glow->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), to, Blitter::Options{});
   g_device->context()->GenerateMips(g_night_glow->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
   g_night_glow_frame = g_device->frames_presented();
   ++g_night_glow_frames;
@@ -2132,8 +2355,13 @@ void ApplyOpaqueEffects() {
       const char* v = std::getenv("NXR_SKY_DRAWS");
       return v && *v ? std::atoi(v) : 0;
     }();
+    static const int count = [] {  // NXR_SKY_DRAWS=<frame>:<count>: that many instead of 60
+      const char* v = std::getenv("NXR_SKY_DRAWS");
+      const char* c = v ? std::strchr(v, ':') : nullptr;
+      return c ? std::max(1, std::atoi(c + 1)) : 60;
+    }();
     static int frames = 0;
-    if (at > 0 && ++frames == at) DumpNextDraws(60);
+    if (at > 0 && ++frames == at) DumpNextDraws(count);
   }
   if ((SkyOn() || FogOn()) && g_terrain.valid && g_scene_depth->srv) {
     RendererTime time(&g_phase.effects);
@@ -2162,6 +2390,8 @@ void ApplyOpaqueEffects() {
         in.eye[r] = float(-(inv[r][0] * t[0] + inv[r][1] * t[1] + inv[r][2] * t[2]));
         for (int c = 0; c < 3; ++c) in.forward[r][c] = float(a[r][c]);
       }
+      TrackSkyEye(in.eye, true);
+      NoteListener(in.eye, a);
       in.width = g_scene_color->scale.HostWidth(g_profile->output_width);
       in.height = g_scene_color->scale.HostHeight(g_profile->output_height);
       in.to_ndc[0] = float(in.width) * 2.0f / (vp.Width * g_terrain.ndc_scale[0]);
@@ -2172,6 +2402,7 @@ void ApplyOpaqueEffects() {
       in.seconds = world.cloud_seconds;
       in.evolve = world.cloud_evolve;
       in.weather = world.weather;
+      StormInputs(world, in);  // D208
       in.fog = world.fog;
       in.ground_fog = world.ground_fog;
       in.wind = world.wind;
@@ -2299,6 +2530,30 @@ void ApplyOpaqueEffects() {
 }
 
 // The renderer's sky in a view without terrain (g_sky_late), then its fog.
+// The eye's place for the sky, followed from frame to frame: `fresh`, it is kept with its speed; else it is set to
+// where that speed has carried it since (for twenty seconds at the most).
+void TrackSkyEye(float eye[3], bool fresh) {
+  static float last[3] = {}, speed[3] = {};
+  static std::chrono::steady_clock::time_point at{};
+  static bool known = false;
+  const auto now = std::chrono::steady_clock::now();
+  const float dt = known ? std::chrono::duration<float>(now - at).count() : 0.0f;
+  if (fresh) {
+    if (known && dt > 1e-4f && dt < 0.5f) {
+      for (int i = 0; i < 3; ++i) {
+        const float v = (eye[i] - last[i]) / dt;
+        speed[i] = std::abs(v) < 400.0f ? speed[i] + (v - speed[i]) * std::min(1.0f, dt * 8.0f) : 0.0f;  // (a jump: a respawn)
+      }
+    } else {
+      speed[0] = speed[1] = speed[2] = 0.0f;
+    }
+    for (int i = 0; i < 3; ++i) last[i] = eye[i];
+    at = now, known = true;
+  } else if (known && dt < 20.0f) {
+    for (int i = 0; i < 3; ++i) eye[i] = last[i] + speed[i] * dt;
+  }
+}
+
 void ApplyLateSky() {
   if (!g_sky_late) return;
   g_sky_late = g_fog_dome = false;
@@ -2311,7 +2566,28 @@ void ApplyLateSky() {
   const double det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
                      a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
   if (std::abs(det) < 1e-12) return;
-  Sky::Inputs in = g_last_sky_in;  // the eye's place and the view's size as they last were
+  Sky::Inputs in = g_last_sky_in;  // the view's size as it last was
+  // The eye's place now, from the game's lit draws (a plane climbing with its nose up shows no terrain for as long
+  // as it climbs: with the eye kept where the terrain last gave it, the clouds never came nearer, and jumped down
+  // when the nose came down again; the user, 16 Nov 2026).
+  {
+    float eye[3];
+    if (g_draw->WorldCamera(eye)) {
+      static bool said_eye = false;
+      if (!said_eye) {
+        said_eye = true;
+        REXLOG_INFO("[native_x_renderer] sky: a view without terrain: the eye at {:.1f} {:.1f} {:.1f} from the game's lit draws "
+                    "(the terrain's last gave {:.1f} {:.1f} {:.1f})", eye[0], eye[1], eye[2], in.eye[0], in.eye[1], in.eye[2]);
+      }
+    }
+    // Fresh when a lit draw of the world's gave it within the last two frames; else (a cockpit's view of nothing but
+    // sky) the eye goes on from where it last was at the speed it last had.
+    uint64_t at = 0;
+    const bool fresh = g_draw->WorldCamera(eye, &at) && at + 2 >= g_device->frames_presented();
+    if (fresh)
+      for (int i = 0; i < 3; ++i) in.eye[i] = eye[i];
+    TrackSkyEye(in.eye, fresh);
+  }
   const double inv[3][3] = {
       {(a[1][1] * a[2][2] - a[1][2] * a[2][1]) / det, (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / det,
        (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / det},
@@ -2321,10 +2597,12 @@ void ApplyLateSky() {
        (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / det}};
   for (int row = 0; row < 3; ++row)
     for (int col = 0; col < 3; ++col) in.inverse[row][col] = float(inv[row][col]), in.forward[row][col] = float(a[row][col]);
+  NoteListener(in.eye, a);
   const WorldState world = World();
   in.seconds = world.cloud_seconds;
   in.evolve = world.cloud_evolve;
   in.weather = world.weather;
+  StormInputs(world, in);  // D208
   in.fog = world.fog;
   in.ground_fog = world.ground_fog;
   in.wind = world.wind;
@@ -2369,8 +2647,54 @@ void ApplyFog() {
   const DrawPath::ShadowMap& shadows = g_draw->shadow_map();
   g_fog_in.cover = shadows.view && shadows.frame == g_device->frames_presented() ? shadows.view.RawPtr() : nullptr;
   std::memcpy(g_fog_in.cover_m, shadows.cascades, sizeof(g_fog_in.cover_m));
+  // D190: the picture after the sea, if the sea was the last drawn (before the clouds go over it).
+  if (g_draw->sea_after_due()) g_draw->TakeSeaAfter();
   // The clouds over what the view holds (planes in them, the ground under them), then the fog over all.
   const bool over = SkyOn() && g_own_sky.CloudsOver(g_device->context(), g_fog_in);
+  // D190: where the sea is drawn, from its draws drawn again (flat ground at its height is not it).
+  g_own_sky.sea_mask = nullptr;
+  g_own_sky.sea_after = nullptr;
+  g_own_sky.sea_floor = nullptr;
+  if (SeaReflection() && g_draw->sea_draw_count() > 0) {
+    const TextureDesc& cd = g_scene_color->texture->GetDesc();
+    if (!g_sea_mask || g_sea_mask->GetDesc().Width != cd.Width || g_sea_mask->GetDesc().Height != cd.Height) {
+      g_sea_mask.Release();
+      TextureDesc m;
+      m.Name = "NativeXRenderer sea mask";
+      m.Type = RESOURCE_DIM_TEX_2D;
+      m.Width = cd.Width, m.Height = cd.Height;
+      m.Format = TEX_FORMAT_R32_FLOAT;
+      m.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+      g_device->device()->CreateTexture(m, nullptr, &g_sea_mask);
+    }
+    if (g_sea_mask) {
+      ITextureView* rtv = g_sea_mask->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET);
+      const float zero[4] = {};
+      g_device->context()->SetRenderTargets(1, &rtv, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      g_device->context()->ClearRenderTarget(rtv, zero, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      if (g_scene_depth->view && g_draw->DrawGlassMask(rtv, true, g_scene_depth->view) > 0) {
+        g_own_sky.sea_mask = g_sea_mask->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+        g_own_sky.sea_mask_uv[0] = float(g_fog_in.width) / float(cd.Width);
+        g_own_sky.sea_mask_uv[1] = float(g_fog_in.height) / float(cd.Height);
+        // (Pixel for pixel with the fog's own picture, or not used.)
+        ITexture* after = g_draw->sea_after();
+        if (after && after->GetDesc().Width == cd.Width && after->GetDesc().Height == cd.Height)
+          g_own_sky.sea_after = after->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+        if (g_night_world && g_night_world_frame == g_device->frames_presented() &&
+            g_night_world->GetDesc().Width == cd.Width && g_night_world->GetDesc().Height == cd.Height)
+          g_own_sky.sea_floor = g_night_world->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+        static bool said_after = false;
+        if (!said_after) {
+          said_after = true;
+          REXLOG_INFO("[native_x_renderer] sea reflection: the picture after the sea {} ({}, the scene's {}x{}); the "
+                      "world's depth without it {}", g_own_sky.sea_after ? "used" : "not used", after ? "taken" : "not taken",
+                      cd.Width, cd.Height, g_own_sky.sea_floor ? "used" : "not used");
+        }
+      }
+      g_draw->TargetsChanged();
+      g_device->context();  // (what was recorded is done before the fog reads it)
+    }
+  }
   const bool drawn = g_own_sky.Fog(g_device->context(), g_fog_in);
   if (drawn || over) g_draw->TargetsChanged();
   static bool said = false;
@@ -2391,13 +2715,65 @@ void ExecuteResolve(const Command& c) {
     if (g_sky_late) ApplyLateSky();
     if (g_fog_ready) ApplyFog();
     // Rain on the lens, over the finished view (once a frame: the fog's pass of this frame keeps how wet it is).
-    if (g_lens_due && g_scene_color && g_scene_color->texture && g_draw && g_own_sky.lens_wet() >= 0.01f &&
-        REXCVAR_GET(native_x_renderer_rain_lens)) {
+    const bool drops = REXCVAR_GET(native_x_renderer_rain_lens);
+    // D191: the window glass's mask, drawn from this frame's kept glass draws, for its reflection with the lens.
+    Sky::GlassInputs glass;
+    bool glassy = false;
+    if (g_lens_due && g_scene_color && g_scene_color->texture && g_draw && g_scene_depth && g_scene_depth->srv &&
+        SeaReflection() && REXCVAR_GET(native_x_renderer_glass_reflections) && g_draw->glass_draw_count() > 0 && g_night_world &&
+        g_night_world_frame == g_device->frames_presented()) {
+      const TextureDesc& cd = g_scene_color->texture->GetDesc();
+      if (!g_glass_mask || g_glass_mask->GetDesc().Width != cd.Width || g_glass_mask->GetDesc().Height != cd.Height) {
+        g_glass_mask.Release();
+        TextureDesc m;
+        m.Name = "NativeXRenderer glass mask";
+        m.Type = RESOURCE_DIM_TEX_2D;
+        m.Width = cd.Width, m.Height = cd.Height;
+        m.Format = TEX_FORMAT_R32_FLOAT;
+        m.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+        g_device->device()->CreateTexture(m, nullptr, &g_glass_mask);
+      }
+      if (g_glass_mask) {
+        ITextureView* rtv = g_glass_mask->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET);
+        const float zero[4] = {};
+        g_device->context()->SetRenderTargets(1, &rtv, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        g_device->context()->ClearRenderTarget(rtv, zero, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        if (g_draw->DrawGlassMask(rtv) > 0) {
+          const float view_w = float(g_scene_color->scale.HostWidth(g_profile->output_width));
+          const float view_h = float(g_scene_color->scale.HostHeight(g_profile->output_height));
+          const TextureDesc& dd = g_scene_depth->texture->GetDesc();
+          glass.mask = g_glass_mask->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+          glass.world_depth = g_night_world->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+          glass.view_depth = g_scene_depth->srv;
+          glass.world_uv[0] = view_w / float(g_night_world->GetDesc().Width);
+          glass.world_uv[1] = view_h / float(g_night_world->GetDesc().Height);
+          glass.view_uv[0] = view_w / float(dd.Width), glass.view_uv[1] = view_h / float(dd.Height);
+          glassy = true;
+        }
+        g_draw->TargetsChanged();
+      }
+    }
+    // D195: in a vehicle, the depths for the drops to keep to its glass.
+    if (!glassy && g_night_vehicle_seated.load(std::memory_order_relaxed) && g_scene_color && g_scene_depth &&
+        g_scene_depth->srv && g_night_world && g_night_world_frame == g_device->frames_presented()) {
+      const float view_w = float(g_scene_color->scale.HostWidth(g_profile->output_width));
+      const float view_h = float(g_scene_color->scale.HostHeight(g_profile->output_height));
+      const TextureDesc& dd = g_scene_depth->texture->GetDesc();
+      glass.world_depth = g_night_world->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+      glass.view_depth = g_scene_depth->srv;
+      glass.world_uv[0] = view_w / float(g_night_world->GetDesc().Width);
+      glass.world_uv[1] = view_h / float(g_night_world->GetDesc().Height);
+      glass.view_uv[0] = view_w / float(dd.Width), glass.view_uv[1] = view_h / float(dd.Height);
+    }
+    glass.cockpit = g_night_vehicle_seated.load(std::memory_order_relaxed);
+    if (g_lens_due && g_scene_color && g_scene_color->texture && g_draw &&
+        ((drops && g_own_sky.lens_wet() >= 0.01f) || g_own_sky.sway() >= 0.005f || glassy)) {
       g_lens_due = false;
       RendererTime time(&g_phase.effects);
       MsaaWrite(g_scene_color);
       if (g_own_sky.Lens(g_device->context(), g_scene_color->texture, g_scene_color->scale.HostWidth(g_profile->output_width),
-                     g_scene_color->scale.HostHeight(g_profile->output_height))) {
+                     g_scene_color->scale.HostHeight(g_profile->output_height), drops,
+                     glassy || glass.world_depth ? &glass : nullptr)) {
         g_draw->TargetsChanged();
       }
     }
@@ -2432,7 +2808,7 @@ void ExecuteResolve(const Command& c) {
   // D162: the world's depth for the night's haze, at the same depth copy (once a frame): the first person weapon's
   // draws clear the depth after it, so on foot the view's depth at its end held only the weapon and the night took
   // everything else for the far sky (run nightzip1). Copied into a float texture's red channel.
-  if (NightPassOn() && c.caller == g_profile->ao_resolve_caller && surface.depth && source &&
+  if ((NightPassOn() || SeaReflection()) && c.caller == g_profile->ao_resolve_caller && surface.depth && source &&
       source->srv && source->texture && surface.width == g_profile->output_width &&
       surface.height == g_profile->output_height && g_night_world_frame != g_device->frames_presented()) {
     const TextureDesc& d = source->texture->GetDesc();
@@ -2956,7 +3332,8 @@ void UpscaleScene() {
                       g_blur_voted ? "taken" : "none", in.z_min, in.z_max, g_draw->jittered_z_min(), g_draw->jittered_z_max(), seconds * 1000.0f);
         }
       }
-      if (REXCVAR_GET(native_x_renderer_motion_blur_objects))
+      // Not while the game says so (SetObjectMotionBlurPaused: a vehicle's outside view turned round it by free look).
+      if (REXCVAR_GET(native_x_renderer_motion_blur_objects) && !ObjectMotionBlurPaused())
         in.object_motion = [](ITextureView* motion) {
           if (g_draw) g_draw->DrawObjectMotion(motion, g_scene_depth->view);
         };
@@ -2986,7 +3363,7 @@ void UpscaleScene() {
       in.depth_width = g_scene_depth->scale.HostWidth(g_profile->output_width);
       in.depth_height = g_scene_depth->scale.HostHeight(g_profile->output_height);
       in.blend = ads;
-      in.taps = quality == "low" ? 12 : quality == "high" ? 40 : 24;
+      in.taps = quality == "low" ? 24 : quality == "high" ? 80 : 48;
       if (g_dof.Apply(g_device->context(), in)) g_draw->TargetsChanged();
     }
   }
@@ -3424,9 +3801,9 @@ void ExecutePresent(const Command& c) {
   g_gtao_done = false;
   g_fog_ready = g_fog_dome = g_lens_due = g_sky_late = false;
   g_terrain.Reset();
-  g_sky.valid = false;
   g_scene_antialiased = false;
   g_night_pending = false;  // a frame whose composite never came
+  g_night_glow_dome_into = nullptr;
   g_scope_pending = false;
   g_scope_research_present = g_scope_research_frame;  // PresentFrontBuffer logs what it shows
   g_scope_draw_probes = 0;
@@ -4441,6 +4818,13 @@ bool NisSupport(bool* runs, std::string* gpu) {
   return true;
 }
 
+void NightVehicleSeated(bool seated) { g_night_vehicle_seated.store(seated, std::memory_order_relaxed); }
+void SetMapArea(float x, float z, float reach) {
+  g_map_x.store(x, std::memory_order_relaxed), g_map_z.store(z, std::memory_order_relaxed);
+  if (reach > 0.0f) g_map_reach.store(reach, std::memory_order_relaxed);
+  g_map_known.store(true, std::memory_order_relaxed);
+}
+void SetPlayerGroups(const float* xz, uint32_t count) { SetStrikeGroups(xz, count); }
 void NightModels(const NightModelLamps* models, uint32_t count) {
   std::lock_guard lock(g_night_lamps_mutex);
   if (models && count) g_night_models.assign(models, models + count);
@@ -4454,13 +4838,6 @@ void SetWorldState(const WorldState& state) {
   g_world_set = state, g_world_set_at = std::chrono::steady_clock::now();
 }
 WorldState CurrentWorldState() { return World(); }
-void NightSky(const NightSkyStyle& style) {
-  std::lock_guard lock(g_night_lamps_mutex);
-  g_night_sky_style = style;
-  ++g_night_sky_version;
-  REXLOG_INFO("[native_x_renderer] night: the sky's style set (stars {:.2f}, Milky Way {:.2f}, moon {:.4f}; D169)",
-              style.stars, style.milky_way, style.moon_radius);
-}
 
 void NightLamps(const NightLamp* lamps, uint32_t count) {
   std::lock_guard lock(g_night_lamps_mutex);

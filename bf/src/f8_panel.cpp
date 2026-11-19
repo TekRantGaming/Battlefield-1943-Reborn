@@ -90,7 +90,7 @@ const std::vector<Row>& Rows() {
       {"SHADOWS AND EFFECTS", "Camera shake", "bf_camera_shake", {{"Off", "false"}, {"On", "true"}}},
       {"PICTURE", "Brightness", "bf_brightness", {}, false, -50, 50, 5, "%+.0f"},
       {"PICTURE", "Gamma", "bf_gamma", {}, false, 0.5f, 1.5f, 0.05f, "%.2f"},
-      {"PICTURE", "Field of view", "bf_fov", {}, false, 60, 120, 2, "%.0f\xC2\xB0"},
+      {"PICTURE", "Field of view", "bf_fov", {}, false, 86, 120, 2, "%.0f\xC2\xB0"},
       {"FRAME RATE", "Frame rate cap", "frame_rate",
        {{"30", "30"}, {"60", "60"}, {"90", "90"}, {"120", "120"}, {"150", "150"}, {"180", "180"}, {"240", "240"},
         {"Unlimited", "unlimited"}}},
@@ -151,6 +151,10 @@ class Panel final : public rex::ui::ImGuiDialog {
     const float u = io.DisplaySize.y / 720.0f;
     const kit::Fonts& f = kit::GetFonts();
     ImDrawList* d = ImGui::GetForegroundDrawList();
+    // The mouse over a rectangle. Unclipped: the panel is drawn on the foreground list with no window of its own, so
+    // ImGui's clip would be its hidden 400 by 400 default window's (near the top left), and this panel, on the right,
+    // would not see the mouse at all (18 Nov 2026, as the F9 panel's, world_sync.cpp).
+    auto over = [](ImVec2 a, ImVec2 b) { return ImGui::IsMouseHoveringRect(a, b, false); };
     const float alpha = float(std::clamp(REXCVAR_GET(bf_f8_opacity), 0.3, 1.0));
     double fps = 0, ms = 0;
     FrameRateNow(&fps, &ms);
@@ -169,7 +173,7 @@ class Panel final : public rex::ui::ImGuiDialog {
       d->AddText(f.ui, 14 * u, ImVec2(a.x + 12 * u, a.y + 6 * u), IM_COL32(232, 226, 204, 255), head);
       d->AddText(f.ui, 12 * u, ImVec2(a.x + 12 * u, a.y + 28 * u), comparing_ ? kit::kGreenBright : IM_COL32(207, 198, 168, 255),
                  hint.c_str());
-      if (ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+      if (over(a, b) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         rex::cvar::SetFlagByName("bf_f8_compact", "false");
       return;
     }
@@ -232,7 +236,8 @@ class Panel final : public rex::ui::ImGuiDialog {
       if (row_y[size_t(row_)] < top + 22 * u) shift = row_y[size_t(row_)] - (top + 22 * u);
       if (row_y[size_t(row_)] + rh > bottom) shift = row_y[size_t(row_)] + rh - bottom;
     }
-    if (ImGui::IsMouseHoveringRect(ImVec2(x0, top), ImVec2(x1, bottom)) && io.MouseWheel != 0)
+    const bool in_list = over(ImVec2(x0, top), ImVec2(x1, bottom));
+    if (in_list && io.MouseWheel != 0)
       shift -= io.MouseWheel * rh * 2;
     if (shift != 0) {
       const float before = scroll_;
@@ -250,7 +255,7 @@ class Panel final : public rex::ui::ImGuiDialog {
         d->AddText(f.ui, 13 * u, ImVec2(x0 + 12 * u, yy - 20 * u), kit::kGold, r.section);
       }
       const ImVec2 a(x0 + 4 * u, yy), b(x1 - 4 * u, yy + rh);
-      const bool hover = ImGui::IsMouseHoveringRect(a, b);
+      const bool hover = in_list && over(a, b);  // a row scrolled out of the list's view takes no clicks
       if (hover && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) row_ = i;
       const bool sel = i == row_;
       if (sel) d->AddRectFilled(a, b, IM_COL32(93, 138, 50, 115));
@@ -277,7 +282,7 @@ class Panel final : public rex::ui::ImGuiDialog {
     for (int i = 0; i < 5; ++i) {
       const float bw = kit::TextWidth(f.ui, 14 * u, kButtons[i]) + 16 * u;
       const ImVec2 a(bx, fy), b(bx + bw, fy + 26 * u);
-      const bool hover = ImGui::IsMouseHoveringRect(a, b);
+      const bool hover = over(a, b);
       const bool lit = (i == 0 || i == 1) && !trial_.empty();
       d->AddRectFilled(a, b, hover ? IM_COL32(93, 138, 50, 200) : lit ? IM_COL32(93, 138, 50, 120) : IM_COL32(48, 46, 38, 230));
       d->AddText(f.ui, 14 * u, ImVec2(a.x + 8 * u, a.y + 3 * u), kit::kCream, kButtons[i]);
@@ -299,7 +304,7 @@ class Panel final : public rex::ui::ImGuiDialog {
       d->AddRectFilled(ImVec2(tx0, ty - u), ImVec2(tx1, ty + u), IM_COL32(232, 226, 204, 60));
       const float fx = tx0 + (tx1 - tx0) * (alpha - 0.3f) / 0.7f;
       d->AddRectFilled(ImVec2(fx - 3 * u, ty - 7 * u), ImVec2(fx + 3 * u, ty + 7 * u), kit::kGold);
-      if (ImGui::IsMouseHoveringRect(ImVec2(tx0, ty - 9 * u), ImVec2(tx1, ty + 9 * u)) && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+      if (over(ImVec2(tx0, ty - 9 * u), ImVec2(tx1, ty + 9 * u)) && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         const double v = 0.3 + 0.7 * std::clamp((io.MousePos.x - tx0) / (tx1 - tx0), 0.0f, 1.0f);
         char b[16];
         std::snprintf(b, sizeof(b), "%.2f", v);

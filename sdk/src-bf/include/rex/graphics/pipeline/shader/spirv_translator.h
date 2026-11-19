@@ -312,6 +312,15 @@ class SpirvShaderTranslator : public ShaderTranslator {
     uint32_t vertex_index_max;
     float tessellation_factor_range_min;
     float tessellation_factor_range_max;
+
+    // NativeXRenderer's soft shadows (SetSoftShadowFetchConstant): per shadow cascade (the shadow map's array
+    // layer 0 to 2) in the first three components of each row:
+    // [0] depth units per uv unit (xyz), w: on when above 0 (the game's own filter otherwise);
+    // [1] depth units per metre (xyz), w: the light's penumbra per metre of blocker distance;
+    // [2] x: the farthest blocker distance searched (metres), y: the slope bias (tangent of the steepest
+    //     receiver), z, w: the smallest and largest filter radius in texels;
+    // [3] reserved.
+    float soft_shadow[4][4];
   };
 
   enum ConstantBuffer : uint32_t {
@@ -427,6 +436,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
     shader_resolution_scale_x_ = scale_x > 1.0f ? scale_x : 1.0f;
     shader_resolution_scale_y_ = scale_y > 1.0f ? scale_y : 1.0f;
   }
+
+  // NativeXRenderer's soft shadows (a host renderer's option, off by default): the texture fetch constant of a
+  // game's shadow map, a stacked depth texture whose pixel shaders filter it themselves with point fetches at
+  // half texel offsets and compare a receiver's depth with them (sgt / sge on the fetched register). Such a
+  // compare then gives, when SystemConstants::soft_shadow[0].w is above 0, the share of a wider, softer filter
+  // in every component (whatever weights the game sums them with, they add up to one): the penumbra widens
+  // with the blockers' distance. UINT32_MAX: off.
+  void SetSoftShadowFetchConstant(uint32_t fetch_constant) { soft_shadow_fetch_constant_ = fetch_constant; }
 
   uint64_t GetDefaultVertexShaderModification(
       uint32_t dynamic_addressable_register_count,
@@ -720,6 +737,13 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id QueryTextureLod(spv::Builder::TextureParameters& texture_parameters,
                           spv::Id image_unsigned, spv::Id image_signed, spv::Id sampler,
                           spv::Id is_all_signed);
+  // Soft shadows (SetSoftShadowFetchConstant): the replacement of a compare of the receiver's depth with the
+  // shadow map's point fetches, `original` when soft_shadow[0].w is not above 0. `taps_first`: the fetched
+  // register is the compare's first operand (lit where it passes) rather than its second (shadowed).
+  spv::Id SoftShadowCompare(spv::Id receiver_depth, bool taps_first, spv::Id original,
+                            uint32_t component_count);
+  // Whether an operand reads the register the shadow map's point fetches were last written to.
+  bool IsSoftShadowTapOperand(const InstructionOperand& operand) const;
 
   spv::Id LoadMsaaSamplesFromFlags();
   // Whether it's possible and worth skipping running the translated shader for
@@ -778,6 +802,17 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // The scale the shaders revert (SetFractionalResolutionScale); the whole scale otherwise.
   float shader_resolution_scale_x_;
   float shader_resolution_scale_y_;
+
+  // Soft shadows (SetSoftShadowFetchConstant). Per translation: the temporary register the shadow map's
+  // point fetches wrote last (UINT32_MAX: none), and the bindings they used; their coordinates without the
+  // offset (u, v, layer) are in var_main_soft_shadow_coordinates_.
+  uint32_t soft_shadow_fetch_constant_ = UINT32_MAX;
+  uint32_t soft_shadow_register_ = UINT32_MAX;
+  // The components of that register the taps wrote: the compare is replaced only when all four were.
+  uint32_t soft_shadow_tap_mask_ = 0;
+  size_t soft_shadow_sampler_index_ = SIZE_MAX;
+  size_t soft_shadow_image_index_ = SIZE_MAX;
+  spv::Id var_main_soft_shadow_coordinates_ = spv::NoResult;
 
   // Is currently writing the empty depth-only pixel shader, such as for depth
   // and stencil testing with fragment shader interlock.
@@ -899,6 +934,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
     kSystemConstantEdramRTKeepMask,
     kSystemConstantEdramRTClamp,
     kSystemConstantEdramBlendConstant,
+    kSystemConstantSoftShadow,
   };
   spv::Id uniform_system_constants_;
   spv::Id uniform_float_constants_;

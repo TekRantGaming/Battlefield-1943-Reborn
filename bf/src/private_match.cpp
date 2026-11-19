@@ -11,6 +11,7 @@
 #include "private_match.h"
 #include "world_sync.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <fstream>
@@ -125,7 +126,17 @@ std::wstring ServerEnvironment() {
   if (wchar_t* env = GetEnvironmentStringsW()) {
     for (const wchar_t* at = env; *at; at += wcslen(at) + 1) {
       const std::wstring entry = at;
-      if (_wcsnicmp(entry.c_str(), L"BF_", 3) == 0 || _wcsnicmp(entry.c_str(), L"SDL_WINDOW_ACTIVATE_WHEN_SHOWN=", 31) == 0)
+      const bool test_setting = _wcsnicmp(entry.c_str(), L"BF_", 3) == 0;
+#if defined(BF_DEV_TOOLS)
+      // A server's own test aid (BF_DEV_MOVE_SPAWNS: the vehicles' night lamps test hosts a LAN match whose US carrier
+      // spawns are moved to the airfield's flag; BF_BOTS and BF_BOT_*: the bots' tests) goes to the server too.
+      const bool for_server = _wcsnicmp(entry.c_str(), L"BF_DEV_MOVE_SPAWNS", 18) == 0 ||
+                              _wcsnicmp(entry.c_str(), L"BF_BOTS=", 8) == 0 ||
+                              _wcsnicmp(entry.c_str(), L"BF_BOT_", 7) == 0;
+#else
+      const bool for_server = false;
+#endif
+      if ((test_setting && !for_server) || _wcsnicmp(entry.c_str(), L"SDL_WINDOW_ACTIVATE_WHEN_SHOWN=", 31) == 0)
         continue;
       block += entry;
       block += L'\0';
@@ -276,6 +287,7 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
       {"--bf_round_end_delay", "45"},
       // At the rate this game runs at: its own game joins it without starting again.
       {"--bf_tick_rate", std::to_string(o.tick ? o.tick : TickRate())},
+      {"--bf_bots", std::to_string(std::clamp(o.bots, 0, 24))},
       {"--bf_gm_backend", registry},
       {"--bf_gm_listen", (LoopbackOnly() ? "127.0.0.1:" : "0.0.0.0:") + std::to_string(g.port)},
       {"--bf_gm_name", Clean(o.name.empty() ? std::string("Private match") : o.name), true},
@@ -303,6 +315,9 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
            {"--bf_world_ground_fog", number(o.ground_fog)},
            {"--bf_world_wind", number(o.wind)},
            {"--bf_world_cloud_height", number(o.cloud_height)},
+           {"--bf_world_dynamic_storm", o.dynamic_storm ? "true" : "false"},
+           {"--bf_match_tickets", std::to_string(std::clamp(o.tickets, 0, 9999))},
+           {"--bf_match_time_limit", std::to_string(std::clamp(o.time_limit, 0, 600))},
            {"--bf_world_admin_key", admin_key},
            {"--bf_gm_status_file", (dir / "status.json").string(), true},
            {"--bf_gm_parent_pid", std::to_string(own_pid)},

@@ -106,6 +106,9 @@ const char* StyleName(Style s);
 // One button, `h` tall, its left middle at `at`; `key` is the keyboard's key for it (a key name as the glyph files
 // have them: Enter, Esc, E, F8...). Returns the width; draws nothing with draw false.
 float Glyph(ImDrawList* d, Style style, Button b, const std::string& key, ImVec2 at, float h, bool draw = true);
+// A controller picture of the style's set by its file name (stick_lr, stick_r_ud, ...), `h` tall, its left middle at
+// `at`; the Xbox 360 style (which has no pictures of its own) the Xbox Series'. Returns the width, 0 when not there.
+float GlyphPicture(ImDrawList* d, Style style, const std::string& name, ImVec2 at, float h, bool draw = true);
 void SetGlyphDir(const std::filesystem::path& dir);  // <exe>\glyphs
 // A PNG file (made from the player's game files: the map pictures) drawn to fill a..b, cropped to its shape, or with
 // stretch its whole picture squeezed to a..b (the game's square startup cards, drawn 16:9 as the console showed them).

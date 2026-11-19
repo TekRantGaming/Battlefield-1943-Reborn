@@ -113,6 +113,16 @@ function New-Bin([string]$dest, [switch]$Shaders, [switch]$Flat) {
     if ($Shaders) {
         # The launcher's button glyphs (Kenney's CC0 Input Prompts, glyphs\LICENSE.txt): the player's only.
         Copy-Item (Join-Path $build "glyphs") (Join-Path $bin "glyphs") -Recurse
+        # The weather's sounds (bf\src\weather_audio.cpp: rain, wind, thunder; the project's own recordings, 17 Nov
+        # 2026): the player's only. A build without them plays no weather sounds.
+        $weather = Join-Path $build "data\sounds\weather"
+        if (Test-Path $weather) {
+            $to = Join-Path $bin "data\sounds\weather"
+            New-Item -ItemType Directory -Force $to | Out-Null
+            Get-ChildItem $weather -File -Filter *.mp3 | ForEach-Object { Copy-Item $_.FullName $to }
+        } else {
+            Write-Warning "no weather sounds in the build ($weather): the package has none"
+        }
         # The news window's YouTube player (bf\src\news_video.cpp, docs\NEWS.md): Microsoft's WebView2 loader, signed by
         # Microsoft (no submission of ours needed). The player's only.
         Copy-Item (Join-Path $root "bf\third_party\webview2\x64\WebView2Loader.dll") $bin

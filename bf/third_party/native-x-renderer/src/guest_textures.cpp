@@ -117,6 +117,10 @@ HdPack* HdPackOpen() {
   return pack.get();
 }
 std::atomic<TexturePatchFn> g_texture_patcher{nullptr};  // D142
+std::atomic<TextureUpscaleFn> g_texture_upscaler{nullptr};  // D200
+std::atomic<TextureUpscaleRgbaFn> g_texture_upscaler_rgba{nullptr};  // D200
+std::atomic<TextureUpscaleImageFn> g_texture_upscaler_image{nullptr};  // D200
+std::atomic<bool> g_upscaled_on{true};                                 // D200: SetUpscaledTextures
 std::atomic<uint32_t> g_repatch_count{0};                // D160: RepatchTextures calls
 }  // namespace
 
@@ -353,6 +357,8 @@ class GuestTextures::HostTexture final : public rg::TextureCache::Texture {
   std::optional<uint64_t> base_hash, mips_hash;
   // The HD pack's texture for that data (D149), or null.
   ITextureView* hd_view = nullptr;
+  // D200: `hd_view` is the upscaler's copy (drawn whatever native_x_renderer_hd_textures says).
+  bool hd_own = false;
   // The HD picture with the patcher's pictures drawn in (Patch), this texture's own: `hd_view` is then its view.
   RefCntAutoPtr<ITexture> hd_patched;
   // D160: to be offered to the patcher again when its data is next found unchanged (it was outdated at the request).
@@ -513,7 +519,9 @@ ITextureView* GuestTextures::GetView(uint32_t fetch_constant, xenos::FetchOpDime
   // unsigned view there turned negative values into large positive ones: Kameo's smoke distortion map (8_8, signed)
   // jumped from -0.01 to +1.0 across its zero crossings.
   if (is_signed && texture->signed_view()) return texture->signed_view();
-  if (texture->hd_view && !is_signed && REXCVAR_GET(native_x_renderer_hd_textures)) return texture->hd_view;
+  if (texture->hd_view && !is_signed &&
+      (texture->hd_own ? g_upscaled_on.load(std::memory_order_relaxed) : REXCVAR_GET(native_x_renderer_hd_textures)))
+    return texture->hd_view;
   return texture->view();
 }
 
@@ -522,6 +530,19 @@ ITextureView* GuestTextures::GetView(uint32_t fetch_constant, xenos::FetchOpDime
 // 13 Nov 2026 (Battlefield 1943's menu and HUD pictures): 8_8_8_8 textures too (the pack's block format 0: RGBA8, not
 // compressed), and first levels from 4 KB up; the key is then of the whole first level (of its first 64 KB above).
 ITextureView* GuestTextures::HdView(HostTexture& host_texture) {
+  host_texture.hd_own = false;
+  if (TextureUpscaleFn upscale = g_texture_upscaler.load(std::memory_order_acquire)) {
+    if (ITextureView* view = Upscaled(host_texture, upscale)) {
+      host_texture.hd_own = true;
+      return view;
+    }
+  }
+  if (TextureUpscaleImageFn upscale = g_texture_upscaler_image.load(std::memory_order_acquire)) {
+    if (ITextureView* view = UpscaledImage(host_texture, upscale)) {
+      host_texture.hd_own = true;
+      return view;
+    }
+  }
   if (!REXCVAR_GET(native_x_renderer_hd_textures)) return nullptr;
   const TextureKey key = host_texture.key();
   const uint32_t format = uint32_t(key.format), w = key.GetWidth(), h = key.GetHeight();
@@ -600,6 +621,96 @@ ITextureView* GuestTextures::HdView(HostTexture& host_texture) {
   }
   hd_textures_[content] = texture;  // null too: looked for once
   return texture ? texture->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
+}
+
+// D200: the upscaler's copy of a k_8 2D texture with a single mip, made the first time for its data (kept for the
+// session, by its key, as the HD pack's), or null.
+ITextureView* GuestTextures::Upscaled(HostTexture& host_texture, TextureUpscaleFn upscale) {
+  const TextureKey key = host_texture.key();
+  const uint32_t w = key.GetWidth(), h = key.GetHeight();
+  if (uint32_t(key.format) != 2 /* k_8 */ || key.dimension != xenos::DataDimension::k2DOrStacked ||
+      key.GetDepthOrArraySize() != 1 || key.mip_max_level != 0 || host_texture.GetGuestBaseSize() < uint64_t(w) * h)
+    return nullptr;
+  const uint8_t* guest = memory_.memory().TranslatePhysical<const uint8_t*>(key.base_page << 12);
+  const uint64_t content = XXH3_64bits(guest, size_t(w) * h) ^ (uint64_t(2) << 56) ^ (uint64_t(w) << 32) ^
+                           (uint64_t(h) << 16) ^ 0x5348415250ull;  // "SHARP": apart from the pack's keys
+  auto it = hd_textures_.find(content);
+  if (it == hd_textures_.end()) {
+    RefCntAutoPtr<ITexture> texture;
+    std::vector<uint8_t> out;
+    uint32_t scale = 0;
+    if (upscale(w, h, guest, out, scale) && scale >= 2 && scale <= 8 &&
+        out.size() == size_t(w) * scale * size_t(h) * scale) {
+      TextureDesc desc;
+      desc.Name = "NativeXRenderer upscaled texture";
+      desc.Type = RESOURCE_DIM_TEX_2D_ARRAY;
+      desc.ArraySize = 1;
+      desc.Width = w * scale;
+      desc.Height = h * scale;
+      desc.MipLevels = 1;
+      desc.Format = TEX_FORMAT_R8_UNORM;  // as the game's k_8 (its swizzle RRRR)
+      desc.Usage = USAGE_IMMUTABLE;
+      desc.BindFlags = BIND_SHADER_RESOURCE;
+      TextureSubResData level;
+      level.pData = out.data();
+      level.Stride = uint64_t(w) * scale;
+      TextureData init{&level, 1};
+      device_->CreateTexture(desc, &init, &texture);
+      if (texture)
+        REXLOG_INFO("[native_x_renderer] upscaled texture {:016X}: {}x{} for the game's {}x{} (D200)", content, w * scale,
+                    h * scale, w, h);
+    }
+    it = hd_textures_.emplace(content, texture).first;  // null too: asked once
+  }
+  return it->second ? it->second->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
+}
+
+// D200: the image upscaler's copy of a k_8_8_8_8 or DXT4_5 2D texture with a single mip (RGBA8), made the first time
+// for its data and kept for the session, or null.
+ITextureView* GuestTextures::UpscaledImage(HostTexture& host_texture, TextureUpscaleImageFn upscale) {
+  const TextureKey key = host_texture.key();
+  const uint32_t w = key.GetWidth(), h = key.GetHeight(), format = uint32_t(key.format);
+  if ((format != 6 && format != 20) || key.dimension != xenos::DataDimension::k2DOrStacked ||
+      key.GetDepthOrArraySize() != 1 || key.mip_max_level != 0)
+    return nullptr;
+  const size_t bytes = format == 6 ? size_t(w) * h * 4 : size_t((w + 3) / 4) * ((h + 3) / 4) * 16;
+  if (host_texture.GetGuestBaseSize() < bytes) return nullptr;
+  const uint8_t* guest = memory_.memory().TranslatePhysical<const uint8_t*>(key.base_page << 12);
+  const uint64_t content = XXH3_64bits(guest, bytes) ^ (uint64_t(format) << 56) ^ (uint64_t(w) << 32) ^
+                           (uint64_t(h) << 16) ^ 0x5348415250494dull;  // "SHARPIM"
+  auto it = hd_textures_.find(content);
+  if (it == hd_textures_.end()) {
+    RefCntAutoPtr<ITexture> texture;
+    std::vector<uint8_t> rgba;
+    uint32_t scale = 0;
+    if (upscale(w, h, format, bool(key.tiled), guest, rgba, scale) && scale >= 2 && scale <= 8 &&
+        rgba.size() == size_t(w) * scale * size_t(h) * scale * 4) {
+      // The host holds a guest 8_8_8_8 texture's words byte swapped (B, G, R, A) and the draws' swizzle is for that
+      // (as for an HD pack's); a DXT texture's as R, G, B, A.
+      if (format == 6)
+        for (size_t i = 0; i + 3 < rgba.size(); i += 4) std::swap(rgba[i], rgba[i + 2]);
+      TextureDesc desc;
+      desc.Name = "NativeXRenderer upscaled picture";
+      desc.Type = RESOURCE_DIM_TEX_2D_ARRAY;
+      desc.ArraySize = 1;
+      desc.Width = w * scale;
+      desc.Height = h * scale;
+      desc.MipLevels = 1;
+      desc.Format = TEX_FORMAT_RGBA8_UNORM;
+      desc.Usage = USAGE_IMMUTABLE;
+      desc.BindFlags = BIND_SHADER_RESOURCE;
+      TextureSubResData level;
+      level.pData = rgba.data();
+      level.Stride = uint64_t(w) * scale * 4;
+      TextureData init{&level, 1};
+      device_->CreateTexture(desc, &init, &texture);
+      if (texture)
+        REXLOG_INFO("[native_x_renderer] upscaled picture {:016X}: {}x{} for the game's {}x{} (format {}, D200)",
+                    content, w * scale, h * scale, w, h, format);
+    }
+    it = hd_textures_.emplace(content, texture).first;  // null too: asked once
+  }
+  return it->second ? it->second->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
 }
 
 void GuestTextures::BeginFrame(uint64_t frame, uint64_t completed_frame) {
@@ -1008,7 +1119,9 @@ void GuestTextures::Patch(HostTexture& host_texture, bool again) {
   }
   patched_.insert(&host_texture);
   if (rgba.size() != size_t(w) * h * 4) {
-    drop_hd();
+    // Left as it is at the game's size: its larger picture all the same (D200), the patcher's at that size.
+    if (g_texture_upscaler_rgba.load(std::memory_order_acquire)) PatchHd(host_texture, again);
+    else drop_hd();
     return;
   }
   PatchHd(host_texture, again);
@@ -1034,20 +1147,30 @@ void GuestTextures::PatchHd(HostTexture& host_texture, bool again) {
     host_texture.hd_view = HdView(host_texture);
   };
   TexturePatchFn patch = g_texture_patcher.load(std::memory_order_acquire);
-  HdPack* pack = REXCVAR_GET(native_x_renderer_hd_textures) && patch ? HdPackOpen() : nullptr;
-  if (!pack) return none();
+  if (!patch) return none();
+  HdPack* pack = REXCVAR_GET(native_x_renderer_hd_textures) ? HdPackOpen() : nullptr;
   const TextureKey key = host_texture.key();
   const uint32_t w = key.GetWidth(), h = key.GetHeight();
   const uint8_t* guest = memory_.memory().TranslatePhysical<const uint8_t*>(key.base_page << 12);
   const size_t hashed = size_t(std::min<uint64_t>(host_texture.GetGuestBaseSize(), 65536));
   const uint64_t content = XXH3_64bits(guest, hashed) ^ (uint64_t(6) << 56) ^ (uint64_t(w) << 32) ^ (uint64_t(h) << 16);
-  const HdEntry* e = pack->Find(content);
-  if (!e || e->bc != 0 || e->width != w || e->height != h || e->hd_width % w != 0 || e->hd_width / w < 2 ||
-      e->hd_width / w > 8 || e->hd_height != h * (e->hd_width / w))
-    return none();
-  const uint32_t scale = e->hd_width / w, hw = e->hd_width, hh = e->hd_height;
+  const HdEntry* e = pack ? pack->Find(content) : nullptr;
+  if (e && (e->bc != 0 || e->width != w || e->height != h || e->hd_width % w != 0 || e->hd_width / w < 2 ||
+            e->hd_width / w > 8 || e->hd_height != h * (e->hd_width / w)))
+    e = nullptr;
+  uint32_t scale = 0;
   std::vector<uint8_t> base;
-  if (!pack->Read(*e, base) || base.size() < size_t(hw) * hh * 4) return none();
+  if (e) {
+    scale = e->hd_width / w;
+    if (!pack->Read(*e, base) || base.size() < size_t(e->hd_width) * e->hd_height * 4) return none();
+  } else if (TextureUpscaleRgbaFn upscale = g_texture_upscaler_rgba.load(std::memory_order_acquire)) {
+    // D200: no picture in the pack: the upscaler's.
+    if (!upscale(w, h, guest, base, scale) || scale < 2 || scale > 8 || base.size() != size_t(w) * scale * h * scale * 4)
+      return none();
+  } else {
+    return none();
+  }
+  const uint32_t hw = w * scale, hh = h * scale;
   std::vector<std::vector<uint8_t>> chain(1);
   if (!patch(w, h, guest, chain[0], again, scale, base.data()) || chain[0].size() != size_t(hw) * hh * 4) return none();
   std::vector<std::pair<uint32_t, uint32_t>> sizes{{hw, hh}};
@@ -1090,11 +1213,19 @@ void GuestTextures::PatchHd(HostTexture& host_texture, bool again) {
   if (!texture) return none();
   host_texture.hd_patched = texture;
   host_texture.hd_view = texture->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
-  REXLOG_INFO("[native_x_renderer] HD texture {:016X}: {}x{} with the game's pictures for its {}x{} texture at {:08X}{}",
-              content, hw, hh, w, h, uint32_t(key.base_page) << 12, again ? " (again)" : "");
+  host_texture.hd_own = !e;  // the upscaler's: drawn while SetUpscaledTextures is on; a pack's while the pack is
+  REXLOG_INFO("[native_x_renderer] HD texture {:016X}: {}x{} with the game's pictures for its {}x{} texture at {:08X}{}{}",
+              content, hw, hh, w, h, uint32_t(key.base_page) << 12, again ? " (again)" : "",
+              e ? "" : " (the upscaler's, D200)");
 }
 
 void SetTexturePatcher(TexturePatchFn fn) { g_texture_patcher.store(fn, std::memory_order_release); }
+void SetTextureUpscaler(TextureUpscaleFn fn) { g_texture_upscaler.store(fn, std::memory_order_release); }
+void SetTextureUpscalerRgba(TextureUpscaleRgbaFn fn) { g_texture_upscaler_rgba.store(fn, std::memory_order_release); }
+void SetUpscaledTextures(bool on) { g_upscaled_on.store(on, std::memory_order_relaxed); }
+void SetTextureUpscalerImage(TextureUpscaleImageFn fn) {
+  g_texture_upscaler_image.store(fn, std::memory_order_release);
+}
 void RepatchTextures() { g_repatch_count.fetch_add(1, std::memory_order_acq_rel); }
 
 }  // namespace native_x_renderer

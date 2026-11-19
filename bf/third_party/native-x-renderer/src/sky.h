@@ -52,6 +52,8 @@
 #include "ShaderResourceBinding.h"
 #include "Texture.h"
 
+#include "storm.h"
+
 namespace native_x_renderer {
 
 class Sky {
@@ -76,6 +78,11 @@ class Sky {
     double seconds = 0.0;       // the world's time: the clouds drift with it
     double evolve = 0.0;        // the clouds' forming clock: Beachhead's, 1 a second at its full generation speed
     float weather = 0.0f;       // 0 fair to 1 heavy overcast: more and denser cloud, a greyer sky, less sun
+    // D208: the hurricane (storm.h): the weather outside it (the clouds' cover away from it), and its two vectors for
+    // the clouds (storm::kGlsl's a and b). `weather` is the weather where the eye is.
+    float weather_outside = 0.0f;
+    float match_weather = 0.0f;  // the match's own weather (the hurricane's stage): the lightning
+    float storm_a[4] = {}, storm_b[4] = {};
     float fog = 0.0f;           // the distance fog, 0 to 1
     float ground_fog = 0.0f;    // the ground fog, 0 to 1
     float wind = 0.3f;          // 0 calm to 1 a gale: how far the rain leans
@@ -102,15 +109,34 @@ class Sky {
   // come and go and drops that run down, each bending the picture behind it. How wet the lens is builds up while the
   // eye stands in the rain and dries under cover (Fog keeps it). Written for this project: the well-known Shadertoy
   // ones are CC BY-NC-SA, not ours to take.
-  bool Lens(Diligent::IDeviceContext* context, Diligent::ITexture* color, uint32_t width, uint32_t height);
+  // D191: the window glass's reflection, drawn with the lens: the panes' depth (DrawPath::DrawGlassMask), the world's
+  // depth from before the first person weapon and the view's depth at its end, each with its share of its texture.
+  struct GlassInputs {
+    Diligent::ITextureView* mask = nullptr;
+    Diligent::ITextureView* world_depth = nullptr;
+    Diligent::ITextureView* view_depth = nullptr;
+    float world_uv[2] = {1.0f, 1.0f}, view_uv[2] = {1.0f, 1.0f};
+    bool cockpit = false;  // D195: the player sits in a vehicle: the drops on its glass only (the depths, no mask)
+  };
+  bool Lens(Diligent::IDeviceContext* context, Diligent::ITexture* color, uint32_t width, uint32_t height, bool drops = true,
+            const GlassInputs* glass = nullptr);
   // Water on the lens without rain too ("when running across or jumping into the water", 14 Nov 2026): running with
   // the eye under 1.1 m over the sea (wading) splashes it, drying in 3 seconds; the eye at the water (jumped in, gone
   // under) soaks it, drying in 5.
   float lens_wet() const { return std::max(lens_wet_, splash_wet_); }
+  float sway() const { return sway_; }
+  // D190: the sky's zenith and horizon as the view shows them (exposure in), greyed by the clouds' cover, from the
+  // last frame's constants; false before there are any.
+  bool SeaSkyColours(float zenith[3], float horizon[3]) const;  // D189: a strong storm's sway now (0 to 1)
+  // D205: the sea's height as read from the view (ReadSea); false before it is known.
+  bool SeaLevel(float* sea) const {
+    if (sea_known_) *sea = sea_;
+    return sea_known_;
+  }
   // A wet copy of a texture of the first person weapon's (DrawPath::WetRequest), into `to` (RGBA8, the same size):
   // darker, with beads of water, `count` of them showing by `show`; tint: drawn red instead (a developer's check).
   bool WetCopy(Diligent::IDeviceContext* context, Diligent::ITextureView* from, Diligent::ITexture* to, float count,
-               float show, bool tint, double seconds, bool skin);
+               float show, bool tint, double seconds, bool skin, bool vehicle = false, bool relief_only = false);
   // How wet what is held in the hand is: it builds up in twelve seconds of rain on the eye (at once when the eye
   // goes under the sea) and dries in thirty. How many beads (the most there were), and how strongly they show.
   float weapon_wet_count() const { return weapon_peak_; }
@@ -122,6 +148,8 @@ class Sky {
   bool MakeTextures();
   bool Ready();
   void Fill(const Inputs& in, struct SkyConstantBlock& k);
+  void FillBolt(const Inputs& in, struct SkyConstantBlock& k, float weather, float sea, float scale);  // D192
+  uint64_t said_bolt_ = 0;
   void ReadSea(Diligent::IDeviceContext* context);
   Diligent::IRenderDevice* device_ = nullptr;
   Diligent::RefCntAutoPtr<Diligent::IShader> vs_, cloud_ps_, resolve_ps_, sky_ps_, fog_ps_, sea_ps_, lens_ps_;
@@ -130,6 +158,22 @@ class Sky {
   Diligent::RefCntAutoPtr<Diligent::ITexture> lens_copy_;
   Diligent::TEXTURE_FORMAT lens_format_ = Diligent::TEX_FORMAT_UNKNOWN;
   float lens_wet_ = 0.0f, lens_rain_ = 0.0f, splash_wet_ = 0.0f, splash_dry_ = 3.0f;
+  float sway_ = 0.0f;
+  float edge_ = 0.0f;  // D194: the storm's blurred edges, apart from the shake
+  Diligent::RefCntAutoPtr<Diligent::ITexture> fog_scene_, no_scene_;  // D190: the scene before the fog
+  std::vector<uint8_t> last_fill_;
+ public:
+  // D190: the sea's draws drawn again (DrawPath::DrawGlassMask, sea), for the fog pass's reflection: where the sea
+  // is (its depth; 0 elsewhere), with its share of its texture. Null: the sea's plane alone.
+  Diligent::ITextureView* sea_mask = nullptr;
+  float sea_mask_uv[2] = {1.0f, 1.0f};
+  // D190: the picture just after the sea was drawn (DrawPath::sea_after, of the fog's own size; null: none): the
+  // reflection only where the picture is still that, not over what see-through was drawn over the sea since.
+  Diligent::ITextureView* sea_after = nullptr;
+  // D190: the world's depth before the sea was drawn (the night's copy, pixel for pixel with the fog's picture; null:
+  // none): how deep the water is, the reflection kept off the shallows where the sea's own wash runs up the shore.
+  Diligent::ITextureView* sea_floor = nullptr;
+ private:  // D191: the last constants Fill made (the view's), for the glass's reflection
   // Drying fades every drop away together ("The drying effect looks like it's reversing the droplets. The screen
   // effect should just fade away entirely", 14 Nov 2026): how many drops there are stays at the most there were
   // (the peaks) while what is left of the wetness against it is how strongly they show.
@@ -204,8 +248,18 @@ struct SkyFlash {
   float x = 0.0f, z = 0.0f;
 };
 SkyFlash SkyFlashAt(double seconds, float weather);
+// D208: where strikes may fall now: the hurricane (storm.h), the middle of the eye's 4 km square, and where players are
+// gathered (x, z pairs, at most 8).
+void SetStrikeWorld(const storm::Storm& storm, float square_x, float square_z);
+void SetStrikeGroups(const float* xz, uint32_t count);
 // The player's own choice: no lightning at all (the storm's other weather stays).
 void SetSkyLightning(bool on);
+void SetCloudShadows(bool on);  // D214: the clouds' shadows on the ground
+// D189: a strong storm's sway and blurred edges on the view (native_x_renderer_storm_sway).
+void SetStormSway(bool on);
+// D190: the sea's reflection of the renderer's own, in the fog pass (native_x_renderer_reflections).
+void SetSeaReflection(bool on);
+bool SeaReflection();
 
 // The developer's shader check (aa.cpp's TestUtilityShaders): how many of its shaders failed to compile.
 int TestSkyShaders();

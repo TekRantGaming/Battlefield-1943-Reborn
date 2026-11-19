@@ -94,6 +94,8 @@ void ResetPlaneMouse();    // plane_mouse.cpp
 bool PlaneMouse(uint8_t* gamepad, double dx, double dy);  // plane_mouse.cpp
 void PulseButton(uint16_t button, int ms);  // input_settings.cpp: our press on the player's pad
 bool LocalOnFoot();  // below
+std::string ActiveBind(std::string_view infantry_cvar);  // vehicle_binds.cpp: the keys of the seat's binding set
+int ActiveBindSet();                                      // vehicle_binds.cpp: 0 the infantry's
 // A notch of the mouse wheel: on foot, BF's Toggle Weapon (the right bumper; BF's own Help & Options > Controls, run
 // help3: Y is Draw Knife). In a vehicle the right bumper fires the second weapon or drops bombs (run helpveh1), so the
 // wheel does nothing there.
@@ -101,6 +103,8 @@ bool LocalOnFoot();  // below
 // WheelDown, among the keys of a keybind_* setting: the keyboard driver itself does not know them). The right
 // bumper's only on foot, as before. Until the bindings page has put the wheel in the bindings (bf_wheel_bindable),
 // the wheel is what it was: Toggle Weapon on foot.
+// 18 Nov 2026: the keys are the seat's binding set's (vehicle_binds.cpp). A vehicle's own set may put the wheel on the
+// right bumper (its copy of the infantry's leaves it off); a gunner's seat uses the infantry's, without it as before.
 void WheelNotch(int direction) {
   static const std::pair<const char*, uint16_t> kBinds[] = {
       {"keybind_a", 0x1000},          {"keybind_b", 0x2000},           {"keybind_x", 0x4000},
@@ -115,9 +119,10 @@ void WheelNotch(int direction) {
   const std::string token = direction > 0 ? "WheelUp" : "WheelDown";
   uint16_t press = 0;
   for (const auto& [bind, bit] : kBinds) {
-    const std::string keys = "," + rex::cvar::GetFlagByName(bind) + ",";
+    const std::string keys = "," + ActiveBind(bind) + ",";
     if (keys.find("," + token + ",") == std::string::npos) continue;
-    if (bit == 0x0200 && !LocalOnFoot()) continue;  // in a vehicle the right bumper fires the second weapon
+    // in a vehicle the right bumper fires the second weapon
+    if (bit == 0x0200 && !LocalOnFoot() && ActiveBindSet() == 0) continue;
     press |= bit;
   }
   if (press) PulseButton(press, 120);
@@ -463,7 +468,11 @@ namespace {
 std::atomic<double> g_free_yaw{0.0}, g_free_pitch{0.0};
 std::atomic<int64_t> g_free_at{0};  // steady clock nanoseconds of the pad hook's last free look seat
 constexpr double kFreePitch = 70.0 * 3.14159265358979323846 / 180.0;
+bool g_free_hold = false;  // free look held (vehicle_views.cpp) at the pad hook's last read; under g.mutex
 }  // namespace
+bool FreeLookHeld(bool turret_seat);         // vehicle_views.cpp
+void TakeFreeLookPress(uint8_t* gamepad);  // vehicle_views.cpp
+void VehicleViewsPad(uint8_t* gamepad);    // vehicle_views.cpp
 bool VehicleFreeLook(double& yaw, double& pitch) {
   const int64_t at = g_free_at.load(std::memory_order_acquire);
   if (!at || Clock::now().time_since_epoch().count() - at > std::chrono::nanoseconds(std::chrono::milliseconds(200)).count())
@@ -517,6 +526,9 @@ void LookPad(uint8_t* gamepad, bool seated) {
         std::chrono::duration<double>(now - g.vehicle_moved).count() > 0.25)
       g.stick_moved = now;
   }
+  // A plane's camera button through its views and the bomb view (vehicle_views.cpp), the keyboard's and a controller's;
+  // the Free-Look keys' Guide button never reaches the game.
+  if (seated) VehicleViewsPad(gamepad), TakeFreeLookPress(gamepad);
   // Not in the air raid's bombers (13 Nov 2026): the mouse neither steers them nor turns their view, in the bomb
   // sight or behind them; the keys and the controller steer.
   const bool mouse_active = MouseLook() && !comms::Typing() && !BomberSeat();
@@ -539,6 +551,7 @@ void LookPad(uint8_t* gamepad, bool seated) {
     g.vehicle_pad_tick = ~0ull;
     g.vehicle_pad_at = {};
     g_free_yaw.store(0.0), g_free_pitch.store(0.0), g_free_at.store(0);
+    g_free_hold = false;
     if (g.vehicle_pad_seated) ResetVehicleMouse(), ResetPlaneMouse();
     g.vehicle_pad_seated = vehicle_mouse;
   }
@@ -553,16 +566,33 @@ void LookPad(uint8_t* gamepad, bool seated) {
     g.vehicle_pad_tick = ~0ull;
     g.vehicle_pad_at = {};
     const double d = Density(g);
-    if (PlaneMouse(gamepad, pdx / d, pdy / d)) return;
-    if (VehicleMouseTurretSeat()) {  // a gun's seat between its parts' steps: nothing but the stick writes there
-      g_free_at.store(0);
-      return;
-    }
-    // No free look (it is off, or this view is not one the view hook turns): the seat's own look, natively.
-    if (!REXCVAR_GET(bf_vehicle_free_look) || !TickBlendVehicleView()) {
-      NoteSeatLook(pdx / d, pdy / d);
-      g_free_at.store(0);
-      return;
+    // Free look held (vehicle_views.cpp: Free-Look, Shift, in a plane or a tank's outside view): the mouse turns the
+    // view below in place of flying the plane or turning the turret, and the stick it flew with is centred; let go,
+    // the view is back where the game points it.
+    if (FreeLookHeld(VehicleMouseTurretSeat())) {
+      if (!g_free_hold) {
+        g_free_hold = true;
+        REXLOG_INFO("BF free look: held (the mouse turns the view)");
+        ResetPlaneMouse();
+        g_free_yaw.store(0.0), g_free_pitch.store(0.0);
+      }
+    } else {
+      if (g_free_hold) {
+        g_free_hold = false;
+        REXLOG_INFO("BF free look: let go (the view is back ahead)");
+        g_free_yaw.store(0.0), g_free_pitch.store(0.0), g_free_at.store(0);
+      }
+      if (PlaneMouse(gamepad, pdx / d, pdy / d)) return;
+      if (VehicleMouseTurretSeat()) {  // a gun's seat between its parts' steps: nothing but the stick writes there
+        g_free_at.store(0);
+        return;
+      }
+      // No free look (it is off, or this view is not one the view hook turns): the seat's own look, natively.
+      if (!REXCVAR_GET(bf_vehicle_free_look) || !TickBlendVehicleView()) {
+        NoteSeatLook(pdx / d, pdy / d);
+        g_free_at.store(0);
+        return;
+      }
     }
     // Free look (bf_vehicle_free_look): the mouse turns the view itself, as on foot, with no stick between (12 Nov 2026:
     // driver look "acts like a controller joystick"); tick_blend.cpp turns the view it hands the renderer. Only the
@@ -1106,7 +1136,13 @@ void DevCameraTour(uint8_t* base, uint32_t out, uint64_t frame) {
     t.frame = frame;
     if (t.first == Clock::time_point{}) t.first = now;
     const float sea = bf1943::g_sea_level.load();
-    if (now - t.first > std::chrono::seconds(8) && !std::isnan(sea)) {
+    // BF_DEV_CAMERA_AFTER=<s>: the tour starts that long after the level's first camera instead of 8 s (the vehicles'
+    // lamps test: the camera taken out of the tank only once the soldier has reached it and driven).
+    static const double after = [] {
+      const char* a = std::getenv("BF_DEV_CAMERA_AFTER");
+      return a && *a ? std::max(0.0, std::atof(a)) : 8.0;
+    }();
+    if (now - t.first > std::chrono::duration<double>(after) && !std::isnan(sea)) {
       if (t.at_spot && now - t.since > std::chrono::duration<double>(t.dwell)) {
         t.at_spot = false;
         if (++t.index >= t.spots) {
@@ -1149,6 +1185,19 @@ void DevCameraTour(uint8_t* base, uint32_t out, uint64_t frame) {
         }
       }
     }
+  }
+  // BF_DEV_CAMERA_GLIDE=1 (tests, 19 Nov 2026: shadows seen while flying over buildings): with BF_DEV_CAMERA_POINTS,
+  // the camera and the point it looks at move evenly from each point to the next over the dwell, a fly-by.
+  static const bool glide = [] {
+    const char* g = std::getenv("BF_DEV_CAMERA_GLIDE");
+    return g && *g == '1';
+  }();
+  if (glide && t.at_spot && !t.points.empty() && size_t(t.index) + 1 < t.points.size()) {
+    const auto& a = t.points[size_t(t.index)];
+    const auto& b = t.points[size_t(t.index) + 1];
+    const float f = float(std::clamp(std::chrono::duration<double>(Clock::now() - t.since).count() / t.dwell, 0.0, 1.0));
+    t.x = a[0] + (b[0] - a[0]) * f, t.y = a[1] + (b[1] - a[1]) * f, t.z = a[2] + (b[2] - a[2]) * f;
+    for (int k = 0; k < 3; ++k) t.look_at[k] = a[3 + k] + (b[3 + k] - a[3 + k]) * f;
   }
   if (t.at_spot) {
     StoreF(base, out + 48, t.x);

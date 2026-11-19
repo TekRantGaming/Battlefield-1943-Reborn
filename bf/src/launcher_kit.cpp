@@ -640,6 +640,17 @@ float Glyph(ImDrawList* d, Style style, Button b, const std::string& key, ImVec2
   return Cap(d, t, at, h, draw);
 }
 
+float GlyphPicture(ImDrawList* d, Style style, const std::string& name, ImVec2 at, float h, bool draw) {
+  const char* set = style == Style::kKeyboard ? nullptr : SetName(style);
+  ImFontAtlasRect r;
+  const GlyphImage* g = Picture(set ? set : "xbox_series", name, r);
+  if (!g) return 0;
+  const float w = h * float(g->w) / float(g->h);
+  if (draw)
+    d->AddImage(ImGui::GetIO().Fonts->TexRef, ImVec2(at.x, at.y - h * 0.5f), ImVec2(at.x + w, at.y + h * 0.5f), r.uv0, r.uv1);
+  return w;
+}
+
 Strip PromptStrip(ImDrawList* d, ImVec2 at, float u, Style style, Button button, const std::string& key,
                   const std::string& label, float size, bool green, bool draw) {
   ImFont* f = g_fonts.ui;
