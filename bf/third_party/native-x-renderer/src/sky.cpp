@@ -468,14 +468,26 @@ float cloud_density(vec3 p, vec3 cam, bool cheap) {
   local_type = mix(local_type, 1.0, storm_type);
   float local_base = base_altitude + local_type * local_type * 400.0;
   local_base += (vnoise(wp / 3200.0 + 17.0) - 0.5) * mix(300.0, 0.0, lay);
-  local_base += lay * (band * band_h - local_type * local_type * 400.0 + vnoise(wp / 2600.0 + 31.0) * 90.0);
   float local_thick = thickness * mix(0.3, 1.0, smoothstep(0.3, 0.9, local_type));
-  local_thick = mix(local_thick, band_h * 0.66 * mix(0.45, 1.0, vnoise(wp / 4200.0 + 41.0)), lay);
+  // The bands' own heights and depths only where there are bands: times nothing (lay 0, as with the layer's depth and
+  // kind now) they change nothing, and their two noises were worked out for every sample (the Night Ops performance
+  // pass, 20 Nov 2026). gale.w 1: the old way.
+  if (lay > 0.0 || gale.w > 0.5) {
+    local_base += lay * (band * band_h - local_type * local_type * 400.0 + vnoise(wp / 2600.0 + 31.0) * 90.0);
+    local_thick = mix(local_thick, band_h * 0.66 * mix(0.45, 1.0, vnoise(wp / 4200.0 + 41.0)), lay);
+  }
   // How deep inside a cloud mass this column is, from the shape noise at the base: small puffs stay shallow.
-  vec4 fs = textureLod(shapeTex, vec3(wp.x, local_base + evolve * 40.0, wp.y) / shape_scale, 2.0);
-  float foot = clamp((fs.r - (1.0 - cover)) / max(cover, 1e-3), 0.0, 1.0);
-  local_thick *= mix(0.32, 1.0, pow(foot, mix(0.6, 0.95, lay)));
-  float h = (alt - local_base) / local_thick;
+  // The depth only thins the column (times 0.32 to 1), so a sample under its base or over the column's whole depth is
+  // out of the cloud whatever the noise there: its look up is passed over (the Night Ops performance pass, 20 Nov
+  // 2026: most of the march's samples lie in the layer's shell over the low clouds' tops). gale.z 1: the old way.
+  float above = alt - local_base;
+  float h = -1.0;
+  if (gale.z > 0.5 || (above >= 0.0 && above <= local_thick * 1.001)) {
+    vec4 fs = textureLod(shapeTex, vec3(wp.x, local_base + evolve * 40.0, wp.y) / shape_scale, 2.0);
+    float foot = clamp((fs.r - (1.0 - cover)) / max(cover, 1e-3), 0.0, 1.0);
+    local_thick *= mix(0.32, 1.0, pow(foot, mix(0.6, 0.95, lay)));
+    h = above / local_thick;
+  }
   float low = 0.0;
   // The shape at this height can be no more than its profile here (`shape_most`: the noise's remap is 0 to 1), and
   // the cloud is 0 wherever that is under the cover's threshold, while the storm does not fill the deck in (under 0.3
@@ -3345,7 +3357,9 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
   SkyConstantBlock k{};
   Fill(in, k);
   k.bolt[3] = (in.skip_hidden_clouds ? 1.0f : 0.0f) + (in.checker_clouds ? 2.0f : 0.0f);  // the clouds' march's flags
-  k.gale[1] = in.old_cloud_density ? 1.0f : 0.0f;  // BF_CLOUD_DENSITY_AB (tests): the shape looked up for every sample
+  k.gale[1] = in.old_cloud_density ? 1.0f : 0.0f;
+  k.gale[2] = in.old_cloud_reach ? 1.0f : 0.0f;
+  k.gale[3] = in.old_cloud_bands ? 1.0f : 0.0f;  // BF_CLOUD_BANDS_AB (tests): the bands' noises for every sample  // BF_CLOUD_REACH_AB (tests): the column's depth looked up for every sample  // BF_CLOUD_DENSITY_AB (tests): the shape looked up for every sample
   for (int r = 0; r < 3; ++r)
     for (int c = 0; c < 3; ++c) k.last[r][c] = last_forward_[r][c];
   std::memcpy(k.last_to_ndc, last_to_ndc_, sizeof(k.last_to_ndc));
@@ -3409,7 +3423,7 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
     draw2(clouds_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), where_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET),
           in.checker_clouds ? (cw + 1) / 2 : cw, ch, cloud_pso_, cloud_srb_);
     renderer::SkySectionEnd(0);
-    // BF_CLOUD_CHECK=1 (tests): every 60th march made again the old way (gale.y 1: the shape looked up for every
+    // BF_CLOUD_CHECK=1 (tests): every 60th march made again the old way (gale.y, z and w 1: the shape, the column's depth and the bands' noises for every
     // sample) from the same constants, both read back and compared (the march's two outputs, 16 bit floats).
     static const bool cloud_check = [] {
       const char* v = std::getenv("BF_CLOUD_CHECK");
@@ -3435,7 +3449,7 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
         CopyTextureAttribs w0(where_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, cloud_staging_[1], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
         context->CopyTexture(c0), context->CopyTexture(w0);
         SkyConstantBlock old = k;
-        old.gale[1] = 1.0f;
+        old.gale[1] = 1.0f, old.gale[2] = 1.0f, old.gale[3] = 1.0f;
         void* data = nullptr;
         context->MapBuffer(constants_, MAP_WRITE, MAP_FLAG_DISCARD, data);
         std::memcpy(data, &old, sizeof(old));

@@ -185,6 +185,30 @@ of it): the rain shafts 0.64 ms, the rain here (streaks, rings, splashes) 0.38, 
 reflection 0.20. The shafts' cost is their weather cells' own read and arithmetic at each of 20 steps; no exact
 change takes it away.
 
+### 6. The clouds' density: no work for what is multiplied by nothing (confirmed, the largest of the sky's)
+
+- **The bands:** the fair weather deck can be split into three altitude bands, each with its own heights and depths
+  from two value noises (four hashes each). With the layer as it is now (2800 m deep, a cloud kind of 0.62: the user's
+  "more vertically dense" clouds of 16 Nov 2026) the bands' amount is exactly 0 everywhere, and the noises were still
+  worked out for every sample of the march and of each sample's five steps toward the moon, then multiplied by that 0.
+  Now only where there are bands (the amount over 0).
+- **The column's depth:** each sample read the shape texture at the cloud's foot to learn how deep the column is
+  (0.32 to 1 of its full depth). A sample under the column's base or over its full depth is outside whatever the
+  read says, so it is not read there (most of the layer's shell lies above the low clouds' tops).
+- **Same picture:** `BF_CLOUD_CHECK` (every 60th march made again the old way from the same constants, both read back):
+  535 checks on Iwo Jima and 562 on Wake, the storm built from 15% to 91% cover: 0 texels differed.
+- **Measured** (`BF_AB_EVERY_FRAME`, the storm built over 5 minutes, touring 40 spots), the clouds' march in ms a frame:
+
+  | Stage | Bands: new | old | Column's depth: new | old |
+  |---|---|---|---|---|
+  | clear night | 1.814 | 2.518 | 2.465 | 2.510 |
+  | clouds gather | 1.511 | 2.037 | 2.009 | 2.044 |
+  | storm rolls in | 0.821 | 1.053 | 1.036 | 1.045 |
+  | full storm | 0.792 | 1.017 | 0.992 | 1.001 |
+
+  (Bands: Iwo Jima, run perf_bands1, with the column's depth change in both sides. Column's depth: Iwo Jima, run
+  perf_reach1.) The fog and rain pass in the same runs: unchanged (within 0.006 ms).
+
 ## Looked at, not changed
 
 - **The sky's cloud march** (about 2.9 ms at the clear night stage, half size, temporal): the remaining cost is the march over

@@ -61,6 +61,8 @@ class Sky {
   struct Inputs {
     Diligent::ITexture* color = nullptr;      // the view's colour: its sky pixels are drawn anew
     Diligent::ITextureView* depth_srv = nullptr;
+    bool old_cloud_bands = false;    // BF_CLOUD_BANDS_AB (tests): the bands' noises worked out for every sample
+    bool old_cloud_reach = false;    // BF_CLOUD_REACH_AB (tests): the column's depth looked up for every sample
     bool old_cloud_density = false;  // BF_CLOUD_DENSITY_AB (tests): the cloud's shape looked up for every sample
     int fog_parts_off = 0;  // BF_FOG_PARTS (tests): parts of the fog pass off (8, 16, 32, 64: sky.cpp's kFogPS)
     bool old_rain_order = false;  // BF_FOG_AB (tests): the rain's cover looked up for every pixel, as before

@@ -507,6 +507,24 @@ bool CloudDensityOldNow() {
   }();
   return ab && g_device && AbPhase() == 1;
 }
+// BF_CLOUD_REACH_AB=1 (tests): the clouds' column depth looked up for every sample (the old way) and only where the
+// sample can be in the column (the new) by turns (with BF_AB_EVERY_FRAME every frame).
+bool CloudReachOldNow() {
+  static const bool ab = [] {
+    const char* v = std::getenv("BF_CLOUD_REACH_AB");
+    return v && *v == '1';
+  }();
+  return ab && g_device && AbPhase() == 1;
+}
+// BF_CLOUD_BANDS_AB=1 (tests): the clouds' bands' noises worked out for every sample (the old way) or only where there
+// are bands (the new) by turns.
+bool CloudBandsOldNow() {
+  static const bool ab = [] {
+    const char* v = std::getenv("BF_CLOUD_BANDS_AB");
+    return v && *v == '1';
+  }();
+  return ab && g_device && AbPhase() == 1;
+}
 bool CloudSkipNow() {
   static const bool ab = [] {
     const char* v = std::getenv("BF_CLOUD_AB");
@@ -2618,7 +2636,7 @@ void ApplyOpaqueEffects() {
         MsaaWrite(g_scene_color);
         in.color = g_scene_color->texture;
         in.depth_srv = g_scene_depth->srv;
-        if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); in.checker_clouds = CloudCheckerNow(); in.old_cloud_density = CloudDensityOldNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
+        if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); in.checker_clouds = CloudCheckerNow(); in.old_cloud_density = CloudDensityOldNow(); in.old_cloud_reach = CloudReachOldNow(); in.old_cloud_bands = CloudBandsOldNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
       }
       g_last_sky_in = in, g_last_sky_valid = true;
       // The fog waits for the game's water (ApplyFog).
@@ -2811,7 +2829,7 @@ void ApplyLateSky() {
     MsaaWrite(g_scene_color);
     in.color = g_scene_color->texture;
     in.depth_srv = g_scene_depth->srv;
-    if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); in.checker_clouds = CloudCheckerNow(); in.old_cloud_density = CloudDensityOldNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
+    if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); in.checker_clouds = CloudCheckerNow(); in.old_cloud_density = CloudDensityOldNow(); in.old_cloud_reach = CloudReachOldNow(); in.old_cloud_bands = CloudBandsOldNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
   }
   static bool said = false;
   if (!said) {
