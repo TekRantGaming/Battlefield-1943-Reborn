@@ -1067,7 +1067,13 @@ void main() {
       float wpx = max(fwidth(u), 1e-4);
       if (t > seen || flat_len < 0.05) continue;
       float col = floor(u);
-      float h1 = h21(vec2(col, fi * 7.0 + 1.0)), h2 = h21(vec2(col, fi * 7.0 + 2.0)), h3 = h21(vec2(col, fi * 7.0 + 3.0));
+      float h1 = h21(vec2(col, fi * 7.0 + 1.0));
+      // Across the column first: the streak is thin, and away from it the rest is not needed (all of it is times this).
+      float half_w = 0.002 * per_m;  // half as thick as at first ("make the world rain itself about 50% thinner")
+      float across = 1.0 - smoothstep(0.0, max(half_w, wpx), abs(fract(u) - 0.5 - (h1 - 0.5) * 0.6));
+      across *= clamp(half_w / wpx, 0.15, 1.0);
+      if (across <= 0.0) continue;
+      float h2 = h21(vec2(col, fi * 7.0 + 2.0)), h3 = h21(vec2(col, fi * 7.0 + 3.0));
       float period = (1.2 + 1.3 * h2) * (1.0 - 0.35 * heavy);
       float v = (y + tsec * (8.0 + 3.0 * h1)) / period + h3 * 10.0;
       float on = step(1.0 - amount * 0.85 - 0.13 * heavy, h21(vec2(col + floor(v) * 13.0, fi + 40.0)));
@@ -1075,9 +1081,6 @@ void main() {
       float f = fract(v);
       float len = 0.3 / period * (1.0 + 0.15 * fi) * (1.0 + 0.45 * heavy);
       float along = smoothstep(0.0, len * 0.2, f) * (1.0 - smoothstep(len * 0.6, len, f));
-      float half_w = 0.002 * per_m;  // half as thick as at first ("make the world rain itself about 50% thinner")
-      float across = 1.0 - smoothstep(0.0, max(half_w, wpx), abs(fract(u) - 0.5 - (h1 - 0.5) * 0.6));
-      across *= clamp(half_w / wpx, 0.15, 1.0);
       // Under cover (a roof, the carrier's island) only where a drop is drawn at all: most of a cylinder's pixels are
       // between its thin streaks, and the shadow map's look up was made for every one of them (the Night Ops
       // performance pass, 20 Nov 2026: the fog and rain pass 0.5 ms at the clear night, 1.85 in the full storm).
