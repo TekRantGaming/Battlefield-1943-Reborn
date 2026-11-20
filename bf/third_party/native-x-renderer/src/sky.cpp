@@ -2823,6 +2823,16 @@ void Sky::Fill(const Inputs& in, SkyConstantBlock& k) {
   }
 }
 
+// D221: the world jumped to a new round (renderer SnapWorld): the lens, what is held and the storm's sway and blurred
+// edges dry at once, and the clouds' frames start again (their blend would show the last round's clouds for a moment).
+void Sky::DryForNewRound(const Inputs& in) {
+  if (in.world_snaps == world_snaps_) return;
+  world_snaps_ = in.world_snaps;
+  lens_wet_ = lens_peak_ = splash_wet_ = splash_peak_ = weapon_wet_ = weapon_peak_ = 0.0f;
+  sway_ = edge_ = 0.0f;
+  history_valid_ = false;
+}
+
 bool Sky::FogWanted(const Inputs& in) {
   return in.fog > 0.001f || in.ground_fog > 0.001f || in.weather > 0.45f || in.debug == 4 || in.debug == 5 || in.debug == 6 ||
          SeaReflection();
@@ -2961,6 +2971,7 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
     failed_ = true;
     return false;
   }
+  DryForNewRound(in);  // D221
   SkyConstantBlock k{};
   Fill(in, k);
   k.bolt[3] = (in.old_rain_order ? 4.0f : 0.0f) + float(in.fog_parts_off);  // BF_FOG_AB, BF_FOG_PARTS (tests)
@@ -3261,6 +3272,7 @@ bool Sky::CloudsOver(IDeviceContext* context, const Inputs& in) {
 
 bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
   if (!in.color || !in.depth_srv || !in.width || !in.height || !Ready()) return false;
+  DryForNewRound(in);  // D221
   const TextureDesc& color = in.color->GetDesc();
   SamplerDesc repeat, clamp, point;
   repeat.MinFilter = repeat.MagFilter = repeat.MipFilter = FILTER_TYPE_LINEAR;

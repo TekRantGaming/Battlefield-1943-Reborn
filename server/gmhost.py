@@ -1061,6 +1061,7 @@ class World:
         self.wind = clamp(args.wind, 0, 1)
         self.cloud_height = clamp(args.cloud_height, 100, 1500)
         self.round, self.progress, self.stage = None, 0.0, -1
+        self.match_file, self.match_read = getattr(args, 'match_file', '') or '', 0.0
         if self.night_ops:
             self.set_night_ops(0.0)
         # Player IDs as the game shows them (eight hex digits, the low half of the XUID).
@@ -1106,6 +1107,23 @@ class World:
         if progress > self.progress + 1e-6:
             self.set_night_ops(progress)
 
+    def read_match(self, every=0.5):
+        """Night Ops: the round and its tickets from the server's match.txt (match_rules.cpp writes it each second it
+        changes), read at most every `every` seconds: on players' asks too, not only the 5 s heartbeat, so a new round's
+        clear night reaches their games within a second of its load (TekRantGaming, 20 Nov 2026: the last round's storm
+        was seen and heard at the next one's start)."""
+        now = time.monotonic()
+        if not self.night_ops or not self.match_file or now - self.match_read < every:
+            return
+        self.match_read = now
+        try:
+            with open(self.match_file, encoding='utf-8') as f:
+                parts = f.read().split()
+            if len(parts) >= 2:
+                self.match(int(parts[0]), float(parts[1]))
+        except (OSError, ValueError):
+            pass
+
     def advance(self):
         now = time.monotonic()
         dt, self.at = now - self.at, now
@@ -1132,6 +1150,7 @@ class World:
             if version != 1 or at > len(data):
                 return
             self.advance()
+            self.read_match()  # Night Ops: a new round's world at once
             admin = self.admin(name, key, addr)
             if flags & 1 and admin and len(data) >= at + 33:
                 day_night = data[at] != 0
@@ -1525,14 +1544,7 @@ async def serve(args):
                                         names=host.player_names()))
                 for m in stats_lines():  # each player's stats since the last beat (player_stats.py)
                     send(m)
-                if args.match_file:  # the round's progress (match_rules.cpp): Night Ops' storm builds with it
-                    try:
-                        with open(args.match_file, encoding='utf-8') as f:
-                            parts = f.read().split()
-                        if len(parts) >= 2:
-                            host.world.match(int(parts[0]), float(parts[1]))
-                    except (OSError, ValueError):
-                        pass
+                host.world.read_match(every=0)  # the round's progress (match_rules.cpp): Night Ops' storm builds with it
                 await writer.drain()
                 await asyncio.sleep(5)
 

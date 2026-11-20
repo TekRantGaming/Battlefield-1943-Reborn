@@ -60,6 +60,33 @@ namespace {
 namespace fs = std::filesystem;
 constexpr int kRate = 48000;
 
+// Between two rounds (TekRantGaming, 20 Nov 2026: after a full storm "the game would end and load the next match ... you
+// could hear the storm. And then once you were in, you could actually see the storm, and then the clouds would begin to
+// retreat"): from a round's end (WeatherRoundOver) or the next level's load (WeatherLevelLoading) until that level is
+// in (WeatherLevelIn) the weather is silent; the steady clock's ticks since then, 0 while a round runs.
+std::atomic<int64_t> g_between_since{0};
+// D221's window: once the next level is in, the match's world is taken at once (not eased) this long, so a host that
+// says the new round's weather a few seconds after the load (it reads the round from its server each second) still
+// shows its first frame clear.
+constexpr double kNewRoundSettle = 20.0;
+// A round's end with no next level after this long (a server that stays on its end of round screen): the weather's
+// sounds again.
+constexpr double kBetweenAtMost = 180.0;
+
+int64_t SteadyTicks() { return std::chrono::steady_clock::now().time_since_epoch().count(); }
+
+#if defined(BF_DEV_TOOLS)
+// BF_DEV_WEATHER_SOUND_LOG=1 (tests, which run with the volume at 0): the weather mixed at full volume (the master,
+// effects and weather volumes taken as 100) but never given to the speakers: logged each second, and recorded to
+// BF_DEV_WEATHER_SOUND_OUT's file at its real level, while the PC stays silent.
+const bool g_test_sound = [] {
+  const char* v = std::getenv("BF_DEV_WEATHER_SOUND_LOG");
+  return v && *v == '1';
+}();
+#else
+constexpr bool g_test_sound = false;
+#endif
+
 // The sounds, by the user's file names.
 enum Sound {
   kRainSoft, kRainMedium, kRainStorm, kWindHurricane, kWindTornado, kThunderDistant,  // loops
@@ -257,7 +284,7 @@ void QuadPan(float bearing, float g[4]) {
 // down and comes back over a second or so.
 void MixInto(float* frame, int n, float game_db) {
   std::lock_guard lock(g_mix.mutex);
-  if (g_mix.volume <= 0.0f && g_mix.volume_target <= 0.0f) return;
+  if (g_mix.volume <= 0.0f && g_mix.volume_target <= 0.0f && !g_test_sound) return;  // (tests: the silence recorded too)
   float add[6][256] = {};   // the rain, the wind and the far rumble
   float shot[6][256] = {};  // the strikes' thunder (turned down less in the game's loud moments)
   n = std::min(n, 256);
@@ -400,7 +427,7 @@ void MixInto(float* frame, int n, float game_db) {
       bed_sum += double(add[c][i] * vv) * (add[c][i] * vv);
       const float x = add[c][i] * v + shot[c][i] * vs;
       add[c][i] = x / (1.0f + 0.15f * std::abs(x));
-      frame[c * 256 + i] += add[c][i];
+      if (!g_test_sound) frame[c * 256 + i] += add[c][i];
     }
   }
   last_duck = duck, last_duck_shot = duck_shot;
@@ -539,13 +566,32 @@ void Run() {
   for (;;) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     const double now = Now();
-    const bool playing = InMatch();
+    // Between two rounds (g_between_since): silent, and the thunder still on its way dropped.
+    bool between = false;
+    if (const int64_t since = g_between_since.load(std::memory_order_relaxed); since != 0) {
+      const double for_s = std::chrono::duration<double>(std::chrono::steady_clock::duration(SteadyTicks() - since)).count();
+      if (!InMatch() || for_s > kBetweenAtMost) {
+        g_between_since.store(0, std::memory_order_relaxed);
+        REXLOG_INFO("BF weather sounds: {} (between two rounds for {:.0f} s): the weather heard again",
+                    InMatch() ? "no next level came" : "the match was left", for_s);
+      } else {
+        between = true;
+      }
+    }
+    static bool was_between = false;
+    if (between && !was_between) {
+      std::lock_guard lock(g_mix.mutex);
+      g_mix.shots.clear();
+    }
+    was_between = between;
+    const bool playing = InMatch() && !between;
     static double told_at = 0.0;
     if (now - told_at > 0.5) told_at = now, TellStormWhere();  // D208
     const native_x_renderer::WorldState w = native_x_renderer::CurrentWorldState();
-    const float volume = float(std::clamp(REXCVAR_GET(bf_master_volume), 0.0, 100.0) / 100.0 *
-                               std::clamp(REXCVAR_GET(bf_effects_volume), 0.0, 100.0) / 100.0 *
-                               std::clamp(REXCVAR_GET(bf_weather_volume), 0.0, 100.0) / 100.0);
+    const float volume = g_test_sound ? 1.0f
+                                      : float(std::clamp(REXCVAR_GET(bf_master_volume), 0.0, 100.0) / 100.0 *
+                                              std::clamp(REXCVAR_GET(bf_effects_volume), 0.0, 100.0) / 100.0 *
+                                              std::clamp(REXCVAR_GET(bf_weather_volume), 0.0, 100.0) / 100.0);
     const bool muted = g_game_audio_muted.load(std::memory_order_relaxed);
     // What each loop is asked for (0 to 1, before the volume). Rain falls from 55% of the weather (sky.cpp) and is
     // full at 95%: soft, medium and storm rain cross-fade along it. The wind follows the world's wind: the hurricane
@@ -658,7 +704,7 @@ void Run() {
     {
       std::lock_guard lock(g_mix.mutex);
       g_mix.volume_target = playing && !muted ? volume : 0.0f;
-      g_mix.master = float(std::clamp(REXCVAR_GET(bf_master_volume), 0.0, 100.0) / 100.0);
+      g_mix.master = g_test_sound ? 1.0f : float(std::clamp(REXCVAR_GET(bf_master_volume), 0.0, 100.0) / 100.0);
       g_mix.shelter_target = covered ? 1.0f : 0.0f;
       for (int l = 0; l < kLoops; ++l) {
         Loop& p = g_mix.loops[l];
@@ -683,6 +729,19 @@ void Run() {
     }
 #if defined(BF_DEV_TOOLS)
     if (now - written_at > 5.0) written_at = now, WriteOut();
+    // BF_DEV_WEATHER_SOUND_LOG=1 (g_test_sound): each second what each loop is asked for and plays now (its gain),
+    // the whole's volume and the thunder on its way: the rain heard or not, without a speaker.
+    static double logged_at = 0.0;
+    if (g_test_sound && now - logged_at >= 1.0) {
+      logged_at = now;
+      std::lock_guard lock(g_mix.mutex);
+      std::string gains;
+      for (int l = 0; l < kLoops; ++l) gains += fmt::format(" {:.2f}/{:.2f}", want[l], g_mix.loops[l].gain);
+      REXLOG_INFO("BF weather sounds (test): {}; the match's weather {:.0f}%, here {:.0f}%; loops asked/playing (rain soft, "
+                  "medium, storm, wind, tornado, rumble):{}; the whole's volume {:.2f}; thunder on its way {}",
+                  between ? "between two rounds, silent" : playing ? "in a round" : "not in a match", w.storm * 100.0f,
+                  w.weather * 100.0f, gains, g_mix.volume, g_mix.shots.size());
+    }
     // Tests: each second the weather was turned down for the game's loudness, by how much at most, where in the
     // recording, and the game's loudness then against its usual.
     {
@@ -699,6 +758,32 @@ void Run() {
 }
 
 }  // namespace
+
+// From the menu driver (auto_join.cpp), on the game's thread, as the game's own menu hears them: a round's end (its
+// WinningTeamIsSet), the next level's load beginning in a match (playerRoleReady; also a server's change of map
+// without a round's end) and that level in (the second gameIsReady). The weather is silent from the first of them
+// until the last; and from the load on, D221: the match's world is taken at once, not eased from the last round's
+// storm, and what its rain left is dried (the round's own weather comes from its host: Night Ops' clear night).
+void WeatherRoundOver() {
+  int64_t none = 0;
+  if (g_between_since.compare_exchange_strong(none, SteadyTicks(), std::memory_order_relaxed))
+    REXLOG_INFO("BF weather sounds: the round is over: silent until the next level is in");
+}
+
+void WeatherLevelLoading() {
+  int64_t none = 0;
+  const bool first = g_between_since.compare_exchange_strong(none, SteadyTicks(), std::memory_order_relaxed);
+  native_x_renderer::SnapWorld(kBetweenAtMost);  // until the level is in (WeatherLevelIn)
+  REXLOG_INFO("BF weather sounds: the next level is loading: {}the match's world taken at once (D221)",
+              first ? "silent until it is in, " : "");
+}
+
+void WeatherLevelIn() {
+  native_x_renderer::SnapWorld(kNewRoundSettle);
+  g_between_since.store(0, std::memory_order_relaxed);
+  REXLOG_INFO("BF weather sounds: the next level is in: the weather heard again; its world taken at once for {:.0f} s (D221)",
+              kNewRoundSettle);
+}
 
 // Started once with the world's sync (world_sync.cpp).
 void StartWeatherAudio() {

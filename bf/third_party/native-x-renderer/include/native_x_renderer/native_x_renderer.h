@@ -427,6 +427,11 @@ struct LightningStrike {
 uint32_t LightningStrikes(double from, double to, float weather, LightningStrike* out, uint32_t max);
 // What is drawn now: the server's (run on to this moment) or the player's own settings.
 WorldState CurrentWorldState();
+// D221: a new round or level is coming in (the game's round end, its next level's load): for `seconds` from now the
+// world is drawn as SetWorldState last set it, at once, not eased over the usual 25 s, so the last round's storm does
+// not clear on screen in the next; and what its rain left (the wet lens and what is held, the storm's sway, the clouds'
+// frames) is dried at once. Each such jump in that time dries them again.
+void SnapWorld(double seconds);
 
 // D163: lamps that move with a model (a jeep's headlights): a draw of the main view with this many indices (one of the
 // model's levels of detail) is that model; its lamps are in its own space (x right, y up, z forward), placed each frame

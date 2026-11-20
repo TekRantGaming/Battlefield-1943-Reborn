@@ -671,6 +671,10 @@ double SkyGameHour() {
 std::mutex g_world_mutex;
 WorldState g_world_set;
 std::chrono::steady_clock::time_point g_world_set_at{};
+// D221: a new round or level (SnapWorld): until this moment (the steady clock's ticks) the world is taken as set, not
+// eased; and a count of the jumps so taken, by which the sky dries what the last round's rain left (Sky::Inputs).
+std::atomic<int64_t> g_world_snap_until{0};
+std::atomic<uint32_t> g_world_snaps{0};
 WorldState World() {
   static const auto start = std::chrono::steady_clock::now();
   static auto last = start;
@@ -734,7 +738,8 @@ WorldState World() {
   // not immediate and jumpy like it currently does"): each of the weather, the cloud cover, the fogs, the wind and the
   // cloud base moves toward its set value with a time constant of 8 s, the shares at most 4% a second (5% the wind,
   // 25 m a second the base): a whole change of the weather takes about 25 s. Taken at once on the first look, when the
-  // world's source changes (joining, leaving) and after five seconds without a look.
+  // world's source changes (joining, leaving) and after five seconds without a look. D221: and while a new round or
+  // level is coming in (SnapWorld): the last round's storm is not eased away on the next one.
   {
     static std::mutex ease_mutex;
     static bool have = false, was_valid = false;
@@ -743,7 +748,17 @@ WorldState World() {
     std::lock_guard lock(ease_mutex);
     const double edt = std::chrono::duration<double>(now - eased_at).count();
     eased_at = now;
-    if (!have || w.valid != was_valid || edt > 5.0) {
+    const bool snap = now.time_since_epoch().count() < g_world_snap_until.load(std::memory_order_relaxed);
+    if (snap && have && w.valid == was_valid &&
+        (std::abs(shown.weather - w.weather) > 0.005f || std::abs(shown.cloud_cover - w.cloud_cover) > 0.005f ||
+         std::abs(shown.fog - w.fog) > 0.005f || std::abs(shown.ground_fog - w.ground_fog) > 0.005f)) {
+      g_world_snaps.fetch_add(1, std::memory_order_relaxed);
+      REXLOG_INFO("[native_x_renderer] world (D221): a new round's taken at once: weather {:.0f}% to {:.0f}%, clouds "
+                  "{:.0f}% to {:.0f}%, fog {:.0f}% to {:.0f}%",
+                  shown.weather * 100.0f, w.weather * 100.0f, shown.cloud_cover * 100.0f, w.cloud_cover * 100.0f,
+                  shown.fog * 100.0f, w.fog * 100.0f);
+    }
+    if (!have || w.valid != was_valid || edt > 5.0 || snap) {
       shown = w, have = true, was_valid = w.valid;
     } else {
       const float k = float(1.0 - std::exp(-std::max(edt, 0.0) / 8.0));
@@ -794,6 +809,7 @@ void StormInputs(const WorldState& world, Sky::Inputs& in) {
   const storm::Storm s = storm::Of(world.storm, world.cloud_seconds, g_map_x.load(std::memory_order_relaxed),
                                    g_map_z.load(std::memory_order_relaxed), g_map_reach.load(std::memory_order_relaxed));
   in.match_weather = world.storm;
+  in.world_snaps = g_world_snaps.load(std::memory_order_relaxed);  // D221
   in.weather_outside = s.outside;
   in.storm_a[0] = s.cx, in.storm_a[1] = s.cz, in.storm_a[2] = s.eye, in.storm_a[3] = s.radius;
   in.storm_b[0] = s.gain, in.storm_b[1] = s.spin, in.storm_b[2] = s.on ? 1.0f : 0.0f;
@@ -5082,6 +5098,12 @@ void NightModels(const NightModelLamps* models, uint32_t count) {
 void SetWorldState(const WorldState& state) {
   std::lock_guard lock(g_world_mutex);
   g_world_set = state, g_world_set_at = std::chrono::steady_clock::now();
+}
+void SnapWorld(double seconds) {
+  const auto until = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                             std::chrono::duration<double>(std::max(seconds, 0.0)));
+  g_world_snap_until.store(until.time_since_epoch().count(), std::memory_order_relaxed);
+  g_world_snaps.fetch_add(1, std::memory_order_relaxed);
 }
 WorldState CurrentWorldState() { return World(); }
 

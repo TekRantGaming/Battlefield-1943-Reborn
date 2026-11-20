@@ -38,6 +38,7 @@ bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss);
 void NightLamps(const NightLamp* lamps, uint32_t count);
 void SetWorldState(const WorldState& state);
 WorldState CurrentWorldState();
+void SnapWorld(double seconds);  // D221
 void NightModels(const NightModelLamps* models, uint32_t count);
 void NightVehicleSeated(bool seated);
 void SetMapArea(float x, float z, float reach);            // D208, D213

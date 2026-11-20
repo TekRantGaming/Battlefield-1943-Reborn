@@ -89,6 +89,7 @@ class Sky {
     // the clouds (storm::kGlsl's a and b). `weather` is the weather where the eye is.
     float weather_outside = 0.0f;
     float match_weather = 0.0f;  // the match's own weather (the hurricane's stage): the lightning
+    uint32_t world_snaps = 0;    // D221: counts the world's jumps to a new round (SnapWorld): each dries the last one's rain
     float storm_a[4] = {}, storm_b[4] = {};
     float fog = 0.0f;           // the distance fog, 0 to 1
     float ground_fog = 0.0f;    // the ground fog, 0 to 1
@@ -192,6 +193,8 @@ class Sky {
   // (the peaks) while what is left of the wetness against it is how strongly they show.
   float lens_peak_ = 0.0f, splash_peak_ = 0.0f;
   float weapon_wet_ = 0.0f, weapon_peak_ = 0.0f;
+  uint32_t world_snaps_ = 0;  // D221: the last Inputs::world_snaps seen (DryForNewRound)
+  void DryForNewRound(const Inputs& in);
  public:
   bool whole_colour_ = false;  // the developer's check 98 (WetCopy)
  private:

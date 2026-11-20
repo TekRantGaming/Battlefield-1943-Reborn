@@ -6828,3 +6828,38 @@ camera's frame in the log (dev_matscan.cpp: the view's rows).
 **Measured:** runs gbones3 to gbones5 (Guadalcanal, turning and walking): every such frame eased; the followed bone moved
 under 1 mm a frame against the camera with or without it, so no difference was measurable there. The gun's choppy
 bounce itself was D203's (its springs at 60 ticks). Kept at the user's word.
+
+## D221 — A new round's weather taken at once, and what the last round's rain left dried (2026-11-20, Claude for Battlefield 1943 Reborn)
+
+**Why:** TekRantGaming, 20 Nov 2026, on Night Ops (the storm builds with the tickets; each round starts as a clear
+night): "towards the end of a game, we have a full on storm, and then the game would end and load the next match. And
+briefly, for the first moments of the new match, especially during the loading, you could hear the storm. And then once
+you were in, you could actually see the storm, and then the clouds would begin to retreat." His log: the storm's line at
+100% at the level's load, then 82%, then 42% about 20 s later. D211's easing (at most 4% a second) took the host's clear
+night as a change to ease toward, from the last round's full storm: 25 s of it on screen in the next round.
+
+**What:**
+- `SnapWorld(seconds)` (native_x_renderer.h): for that long the world is drawn as SetWorldState last set it, at once,
+  not eased; each jump so taken (the weather, cloud cover or fogs) is counted and logged ("world (D221): a new round's
+  taken at once: weather 100% to 0% ..."). Easing within a round is unchanged.
+- The sky (Sky::DryForNewRound): at each such jump, and at each SnapWorld call, the lens's rain and splashes, the wet
+  weapon and hands, the storm's sway and blurred edges go to 0 at once, and the clouds' frames start again (their blend
+  would show the last round's clouds for a moment).
+- The game (bf/src/weather_audio.cpp, from auto_join.cpp's view of the game's menu events): the round's end
+  (WinningTeamIsSet) silences the weather's sounds and drops the thunder on its way; the next level's load in a match
+  (playerRoleReady; also a change of map without a round's end) silences them and calls SnapWorld until the level is in;
+  the level in (the second gameIsReady) brings them back and calls SnapWorld(20 s), so a host that says the new round's
+  weather a few seconds late is still taken at once. The host (server/gmhost.py) reads the round from its server's
+  match.txt on players' asks too (at most twice a second), not only on its 5 s heartbeat.
+
+A first join keeps the existing rule (the first look and a change of the world's source are taken at once), so a
+player joining mid-storm sees the storm at once; a round that ends clear changes nothing.
+
+**Tested** (local Night Ops server on Guadalcanal, its tickets set to 1 so the host went to the full storm, a suicide
+ended the round, the same map next; BF_DEV_WEATHER_SOUND_LOG=1 mixes the weather at full volume into
+BF_DEV_WEATHER_SOUND_OUT's file and not the speakers): runs rsnap1 and rsnap2. The join came mid-storm and showed it at
+once. The round's end silenced the weather within a second; the recording was digital silence for the 25 s of the end of
+round screen and the load (the storm stood at about -20 dB RMS before it). The host's clear night came a second into
+the load and was taken at once ("weather 100% to 0%, clouds 90% to 15%, fog 50% to 0%"); the new round's first frame
+(shot_104 in both) a clear starry night, the rifle dry, no storm line after; only the light breeze heard (-76 dB).
+Run rsnap3, a regular server's round change (its weather unchanged): no jump taken, the next round as before.

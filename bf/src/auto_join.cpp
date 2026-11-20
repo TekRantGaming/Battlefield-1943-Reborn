@@ -67,6 +67,9 @@ void HudGlyphsTick(bool seated);                                 // hud_glyphs.c
 void SharpTextTick();                                            // sharp_text.cpp: Enhancements > HUD scale
 void SquadColorsTick(uint8_t* base);                             // squad_colors.cpp: the squad's icons in green
 void NoteLevelChange();                                          // modern_mode.cpp: scan the new level's values
+void WeatherRoundOver();     // weather_audio.cpp: between two rounds the weather is silent, and a new round's
+void WeatherLevelLoading();  // world is taken at once (D221)
+void WeatherLevelIn();
 #if defined(BF_DEV_TOOLS)
 extern std::atomic<float> g_dev_camera[3];                       // look.cpp: the local camera's position
 extern std::atomic<float> g_dev_view_pos[3];                     // dev_matscan.cpp: the rendered camera's
@@ -801,6 +804,14 @@ REX_HOOK_RAW(sub_8243BB70) {
     if (name == "presenceConnected") bf1943::g.seen_presence = true;
     if (name == "queryBegin") bf1943::g.seen_query = true;
     if (name == "onStartLoading") bf1943::g.seen_loading = true;
+    // Between two rounds (weather_audio.cpp): the round's end (the game's WinningTeamIsSet, the end of round screen's
+    // winner) and, in a match, the next level's load (playerRoleReady, as on a join's load: runs endnames10, sb_round3,
+    // m0472b, the last a change of map with no round's end).
+    if (bf1943::g.stage == bf1943::Stage::kInGame && bf1943::g.seen_ready) {
+      if (name == "WinningTeamIsSet") bf1943::WeatherRoundOver();
+      if (name == "playerRoleReady" && std::chrono::steady_clock::now() - bf1943::g.ready_at > std::chrono::seconds(10))
+        bf1943::WeatherLevelLoading();
+    }
     if (name == "gameIsReady" && bf1943::g.seen_loading) {
       const auto now = std::chrono::steady_clock::now();
       bf1943::g_names_team = 0;  // the level's HUD made its team names again (TeamNamesTick)
@@ -819,6 +830,7 @@ REX_HOOK_RAW(sub_8243BB70) {
         bf1943::g.spawning = false;
         bf1943::g.entered = false;
         bf1943::NoteLevelChange();
+        bf1943::WeatherLevelIn();
         REXLOG_INFO("BF menu driver: the server changed the level");
       }
     }

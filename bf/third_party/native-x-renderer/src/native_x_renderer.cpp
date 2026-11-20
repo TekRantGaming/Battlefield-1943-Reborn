@@ -153,6 +153,7 @@ bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss) {
 void NightLamps(const NightLamp* lamps, uint32_t count) { renderer::NightLamps(lamps, count); }
 void SetWorldState(const WorldState& state) { renderer::SetWorldState(state); }
 WorldState CurrentWorldState() { return renderer::CurrentWorldState(); }
+void SnapWorld(double seconds) { renderer::SnapWorld(seconds); }
 void NightModels(const NightModelLamps* models, uint32_t count) { renderer::NightModels(models, count); }
 void NightVehicleSeated(bool seated) { renderer::NightVehicleSeated(seated); }
 void SetMapArea(float x, float z, float reach) { renderer::SetMapArea(x, z, reach); }
