@@ -178,9 +178,9 @@ LampPart Lamp(float x, float y, float z, float range, float strength, float glow
   return l;
 }
 LampPart Beam(float x, float y, float z, float dx, float dy, float dz, float range, float inner, float outer,
-              float strength, float glow, float spin) {
+              float strength, float glow, float spin, const float* c) {
   LampPart l{x, y, z, dx, dy, dz, range, inner, outer, strength, glow};
-  l.r = 1.0f, l.g = 0.92f, l.b = 0.78f, l.spin = spin;
+  l.r = c[0], l.g = c[1], l.b = c[2], l.spin = spin;
   return l;
 }
 // A work lamp hanging under a roof, shining down (a sodium lamp, as the street lamps: D177).
@@ -208,13 +208,18 @@ const std::vector<LampModel>& Models() {
       // little, its reach kept inside the walls.
       {"objects/architecture/houseeffects/houseeffects_fire_t01/houseeffects_fire_t01", {Lamp(0.0f, 1.2f, 0.0f, 5.5f, 2.4f, 0.0f, kLantern, 0.4f)}},
       {"objects/architecture/houseeffects/houseeffects_fire_t01/houseeffect_fire_t02_small", {Lamp(0.0f, 0.8f, 0.0f, 4.5f, 1.6f, 0.0f, kLantern, 0.4f)}},
-      // Iwo Jima's lighthouse: its lens (part_2_LighthouseLens, 17.58 to 19.16 m) turns two beams across the sea and
-      // the shore, and lights its own lantern room.
-      // The beams dip a quarter (they reach the sea and the shore 70 to 160 m out, run nlight2: level ones lit nothing);
-      // the lantern's own glow, not the beams' (theirs was a white disc).
+      // Iwo Jima's lighthouse: its lens (part_2_LighthouseLens, 17.58 to 19.16 m) turns a beam across the sea and the
+      // shore, and lights its own lantern room.
+      // The beam dips a quarter (it reaches the sea and the shore 70 to 160 m out, run nlight2: level ones lit nothing);
+      // the lantern's own glow, not the beam's (its was a white disc).
+      // TekRantGaming, 20 Nov 2026: "far too bright ... casting two simultaneous lights which shoot off in either
+      // direction ... could become annoying for players ... reduce this to just one beam ... reduce the rotation speed
+      // significantly ... the colour ... a modern day white LED, whereas the rest of the light sources in the game offer
+      // a much more amber tone that fits the time period": one beam (was two, opposite), strength 8 (was 30), a turn
+      // in 42 s (0.15 radians a second, was 0.55: 11.4 s), the lanterns' amber (was 1, 0.92, 0.78). Its shaft in the
+      // air (NativeXRenderer D195) takes the same colour and strength.
       {"objects/architecture/beach/lighthouse_t01/lighthouse_t01",
-       {Beam(0.0f, 18.37f, 0.0f, 1.0f, -0.25f, 0.0f, 260.0f, 3.0f, 8.0f, 30.0f, 0.0f, 0.55f),
-        Beam(0.0f, 18.37f, 0.0f, -1.0f, -0.25f, 0.0f, 260.0f, 3.0f, 8.0f, 30.0f, 0.0f, 0.55f),
+       {Beam(0.0f, 18.37f, 0.0f, 1.0f, -0.25f, 0.0f, 260.0f, 3.0f, 8.0f, 8.0f, 0.0f, 0.15f, kLantern),
         Lamp(0.0f, 18.4f, 0.0f, 7.0f, 2.5f, 0.45f, kLantern)}},
       // The airfield's control tower: a dim lamp in its glass cab (14.25 to 15.69 m) and a red light on its roof (16.05 m).
       {"objects/architecture/beach/airtower_t01/airtower_t01",

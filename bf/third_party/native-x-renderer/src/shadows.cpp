@@ -15,9 +15,10 @@
 #include "draw.h"
 
 // The user, 18 Nov 2026: "Is there a way we can also drastically improve shadow and lighting quality?"
-REXCVAR_DEFINE_STRING(native_x_renderer_soft_shadows, "soft", "NativeXRenderer",
+REXCVAR_DEFINE_STRING(native_x_renderer_soft_shadows, "off", "NativeXRenderer",
                       "The sun's shadows (D197): off (the game's own edge, one texel of its shadow map wide), soft (a "
-                      "penumbra that widens with the distance to what casts it) or softer; taken at once");
+                      "penumbra that widens with the distance to what casts it) or softer; taken at once. Off by default "
+                      "(TekRantGaming, 20 Nov 2026)");
 
 namespace native_x_renderer {
 

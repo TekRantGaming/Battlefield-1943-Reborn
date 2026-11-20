@@ -323,6 +323,27 @@
     if (!native_x_renderer::NisSupport(&runs, &gpu)) return;
     nis_noted_ = true;
     const std::string value = runs ? "1" : "0";
+    // The default spatial upscaler (TekRantGaming, 20 Nov 2026: FSR 1 by default, "if we detect that they have a
+    // compatible GPU, we then make it NVIDIA NIS"): while the player has not picked one (upscaler_auto) and the
+    // upscaler is still the default AMD FSR 1, an NVIDIA card that runs NIS (this start's check, D158: its shaders and
+    // pipelines made on this GPU) gets NVIDIA NIS, from the next start (the renderer reads it when it starts). Any
+    // other GPU keeps AMD FSR 1, which runs everywhere.
+    if (settings_.Get("upscaler_auto", "") == "1") {
+      std::string lower = gpu;
+      for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+      const bool nvidia = lower.find("nvidia") != std::string::npos;
+      settings_.values.erase("upscaler_auto");
+      if (runs && nvidia && settings_.Get("cvar.native_x_renderer_scaling", "") == "fsr") {
+        settings_.values["nis_support"] = value, settings_.values["nis_support_gpu"] = gpu;
+        SetCvar("native_x_renderer_scaling", "nis");  // saves
+        REXLOG_INFO("BF upscaler: {} is an NVIDIA card that runs NVIDIA NIS: the default upscaler is NVIDIA NIS from the "
+                    "next start", gpu);
+      } else {
+        settings_.Save();
+        REXLOG_INFO("BF upscaler: {}: the default upscaler stays AMD FSR 1 ({})", gpu,
+                    !nvidia ? "not an NVIDIA card" : !runs ? "NVIDIA NIS does not run on it" : "another upscaler is chosen");
+      }
+    }
     if (settings_.Get("nis_support", "") == value && settings_.Get("nis_support_gpu", "") == gpu) return;
     settings_.values["nis_support"] = value;
     settings_.values["nis_support_gpu"] = gpu;

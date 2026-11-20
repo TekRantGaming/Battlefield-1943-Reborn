@@ -4043,6 +4043,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                                 "Off draws the game at your display's resolution. Applies at the next start.",
                             "native_x_renderer_scaling", choices);
       if (Cvar("native_x_renderer_scaling") == "nis" && !nis_offered) r.index = 1;  // runs as FSR 1 here
+      // The player's own pick: no automatic NVIDIA NIS after it (upscaler_auto, NoteNisSupport).
+      r.choose = [this, pick = r.choose](int i) {
+        settings_.values.erase("upscaler_auto");
+        pick(i);
+      };
       if (temporal) r.disabled = true, r.note = "The upscaler above does this.";
       rows.push_back(r);
     }
@@ -6374,6 +6379,26 @@ void NewInstallDefaults(Settings& settings) {
     REXLOG_INFO("BF settings: no render resolution since v0.2.1 (it was {}){}", scale.empty() ? "Auto" : scale,
                 to_fsr ? ": 720p with the upscaler Off is AMD FSR 1 at Performance now" : "");
   }
+  // 0.4.8 (TekRantGaming, 20 Nov 2026: "I need the following enhancements to be turned off by default for all players
+  // ... soft shadows and reflections"; FSR 1 and NVIDIA NIS "set to quality, by default, for all players ... the
+  // default should be FSR1. And if we detect that they have a compatible GPU, we then make it NVIDIA NIS"): once, for
+  // every settings file from before, Soft shadows and Reflections go back to their default (Off) and the spatial
+  // upscaler is AMD FSR 1 at Quality (NVIDIA NIS kept where it was chosen), with upscaler_auto 1 so the first answer
+  // of this GPU (NoteNisSupport) makes it NVIDIA NIS on an NVIDIA card that runs it. The player's own choices after
+  // this stay.
+  if (settings.Get("install_defaults", "") == "5") {
+    const std::string was = settings.Get("cvar.native_x_renderer_scaling", "bilinear") + " at " +
+                             settings.Get("cvar.bf_upscaler_mode", "quality");
+    settings.values.erase("cvar.native_x_renderer_soft_shadows");
+    settings.values.erase("cvar.native_x_renderer_reflections");
+    if (settings.Get("cvar.native_x_renderer_scaling", "") != "nis") settings.values["cvar.native_x_renderer_scaling"] = "fsr";
+    settings.values["cvar.bf_upscaler_mode"] = "quality";
+    settings.values["upscaler_auto"] = "1";
+    settings.values["install_defaults"] = "6";
+    settings.Save();
+    REXLOG_INFO("BF settings: v0.4.8's defaults: Soft shadows and Reflections Off, the spatial upscaler at Quality "
+                "(it was {}; NVIDIA NIS where this GPU is an NVIDIA card that runs it)", was);
+  }
   if (REXCVAR_GET(server) || !settings.Get("launcher_setup", "").empty() || !settings.Get("install_defaults", "").empty())
     return;
   const std::string start = rex::cvar::GetFlagByName("window_start");
@@ -6393,15 +6418,16 @@ void NewInstallDefaults(Settings& settings) {
       {"cvar.native_ao_mode", "1"}, {"cvar.native_ao_strength", "3"}, {"cvar.native_ao_samples", "3"},
       {"cvar.native_gi_mode", "1"}, {"cvar.native_gi_quality", "3"}, {"cvar.native_gi_distance", "2"},
       {"cvar.native_grass", "true"}, {"cvar.native_grass_radius", "1440.000000"},
-      // Upscaler AMD FSR 1 at Quality, King Kong's default (TekRantGaming, 11 Nov 2026, v0.2.1). Only new installs: a settings
-      // file from before has no upscaler, so its picture stays as it was (King Kong's settings version 2 did the same).
+      // Upscaler AMD FSR 1 at Quality, King Kong's default (TekRantGaming, 11 Nov 2026, v0.2.1); NVIDIA NIS from the first
+      // answer of an NVIDIA GPU that runs it (upscaler_auto, NoteNisSupport; 20 Nov 2026).
       {"cvar.native_x_renderer_scaling", "fsr"}, {"cvar.bf_upscaler_mode", "quality"},
       // Controls: camera response Modern. Gameplay: performance metrics off (the setting's own default).
       {"cvar.bf_camera_modern", "true"}, {"cvar.bf_performance_metrics", "off"}};
   for (const auto& [key, value] : kDefaults) settings.values[key] = value;
   settings.values["fullscreen_mode"] = "desktop";  // Borderless (a test window stays a window)
   if (!test_window) settings.values["fullscreen"] = "on";
-  settings.values["install_defaults"] = "5";  // 0.2.1's: no render resolution to move (above)
+  settings.values["install_defaults"] = "6";  // 0.4.8's: nothing to move (above)
+  settings.values["upscaler_auto"] = "1";     // NVIDIA NIS on a GPU that runs it (NoteNisSupport)
   settings.values["gi_full_capped"] = "1";    // a new install never had the menus' Full (above)
   std::error_code ec;
   fs::create_directories(settings.path.parent_path(), ec);

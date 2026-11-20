@@ -138,7 +138,7 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_cloud_shadows, true, "NativeXRenderer",
                     "The clouds cast their shadows on the ground by day (D214)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_lightning, true, "NativeXRenderer",
                     "Lightning: a storm's flashes in the clouds, on the fog and on the ground");
-REXCVAR_DEFINE_BOOL(native_x_renderer_reflections, true, "NativeXRenderer",
+REXCVAR_DEFINE_BOOL(native_x_renderer_reflections, false, "NativeXRenderer",
                     "Reflections of the renderer's own on the sea (screen space; the game's day sky cube map left out "
                     "of its shaders, D190)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_glass_reflections, false, "NativeXRenderer",
