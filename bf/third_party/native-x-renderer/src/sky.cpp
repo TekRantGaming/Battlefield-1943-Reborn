@@ -481,10 +481,15 @@ float cloud_density(vec3 p, vec3 cam, bool cheap) {
   // the cloud is 0 wherever that is under the cover's threshold, while the storm does not fill the deck in (under 0.3
   // its fill below is exactly nothing): then the shape's look up and the rest are passed over (the Night Ops
   // performance pass, 20 Nov 2026: the clear night's thin cloud made the march the sky's most). gale.y 1: the old way.
-  float dome = smoothstep(0.0, 0.05, h) * sqrt(max(1.0 - pow(h, 1.7), 0.0)) * mix(1.0, 0.8, smoothstep(0.55, 1.0, h));
-  float shape_most = h >= 0.0 && h <= 1.0 ? mix(height_gradient(h, local_type), dome, lay) : 0.0;
-  bool can_show = shape_most > 1.0 - cover || storm > 0.3 || gale.y > 0.5;
-  if (h >= 0.0 && h <= 1.0 && can_show) {
+  // (The profile only inside the layer, as before: worked out for every sample it cost more than the look up saved.)
+  float dome = 0.0, shape_most = 0.0;
+  bool can_show = false;
+  if (h >= 0.0 && h <= 1.0) {
+    dome = smoothstep(0.0, 0.05, h) * sqrt(max(1.0 - pow(h, 1.7), 0.0)) * mix(1.0, 0.8, smoothstep(0.55, 1.0, h));
+    shape_most = mix(height_gradient(h, local_type), dome, lay);
+    can_show = shape_most > 1.0 - cover || storm > 0.3 || gale.y > 0.5;
+  }
+  if (can_show) {
     vec3 sp = vec3(wp.x, p.y + evolve * 40.0, wp.y) / shape_scale;
     vec4 s = textureLod(shapeTex, sp + vec3(0.0, 0.0, evolve * 0.002), 0.0);
     float wfbm = s.g * 0.625 + s.b * 0.25 + s.a * 0.125;
@@ -955,16 +960,11 @@ void main() {
       for (int i = 0; i < n; ++i) {
         float h = eh + rd.y * t;
         vec2 xz = eye.xz + rd.xz * t + wind;
+        float patches = smoothstep(0.32, 0.68, texture(weatherTex, xz / 900.0).r);
+        patches = mix(patches, 0.55 + 0.45 * patches, gale.x);
         float up = exp(-max(h, 0.0) / (top * 0.3)) * (1.0 - smoothstep(top * 0.6, top, h));
-        // The patches' look up only within the layer (over its top `up` is 0 and the step adds nothing; a ray going up
-        // leaves it in a few steps), its texture's level from the same gradients the look up everywhere had.
-        vec2 pq = xz / 900.0, pdx = dFdx(pq), pdy = dFdy(pq);
-        if (up > 0.0 || (fog_off & 4) != 0) {
-          float patches = smoothstep(0.32, 0.68, textureGrad(weatherTex, pq, pdx, pdy).r);
-          patches = mix(patches, 0.55 + 0.45 * patches, gale.x);
-          // Thinner right at the eye, so that what is held in the hand stays clear.
-          tau_low += fog_a.z * patches * up * dt * smoothstep(0.0, 6.0, t);
-        }
+        // Thinner right at the eye, so that what is held in the hand stays clear.
+        tau_low += fog_a.z * patches * up * dt * smoothstep(0.0, 6.0, t);
         t += dt;
       }
     }
@@ -992,15 +992,11 @@ void main() {
         float a = eye_h + rd.y * t;
         vec2 wp = eye.xz + rd.xz * t + drift.xy - along * (base - a) * (0.1 + rain.x);
         float cell = smoothstep(edge, edge + 0.1, texture(weatherTex, wp / 40000.0).r);
+        float streak = 0.5 + 0.5 * texture(weatherTex, wp / 1700.0).r;
         float under = 1.0 - smoothstep(base - 350.0, base + 150.0, a);
-        // The streaks' look up only where there is a shaft to streak (a cell and under the cloud): elsewhere the step
-        // adds nothing (the Night Ops performance pass, 20 Nov 2026: the shafts were a third of the fog pass in a full
-        // storm). Its texture's level as the look up made everywhere chose it: the same gradients, taken here.
-        vec2 sq = wp / 1700.0, sdx = dFdx(sq), sdy = dFdy(sq);
-        if (cell * under > 0.0 || (fog_off & 4) != 0) {
-          float streak = 0.5 + 0.5 * textureGrad(weatherTex, sq, sdx, sdy).r;
-          tau_rain += 0.0007 * fog_b.y * cell * streak * under * dt * smoothstep(t_start, t_start + 700.0, t);
-        }
+        // (Its streaks' look up skipped where the step adds nothing cost more than it saved: the gradients it then needs
+        // at every step, for the same texture level. Measured on four maps, 20 Nov 2026.)
+        tau_rain += 0.0007 * fog_b.y * cell * streak * under * dt * smoothstep(t_start, t_start + 700.0, t);
         t += dt;
       }
     }
@@ -1104,11 +1100,12 @@ void main() {
     rain_light = streak * streaks * (0.45 + 0.45 * heavy);
     // (Not what faces down, a roof's or a porch's underside: 30 cm over a thin roof's underside is out in the rain
     // above it, and rings, splashes and the wet showed on the inside of the roofs: the user, 17 Nov 2026.)
-    float open_all = (int(bolt.w + 0.5) & 4) != 0 ? 1.0 - Covered(P + vec3(0.0, 0.3, 0.0)) : 0.0;  // BF_FOG_AB's old way
+    // BF_FOG_AB's old way: looked up for every pixel, as it was.
+    bool old_way = (int(bolt.w + 0.5) & 4) != 0;
+    float open_all = old_way ? (facing.y < -0.5 ? 0.0 : 1.0 - Covered(P + vec3(0.0, 0.3, 0.0))) : 0.0;
     if (!nothing && seen > 1.2) {
       // (Only here is it used: the sky's pixels, and those right at the eye, look nothing up.)
-      float open = facing.y < -0.5 ? 0.0 : 1.0 - Covered(P + vec3(0.0, 0.3, 0.0));
-      if (open_all > 2.0) open = 0.0;  // (never: it only keeps the old way's look up in the comparison's build)
+      float open = old_way ? open_all : (facing.y < -0.5 ? 0.0 : 1.0 - Covered(P + vec3(0.0, 0.3, 0.0)));
       wet = 1.0 - 0.12 * amount * open;
       if (seen < 45.0 && facing.y > 0.96 && open > 0.5 && P.y < eye_world.y - 0.05) {
         vec4 drop = Drop(P.xz, amount, tsec);

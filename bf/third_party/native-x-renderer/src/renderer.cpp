@@ -477,6 +477,17 @@ bool SkyLoaded() {
 bool SkyOn() { return REXCVAR_GET(native_x_renderer_sky) && SkyLoaded(); }
 // The clouds' march passes over the rays the scene hides (sky.cpp's kCloudPS). BF_CLOUD_AB=1 (tests): on and off by
 // turns, 600 frames each (a stats line's span), so both ways are timed in one run.
+bool AbEveryFrame() {
+  static const bool on = [] {
+    const char* v = std::getenv("BF_AB_EVERY_FRAME");
+    return v && *v == '1';
+  }();
+  return on;
+}
+uint64_t AbPhase() {
+  if (!g_device) return 0;
+  return AbEveryFrame() ? g_device->frames_presented() % 2 : (g_device->frames_presented() / 600) % 2;
+}
 // native_x_renderer_cloud_checkerboard: half the cloud texels marched each frame (about half the march's GPU time; in
 // motion the clouds a little softer for a frame or two). BF_CLOUD_CB_AB=1 (tests): on and off by turns, 600 frames each.
 bool CloudCheckerNow() {
@@ -484,7 +495,7 @@ bool CloudCheckerNow() {
     const char* v = std::getenv("BF_CLOUD_CB_AB");
     return v && *v == '1';
   }();
-  if (ab) return g_device && (g_device->frames_presented() / 600) % 2 == 0;
+  if (ab) return g_device && AbPhase() == 0;
   return REXCVAR_GET(native_x_renderer_cloud_checkerboard);
 }
 // BF_CLOUD_DENSITY_AB=1 (tests): the clouds' shape looked up for every sample (the old way) and only where it may
@@ -494,14 +505,14 @@ bool CloudDensityOldNow() {
     const char* v = std::getenv("BF_CLOUD_DENSITY_AB");
     return v && *v == '1';
   }();
-  return ab && g_device && (g_device->frames_presented() / 600) % 2 == 1;
+  return ab && g_device && AbPhase() == 1;
 }
 bool CloudSkipNow() {
   static const bool ab = [] {
     const char* v = std::getenv("BF_CLOUD_AB");
     return v && *v == '1';
   }();
-  return !ab || !g_device || (g_device->frames_presented() / 600) % 2 == 0;
+  return !ab || !g_device || AbPhase() == 0;
 }
 // The fog (sky.h's Fog), with either sky: whether the world now has any (ExecuteDraw keeps it), the camera and the
 // settings of this frame's view kept from the end of its opaque draws, and the game's sky dome seen being drawn
@@ -961,6 +972,11 @@ class FrameTimer {
   uint32_t frames_ = 0, late_ = 0;
 } g_timer;
 
+// The A/B test switches' phase (0 or 1): by turns of 600 frames, or with BF_AB_EVERY_FRAME=1 every other frame, so
+// that both ways meet the same view, the same moment of the storm and the same load (600 frame windows lined up with
+// the camera tour's spots and put the two ways in different places: run perf_fair_*, 20 Nov 2026). The GPU sections
+// then keep each phase's time apart.
+
 // The GPU time of the renderer's own passes, each by name (native_x_renderer_gpu_sections, off by default: a few
 // duration queries a frame): a ring of 4 queries a section, read when a query comes round again (4 uses on), so
 // nothing waits for the GPU. (16 a section, with the sky's and the AO's parts, took the Vulkan pool's 256 duration
@@ -992,10 +1008,14 @@ class SectionTimers {
     if (!sec.on || sec.active) return;
     if (sec.pending[sec.index]) {
       QueryDataDuration data;
-      if (sec.queries[sec.index]->GetData(&data, sizeof(data), true) && data.Frequency)
+      if (sec.queries[sec.index]->GetData(&data, sizeof(data), true) && data.Frequency) {
+        const int ph = sec.phase[sec.index];
         sec.total_ms += double(data.Duration) * 1000.0 / double(data.Frequency), ++sec.uses;
+        sec.phase_ms[ph] += double(data.Duration) * 1000.0 / double(data.Frequency), ++sec.phase_uses[ph];
+      }
       sec.pending[sec.index] = false;
     }
+    sec.phase[sec.index] = int(AbPhase() & 1);
     context->BeginQuery(sec.queries[sec.index]);
     sec.active = true;
   }
@@ -1015,7 +1035,12 @@ class SectionTimers {
       if (!sec.uses) continue;
       out += fmt::format("{}{} {:.3f} ({})", out.empty() ? "" : ", ", kNames[i],
                          frames ? sec.total_ms / double(frames) : 0.0, sec.uses);
+      // With BF_AB_EVERY_FRAME: each phase's milliseconds a use (A: phase 0, B: phase 1).
+      if (AbEveryFrame())
+        out += fmt::format(" [A {:.3f} B {:.3f}]", sec.phase_uses[0] ? sec.phase_ms[0] / double(sec.phase_uses[0]) : 0.0,
+                           sec.phase_uses[1] ? sec.phase_ms[1] / double(sec.phase_uses[1]) : 0.0);
       sec.total_ms = 0.0, sec.uses = 0;
+      sec.phase_ms[0] = sec.phase_ms[1] = 0.0, sec.phase_uses[0] = sec.phase_uses[1] = 0;
     }
     return out;
   }
@@ -1029,6 +1054,9 @@ class SectionTimers {
     bool tried = false, on = false, active = false;
     double total_ms = 0.0;
     uint64_t uses = 0;
+    int phase[kQueries] = {};  // each query's A/B phase (AbPhase)
+    double phase_ms[2] = {};
+    uint64_t phase_uses[2] = {};
   };
   Section sections_[kCount];
 } g_sections;
@@ -1789,19 +1817,19 @@ void ExecuteDraw(const Command& c) {
         const char* v = std::getenv("BF_NIGHT_AB");
         return v && *v == '1';
       }();
-      if (night_ab) night.seen_pass = (g_device->frames_presented() / 600) % 2 == 0;
+      if (night_ab) night.seen_pass = AbPhase() == 0;
       // BF_NIGHT_FX_AB=1 (tests): the effects' lights' compute search and the old pixel pass by turns, 600 frames each.
       static const bool fx_ab = [] {
         const char* v = std::getenv("BF_NIGHT_FX_AB");
         return v && *v == '1';
       }();
-      if (fx_ab) night.compute_lights = (g_device->frames_presented() / 600) % 2 == 0;
+      if (fx_ab) night.compute_lights = AbPhase() == 0;
       // BF_NIGHT_TILES_AB=1 (tests): the lights' screen tiles and all lights for every pixel by turns, 600 frames each.
       static const bool tiles_ab = [] {
         const char* v = std::getenv("BF_NIGHT_TILES_AB");
         return v && *v == '1';
       }();
-      if (tiles_ab) night.tiles = (g_device->frames_presented() / 600) % 2 == 0;
+      if (tiles_ab) night.tiles = AbPhase() == 0;
       // D177: the cycle's midnight draws the scene about a twelfth as bright as the game's day.
       night.scene_gain = 1.0f + 11.0f * g_cycle_dark.load(std::memory_order_relaxed);
       NightFrame f;
@@ -2867,7 +2895,7 @@ void ApplyFog() {
       const char* v = std::getenv("BF_FOG_AB");
       return v && *v == '1';
     }();
-    g_fog_in.old_rain_order = fog_ab && (g_device->frames_presented() / 600) % 2 == 1;
+    g_fog_in.old_rain_order = fog_ab && AbPhase() == 1;
     // BF_FOG_PARTS=1 (tests): by turns of 600 frames, all of the fog pass, then without its ground fog, its rain
     // shafts, the rain here (streaks, rings, splashes), the sea's reflection: what each costs.
     static const bool fog_parts = [] {

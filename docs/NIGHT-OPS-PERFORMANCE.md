@@ -148,35 +148,42 @@ The fog and rain pass at the full storm by part (`BF_FOG_PARTS`, Wake, touring, 
 with all of it): the rain shafts 0.64 ms, the rain here (streaks, rings, splashes) 0.38, the ground fog 0.26, the
 sea's reflection 0.20.
 
-### 5. The fog and rain pass: look ups only where they count
+### 5. The fog and rain pass, and the clouds' density: look ups only where they count (confirmed, small)
 
-- **The rain's cover:** each of the six rain cylinders looked up the game's shadow map (`Covered`: under a roof?) for
-  every pixel, before finding whether a streak is drawn there at all; most of a cylinder's pixels are between its thin
-  streaks. Now the streak first, the look up only where one is drawn. And the wet surfaces' cover look up only where
-  it is used (not the sky's pixels). The same arithmetic in the same order. Measured (`BF_FOG_AB`, run perf_fogZ_ab):
-  1.81 ms against 1.87.
-- **The rain shafts:** each of their 20 steps a pixel read the streak texture even where the step adds nothing (no
-  rain cell there, or above the cloud base); now only where it adds.
-- **The ground fog:** each of its 16 steps read the patches' texture above the layer's top too, where the step adds
-  nothing; now only within the layer.
-- Both read with `textureGrad` and the gradients the old reads had, so the texture's level is the same.
-- **The rain's streaks:** each cylinder worked out a drop's four hashes before knowing whether the pixel is across a
-  streak at all; now across first, the rest only there.
+- **The rain's cover:** each of the six rain cylinders looked up the game's shadow map (`Covered`: under a roof?)
+  for every pixel before finding whether a streak is drawn there at all; now the streak first (across the column
+  first, before the rest of a drop's hashes), the look up only where one is drawn. The wet surfaces' cover look up
+  only where it is used (not the sky's pixels).
 - **The rain on the lens:** its beads only outside the clear middle, its runners only outside the sights (both are
   multiplied by those masks).
-- **Same picture:** `BF_FOG_CHECK` draws the fog pass both ways from the same picture: 231 frames on Wake and 225 on
-  Guadalcanal (with the streaks' change), rain at 0, 0.5 and 1, 0 pixels differed (runs perf_fogcheck2, perf_fogcheck3).
-- **Measured** (`BF_FOG_AB`, Coral Sea, full storm, touring 40 spots, run perf_fogAB2): the fog and rain pass 1.86 ms
-  against 1.99 (the old side already had the streaks' change). The shafts' cost is mostly their cloud cells' own read
-  and arithmetic at every step, which no exact change takes away.
+- **The clouds' density:** inside the layer the fine shape texture only where the height profile lets the cloud
+  show (exactly 0 elsewhere while the storm under 0.3 does not fill the deck in).
+- **Same picture:** `BF_FOG_CHECK` drew the fog pass both ways from the same picture in 456 frames (Wake, Guadalcanal;
+  rain at 0, 0.5 and 1): 0 pixels differed. `BF_CLOUD_CHECK` ran the march both ways in 410 frames on Iwo Jima from
+  15% to 91% cover: 0 texels differed.
+- **Measured fairly** (`BF_AB_EVERY_FRAME`: the old way and the new by turns every frame, each pass's time kept
+  apart by phase, so both meet the same view and the same moment of the storm; Iwo Jima, the storm built over 5
+  minutes, touring 40 spots, run perf_everyframe1), ms a frame:
 
-### 6. The clouds' shape only where it can show (confirmed exact, small)
+  | Stage | Fog and rain new | old | Clouds' march new | old |
+  |---|---|---|---|---|
+  | clear night | 0.518 | 0.521 | 2.468 | 2.524 |
+  | clouds gather | 0.460 | 0.459 | 2.018 | 2.052 |
+  | storm rolls in | 0.736 | 0.735 | 1.011 | 1.016 |
+  | full storm | 1.687 | 1.768 | 0.983 | 0.985 |
 
-Inside the layer each sample read the fine shape texture. The shape there can be no more than its height profile,
-and where that is under the cover's threshold the cloud is exactly 0 (while the storm under 0.3 does not fill the deck
-in). Now the read and the rest are passed over there. `BF_CLOUD_CHECK` ran the march both ways in 410 frames on Iwo
-Jima from 15% to 91% cover: 0 texels differed. Measured (`BF_CLOUD_DENSITY_AB`, run perf_densityAB1): 2.40 ms against
-2.46 at the clear night, the same in the storm: the shape read is a small part of a sample.
+- **Two changes taken back:** skipping the rain shafts' streak read and the ground fog's patches read where a step
+  adds nothing needed `textureGrad` with the gradients (`dFdx`, `dFdy`) at every step to keep the same texture level,
+  and that cost more than the reads saved; and working out the clouds' height profile for every sample (not only
+  inside the layer) cost more than the shape read saved. The first in-run A/Bs (by 600 frame windows) showed gains
+  because their "old" side carried the same extra work, and the windows lined up with the camera tour's spots; the
+  before and after suite (suite_a against suite_b, the same tour seeds) showed the fog pass 0.25 to 0.45 ms slower in
+  the storm stages on three maps. Both taken back; the table above is after that.
+
+The fog and rain pass at the full storm by part (`BF_FOG_PARTS`, Wake, touring, run perf_fogparts1; 1.92 ms with all
+of it): the rain shafts 0.64 ms, the rain here (streaks, rings, splashes) 0.38, the ground fog 0.26, the sea's
+reflection 0.20. The shafts' cost is their weather cells' own read and arithmetic at each of 20 steps; no exact
+change takes it away.
 
 ## Looked at, not changed
 
