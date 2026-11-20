@@ -2447,13 +2447,16 @@
     const float x0 = st.P(40, 0).x, x1 = st.P(1240, 0).x;
     float y = st.P(0, 176).y;
     int toggled = -1;
-    // The columns' words over the ping and the score.
+    // The columns' words over the score and the ping; the ping furthest right (TekRantGaming, 20 Nov 2026), the score
+    // before it.
+    const bool show_ping = REXCVAR_GET(bf_scoreboard_ping);
+    const float score_right = show_ping ? x1 - st(24) - ping::CellWidth(st(20)) - st(40) : x1 - st(24);
     if (n) {
-      const float pc = x1 - st(110) - ping::CellWidth(st(20)) * 0.5f;
-      if (REXCVAR_GET(bf_scoreboard_ping))
+      const float pc = x1 - st(24) - ping::CellWidth(st(20)) * 0.5f;
+      if (show_ping)
         kit::Spaced(d, f.typed, st(11), ImVec2(pc - kit::SpacedWidth(f.typed, st(11), "PING", st(2)) * 0.5f, st.P(0, 156).y),
                     kit::kKhakiDim, "PING", st(2));
-      kit::Spaced(d, f.typed, st(11), ImVec2(x1 - st(24) - kit::SpacedWidth(f.typed, st(11), "SCORE", st(2)), st.P(0, 156).y),
+      kit::Spaced(d, f.typed, st(11), ImVec2(score_right - kit::SpacedWidth(f.typed, st(11), "SCORE", st(2)), st.P(0, 156).y),
                   kit::kKhakiDim, "SCORE", st(2));
     }
     const double now = ImGui::GetTime();
@@ -2483,11 +2486,11 @@
         kit::Spaced(d, f.typed, st(12), ImVec2(nx, y + st(14)), kit::kStamp, "MUTED", st(2));
       }
       const std::string sc = std::to_string(r.score);
-      d->AddText(f.typed, st(16), ImVec2(x1 - st(24) - kit::TextWidth(f.typed, st(16), sc), y + st(10)), ink, sc.c_str());
-      // The player's ping (scoreboard_ping.h): bars and ms before the score; BOT for a bot; nothing when not known.
-      if (REXCVAR_GET(bf_scoreboard_ping)) {
+      d->AddText(f.typed, st(16), ImVec2(score_right - kit::TextWidth(f.typed, st(16), sc), y + st(10)), ink, sc.c_str());
+      // The player's ping (scoreboard_ping.h): bars and ms at the right edge; BOT for a bot; nothing when not known.
+      if (show_ping) {
         const bool bot = ping::IsBot(r.name);
-        ping::DrawCell(d, f.ui_bold, x1 - st(110), y + st(20), st(20), bot ? -1 : world::PingOf(r.name), bot, false, ink);
+        ping::DrawCell(d, f.ui_bold, x1 - st(24), y + st(20), st(20), bot ? -1 : world::PingOf(r.name), bot, false, ink);
       }
       y += st(44);
     }

@@ -92,6 +92,35 @@ thread_local Pending g_pending;
 std::mutex g_mutex;
 std::vector<GameRun> g_runs;  // the last quarter second's runs that could be a heading or a row
 
+// The ping column's room (TekRantGaming, 20 Nov 2026: "push the ping information to the furthest right of the
+// scoreboard"). The game's tables have no space right of their Scr. column, so while the ping column shows, the game's
+// own Kls. and Scr. columns (headings and numbers) are drawn kShift stage units further left and each row's dot
+// leaders end before the kills (kCut): the ping cell then takes the Scr. column's old place at the right edge. Done
+// glyph by glyph as the game draws (LayoutGlyph, the game's thread) from the tables the overlay found in the frames
+// just before (DrawOverGame publishes them, clip space).
+constexpr float kShift = 65.0f;        // stage units the Kls. and Scr. columns move left
+constexpr float kColumnsFrom = 240.0f;  // a run starting this far right of the name heading is Kls. or Scr. (to kColumnsTo)
+constexpr float kColumnsTo = 410.0f;  // the other table's # column starts at about 421
+constexpr float kCut = 236.0f;          // a row's dot leaders end here (the kills, moved, start after it)
+constexpr float kPingRight = 396.0f;    // the ping cell's right edge (the Scr. numbers' old right edge)
+struct LayoutTable {
+  float name_x = 0, name_y = 0;  // the name heading's pen, clip space
+  float ux = 0, uy = 0;          // a stage unit in clip space (uy negative: down)
+  float bottom = 0;              // stage units below the name heading that its rows reach
+};
+std::mutex g_layout_mutex;
+std::vector<LayoutTable> g_layout;
+double g_layout_at = -100;
+// The run being drawn (the game's thread): its matrix, the tables, and what is done to it.
+struct LayoutRun {
+  bool active = false, first = true, dotted = false;
+  int mode = 0;  // 1 moved left (Kls., Scr.), 2 a row's name with its dot leaders cut
+  float m[16] = {};
+  float cut_x = 0, ux = 1;
+  std::vector<LayoutTable> tables;
+};
+thread_local LayoutRun g_lrun;
+
 // The rewritten prompt (RewriteGameText), put back after its draw.
 struct Rewrite {
   bool active = false;
@@ -147,6 +176,19 @@ Voice VoiceOf(const std::string& name) {
 
 void NoteGameText(const uint8_t* base, uint32_t renderer, uint32_t lines) {
   g_pending.active = false;
+  g_lrun.active = false;
+  if (!REXCVAR_GET(server) && REXCVAR_GET(bf_scoreboard_ping) && Plausible(renderer) && Plausible(lines)) {
+    std::lock_guard lock(g_layout_mutex);
+    if (!g_layout.empty() && Seconds() - g_layout_at < 0.25) {
+      g_lrun.active = true, g_lrun.first = true, g_lrun.mode = 0;
+      g_lrun.tables = g_layout;
+      for (int i = 0; i < 16; ++i) g_lrun.m[i] = LoadF(base, renderer + 128 + 4 * i);
+    }
+  }
+  if (g_lrun.active) {
+    std::string t;
+    g_lrun.dotted = RunText(base, lines, t, 64) && t.find(" . .") != std::string::npos;
+  }
   if (REXCVAR_GET(server) || !(REXCVAR_GET(bf_scoreboard_mute) || REXCVAR_GET(bf_scoreboard_ping)) || !Plausible(renderer) ||
       !Plausible(lines))
     return;
@@ -169,7 +211,37 @@ void NoteGameGlyph(int32_t pen_x, int32_t pen_y) {
   g_pending.run.ux = m[0], g_pending.run.uy = m[5];
 }
 
+bool LayoutGlyph(uint8_t* base, uint32_t pen_at, int32_t pen_y) {
+  if (!g_lrun.active) return true;
+  const float* m = g_lrun.m;
+  const int32_t px = int32_t(Load32(base, pen_at));
+  const float cx = float(px) * m[0] + float(pen_y) * m[4] + m[12];
+  if (g_lrun.first) {
+    g_lrun.first = false;
+    const float cy = float(px) * m[1] + float(pen_y) * m[5] + m[13];
+    for (const LayoutTable& t : g_lrun.tables) {
+      if (t.ux == 0 || t.uy == 0 || m[0] == 0) continue;
+      const float rx = (cx - t.name_x) / t.ux, ry = (cy - t.name_y) / t.uy;
+      if (ry < -6 || ry > t.bottom) continue;
+      if (!g_lrun.dotted && rx > kColumnsFrom && rx < kColumnsTo) {
+        // Kls. or Scr. (a heading or a number): the run's pen moved left; its later glyphs follow from it.
+        Store32(base, pen_at, uint32_t(px + int32_t(std::lround(-kShift * t.ux / m[0]))));
+        g_lrun.mode = 1;
+        return true;
+      }
+      if (g_lrun.dotted && std::fabs(rx) < 4) {
+        g_lrun.mode = 2, g_lrun.cut_x = t.name_x + kCut * t.ux, g_lrun.ux = t.ux;
+        break;
+      }
+    }
+  }
+  // A row's dot leaders past the cut: not drawn.
+  if (g_lrun.mode == 2 && (cx - g_lrun.cut_x) * g_lrun.ux > 0) return false;
+  return true;
+}
+
 void EndGameText() {
+  g_lrun.active = false;
   if (!g_pending.active) return;
   g_pending.active = false;
   if (!g_pending.pen || !std::isfinite(g_pending.run.x) || !std::isfinite(g_pending.run.y)) return;
@@ -247,6 +319,7 @@ void DrawOverGame(ImGuiIO& io) {
   struct Table {
     ImVec2 v, name;  // the headings' pens on the screen
     float unit;      // a stage unit in screen pixels (down)
+    LayoutTable clip;  // the name heading in clip space (LayoutGlyph)
   };
   std::vector<Table> tables;
   for (const GameRun& v : runs) {
@@ -260,7 +333,9 @@ void DrawOverGame(ImGuiIO& io) {
       if (std::fabs(gp.y - vp.y) < 4 * unit && gp.x > vp.x && gp.x - vp.x < 140 * unit) {
         bool dup = false;
         for (const Table& t : tables) dup = dup || (std::fabs(t.v.x - vp.x) < unit && std::fabs(t.v.y - vp.y) < unit);
-        if (!dup) tables.push_back({vp, gp, unit});
+        LayoutTable lt;
+        lt.name_x = g.x, lt.name_y = g.y, lt.ux = v.ux, lt.uy = v.uy;
+        if (!dup) tables.push_back({vp, gp, unit, lt});
       }
     }
   }
@@ -293,17 +368,23 @@ void DrawOverGame(ImGuiIO& io) {
   // with its clan tag, about 20 letters, ends near 185), and "Ping" over it on the headings' line.
   if (show_ping) {
     const kit::Fonts& f = kit::GetFonts();
+    std::vector<LayoutTable> layout;
     for (size_t ti = 0; ti < tables.size(); ++ti) {
       const Table& t = tables[ti];
-      const float u = t.unit, h = 17.0f * u, right = t.name.x + 292.0f * u;
+      const float u = t.unit, h = 17.0f * u, right = t.name.x + kPingRight * u;
       bool any = false;
+      float bottom = 0;
       for (const Row& row : rows) {
         if (row.table != ti) continue;
+        bottom = std::max(bottom, (row.pen.y - t.name.y) / u + 22.0f);
         const bool bot = ping::IsBot(row.name);
         const int ms = bot ? -1 : world::PingOf(row.name);
         any = ping::DrawCell(d, f.ui_bold, right, row.pen.y + 10.0f * u, h, ms, bot, true, 0) > 0 || any;
       }
-      if (!any) continue;  // nobody's ping known here (an older server): no heading either
+      if (!any) continue;  // nobody's ping known here (an older server): the game's columns as they are, no heading
+      LayoutTable lt = t.clip;
+      lt.bottom = bottom;
+      layout.push_back(lt);
       const char* word = "Ping";
       const float cap = 11.0f * u, cx = right - ping::CellWidth(h) * 0.5f;
       const ImU32 ink = IM_COL32(30, 28, 22, 255);
@@ -315,6 +396,8 @@ void DrawOverGame(ImGuiIO& io) {
         d->AddText(f.ui, 16.0f * u, ImVec2(cx - w.x * 0.5f, t.name.y + 1.0f * u), ink, word);
       }
     }
+    std::lock_guard lock(g_layout_mutex);
+    g_layout = std::move(layout), g_layout_at = Seconds();
   }
   if (!show_mute) return;
   for (const Row& row : rows) {

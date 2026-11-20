@@ -218,7 +218,11 @@ REX_HOOK_RAW(sub_826AB588) {
 }
 
 REX_HOOK_RAW(sub_826AB240) {
-  if (ctx.r9.u32 == 0 && Plausible(ctx.r7.u32)) bf1943::mute::NoteGameGlyph(int32_t(Load32(base, ctx.r7.u32)), int32_t(ctx.r8.u32));
+  if (ctx.r9.u32 == 0 && Plausible(ctx.r7.u32)) {
+    bf1943::mute::NoteGameGlyph(int32_t(Load32(base, ctx.r7.u32)), int32_t(ctx.r8.u32));
+    // The scoreboards' ping column (voice_mute.cpp): Kls. and Scr. moved left, the dot leaders cut before them.
+    if (!bf1943::mute::LayoutGlyph(base, ctx.r7.u32, int32_t(ctx.r8.u32))) return;
+  }
 #if defined(BF_DEV_TOOLS)
   if (g_probe_pen && ctx.r9.u32 == 0 && Plausible(ctx.r7.u32)) {
     g_pen_x = int32_t(Load32(base, ctx.r7.u32)), g_pen_y = int32_t(ctx.r8.u32);
