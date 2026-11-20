@@ -436,6 +436,9 @@ void GameCommand(const std::string& name, const std::string& args) {
 // switch the flags were right and the names the old ones (run v41team2; tb_move4's shot 36). When the player's team
 // changes, the array is reversed, and the end of round screen's two (factionSIDsWIN, factionSIDsLOSE) with it.
 bool InMatch();
+#if defined(BF_DEV_TOOLS)
+void BenchFreeCam(PPCContext& ctx, uint8_t* base, bool hidden);  // bench_freecam.cpp
+#endif
 void TeamNamesTick() {
   if (!InMatch()) return;
   const int team = comms::Team();
@@ -1472,6 +1475,28 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
       if (since > look_after && since < look_after + 2.0) p[14] = 0x7F, p[15] = 0xFF;
     }
   }
+#if defined(BF_DEV_TOOLS)
+  // Benchmarks (tools/bench). BF_BENCH_TURN=<seconds>[,<strength>]: from that many seconds after joining, the right
+  // stick held to the right (default half way): the soldier turns on the spot at a steady rate, so a benchmark sweeps
+  // the whole view around the spawn point the same way every run.
+  {
+    static const std::pair<double, double> turn = [] {
+      const char* v = std::getenv("BF_BENCH_TURN");
+      double at = -1, strength = 0.5;
+      if (v && *v) std::sscanf(v, "%lf,%lf", &at, &strength);
+      return std::make_pair(at, std::clamp(strength, -1.0, 1.0));
+    }();
+    static std::chrono::steady_clock::time_point turn_joined{};
+    if (turn.first >= 0 && bf1943::InMatch() && !menu && !hidden) {
+      if (!turn_joined.time_since_epoch().count()) turn_joined = std::chrono::steady_clock::now();
+      if (std::chrono::duration<double>(std::chrono::steady_clock::now() - turn_joined).count() > turn.first) {
+        const int16_t x = int16_t(turn.second * 32767);
+        p[12] = uint8_t(uint16_t(x) >> 8), p[13] = uint8_t(x);
+      }
+    }
+  }
+  bf1943::BenchFreeCam(ctx, base, menu || hidden);  // BF_BENCH_FREECAM (bench_freecam.cpp)
+#endif
   // BF_WALK_TEST=<seconds>: in a match, the left stick full right from that many seconds after joining (frame rate
   // tests: how the soldier moves at different rates).
   static const double walk_after = [] {

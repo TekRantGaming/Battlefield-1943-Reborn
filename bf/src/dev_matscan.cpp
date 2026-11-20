@@ -334,8 +334,8 @@ namespace bf1943 {
 void DevMatScanFrame() {}
 }  // namespace bf1943
 #if defined(BF_DEV_TOOLS)
-// Developer builds off Windows: only the rendered camera's position (fov.cpp's view sample, for the vehicle seeker);
-// the view logs, finds and watches above are Windows only.
+// Developer builds off Windows: only the rendered camera's position and rows (fov.cpp's view sample, for the vehicle
+// seeker and BF_DEV_BONELOG); the view logs, finds and watches above are Windows only.
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -343,6 +343,7 @@ namespace bf1943 {
 std::atomic<uint32_t> g_dev_view{0};
 std::atomic<uint32_t> g_dev_view_calls{0};
 std::atomic<float> g_dev_view_pos[3];
+std::atomic<float> g_dev_view_rot[9];  // its rows (right, up, forward), for BF_DEV_BONELOG (tick_blend.cpp)
 void DevViewSample(uint8_t* base, uint32_t view) {
   auto be_float = [base](uint32_t at) {
     const uint32_t u = uint32_t(base[at]) << 24 | uint32_t(base[at + 1]) << 16 | uint32_t(base[at + 2]) << 8 | base[at + 3];
@@ -351,6 +352,9 @@ void DevViewSample(uint8_t* base, uint32_t view) {
     return f;
   };
   for (uint32_t i = 0; i < 3; ++i) g_dev_view_pos[i].store(be_float(view + 0x40 + 48 + 4 * i), std::memory_order_relaxed);
+  for (uint32_t r = 0; r < 3; ++r)
+    for (uint32_t c = 0; c < 3; ++c)
+      g_dev_view_rot[r * 3 + c].store(be_float(view + 0x40 + r * 16 + c * 4), std::memory_order_relaxed);
 }
 }  // namespace bf1943
 #endif

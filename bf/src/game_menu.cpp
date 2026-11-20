@@ -6531,6 +6531,27 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   settings.path = user_dir / "bf1943-settings.txt";
   settings.Load();
   NewInstallDefaults(settings);
+#if defined(BF_DEV_TOOLS)
+  // BF_BENCH_PRESET=<Potato|Low|Medium|High|Ultra> (benchmarks, tools/bench): that graphics preset, as choosing it on
+  // the Graphics page does (GraphicsPresets), saved in this user folder's settings before they are applied below.
+  if (const char* want = std::getenv("BF_BENCH_PRESET"); want && *want && !REXCVAR_GET(server)) {
+    auto same = [](std::string a, std::string b) {
+      for (auto* s : {&a, &b})
+        for (char& c : *s) c = char(std::tolower(static_cast<unsigned char>(c)));
+      return a == b;
+    };
+    bool found = false;
+    for (const GraphicsPreset& p : GraphicsPresets()) {
+      if (!same(p.name, want)) continue;
+      for (const auto& [name, value] : p.settings) settings.values[std::string("cvar.") + name] = value;
+      settings.values["graphics_preset"] = p.name;
+      settings.Save();
+      REXLOG_INFO("BF settings: graphics preset {} (BF_BENCH_PRESET)", p.name);
+      found = true;
+    }
+    if (!found) REXLOG_WARN("BF settings: no graphics preset {} (BF_BENCH_PRESET)", want);
+  }
+#endif
   auto set = [&](const char* key, const char* cvar) {
     if (auto it = settings.values.find(key); it != settings.values.end()) rex::cvar::SetFlagByName(cvar, it->second);
   };

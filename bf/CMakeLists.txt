@@ -77,6 +77,7 @@ set(BF1943_SOURCES
     src/input_settings.cpp
     src/perf_overlay.cpp
     src/audio_settings.cpp
+    src/ea_voice_cull.cpp
     src/ea_mixer_ready.cpp
     src/ea_xma_kicks.cpp
     src/auto_join.cpp
@@ -132,6 +133,8 @@ set(BF1943_SOURCES
     src/private_match.cpp
     src/dev_watch.cpp
     src/dev_renderdoc.cpp
+    src/bench_freecam.cpp
+    src/bench_explode.cpp
     src/dev_profiler.cpp
     src/dev_io_stats.cpp
 )

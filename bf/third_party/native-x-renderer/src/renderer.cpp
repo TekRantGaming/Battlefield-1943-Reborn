@@ -249,6 +249,10 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_hud_scale, 100.0, "NativeXRenderer",
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_minimap_scale, 100.0, "NativeXRenderer",
                       "The HUD's bottom left group (Battlefield 1943's minimap) in percent of the game's size (75, 100 "
                       "or 125), apart from native_x_renderer_hud_scale; read while the game runs");
+REXCVAR_DEFINE_BOOL(native_x_renderer_hide_hud, false, "NativeXRenderer",
+                    "No HUD over a frame with a 3D view: the draws after the composite are skipped "
+                    "(Profile::box_2d_after_composite; menus and frames without a 3D view are drawn as ever). For "
+                    "screenshots and the benchmark's free camera (bench_freecam.cpp turns it on)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_debug_hud, false, "NativeXRenderer",
                     "Log the 2D layer's draws after the composite every 10 s (Profile::box_2d_after_composite)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_raise_priority, false, "NativeXRenderer",
@@ -1664,7 +1668,8 @@ void ExecuteDraw(const Command& c) {
   const float hud_scale = float(std::clamp(REXCVAR_GET(native_x_renderer_hud_scale), 50.0, 100.0) / 100.0);
   const float minimap_scale = float(std::clamp(REXCVAR_GET(native_x_renderer_minimap_scale), 50.0, 150.0) / 100.0);
   const bool hud_scaled = hud_scale != 1.0f || minimap_scale != 1.0f;
-  if (g_profile->box_2d_after_composite && (g_aspect_factor != 1.0 || hud_scaled) && targets[0] &&
+  const bool hide_hud = REXCVAR_GET(native_x_renderer_hide_hud);  // the phases are told apart for it too
+  if (g_profile->box_2d_after_composite && (g_aspect_factor != 1.0 || hud_scaled || hide_hud) && targets[0] &&
       targets[0]->guest_width == g_profile->output_width && targets[0]->guest_height == g_profile->output_height) {
     const bool wide = g_aspect_factor != 1.0;
     if (g_hud_phase == 1) composite = true;
@@ -1827,9 +1832,11 @@ void ExecuteDraw(const Command& c) {
       REXLOG_INFO("[native_x_renderer] night: an effect drawn by pixel shader {:016X}", h);
   }
   g_draw->TakePackedRead();
-  g_draw->Draw(c.programs[0] ? *c.programs[0] : StateTracker::kNoProgram,
-               c.programs[1] ? *c.programs[1] : StateTracker::kNoProgram, std::span(copies.data(), c.copy_count),
-               targets, g_tiling);
+  // native_x_renderer_hide_hud: the HUD's draws (after the composite of a frame with a 3D view) not drawn.
+  if (!(hide_hud && g_hud_phase == 2))
+    g_draw->Draw(c.programs[0] ? *c.programs[0] : StateTracker::kNoProgram,
+                 c.programs[1] ? *c.programs[1] : StateTracker::kNoProgram, std::span(copies.data(), c.copy_count),
+                 targets, g_tiling);
   if (composite) g_hud_phase = 2;
   // D162: the night on the game's composite, the first draw into a target of the output size after the scene's copy
   // (Battlefield 1943: its bloom chain draws only smaller targets in between): the picture with the game's bloom and
