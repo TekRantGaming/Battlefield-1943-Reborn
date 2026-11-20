@@ -227,6 +227,9 @@ bool Device::Create(void* native_window, bool half_precision) {
   create_info.Features.OcclusionQueries = DEVICE_FEATURE_STATE_OPTIONAL;
   create_info.QueryPoolSizes[QUERY_TYPE_OCCLUSION] = OcclusionQueries::kPoolSize;  // the guest's (D62)
   create_info.Features.DurationQueries = DEVICE_FEATURE_STATE_OPTIONAL;  // GPU time per frame, for the log
+  // The duration queries' pool: the frame timer's 32, and with native_x_renderer_gpu_sections the passes' timers
+  // (4 a section) and the night pass's; DiligentCore's 256 left too little room (a failed allocation crashed).
+  create_info.QueryPoolSizes[QUERY_TYPE_DURATION] = 512;
   // D174: the guest memory mirror as a sparse buffer, its binds signalling a timeline semaphore.
   create_info.Features.SparseResources = DEVICE_FEATURE_STATE_OPTIONAL;
   create_info.Features.NativeFence = DEVICE_FEATURE_STATE_OPTIONAL;

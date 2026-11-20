@@ -66,6 +66,10 @@ REXCVAR_DEFINE_DOUBLE(native_gi_sunlit, 0.65, "NativeXRenderer",
                       "0: the plain lit colour");
 
 namespace native_x_renderer {
+namespace renderer {
+void SkySectionBegin(int part);  // renderer.cpp: GPU sections
+void SkySectionEnd(int part);
+}  // namespace renderer
 
 using namespace Diligent;
 
@@ -740,6 +744,7 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
   ITextureView* b_srv = gi_b_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
   ITextureView* b_uav = gi_b_->GetDefaultView(TEXTURE_VIEW_UNORDERED_ACCESS);
 
+  renderer::SkySectionBegin(3);  // the GPU time of the depth and normals (renderer.cpp's sections)
   bool ok =
       Dispatch(context, prepare_, {{"g_srcSceneDepth", depth_srv}, {"g_outRawDepth", raw_uav}}, pw / 8, ph / 8) &&
       Dispatch(context, prefilter_,
@@ -750,7 +755,9 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
                 {"g_outWorkingDepthMIP3", depth_mip_uav_[3].RawPtr()},
                 {"g_outWorkingDepthMIP4", depth_mip_uav_[4].RawPtr()}},
                pw / 16, ph / 16) &&
-      Dispatch(context, normals_, {{"g_srcRawDepth", raw_srv}, {"g_outNormalmap", normals_uav}}, pw / 8, ph / 8) &&
+      Dispatch(context, normals_, {{"g_srcRawDepth", raw_srv}, {"g_outNormalmap", normals_uav}}, pw / 8, ph / 8);
+  renderer::SkySectionEnd(3);
+  ok = ok &&
       Dispatch(context, radiance_pass_,
                {{"g_srcSceneColor", copy_srv},
                 {"g_srcSourceDepth", depth_srv},

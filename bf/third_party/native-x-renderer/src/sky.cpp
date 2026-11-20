@@ -251,7 +251,7 @@ layout(std140, set = 0, binding = 0) uniform SkyConstants {
   vec4 cover_m[9];           // the rain's cover: three cascades' transforms from the world, three rows each
   vec4 rain;                 // x how far the rain leans (the tangent); y 1 with a cover map; the lens: z how many of the rain's drops, w of a splash's (view.z and view.w: how strongly each shows)
   vec4 ssr;                  // D190: x the sea's reflection of the renderer's own (0 off, 1 on); y the wind, 0 to 1
-  vec4 bolt;                 // D192: x how many of the bolt's pieces (0: none); y its light now; z pixels a metre makes at 1 m; w 1: the clouds skip hidden rays
+  vec4 bolt;                 // D192: x how many of the bolt's pieces (0: none); y its light now; z pixels a metre makes at 1 m; w flags for the clouds: 1 skip hidden rays, 2 the checkerboard (half the texels marched a frame)
   vec4 bolt_box;             // the view's pixels it may show in (x0, y0, x1, y1)
   vec4 bolt_seg[144];        // each piece: its ends in the view's pixels (ax, ay, bx, by); their distances along the view, its half width (m), how bright
   vec4 gale;                 // D194: x the storm's mist, 0 to 1 (the ground fog filled in, low on the ground under what is seen)
@@ -551,7 +551,22 @@ void main() {
   // The layer is marched at its own scale (Beachhead's), the eye and the distances taken into it: in the world it is
   // smaller by misc.z, and looks the same from the ground.
   float world_scale = max(misc.z, 1e-3);
-  vec3 rd = Ray(v_uv);
+  // The texel this one marches: itself, or with the checkerboard (bolt.w's 2, native_x_renderer_cloud_checkerboard)
+  // the pass runs over half the width and each fragment marches the texel of this frame's parity in its pair (every
+  // thread of a group at work: a whole size checkerboard left half of each group idle and saved almost nothing).
+  ivec2 texel = ivec2(gl_FragCoord.xy);
+  vec2 uv = v_uv;
+  if ((int(bolt.w + 0.5) & 2) != 0) {
+    ivec2 size = max(ivec2(view.xy) / 2, ivec2(1));
+    texel.x = texel.x * 2 + ((texel.y + int(misc.x)) & 1);
+    if (texel.x >= size.x) {
+      out_color = vec4(0.0, 0.0, 0.0, 1.0);
+      out_where = vec4(0.0);
+      return;
+    }
+    uv = (vec2(texel) + 0.5) / vec2(size);
+  }
+  vec3 rd = Ray(uv);
   vec3 cam = eye.xyz / world_scale;
   out_color = vec4(0.0, 0.0, 0.0, 1.0);
   out_where = vec4(0.0);
@@ -562,22 +577,23 @@ void main() {
   float thickness = cloud.w, base_altitude = cloud.z;
   float len_low = t1 - t0;
   if (len_low < 1.0) return;
+  int cloud_flags = int(bolt.w + 0.5);
   // A hidden ray is not marched (the Night Ops performance pass, 20 Nov 2026: the march was most of the sky's 3 ms a
   // frame in a storm, and its long low rays, up to 144 steps, are the ones the island, the ship and the buildings
   // hide). Hidden: every full size pixel this one covers, and one more round them (the reach of the passes' bilinear
   // reads of this texture), shows the scene nearer than where the ray enters the layer. Those pixels show no sky and
   // none of this ray's cloud (the over pass takes only cloud that lies before the scene), so what is written here is
   // never seen.
-  if (bolt.w > 0.5) {
+  if ((cloud_flags & 1) != 0) {
     ivec2 full = ivec2(view.xy);
-    ivec2 b = ivec2(gl_FragCoord.xy) * 2 - 1;
+    ivec2 b = texel * 2 - 1;
     float far_depth = 1e9;  // the smallest stored depth among them: the farthest (0: the sky)
     for (int y = 0; y < 4; ++y) {
       for (int x = 0; x < 4; ++x)
         far_depth = min(far_depth, texelFetch(cloudDepthTex, clamp(b + ivec2(x, y), ivec2(0), full - 1), 0).r);
     }
     if (far_depth > 1e-6) {
-      vec2 ndc = v_uv * to_ndc.xy + to_ndc.zw;
+      vec2 ndc = uv * to_ndc.xy + to_ndc.zw;
       vec3 c = vec3(ndc, 1.0);
       vec3 r = vec3(dot(inv0.xyz, c), dot(inv1.xyz, c), dot(inv2.xyz, c));
       if (fog_b.x / far_depth * length(r) < t0 * world_scale * 0.9) return;
@@ -591,7 +607,7 @@ void main() {
   float extinction = mix(outside_extinction, interior_extinction, inside);
   // Each pixel's march starts elsewhere within a step, another place each frame (the golden ratio spreads a pixel's
   // starts evenly over the step): the frames blended (the resolve) smooth the grain away.
-  float t = t0 + (inside > 0.01 ? min(dt, 12.0) * 0.5 : dt * fract(ign(gl_FragCoord.xy) + 0.618034 * misc.x));
+  float t = t0 + (inside > 0.01 ? min(dt, 12.0) * 0.5 : dt * fract(ign(vec2(texel) + 0.5) + 0.618034 * misc.x));
   float night_amount = sun_color.w;
   bool moon_key = night_amount > 0.5;
   vec3 ls = normalize(moon_key ? moon_dir.xyz : sun_dir.xyz);
@@ -679,6 +695,30 @@ layout(location = 1) out vec4 out_where;
 void main() {
   vec4 now = textureLod(cloudTex, v_uv, 0.0);
   vec4 now_w = textureLod(whereTex, v_uv, 0.0);
+  vec2 px = 1.0 / vec2(textureSize(cloudTex, 0));
+  // The checkerboard (native_x_renderer_cloud_checkerboard): this frame's marched texels are those of one parity; a
+  // texel of the other takes the mean of its four marched neighbours as its "now", and the box its history is kept
+  // in comes from marched texels only (its four neighbours; a marched texel's: its four diagonals).
+  bool checker = (int(bolt.w + 0.5) & 2) != 0;
+  ivec2 me = ivec2(gl_FragCoord.xy);
+  ivec2 size = textureSize(cloudTex, 0);
+  bool marched = !checker || ((me.x + me.y + int(misc.x)) & 1) == 0;
+  if (checker) {
+    // This frame's marched texels are packed into the texture's left half (x / 2 of each row).
+    if (marched) {
+      now = texelFetch(cloudTex, ivec2(me.x >> 1, me.y), 0), now_w = texelFetch(whereTex, ivec2(me.x >> 1, me.y), 0);
+    } else {
+      now = vec4(0.0), now_w = vec4(0.0);
+      float n = 0.0;
+      for (int k = 0; k < 4; ++k) {
+        ivec2 q = me + ivec2(k == 0 ? 1 : k == 1 ? -1 : 0, k == 2 ? 1 : k == 3 ? -1 : 0);
+        if (any(lessThan(q, ivec2(0))) || q.x >= size.x || q.y >= size.y) continue;
+        now += texelFetch(cloudTex, ivec2(q.x >> 1, q.y), 0), now_w += texelFetch(whereTex, ivec2(q.x >> 1, q.y), 0);
+        n += 1.0;
+      }
+      now /= max(n, 1.0), now_w /= max(n, 1.0);
+    }
+  }
   out_color = now;
   out_where = now_w;
   if (misc.y < 0.5) return;
@@ -690,12 +730,19 @@ void main() {
   vec4 then = textureLod(historyTex, uv, 0.0);
   vec4 then_w = textureLod(whereHistoryTex, uv, 0.0);
   // Kept within what this frame shows around the pixel: clouds that moved or changed do not leave a trail.
-  vec2 px = 1.0 / vec2(textureSize(cloudTex, 0));
   vec4 lo = now, hi = now, lo_w = now_w, hi_w = now_w;
   for (int y = -1; y <= 1; ++y)
     for (int x = -1; x <= 1; ++x) {
-      vec2 at = v_uv + vec2(float(x), float(y)) * px;
-      vec4 s = textureLod(cloudTex, at, 0.0), sw = textureLod(whereTex, at, 0.0);
+      vec4 s, sw;
+      if (checker) {
+        if ((((x + y) & 1) != 0) == marched) continue;  // only this frame's marched texels
+        ivec2 q = me + ivec2(x, y);
+        if (any(lessThan(q, ivec2(0))) || q.x >= size.x || q.y >= size.y) continue;
+        s = texelFetch(cloudTex, ivec2(q.x >> 1, q.y), 0), sw = texelFetch(whereTex, ivec2(q.x >> 1, q.y), 0);
+      } else {
+        vec2 at = v_uv + vec2(float(x), float(y)) * px;
+        s = textureLod(cloudTex, at, 0.0), sw = textureLod(whereTex, at, 0.0);
+      }
       lo = min(lo, s), hi = max(hi, s);
       lo_w = min(lo_w, sw), hi_w = max(hi_w, sw);
     }
@@ -3191,7 +3238,7 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
 
   SkyConstantBlock k{};
   Fill(in, k);
-  k.bolt[3] = in.skip_hidden_clouds ? 1.0f : 0.0f;  // the march passes over the rays the scene hides
+  k.bolt[3] = (in.skip_hidden_clouds ? 1.0f : 0.0f) + (in.checker_clouds ? 2.0f : 0.0f);  // the clouds' march's flags
   for (int r = 0; r < 3; ++r)
     for (int c = 0; c < 3; ++c) k.last[r][c] = last_forward_[r][c];
   std::memcpy(k.last_to_ndc, last_to_ndc_, sizeof(k.last_to_ndc));
@@ -3252,8 +3299,8 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
     set(cloud_srb_, "weatherTex", weather_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
     set(cloud_srb_, "cloudDepthTex", in.depth_srv);
     renderer::SkySectionBegin(0);
-    draw2(clouds_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), where_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), cw, ch,
-          cloud_pso_, cloud_srb_);
+    draw2(clouds_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), where_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET),
+          in.checker_clouds ? (cw + 1) / 2 : cw, ch, cloud_pso_, cloud_srb_);
     renderer::SkySectionEnd(0);
     // Blended with the frames before, into the other of the two kept textures.
     history_now_ ^= 1;

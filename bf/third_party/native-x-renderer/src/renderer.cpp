@@ -205,8 +205,12 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_lamp_bloom, true, "NativeXRenderer",
                     "Night's lights (D183): a soft bloom round a lit lamp's glass");
 REXCVAR_DEFINE_BOOL(native_x_renderer_lens_flare, true, "NativeXRenderer",
                     "Night's lights (D183): a subtle lens flare, halo and haze from the brightest lamps in view");
-REXCVAR_DEFINE_BOOL(native_x_renderer_gpu_sections, true, "NativeXRenderer",
-                    "The GPU time of the renderer's own passes (sky, fog, grass, AO, ...), logged every 600 frames");
+REXCVAR_DEFINE_BOOL(native_x_renderer_cloud_checkerboard, false, "NativeXRenderer",
+                    "The sky's clouds: half their texels marched each frame, the rest filled in from their neighbours "
+                    "and the last frames (about half the clouds' cost; a little softer in motion)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_gpu_sections, false, "NativeXRenderer",
+                    "The GPU time of the renderer's own passes (sky, fog, grass, AO, the night pass, ...), logged every "
+                    "600 frames (tests: a few duration queries a frame)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_night_lamp_visibility_pass, true, "NativeXRenderer",
                     "Night's lights: each lamp's visibility (for its bloom and lens flare) found once a frame in a small "
                     "pass, not again for every pixel (false: the old per pixel way, for comparisons)");
@@ -473,6 +477,16 @@ bool SkyLoaded() {
 bool SkyOn() { return REXCVAR_GET(native_x_renderer_sky) && SkyLoaded(); }
 // The clouds' march passes over the rays the scene hides (sky.cpp's kCloudPS). BF_CLOUD_AB=1 (tests): on and off by
 // turns, 600 frames each (a stats line's span), so both ways are timed in one run.
+// native_x_renderer_cloud_checkerboard: half the cloud texels marched each frame (about half the march's GPU time; in
+// motion the clouds a little softer for a frame or two). BF_CLOUD_CB_AB=1 (tests): on and off by turns, 600 frames each.
+bool CloudCheckerNow() {
+  static const bool ab = [] {
+    const char* v = std::getenv("BF_CLOUD_CB_AB");
+    return v && *v == '1';
+  }();
+  if (ab) return g_device && (g_device->frames_presented() / 600) % 2 == 0;
+  return REXCVAR_GET(native_x_renderer_cloud_checkerboard);
+}
 bool CloudSkipNow() {
   static const bool ab = [] {
     const char* v = std::getenv("BF_CLOUD_AB");
@@ -938,17 +952,19 @@ class FrameTimer {
   uint32_t frames_ = 0, late_ = 0;
 } g_timer;
 
-// The GPU time of the renderer's own passes, each by name (native_x_renderer_gpu_sections, on by default: a few
-// duration queries a frame): a ring of queries a section, read when a query comes round again (16 uses on), so
-// nothing waits for the GPU. Logged every 600 frames as milliseconds a frame, to tell what a frame's GPU time is
+// The GPU time of the renderer's own passes, each by name (native_x_renderer_gpu_sections, off by default: a few
+// duration queries a frame): a ring of 4 queries a section, read when a query comes round again (4 uses on), so
+// nothing waits for the GPU. (16 a section, with the sky's and the AO's parts, took the Vulkan pool's 256 duration
+// queries and the next allocation failed: a crash, run perf_cbU_ab.) Logged every 600 frames as milliseconds a frame, to tell what a frame's GPU time is
 // spent on (the Night Ops performance pass, 20 Nov 2026).
 class SectionTimers {
  public:
   enum Id { kSky, kCloudsOver, kFog, kLens, kWet, kGrass, kGtao, kSsgi, kAa, kUpscale, kMotionBlur, kDof,
-            kSkyMarch, kSkyResolve, kSkyDraw, kCount };
+            kSkyMarch, kSkyResolve, kSkyDraw, kGiDepth, kAoDepth, kCount };
   static constexpr const char* kNames[kCount] = {"sky",  "clouds over", "fog and rain", "lens", "wet copies", "grass",
                                                  "GTAO", "SSGI",        "AA",           "upscaler", "motion blur",
-                                                 "DOF",  "(sky: the clouds' march", "the clouds' blend", "the sky drawn)"};
+                                                 "DOF",  "(sky: the clouds' march", "the clouds' blend", "the sky drawn)",
+                                                 "(SSGI's depth and normals)", "(GTAO's depth and normals)"};
   void Begin(IRenderDevice* device, IDeviceContext* context, Id id) {
     if (!REXCVAR_GET(native_x_renderer_gpu_sections) || !device || !context) return;
     Section& sec = sections_[id];
@@ -996,7 +1012,7 @@ class SectionTimers {
   }
 
  private:
-  static constexpr uint32_t kQueries = 16;
+  static constexpr uint32_t kQueries = 4;
   struct Section {
     RefCntAutoPtr<IQuery> queries[kQueries];
     bool pending[kQueries] = {};
@@ -1007,14 +1023,15 @@ class SectionTimers {
   };
   Section sections_[kCount];
 } g_sections;
-// The sky's own parts, timed from sky.cpp (SkySectionBegin / End: 0 the clouds' march, 1 their blend, 2 the sky drawn).
+// Parts of passes timed from their own files (SkySectionBegin / End: 0 the clouds' march, 1 their blend, 2 the sky
+// drawn; 3 SSGI's depth and normals, 4 GTAO's).
 }  // namespace
 void SkySectionBegin(int part) {
-  if (g_device && part >= 0 && part < 3)
+  if (g_device && part >= 0 && part < 5)
     g_sections.Begin(g_device->device(), g_device->context(), SectionTimers::Id(SectionTimers::kSkyMarch + part));
 }
 void SkySectionEnd(int part) {
-  if (g_device && part >= 0 && part < 3) g_sections.End(g_device->context(), SectionTimers::Id(SectionTimers::kSkyMarch + part));
+  if (g_device && part >= 0 && part < 5) g_sections.End(g_device->context(), SectionTimers::Id(SectionTimers::kSkyMarch + part));
 }
 namespace {
 // A GPU section around `work` (a call returning what it returns).
@@ -1756,6 +1773,7 @@ void ExecuteDraw(const Command& c) {
       night.bloom = REXCVAR_GET(native_x_renderer_lamp_bloom) ? 1.0f : 0.0f;
       night.flare = REXCVAR_GET(native_x_renderer_lens_flare) ? 1.0f : 0.0f;
       night.seen_pass = REXCVAR_GET(native_x_renderer_night_lamp_visibility_pass);
+      night.timing = REXCVAR_GET(native_x_renderer_gpu_sections);
       // BF_NIGHT_AB=1 (tests): the lamps' visibility pass on and off by turns, 600 frames each (a stats line's span),
       // so both ways are timed in one run over the same scene.
       static const bool night_ab = [] {
@@ -2563,7 +2581,7 @@ void ApplyOpaqueEffects() {
         MsaaWrite(g_scene_color);
         in.color = g_scene_color->texture;
         in.depth_srv = g_scene_depth->srv;
-        if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
+        if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); in.checker_clouds = CloudCheckerNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
       }
       g_last_sky_in = in, g_last_sky_valid = true;
       // The fog waits for the game's water (ApplyFog).
@@ -2756,7 +2774,7 @@ void ApplyLateSky() {
     MsaaWrite(g_scene_color);
     in.color = g_scene_color->texture;
     in.depth_srv = g_scene_depth->srv;
-    if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
+    if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); in.checker_clouds = CloudCheckerNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
   }
   static bool said = false;
   if (!said) {

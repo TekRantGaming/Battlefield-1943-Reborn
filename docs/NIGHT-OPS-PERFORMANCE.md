@@ -106,20 +106,31 @@ drawn 0.34. The march's work is the cloud that is seen (up to 144 steps a ray, e
 moon and one more for the billows' facing); its density already skips the detail noise where the coarse shape is
 empty.
 
+## A crash found and fixed on the way (confirmed)
+
+The GPU timers added in this pass kept 16 duration queries a section; with the sky's and the AO's and GI's parts timed
+too they passed the Vulkan pool's 256 duration queries, the next allocation failed and the game crashed (a null read,
+run perf_cbU_ab, 36 s into a match). Now 4 a section, the timers off by default (`native_x_renderer_gpu_sections`,
+for tests; the night pass's own timers with them), and the pool 512 (device.cpp). The same run again: no crash.
+Builds pushed before this fix (v0.4.8-testing 4c77eb82 and 34f15612) had the timers on and could crash this way.
+
 ## Looked at, not changed
 
 - **The sky's cloud march** (about 2.9 ms in a full storm, half size, temporal): the remaining cost is the march over
   visible cloud (48 to 144 steps, five light samples a step). Fewer steps or a quarter size march would change the
   look; left for TekRantGaming to choose.
-- **The clouds' march, amortised over frames** (marching half the cloud texels each frame, the blend already keeping
-  90% of the last frames): would take about 1.2 ms off a Night Ops frame, enough with the rest to come near 120 FPS,
-  but newly seen sky and fast turns would show the clouds a little softer for a frame or two. A change of look:
-  **his call**, not done unattended.
+- **The clouds' march, amortised over frames: built as an option, off** (`native_x_renderer_cloud_checkerboard`):
+  each frame marches half the cloud texels (a checkerboard turning every frame), packed into a half width pass so
+  every GPU thread works (a whole size checkerboard with half the threads idle saved only 0.08 ms), and the blend fills
+  the rest from their marched neighbours and the last frames. Measured (`BF_CLOUD_CB_AB`, run perf_cbV_ab): the march
+  2.45 ms to 1.30. But the screenshots taken just after the camera turns show the clouds' edges combed in rows
+  (shot_60 against shot_64): a visible loss in motion. Off by default; **his call** whether it is worth it, or worth
+  a better fill.
 - **SSGI and GTAO** (1.8 and 0.95 ms): his Ultra settings (GI quality 3: full resolution, 4 slices of 10 steps), the
   same by day. Both build the view's raw depth and normals from the same depth with the same code (gtao_shaders.h and
   ssgi_shaders.h differ only in comments there); the GI could take the AO's, about 0.1 to 0.2 ms (**estimated**). Their
-  depth mips are weighted by each one's own radius, so those differ and cannot be shared. Not done: small, and the two
-  can run at different resolutions.
+  depth mips are weighted by each one's own radius, so those differ and cannot be shared. Measured (new sub-timers): 0.08 ms each, and
+  the AO smooths its normals in place, so only the raw depth could be shared (under 0.05 ms). Not done.
 - **The game's side** (bf/src): the per frame memory walks found were one time scans or test tools; the team icons'
   per frame cost was fixed earlier the same day (squad_colors.cpp). The renderer's own CPU time is about 2 ms a frame
   and the frame is GPU bound.

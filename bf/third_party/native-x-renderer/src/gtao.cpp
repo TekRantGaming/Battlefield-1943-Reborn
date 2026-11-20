@@ -56,6 +56,10 @@ REXCVAR_DEFINE_DOUBLE(native_ao_fade, 0.0, "NativeXRenderer",
                       "GTAO's occlusion fades out linearly to this many near-plane distances (0: none)");
 
 namespace native_x_renderer {
+namespace renderer {
+void SkySectionBegin(int part);  // renderer.cpp: GPU sections
+void SkySectionEnd(int part);
+}  // namespace renderer
 
 using namespace Diligent;
 
@@ -771,6 +775,7 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
   ITextureView* output_uav = output_->GetDefaultView(TEXTURE_VIEW_UNORDERED_ACCESS);
   ITextureView* spatial_uav = temporal ? spatial_->GetDefaultView(TEXTURE_VIEW_UNORDERED_ACCESS) : output_uav;
 
+  renderer::SkySectionBegin(4);  // the GPU time of the depth and normals (renderer.cpp's sections)
   bool ok =
       Dispatch(context, prepare_, {{"g_srcSceneDepth", depth_srv}, {"g_outRawDepth", raw_uav}}, pw / 8, ph / 8) &&
       Dispatch(context, prefilter_,
@@ -782,6 +787,7 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
                 {"g_outWorkingDepthMIP4", depth_mip_uav_[4].RawPtr()}},
                pw / 16, ph / 16) &&
       Dispatch(context, normals_, {{"g_srcRawDepth", raw_srv}, {"g_outNormalmap", normals_uav}}, pw / 8, ph / 8);
+  renderer::SkySectionEnd(4);
   if (ok && smoothing.max_pixels_1080 > 0.0f) {
     // In place through term b, free until the first denoise writes it.
     ok = Dispatch(context, smooth_h_,

@@ -50,6 +50,7 @@ struct NightSettings {
   bool seen_pass = true;  // each lamp's visibility found once a frame (false: per pixel, for comparisons)
   bool compute_lights = true;  // the effects' lights found by the compute search (false: the pixel pass, for comparisons)
   bool tiles = true;  // each pixel loops over its screen tile's lights (false: over all of them, for comparisons)
+  bool timing = false;  // the night pass's GPU time (native_x_renderer_gpu_sections)
   int debug = 0;            // D163, tests: 1 each pixel's place in the world, 2 the lights alone
 };
 
@@ -125,7 +126,7 @@ class Night {
     bool check_tiles = false;
     Pass* pass = PassFor(device, desc.Format, seen_pass);
     if (!pass) return;
-    timer_.Begin(device, context);
+    if (s.timing) timer_.Begin(device, context);
     {
       Constants k = {};
       k.night[0] = std::clamp(s.scene_gain, 1.0f, 64.0f);
@@ -238,7 +239,7 @@ class Night {
       set("effectLightsOut", effect_lights_->GetDefaultView(TEXTURE_VIEW_UNORDERED_ACCESS));
       context->SetPipelineState(compute_lights_.pso);
       context->CommitShaderResources(compute_lights_.srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-      lights_timer_.Begin(device, context);
+      if (s.timing) lights_timer_.Begin(device, context);
       context->DispatchCompute(DispatchComputeAttribs(1, 1, 1));
       lights_timer_.End(context);
       ++applied_effect_lights_, ++applied_compute_lights_;
@@ -289,7 +290,7 @@ class Night {
       context->CommitShaderResources(lights_pass_.srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
       DrawAttribs lights_draw;
       lights_draw.NumVertices = 3;
-      lights_timer_.Begin(device, context);
+      if (s.timing) lights_timer_.Begin(device, context);
       context->Draw(lights_draw);
       lights_timer_.End(context);
       context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
