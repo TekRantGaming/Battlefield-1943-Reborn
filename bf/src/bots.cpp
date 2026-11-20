@@ -242,6 +242,7 @@ struct Bot {
   bool ads = false;        // aiming down the sights in this fight
   bool sprinter = true;    // sprints on its way to this goal
   Clock::time_point next_ride{};  // when it looks for a vehicle to ride in next
+  bool paused = false;            // waiting: no human on the server (BotsTick)
   bool defending = false;  // its goal is a flag its side holds
   std::vector<std::array<float, 3>> path;  // the way to its goal (cell centres), the next first
   float path_goal[3] = {};
@@ -360,7 +361,12 @@ std::string PlayerName(const uint8_t* base, uint32_t player) {
   return GuestText(base, Load32(base, player + 0x18), Load32(base, player + 0x1C));
 }
 
-// A new name for a bot of this team, none of the names taken.
+// Every bot wears the clan tag BOT (TekRantGaming, 20 Nov 2026: "all bots should use clan tag [bot]"): in its name
+// itself, so every player's game shows it in the scoreboard, kill feed and name tags with no backend. A player cannot
+// take the tag (text_filter's reserved tags), and a player's name holds no brackets.
+const std::string kBotTag = "[BOT]";
+
+// A new name for a bot of this team ("[BOT]" and up to 15 letters), none of the names taken.
 std::string PickName(int team, const std::set<std::string>& taken) {
   static std::mt19937 rng{std::random_device{}()};
   for (int tries = 0; tries < 400; ++tries) {
@@ -370,9 +376,9 @@ std::string PickName(int team, const std::set<std::string>& taken) {
     } else {
       name = std::string(kUsFirst[rng() % std::size(kUsFirst)]) + " " + kUsLast[rng() % std::size(kUsLast)];
     }
-    if (name.size() <= 15 && !taken.count(name)) return name;
+    if (name.size() <= 15 && !taken.count(kBotTag + name)) return kBotTag + name;
   }
-  return std::string(team == 2 ? "Heitai " : "Private ") + std::to_string(taken.size() + 1);
+  return kBotTag + std::string(team == 2 ? "Heitai " : "Private ") + std::to_string(taken.size() + 1);
 }
 
 bool Position(PPCContext& outer, uint8_t* base, uint32_t entity, float out[3]) {
@@ -2252,8 +2258,34 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
   }
   // The path searches' rays: a time budget for this tick's thinking as well as a count.
   nav.ray_deadline = Clock::now() + std::chrono::microseconds(int64_t(kPathRayMs * 1000));
+  // No human on the server (TekRantGaming, 20 Nov 2026: "Yes, pause them"): the bots stand still and do not think,
+  // steer, spawn or learn until a player joins (about 10% of a core saved on an empty server with 24 bots; the bots
+  // play as backfill all the time). The level's mapping goes on meanwhile, so a map is ready when players come.
+  const bool pause = g.humans == 0;
+  static bool told_pause = false;
+  if (pause != told_pause) {
+    told_pause = pause;
+    REXLOG_INFO("BF bots: {}", pause ? "no players on the server: the bots wait" : "a player is on the server: the bots play");
+  }
   for (Bot& bot : g.bots) {
     const uint32_t soldier = Load32(base, bot.player + 288);
+    if (pause) {
+      // Its last orders let go once (no walking, firing or sprinting left held), then nothing until a player joins.
+      if (!bot.paused && soldier && soldier == bot.last_soldier && Load32(base, bot.player + 312) == soldier) {
+        bot.forward = bot.strafe = 0.0f;
+        bot.fire = bot.sprint = bot.ads = false;
+        bot.want_yaw = bot.yaw, bot.want_pitch = bot.pitch;
+        Drive(ctx, base, bot, soldier, dt);
+      }
+      bot.paused = true;
+      continue;
+    }
+    if (bot.paused) {  // a player joined: think again at once (spread over the ticks), a fresh plan
+      bot.paused = false;
+      bot.next_think = now + std::chrono::milliseconds((bot.index * 37) % 250);
+      bot.replan_at = now;
+      bot.died = std::min(bot.died, now - std::chrono::seconds(5));
+    }
     if (soldier != bot.last_soldier) {
       if (!soldier) {
         bot.died = now;

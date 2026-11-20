@@ -2385,6 +2385,9 @@ def tag_for(name):
     if name_holder(name) != held[1]:  # the name's hold ended, or another player has it now
         TAGS.pop(name.lower(), None)
         return ''
+    if text_filter.tag_problem(held[0], name) == 'reserved':  # taken before it was reserved (BOT, 20 Nov 2026)
+        TAGS.pop(name.lower(), None)
+        return ''
     return held[0]
 
 
