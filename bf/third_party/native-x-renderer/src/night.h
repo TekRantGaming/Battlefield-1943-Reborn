@@ -155,6 +155,7 @@ class Night {
         k.glow2[2] = 1.0f;
       }
       TileLights(f, lights, s.tiles, k);
+      TileSprites(f, sprites, s.tiles, k);
       for (uint32_t i = 0; i < lights; ++i) {
         const NightLight& l = f.lights[i];
         float* a = k.lights[i * 3];
@@ -185,6 +186,9 @@ class Night {
         std::memset(untiled_->tiles, 0, sizeof(untiled_->tiles));
         for (uint32_t t = 0; t < kTilesX * kTilesY; ++t)
           for (uint32_t i = 0; i < lights; ++i) untiled_->tiles[t][i / 32] |= 1u << (i % 32);
+        std::memset(untiled_->sprite_tiles, 0, sizeof(untiled_->sprite_tiles));
+        for (uint32_t t = 0; t < kTilesX * kTilesY; ++t)
+          for (uint32_t i = 0; i < sprites; ++i) untiled_->sprite_tiles[t / 2][(t % 2) * 2 + i / 32] |= 1u << (i % 32);
       }
     }
     // D163: the effects' lights into their 4 x 2 texture, first: by the compute search, or the pixel pass without it.
@@ -431,6 +435,7 @@ layout(set = 0, binding = 0) uniform NightConstants {
   vec4 extra;   // x: 1 with each lamp's visibility found once a frame (spriteSeenTex: LampSeen, GlassAt)
   uvec4 beams;  // the lights that are turning beams: bits 0 to 95 in x, y, z (TileLights)
   uvec4 tiles[144];  // 16 x 9 screen tiles: each its lights, bits 0 to 95 in x, y, z (TileLights)
+  uvec4 sprite_tiles[72];  // the same tiles' lamp glows: tile 2k in xy, 2k + 1 in zw, bits 0 to 63 (TileLights)
   vec4 lights[288];  // 96 x (position, range), (colour, cos outer), (direction, cos inner)
   vec4 sprites[192];  // 64 x (uv, radius), (colour, the bulb's depth), (the bulb in the world, its radius + 2 x 255 x flare)
 };
@@ -783,7 +788,15 @@ void main() {
   bool placed = inv_t.w > 0.5 && depth > 2e-5;
   vec3 Pw = placed ? WorldAt(v_texcoord, depth) : vec3(0.0);
   float aspect = counts.z;
-  for (int i = 0; i < ns; ++i) {
+  // Only the glows whose reach touches this pixel's screen tile (TileLights), in the same order as all of them.
+  int sprite_tile = clamp(int(v_texcoord.y * 9.0), 0, 8) * 16 + clamp(int(v_texcoord.x * 16.0), 0, 15);
+  uvec4 sprite_pair = sprite_tiles[sprite_tile >> 1];
+  uvec2 sprite_mine = (sprite_tile & 1) == 0 ? sprite_pair.xy : sprite_pair.zw;
+  for (int word = 0; word < 2; ++word) {
+   uint sbits = sprite_mine[word];
+   while (sbits != 0u) {
+    int i = word * 32 + findLSB(sbits);
+    sbits &= sbits - 1u;
     vec4 s0 = sprites[i * 3], s1 = sprites[i * 3 + 1], s2 = sprites[i * 3 + 2];
     vec2 q = (v_texcoord - s0.xy) / s0.zw;
     float r2 = dot(q, q);
@@ -807,6 +820,7 @@ void main() {
       float glare = exp(-r2 * 160.0) * 1.2 + 0.010 / (r2 + 0.010) * edge * edge * edge * 0.45;
       result += s1.rgb * glare * seen * night.y * eye.w;
     }
+   }
   }
   // D183: the camera's lens flare from the brightest few lamps in view (the first sprites, their strength in s2.w's
   // whole pairs, 255ths), stronger the more directly the camera looks at one: faint ghosts along the line through the picture's middle,
@@ -865,6 +879,7 @@ void main() {
     float extra[4];  // x: 1 with the lamps' visibility found once each (spriteSeenTex)
     uint32_t beams[4];  // the lights that are turning beams (bits 0 to 95 in x, y, z)
     uint32_t tiles[kTilesX * kTilesY][4];  // each screen tile's lights (bits 0 to 95 in x, y, z)
+    uint32_t sprite_tiles[kTilesX * kTilesY / 2][4];  // each tile's lamp glows: two tiles a row, 64 bits each
     float lights[kMaxLights * 3][4];
     float sprites[kMaxSprites * 3][4];
   };
@@ -1084,6 +1099,30 @@ void main() {
     if (b.pData) context->UnmapTextureSubresource(tiles_staging_[1], 0, 0);
     REXLOG_INFO("[native_x_renderer] night: tiles check: {}x{} format {}: {} pixels differ, by {} at most (a byte)",
                 desc.Width, desc.Height, int(desc.Format), differ, most);
+  }
+
+  // Which lamp glows can show in each tile: a glow shows only within its ellipse on the picture (the pass passes over
+  // every pixel outside it, r2 >= 1), so a tile outside the ellipse's box has none of it; a margin of a hundredth of
+  // the picture as for the lights. `tiled` false: every glow in every tile.
+  static void TileSprites(const NightFrame& f, uint32_t sprites, bool tiled, Constants& k) {
+    for (uint32_t i = 0; i < sprites; ++i) {
+      const NightSprite& p = f.sprites[i];
+      int tx0 = 0, tx1 = int(kTilesX) - 1, ty0 = 0, ty1 = int(kTilesY) - 1;
+      if (tiled) {
+        const float u0 = p.uv[0] - std::fabs(p.radius[0]) - 0.01f, u1 = p.uv[0] + std::fabs(p.radius[0]) + 0.01f;
+        const float v0 = p.uv[1] - std::fabs(p.radius[1]) - 0.01f, v1 = p.uv[1] + std::fabs(p.radius[1]) + 0.01f;
+        if (!(u1 >= 0.0f && v1 >= 0.0f && u0 <= 1.0f && v0 <= 1.0f)) continue;  // off the picture (or not a number)
+        tx0 = std::clamp(int(std::floor(u0 * kTilesX)), 0, int(kTilesX) - 1);
+        tx1 = std::clamp(int(std::floor(u1 * kTilesX)), 0, int(kTilesX) - 1);
+        ty0 = std::clamp(int(std::floor(v0 * kTilesY)), 0, int(kTilesY) - 1);
+        ty1 = std::clamp(int(std::floor(v1 * kTilesY)), 0, int(kTilesY) - 1);
+      }
+      for (int ty = ty0; ty <= ty1; ++ty)
+        for (int tx = tx0; tx <= tx1; ++tx) {
+          const uint32_t t = uint32_t(ty) * kTilesX + uint32_t(tx);
+          k.sprite_tiles[t / 2][(t % 2) * 2 + i / 32] |= 1u << (i % 32);
+        }
+    }
   }
 
   // Which lights can reach each of the picture's 16 x 9 tiles (the Night Ops performance pass, 20 Nov 2026: every

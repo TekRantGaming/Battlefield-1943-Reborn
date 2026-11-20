@@ -9,11 +9,16 @@ Status labels as in [PERFORMANCE.md](PERFORMANCE.md): **confirmed** (measured be
 ## How it was measured
 
 - **The PC:** Ryzen 7 7800X3D, RTX 4070 Ti, Windows 11. Output 3840 x 2160.
-- **The scene:** Wake Island on a local Night Ops server (`run_dedicated_test.ps1 -Night`), the storm at full strength
-  from the start (`BF_DEV_NIGHT_RAMP=1`), the test player on the US carrier turning left and right every 6 s, his own
+- **The scene:** Wake Island on a local Night Ops server (`run_dedicated_test.ps1 -Night`), the test player on the US
+  carrier turning left and right every 6 s, his own
   settings file (Ultra: GTAO, SSGI, grass radius 1440, shadow scale 4, upscaler quality, FXAA). Night Ops turns the
   sky, lamp glow and lens flare on. With `-Bots 12` and `-Fire` (the test player firing) there are effects on screen.
   Scratchpad `perf_night.ps1`.
+- **Correction (found later the same day, TekRantGaming's question):** the runs above were all at the **clear night**
+  stage (clouds 15%, no rain), not the full storm they were meant to be: `BF_DEV_NIGHT_RAMP` builds the storm only
+  through the server's match file, and `run_dedicated_test.ps1` did not pass `--match-file` (the manager does), so the
+  server stayed at "Night Ops at 0%". Every result below headed "full storm" is the clear night's. The storm's stages and
+  other places on the map are measured in [the storm and the map](#the-storm-and-the-map) below.
 - **GPU time by pass (new, on by default):** `native_x_renderer_gpu_sections` puts a duration query round each of the
   renderer's own passes and logs every 600 frames "GPU ms a frame by pass: sky ..., fog and rain ..., GTAO ...". The
   night pass logs its own time and the effects' lights' search's: "night pass GPU ... (the effects' lights' search ...)".
@@ -27,7 +32,7 @@ Status labels as in [PERFORMANCE.md](PERFORMANCE.md): **confirmed** (measured be
 
 ## The baseline
 
-Night Ops at full storm, his settings: 68 to 69 FPS, GPU bound (11 to 12 ms of GPU work a frame, about 12 ms of each
+Night Ops (clear night stage, see the correction), his settings: 68 to 69 FPS, GPU bound (11 to 12 ms of GPU work a frame, about 12 ms of each
 frame spent waiting for the GPU). By pass: sky 3.1 ms, SSGI 1.65, night pass 1.0 to 1.9 without effects and 2.5 to 2.9
 with them, GTAO 0.92, fog and rain 0.6, FXAA 0.45, grass 0.05. SSGI and GTAO are his Ultra choices and are the same by
 day; the sky and the night pass are what Night Ops adds.
@@ -88,20 +93,20 @@ day; the sky and the night pass are what Night Ops adds.
 
 ## Overall (confirmed)
 
-The night pass at full storm, his settings: 1.0 to 1.9 ms before without effects (2.5 to 2.9 with), 0.52 ms on
+The night pass (clear night stage), his settings: 1.0 to 1.9 ms before without effects (2.5 to 2.9 with), 0.52 ms on
 average after (0.82 at the most, run `perf_tilesL_ab`, no effects). With effects on screen the search alone saves a
 further 1.2 ms a frame. The frame stays GPU bound: the sky (2.9 ms) and his SSGI and GTAO (2.6 ms) are now the largest
 passes.
 
 ## The whole frame after (confirmed)
 
-The same scene (no bots, full storm, his settings with VSync on): the frame interval 14.6 ms before (68 FPS; runs
+The same scene (no bots, clear night stage, his settings with VSync on): the frame interval 14.6 ms before (68 FPS; runs
 perf_nightA_old) and 11.3 to 11.8 ms after (85 to 89 FPS; runs perf_utilP, perf_skyQ), GPU 9.8 to 10.3 ms a frame.
 nvidia-smi during the run (new in perf_night.ps1): the GPU 83 to 90% busy at 2.3 to 2.7 GHz. The rest is VSync: his
 settings have it on, and a frame that misses a refresh waits for the next, so frames of about 10 ms of GPU work come
 out at 11 to 12 ms. Under about 8.3 ms of GPU work (120 Hz) the frame would hold the refresh rate.
 
-The sky's 2.9 ms by part (new sub-timers, sky.cpp): the clouds' march 2.43 ms, their blend over frames 0.14, the sky
+The sky's 2.9 ms (clear night stage) by part (new sub-timers, sky.cpp): the clouds' march 2.43 ms, their blend over frames 0.14, the sky
 drawn 0.34. The march's work is the cloud that is seen (up to 144 steps a ray, each with five samples toward the
 moon and one more for the billows' facing); its density already skips the detail noise where the coarse shape is
 empty.
@@ -116,7 +121,7 @@ Builds pushed before this fix (v0.4.8-testing 4c77eb82 and 34f15612) had the tim
 
 ## Looked at, not changed
 
-- **The sky's cloud march** (about 2.9 ms in a full storm, half size, temporal): the remaining cost is the march over
+- **The sky's cloud march** (about 2.9 ms at the clear night stage, half size, temporal): the remaining cost is the march over
   visible cloud (48 to 144 steps, five light samples a step). Fewer steps or a quarter size march would change the
   look; left for TekRantGaming to choose.
 - **The clouds' march, amortised over frames: built as an option, off** (`native_x_renderer_cloud_checkerboard`):
