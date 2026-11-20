@@ -392,19 +392,13 @@ std::string GuestText(const uint8_t* base, uint32_t begin, uint32_t end) {
 // The vehicle a player sits in, and its seat: its controlled entity (+312) when that is not its soldier; the vehicle's
 // name from its data object (+0x14, its name at +0xC: native_input.cpp, run kb_probe_g2), the seat the entry the
 // player holds (+292: 0 the driver's). "" on foot.
+std::string VehicleName(const uint8_t* base, uint32_t vehicle);
 std::string VehicleKey(const uint8_t* base, uint32_t player, uint32_t* vehicle_out = nullptr) {
   const uint32_t so = Load32(base, player + 288), ctl = Load32(base, player + 312);
   if (!ctl || ctl == so || !Readable(ctl, 0x20)) return {};
-  const uint32_t data = Load32(base, ctl + 0x14);
-  std::string name;
-  if (Readable(data, 0x10)) {
-    const uint32_t s = Load32(base, data + 0xC);
-    for (uint32_t i = 0; i < 40 && Mapped(base, s + i, 1); ++i) {
-      const char c = char(base[s + i]);
-      if (!c) break;
-      name += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
-    }
-  }
+  // The vehicle's name as KindOf has it (read once per vehicle type: a character at a time through Mapped read the
+  // process's memory map 40 times a sample on Linux, and some names came out as their first letter, "C|driver").
+  std::string name = VehicleName(base, ctl);
   if (name.empty()) name = "vehicle";
   const uint32_t seat = Load32(base, player + 292);
   if (vehicle_out) *vehicle_out = ctl;
