@@ -384,12 +384,62 @@ void StartTickWatchdogOnce() {
   (void)started;
 }
 
+// The machine's witness (20 Nov 2026, the US Central test server, a Contabo KVM VPS): its stalls came in the first six
+// seconds of every minute and said "it was working", yet with the game server stopped a plain Python loop on the same
+// machine stood still at the same seconds, every processor at once, idle ones too. The host stops running the whole
+// machine and tells it nothing (it gives no steal time), so the paused time counts as the tick thread's own processor
+// time. A thread that only sleeps, waking every 20 ms, is held as well when the machine stands still: a stall it was
+// silent through is the machine's, not the tick's. It costs 50 wakes a second.
+constexpr int64_t kWitnessPeriodUs = 20000;
+std::atomic<int64_t> g_witness_seen_us{0};                         // its latest wake
+std::atomic<int64_t> g_witness_from_us{0}, g_witness_to_us{0};     // its latest late wake: silent from, to
+std::atomic<uint32_t> g_witness_stands{0};                         // late wakes of 50 ms or more
+std::atomic<int64_t> g_witness_still_us{0};                        // their time held, all of them
+static int64_t SteadyUs() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count();
+}
+static void StartMachineWitnessOnce() {
+  static const bool started = [] {
+    g_witness_seen_us.store(SteadyUs(), std::memory_order_relaxed);
+    std::thread([] {
+      auto next = Clock::now();
+      for (;;) {
+        next += std::chrono::microseconds(kWitnessPeriodUs);
+        std::this_thread::sleep_until(next);
+        const int64_t now = SteadyUs(), seen = g_witness_seen_us.load(std::memory_order_relaxed);
+        const int64_t held = now - seen - kWitnessPeriodUs;
+        if (held >= 30000) {
+          g_witness_from_us.store(seen + kWitnessPeriodUs, std::memory_order_relaxed);
+          g_witness_to_us.store(now, std::memory_order_release);  // after "from": a reader that sees it sees both
+          if (held >= 50000) {
+            g_witness_stands.fetch_add(1, std::memory_order_relaxed);
+            g_witness_still_us.fetch_add(held, std::memory_order_relaxed);
+          }
+        }
+        g_witness_seen_us.store(now, std::memory_order_relaxed);
+        if (const auto t = Clock::now(); next < t) next = t;  // no wakes to catch up after a stand
+      }
+    }).detach();
+    return true;
+  }();
+  (void)started;
+}
+// How much of [from, to] the witness was held through (beyond its own 20 ms): the machine stood still that long.
+static double MachineStillMs(int64_t from_us, int64_t to_us) {
+  const auto overlap = [&](int64_t a, int64_t b) { return std::max<int64_t>(0, std::min(b, to_us) - std::max(a, from_us)); };
+  const int64_t to = g_witness_to_us.load(std::memory_order_acquire), from = g_witness_from_us.load(std::memory_order_relaxed);
+  const int64_t seen = g_witness_seen_us.load(std::memory_order_relaxed);
+  // Its latest late wake, and a stand it is still in (not woken yet as the tick goes on).
+  return double(std::max(overlap(from, to), overlap(seen + kWitnessPeriodUs, to_us))) / 1000.0;
+}
+
 static void NoteServerTick(double work_ms, const ThreadCost& before, const ThreadCost& after) {
   bf1943::InstallNullPageGuardOnce();
   g_last_tick_ms.store(SteadyMs(), std::memory_order_relaxed);
   StartTickWatchdogOnce();
+  StartMachineWitnessOnce();
   static Clock::time_point window{}, last{};
-  static uint32_t ticks = 0, slow25 = 0, slow100 = 0, gaps50 = 0, said = 0;
+  static uint32_t ticks = 0, slow25 = 0, slow100 = 0, gaps50 = 0, said = 0, machine_stalls = 0;
   static double longest_gap = 0, work_total = 0, work_longest = 0;
   static ThreadCost last_after;
   static double machine_total = 0, machine_stolen = 0;
@@ -397,6 +447,17 @@ static void NoteServerTick(double work_ms, const ThreadCost& before, const Threa
   constexpr double kStallMs = 50.0;
   constexpr uint32_t kSaidPerWindow = 20;
   const auto now = Clock::now();
+  const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+  const int64_t work_us = int64_t(work_ms * 1000.0);
+  // A stall the witness was held through for half its time or more: the whole machine stood still, not the thread.
+  const auto still_words = [&](double stall_ms, int64_t from_us, int64_t to_us) -> std::string {
+    const double still = MachineStillMs(from_us, to_us);
+    if (still < stall_ms * 0.5) return {};
+    ++machine_stalls;
+    return fmt::format("the whole machine stood still for {:.0f} ms of it (a thread that only sleeps was held as long: "
+                       "the machine's host did not run it)",
+                       still);
+  };
   if (last != Clock::time_point{}) {
     // From the last tick's end to this one's start: the game's own wait for the next tick, and whatever held it.
     const double gap = std::chrono::duration<double, std::milli>(now - last).count();
@@ -404,22 +465,27 @@ static void NoteServerTick(double work_ms, const ThreadCost& before, const Threa
     const double between = gap - work_ms;
     if (between >= kStallMs) {
       ++gaps50;
+      const int64_t last_us = std::chrono::duration_cast<std::chrono::microseconds>(last.time_since_epoch()).count();
+      const std::string still = still_words(between, last_us, now_us - work_us);
       if (said++ < kSaidPerWindow)
         REXLOG_WARN("BF server stall: {:.0f} ms between two ticks ({:.1f} ms of it on the processor; the thread waited {} "
-                    "times and had the processor taken {} times)",
+                    "times and had the processor taken {} times){}{}",
                     between, before.cpu_ms - last_after.cpu_ms, before.waits - last_after.waits,
-                    before.taken - last_after.taken);
+                    before.taken - last_after.taken, still.empty() ? "" : ": ", still);
     }
   } else {
     window = now;
     machine = MachineTimes(machine_total, machine_stolen);
     REXLOG_INFO("BF server: {} processors on this machine", std::thread::hardware_concurrency());
   }
-  if (work_ms >= kStallMs && said++ < kSaidPerWindow)
-    REXLOG_WARN("BF server stall: a tick took {:.0f} ms, {:.1f} ms of it on the processor (the thread waited {} times and "
-                "had the processor taken {} times): {}",
-                work_ms, after.cpu_ms - before.cpu_ms, after.waits - before.waits, after.taken - before.taken,
-                after.cpu_ms - before.cpu_ms >= work_ms * 0.7 ? "it was working" : "it was waiting");
+  if (work_ms >= kStallMs) {
+    std::string why = still_words(work_ms, now_us - work_us, now_us);
+    if (why.empty()) why = after.cpu_ms - before.cpu_ms >= work_ms * 0.7 ? "it was working" : "it was waiting";
+    if (said++ < kSaidPerWindow)
+      REXLOG_WARN("BF server stall: a tick took {:.0f} ms, {:.1f} ms of it on the processor (the thread waited {} times "
+                  "and had the processor taken {} times): {}",
+                  work_ms, after.cpu_ms - before.cpu_ms, after.waits - before.waits, after.taken - before.taken, why);
+  }
   last = now;
   last_after = after;
   ++ticks;
@@ -439,10 +505,17 @@ static void NoteServerTick(double work_ms, const ThreadCost& before, const Threa
   if (getloadavg(load, 3) >= 1) host += fmt::format(", load {:.2f}", load[0]);
 #endif
   if (const double mb = ProcessMemoryMb(); mb > 0) host += fmt::format("; memory {:.0f} MB", mb);
+  // The witness's stands since the last report: how often the whole machine stood still, ticks or not.
+  const uint32_t stands = g_witness_stands.exchange(0, std::memory_order_relaxed);
+  const double still_ms = double(g_witness_still_us.exchange(0, std::memory_order_relaxed)) / 1000.0;
+  if (stands > 0 || machine_stalls > 0)
+    host += fmt::format("; the whole machine stood still {} times (50 ms or more, {:.0f} ms in all), {} of the stalls in "
+                        "those",
+                        stands, still_ms, machine_stalls);
   REXLOG_INFO("BF server ticks: {:.1f} a second over {:.0f} s, longest gap {:.1f} ms; the tick's own work {:.2f} ms average, "
               "{:.1f} ms longest; {} ticks of 25 ms or more, {} of 100 ms or more, {} waits of 50 ms or more between ticks{}",
               ticks / seconds, seconds, longest_gap, work_total / ticks, work_longest, slow25, slow100, gaps50, host);
-  window = now, ticks = slow25 = slow100 = gaps50 = said = 0, longest_gap = work_total = work_longest = 0;
+  window = now, ticks = slow25 = slow100 = gaps50 = said = machine_stalls = 0, longest_gap = work_total = work_longest = 0;
 }
 
 #if defined(BF_DEV_TOOLS)
