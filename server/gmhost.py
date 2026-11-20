@@ -1006,11 +1006,20 @@ class World:
         self.at = time.monotonic()
         self.admins, self.key = set(), ''
         self.night_ops = False
+        self.base = None  # Night Ops: the weather and fogs a round starts with (configure)
+        self.round, self.raining = None, False
 
     # Night Ops (16 Nov 2026, TekRantGaming: the night maps gone, "we would just start the match to always be at a set
     # time the full time so could have night ops maps"): a Night Ops server's world is the day and night cycle held at
     # this hour for the whole match; its admins may change the weather, never the time.
-    NIGHT_OPS_HOUR = 0.0  # midnight: the moon at its highest, the cycle's lightest night
+    # 20 Nov 2026, his presets: "time of day should be 1900h and is locked at that time"; "the games tickets are used to
+    # start the weather so when the game has reached its halfway point the rain should start right now rain starts when
+    # the weather is set to above 75%"; "When the rain starts at the halfway point also put ground fog and distant fog
+    # at 50%". The halfway point: the team with fewer tickets has half its round's count left (match(), from the
+    # server's match.txt, match_rules.cpp). Each new round starts dry again.
+    NIGHT_OPS_HOUR = 19.0
+    NIGHT_OPS_RAIN = 0.85  # the weather from the halfway point: past 75%, where the rain falls
+    NIGHT_OPS_RAIN_FOG = 0.5  # the distance fog and the ground fog from then
 
     def configure(self, args):
         clamp = lambda v, lo, hi: max(lo, min(hi, float(v)))
@@ -1025,6 +1034,8 @@ class World:
         self.fog, self.ground_fog = clamp(args.fog, 0, 1), clamp(args.ground_fog, 0, 1)
         self.wind = clamp(args.wind, 0, 1)
         self.cloud_height = clamp(args.cloud_height, 100, 1500)
+        self.base = (self.weather, self.fog, self.ground_fog)
+        self.round, self.raining = None, False
         # Player IDs as the game shows them (eight hex digits, the low half of the XUID).
         self.admins = {a.strip().upper().rjust(8, '0') for a in args.admins.replace(';', ',').replace(' ', ',').split(',')
                        if a.strip()}
@@ -1036,6 +1047,23 @@ class World:
                 'ground fog %.0f%%, wind %.0f%%, cloud height %.0f m') % (
             'on' if self.day_night else 'off', self.hour, self.day_minutes, self.cover * 100, self.rate * 100,
             self.weather * 100, self.fog * 100, self.ground_fog * 100, self.wind * 100, self.cloud_height)
+
+    def match(self, round_number, left):
+        """Night Ops: the round's progress from the server (round number, the share of tickets the team with fewer still
+        has): a new round starts with the server's own weather and fogs, and from the halfway point the rain and fog."""
+        if not self.night_ops or self.base is None:
+            return
+        if round_number != self.round:
+            if self.round is not None or self.raining:
+                self.weather, self.fog, self.ground_fog = self.base
+                self.host.note('world: Night Ops round %s starts dry: %s' % (round_number, self.said()))
+            self.round, self.raining = round_number, False
+        if not self.raining and left <= 0.5:
+            self.raining = True
+            self.weather = max(self.weather, self.NIGHT_OPS_RAIN)
+            self.fog = self.ground_fog = self.NIGHT_OPS_RAIN_FOG
+            self.host.note('world: Night Ops halfway (%.0f%% of the tickets left): the rain starts, %s' % (
+                left * 100, self.said()))
 
     def advance(self):
         now = time.monotonic()
@@ -1454,6 +1482,14 @@ async def serve(args):
                                         names=host.player_names()))
                 for m in stats_lines():  # each player's stats since the last beat (player_stats.py)
                     send(m)
+                if args.match_file:  # the round's progress (match_rules.cpp): Night Ops' rain at the halfway point
+                    try:
+                        with open(args.match_file, encoding='utf-8') as f:
+                            parts = f.read().split()
+                        if len(parts) >= 2:
+                            host.world.match(int(parts[0]), float(parts[1]))
+                    except (OSError, ValueError):
+                        pass
                 await writer.drain()
                 await asyncio.sleep(5)
 
@@ -1536,10 +1572,11 @@ def main():
     ap.add_argument('--mode', choices=['classic', 'modern'], default='classic',
                     help='not used since v0.4.0: every server plays the original movement and aiming')
     # Night Ops (TekRantGaming, 11 Nov 2026): the maps at night, shown in the server list. Since 16 Nov 2026 the night
-    # is the server's world: the day and night cycle held at midnight for the whole match (World.NIGHT_OPS_HOUR), drawn
-    # by players' games with the levels' lamps lit (NativeXRenderer D175); --day-night, --time and --day-minutes are
-    # then not used.
-    ap.add_argument('--night', action='store_true', help='a night server: its world is held at midnight (Night Ops)')
+    # is the server's world: the day and night cycle held at one hour for the whole match (World.NIGHT_OPS_HOUR, 19:00
+    # since 20 Nov 2026), drawn by players' games with the levels' lamps lit (NativeXRenderer D175); --day-night, --time
+    # and --day-minutes are then not used. From each round's halfway point (World.match, --match-file) the rain and fog.
+    ap.add_argument('--night', action='store_true',
+                    help='a night server (Night Ops): its world held at 19:00, the rain and fog from the halfway point')
     # Where the server is (TekRantGaming, 13 Nov 2026: the browser shows the region with its flag): one of the game's
     # region codes (bf/src/regions.h, the manager's drop down). And its tick rate, for the browser: the game's own
     # 30 Hz today.
@@ -1571,6 +1608,8 @@ def main():
     ap.add_argument('--region', default='', help="the server's region code, e.g. gb, de, us-east (shown in the browser)")
     ap.add_argument('--tick', type=int, default=60, help="the server's tick rate in Hz (shown in the browser; 60 by default since 14 Nov 2026)")
     ap.add_argument('--map-file', default='', help="the server's current_map.txt (its map rotation)")
+    ap.add_argument('--match-file', default='',
+                    help="the server's match.txt (match_rules.cpp): the round and its tickets left, for Night Ops' rain")
     ap.add_argument('--maps', default='', help='the rotation, map titles separated by commas (for the next map)')
     ap.add_argument('--description', default='', help='shown in the server browser (200 characters)')
     ap.add_argument('--unlisted', action='store_true', help='registered but not listed: Direct connect only')

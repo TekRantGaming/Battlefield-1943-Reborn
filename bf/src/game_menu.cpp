@@ -2706,6 +2706,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     joined_gid_ = sv.gid;  // the pause's Scoreboard and the match score sent to the backend
     comms::NoteJoined(sv.address);  // voice and text chat go to this server's host (comms.cpp)
     world::NoteJoined(sv.address);  // and the match's clock and weather come from it (world_sync.cpp)
+    // A dedicated server's look (TekRantGaming, 20 Nov 2026): a Night Ops server turns its night's settings on, any
+    // other server's turns them off. A match a player's game hosts (Custom Match, LAN) keeps the player's own.
+    // Only in a build with Night Ops (night_ops.h): without it no server is one, and nothing is changed.
+    if (kNightOps && !sv.player_hosted && !pm_hosting_ && own_backend_.empty()) ApplyNightOpsLook(sv.night);
     joined_from_start_ = MenuDriverStage() < 2;  // its joining page shows the game's start first
     tutorial_ = false;
     NotePlayedLevel(sv.map.empty() ? "Wake Island" : sv.map);
@@ -3478,6 +3482,30 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       ApplyUpscaler(false, settings_.Get("nis_support", ""));
   }
   static bool Truthy(const std::string& v) { return v == "true" || v == "1" || v == "on"; }
+
+  // The settings a Night Ops server's night is made for (TekRantGaming, 20 Nov 2026: "these settings should turn on
+  // when joining a night ops server. But if the user's joining one of our normal regular servers ... these settings
+  // need to be turned off"): in Graphics, Day and night, the Volumetric clouds sky, Lightning, Storm shake, Rain on
+  // the lens and Wet weapon and hands; in Enhancements, Lamp glow and Lens flare. Saved like the player's own choice,
+  // so the rows show them; each applies at once. The server holds the hour (19:00) and the weather (gmhost.py).
+  void ApplyNightOpsLook(bool night) {
+    static constexpr const char* kNightOpsCvars[] = {
+        "native_x_renderer_day_night", "native_x_renderer_sky",     "native_x_renderer_lightning",
+        "native_x_renderer_storm_sway", "native_x_renderer_rain_lens", "native_x_renderer_wetness",
+        "native_x_renderer_lamp_bloom", "native_x_renderer_lens_flare"};
+    const std::string value = night ? "true" : "false";
+    int changed = 0;
+    for (const char* name : kNightOpsCvars) {
+      if (!rex::cvar::GetFlagInfo(name)) continue;
+      if (Truthy(rex::cvar::GetFlagByName(name)) != night) ++changed;
+      gfx_pending_.erase(name);  // not left waiting for Graphics' Apply
+      settings_.values[std::string("cvar.") + name] = value;
+      rex::cvar::SetFlagByName(name, value);
+    }
+    settings_.Save();
+    REXLOG_INFO("BF night ops: {} server: its night's settings {} ({} changed)", night ? "a Night Ops" : "a regular",
+                night ? "on" : "off", changed);
+  }
 
   // The Upscaler row's choices: Off and TAA always, the others only where this GPU runs them (the renderer's answer,
   // NoteTemporalSupport); before the first answer, Off and TAA alone. The one chosen stays listed until it is changed.

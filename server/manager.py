@@ -920,6 +920,7 @@ class Manager:
                 '--name', s['name'].replace('"', "'"), '--map', MAP_TITLE[maps[0]],
                 '--maps', ','.join(MAP_TITLE[m] for m in maps),
                 '--map-file', os.path.join(directory, 'user', 'current_map.txt'),
+                '--match-file', os.path.join(directory, 'user', 'match.txt'),
                 '--status-file', os.path.join(directory, 'status.json'), '--log', os.path.join(directory, 'host.log'),
                 '--max-players', str(s['max_players']), '--tick', str(tick),
                 '--broadcast-file', os.path.join(directory, 'broadcast.json'),

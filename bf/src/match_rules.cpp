@@ -28,8 +28,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "bf1943_pch.h"
@@ -40,6 +44,7 @@
 #include "world_sync.h"
 
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
+REXCVAR_DECLARE(std::string, user_data_root);
 REXCVAR_DEFINE_INT32(bf_match_tickets, 0, "BF1943/Server",
                      "Each team's tickets at a round's start; 0: the level's own (130, Coral Sea 100)");
 REXCVAR_DEFINE_DOUBLE(bf_match_time_limit, 0.0, "BF1943/Server",
@@ -145,8 +150,57 @@ void MatchRulesRoundOver() {
   g_seconds_left = -1.0f;
 }
 
-// The server's tick (server_rotation.cpp): the time limit.
+// How far a round has gone, for the server's host (TekRantGaming, 20 Nov 2026, Night Ops: "the games tickets are used
+// to start the weather so when the game has reached its halfway point the rain should start"): each second, the round's
+// number and the tickets the team with fewer left still has, over its count at the round's start (1 at the start, 0
+// when a team is out), into <user data>/match.txt as "<round> <left>", which gmhost.py --match-file reads. Written only
+// when it changes; a round with no counters running writes nothing.
+void WriteMatchProgress(uint8_t* base) {
+  static Clock::time_point next{};
+  static std::string written;
+  const auto now = Clock::now();
+  if (now < next) return;
+  next = now + std::chrono::seconds(1);
+  std::vector<uint32_t> counters;
+  {
+    std::lock_guard lock(g.mutex);
+    if (!g.running) return;
+    counters = g.counters;
+  }
+  double left = 1.0;
+  int found = 0;
+  for (uint32_t c : counters) {
+    if (Load32(base, c) != kCounterVtable) continue;
+    const uint32_t data = Load32(base, c + 20);
+    const double start = Plausible(data) ? double(Load32(base, data + 136)) : 0.0;
+    if (start <= 0) continue;
+    const double t = Load32(base, c + 140) != 0 ? 0.0 : std::max(0.0, double(LoadF(base, c + 132)));
+    left = std::min(left, std::clamp(t / start, 0.0, 1.0));
+    ++found;
+  }
+  if (!found) return;
+  const std::filesystem::path dir = REXCVAR_GET(user_data_root);
+  if (dir.empty()) return;
+  char line[64];
+  std::snprintf(line, sizeof(line), "%u %.3f\n", g_round.load(), left);
+  if (written == line) return;
+  const std::filesystem::path file = dir / "match.txt", tmp = dir / "match.txt.new";
+  {
+    std::ofstream f(tmp, std::ios::trunc);
+    if (!f) return;
+    f << line;
+  }
+  std::error_code ec;
+  std::filesystem::rename(tmp, file, ec);
+  if (ec) return;
+  written = line;
+  REXLOG_INFO("BF match rules: round {}, the team with fewer tickets has {:.0f}% of its count left ({} counters)",
+              g_round.load(), left * 100, found);
+}
+
+// The server's tick (server_rotation.cpp): the time limit, and the round's progress for the host.
 void MatchRulesTick(PPCContext& ctx, uint8_t* base) {
+  WriteMatchProgress(base);
   const double limit = LimitSeconds();
   std::vector<uint32_t> counters;
   {
