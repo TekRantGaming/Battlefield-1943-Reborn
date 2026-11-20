@@ -276,6 +276,23 @@ struct Bot {
   bool ads = false;        // aiming down the sights in this fight
   bool sprinter = true;    // sprints on its way to this goal
   Clock::time_point next_ride{};  // when it looks for a vehicle to ride in next
+  // Riding (Ride): the vehicle it sits in, where it got on, where the vehicle last moved and when, when its driver's
+  // seat went empty, and the enter/exit button (digital concept 13, B: run boatbtn2) held until press_until.
+  uint32_t ride = 0;
+  float ride_from[3] = {}, ride_last[3] = {};
+  Clock::time_point ride_at{}, ride_moved{}, no_driver_since{}, press_until{}, next_press{};
+  uint32_t off_vehicle = 0;          // the vehicle it just got off: not boarded again until off_until
+  Clock::time_point off_until{};
+  // Boats (TekRantGaming, 20 Nov 2026: "id like them to use the boats and also know how to get in and out of them"):
+  // the boat it walks to (to drive it, or ride in it with a bot of its side driving), until boat_until; a driver's
+  // way to the beach (BoatRoute), how long it waits for passengers, and its backing off something it ran into.
+  uint32_t boat = 0;
+  Clock::time_point boat_until{}, boat_check{}, boat_wait_until{}, reverse_until{}, boat_log{};
+  std::vector<std::array<float, 3>> boat_path;
+  int reverses = 0;
+  int presses = 0;  // enter presses at the boat it walks to (the game refusing it: given up after 4)
+  Clock::time_point life_at{};  // when its soldier spawned: boats are for the first 45 s of a life, once
+  bool boated = false;
   bool paused = false;            // waiting: no human on the server (BotsTick)
   bool leaving = false;           // backfill: a player needs its slot; it leaves when dead (now, or when it next dies)
   bool defending = false;  // its goal is a flag its side holds
@@ -317,6 +334,8 @@ struct State {
   // sub_822FF5B0 hooked below). Every tank, jeep, boat, plane and fixed gun the game treats as a vehicle
   // (sub_822F1CF8, the game's own "is a vehicle" test, compares its type with 0x82D55EF0, that class's).
   std::set<uint32_t> vehicles;
+  std::set<std::string> boat_names;  // the level's boats by name (IsBoat: "LCVP"), for the routes learned in them
+  std::map<uint32_t, Clock::time_point> stranded;  // boats a bot left stuck (a reef, the lagoon): not taken until then
   uint32_t ray_scratch = 0;  // guest memory for the ray test's vectors (16 byte aligned)
   int searches_left = 0;     // path searches this tick may still make (kSearchesPerTick)
   uint8_t* base = nullptr;   // guest memory (BotsTick), for BotsLevelChange
@@ -426,6 +445,19 @@ bool Position(PPCContext& outer, uint8_t* base, uint32_t entity, float out[3]) {
   for (int i = 0; i < 3; ++i) out[i] = LoadF(base, m + 48 + 4 * i);
   return true;
 }
+// An entity's heading (the way its forward axis, the transform's third row, points), as a bot's yaw: forward =
+// (-sin yaw, 0, cos yaw).
+bool Heading(PPCContext& outer, uint8_t* base, uint32_t entity, float* yaw) {
+  PPCContext call = outer;
+  call.r3.u64 = entity;
+  sub_822A7BB0(call, base);
+  const uint32_t m = call.r3.u32;
+  if (!Readable(m, 64)) return false;
+  const float fx = LoadF(base, m + 32), fz = LoadF(base, m + 40);
+  if (fx * fx + fz * fz < 1e-4f) return false;
+  *yaw = std::atan2(-fx, fz);
+  return true;
+}
 // The same, read once a server tick (the optimization pass: every bot's think read every soldier's and vehicle's
 // place again through the game, thousands of calls a second); TickPositions() empties it each tick.
 std::unordered_map<uint32_t, std::array<float, 3>> tick_positions;
@@ -456,19 +488,45 @@ uint32_t SeatPlayer(const uint8_t* base, uint32_t vehicle, uint32_t seat) {
   const uint32_t entry = Load32(base, entries + 4 * seat);
   return Readable(entry, 288) ? Load32(base, entry + 284) : 0;
 }
-// A vehicle's name from its data (+0x14, the name at +0xC; VehicleKey's).
-std::string VehicleName(const uint8_t* base, uint32_t vehicle) {
-  const uint32_t data = Load32(base, vehicle + 0x14);
-  std::string name;
-  if (Readable(data, 0x10)) {
-    const uint32_t s = Load32(base, data + 0xC);
-    for (uint32_t i = 0; i < 40 && Readable(s + i, 1); ++i) {
-      const char c = char(base[s + i]);
-      if (!c) break;
-      name += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
-    }
+// A C string of the game's data, 40 characters at most. Readable takes 4 byte aligned addresses only (a name read a
+// character at a time stopped at its first: "L" for the LCVP, US Central 20 Nov), so the aligned span is checked once;
+// a string outside the heaps (the level's data) is checked as mapped.
+std::string DataText(const uint8_t* base, uint32_t s) {
+  std::string out;
+  if (!Readable(s & ~3u, 48) && !Mapped(base, s, 40)) return out;
+  for (uint32_t i = 0; i < 40; ++i) {
+    const char c = char(base[s + i]);
+    if (!c) break;
+    out += c;
   }
-  return name;
+  return out;
+}
+// A vehicle's name and whether it is a boat, by its data (+0x14; its name at +0xC, VehicleKey's; its class at +0x80,
+// an object whose name comes first: "Light_Boat" for the landing craft, run vach_scan1 of 18 Nov 2026). Kept by the
+// data object; forgotten at a level change.
+struct VehicleKind {
+  std::string name;
+  bool boat = false;
+};
+std::unordered_map<uint32_t, VehicleKind> vehicle_kinds;
+const VehicleKind& KindOf(const uint8_t* base, uint32_t vehicle) {
+  static const VehicleKind none;
+  const uint32_t data = Readable(vehicle, 0x18) ? Load32(base, vehicle + 0x14) : 0;
+  if (!Readable(data, 0x84)) return none;
+  const auto it = vehicle_kinds.find(data);
+  if (it != vehicle_kinds.end()) return it->second;
+  VehicleKind k;
+  for (char c : DataText(base, Load32(base, data + 0xC))) k.name += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+  const std::string cls = DataText(base, Load32(base, data + 0x80));
+  k.boat = cls.find("Boat") != std::string::npos || cls.find("boat") != std::string::npos;
+  REXLOG_INFO("BF bots: vehicle '{}', class '{}'{}", k.name, cls, k.boat ? ": a boat" : "");
+  return vehicle_kinds.emplace(data, k).first->second;
+}
+std::string VehicleName(const uint8_t* base, uint32_t vehicle) { return KindOf(base, vehicle).name; }
+bool IsBoat(const uint8_t* base, uint32_t vehicle) {
+  const VehicleKind& k = KindOf(base, vehicle);
+  if (k.boat) g.boat_names.insert(k.name);
+  return k.boat;
 }
 
 // Every committed guest range outside the image (modern_mode.cpp's walk).
@@ -1455,6 +1513,106 @@ struct Enemy {
 
 // What the bot decides, 4 times a second: an enemy it sees to fight, else the flag to go for, and how to get there
 // past what is in the way (rays ahead at waist and chest height, one down ahead for a drop).
+// A boat's way from where it is to the beach nearest a flag, over the water human players drove boats on (the cells
+// learned of every "<boat>|driver", Learned::vehicles): the learned cell nearest the flag is the landing (where the
+// players beached), and the way there links cells up to 14 m apart (a sample each half second, 10 m apart at speed), shortest
+// first. Points 15 m apart and more. Empty when nothing was learned near enough: the driver heads straight for the
+// flag instead.
+std::vector<std::array<float, 3>> BoatRoute(const float from[3], const float to[3]) {
+  struct Node {
+    float p[3];
+  };
+  std::vector<Node> nodes;
+  for (const auto& [key, vu] : learn.vehicles) {
+    const size_t bar = key.find('|');
+    if (bar == std::string::npos || key.compare(bar, std::string::npos, "|driver") != 0 ||
+        !g.boat_names.count(key.substr(0, bar)))
+      continue;
+    for (const auto& [k, c] : vu.cells)
+      if (c.second > 0) nodes.push_back({{CellCenter(CellX(k)), c.first / c.second, CellCenter(CellZ(k))}});
+  }
+  if (nodes.size() < 10) return {};
+  int start = -1, end = -1;
+  float ds = 40.0f, de = 1e9f;
+  for (int i = 0; i < int(nodes.size()); ++i) {
+    const float a = Dist2D(nodes[i].p, from), b = Dist2D(nodes[i].p, to);
+    if (a < ds) ds = a, start = i;
+    if (b < de) de = b, end = i;
+  }
+  if (start < 0 || end < 0 || de > Dist2D(from, to) - 50.0f) return {};
+  constexpr float kLink = 14.0f, kBucket = 15.0f;
+  std::unordered_map<uint64_t, std::vector<int>> buckets;
+  auto bucket = [&](float x, float z) {
+    return (uint64_t(uint32_t(int(std::floor(x / kBucket)))) << 32) | uint32_t(int(std::floor(z / kBucket)));
+  };
+  for (int i = 0; i < int(nodes.size()); ++i) buckets[bucket(nodes[i].p[0], nodes[i].p[2])].push_back(i);
+  std::vector<float> dist(nodes.size(), 1e30f);
+  std::vector<int> prev(nodes.size(), -1);
+  using Item = std::pair<float, int>;
+  std::priority_queue<Item, std::vector<Item>, std::greater<Item>> open;
+  dist[start] = 0, open.push({0.0f, start});
+  while (!open.empty()) {
+    const auto [d, i] = open.top();
+    open.pop();
+    if (d > dist[i]) continue;
+    if (i == end) break;
+    const int bx = int(std::floor(nodes[i].p[0] / kBucket)), bz = int(std::floor(nodes[i].p[2] / kBucket));
+    for (int ox = -1; ox <= 1; ++ox)
+      for (int oz = -1; oz <= 1; ++oz) {
+        const auto it = buckets.find((uint64_t(uint32_t(bx + ox)) << 32) | uint32_t(bz + oz));
+        if (it == buckets.end()) continue;
+        for (int j : it->second) {
+          const float step = Dist2D(nodes[i].p, nodes[j].p);
+          if (step > kLink || d + step >= dist[j]) continue;
+          dist[j] = d + step, prev[j] = i;
+          open.push({dist[j], j});
+        }
+      }
+  }
+  if (dist[end] >= 1e29f) return {};
+  std::vector<std::array<float, 3>> way;
+  for (int i = end; i >= 0; i = prev[i]) way.push_back({nodes[i].p[0], nodes[i].p[1], nodes[i].p[2]});
+  std::reverse(way.begin(), way.end());
+  std::vector<std::array<float, 3>> out;
+  for (size_t i = 0; i < way.size(); ++i)
+    if (i + 1 == way.size() || out.empty() || Dist2D(out.back().data(), way[i].data()) >= 15.0f) out.push_back(way[i]);
+  return out;
+}
+
+// How far of its planned way a bot would swim: the way's legs walked in 2 m steps (a long straight leg, a swim from
+// the carrier's side to the beach, has no point of its own on the water), each step on a cell the grid knows as water.
+float SwimAhead(const Bot& bot, const float pos[3]) {
+  float m = 0;
+  float from[3] = {pos[0], pos[1], pos[2]};
+  for (const auto& pt : bot.path) {
+    const float len = Dist2D(from, pt.data());
+    const int steps = std::min(1000, int(len / kCell));
+    for (int i = 1; i <= steps; ++i) {
+      const float t = float(i) / float(steps);
+      const auto c = nav.cells.find(
+          CellKey(CellOf(from[0] + (pt[0] - from[0]) * t), CellOf(from[2] + (pt[2] - from[2]) * t)));
+      if (c != nav.cells.end() && c->second.state == 3) m += len / float(steps);
+    }
+    from[0] = pt[0], from[1] = pt[1], from[2] = pt[2];
+  }
+  return m;
+}
+
+// How much of the straight line to a place is sea: 2 m steps on cells the grid knows as water, or does not know at all
+// (the open sea between a carrier and the island is never mapped: no spawn point or flag leads there; run boatdrive6,
+// the US bots' planned ways crossed it and counted no swim).
+float StraightWater(const float from[3], const float to[3]) {
+  const float len = Dist2D(from, to);
+  const int steps = std::min(2000, int(len / kCell));
+  float m = 0;
+  for (int i = 1; i <= steps; ++i) {
+    const float t = float(i) / float(steps);
+    const auto c = nav.cells.find(CellKey(CellOf(from[0] + (to[0] - from[0]) * t), CellOf(from[2] + (to[2] - from[2]) * t)));
+    if (c == nav.cells.end() || c->second.state == 3) m += len / float(steps);
+  }
+  return m;
+}
+
 void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const float pos[3],
            const std::vector<uint32_t>& listed, Clock::time_point now) {
   const int team = int(Load32(base, bot.player + 48));
@@ -1723,6 +1881,7 @@ void Drive(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t soldier, double 
     base[cur + 122] |= 0x09;  // digital bits 40 (aim valid) and 43 (from the client)
     if (bot.sprint) base[cur + 125] |= 0x40;  // digital concept 22: sprint
     if (bot.ads && bot.enemy) base[cur + 126] |= 0x08;  // digital concept 11: aim down the sights (LT, run bots_calib)
+    if (Clock::now() < bot.press_until) base[cur + 126] |= 0x20;  // digital concept 13: enter/exit (B, run boatbtn2)
     StoreF(base, cur + 136, bot.yaw);
     StoreF(base, cur + 140, bot.pitch);
     Store32(base, cur + 152, ++bot.tick);
@@ -1734,6 +1893,143 @@ void Drive(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t soldier, double 
   call.r3.u64 = soldier, call.r4.u64 = 0;
   // (vtable 82013A40 +260: sub_822F05C8, the step a human's input runs too, 60 a second each, about 0.05 ms: run
   // botsstep2 of the optimization pass. Most of what a bot costs is this, as a human player's soldier costs.)
+  CostTimer t(&cost.input_step);
+  CallGuest(call, base, Load32(base, vtable + 260));
+}
+
+// A bot in a vehicle's seat, each server tick: it sits still (no stick, no trigger) and gets off where a passenger
+// would. Its input goes through the vehicle's own input step for its seat (vtable +260 with the entry's index: the
+// step reads the entry's player at +284 and runs only for the entity that player controls, sub_822F05C8), so the
+// enter/exit button (digital concept 13) does what it does for a player: the game takes it out of its seat.
+// Off when: the vehicle has come 25 m or more from where it got on and stood still 2 s (a landing craft at the
+// beach); its driver's seat has been empty 1 s (the driver got off: the boat goes nowhere); or it has sat 3 minutes
+// with the vehicle still 5 s.
+void Ride(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t vehicle, Clock::time_point now, double dt) {
+  float at[3] = {};
+  if (!CachedPosition(outer, base, vehicle, at)) return;
+  if (bot.ride != vehicle) {
+    bot.ride = vehicle, bot.ride_at = bot.ride_moved = now, bot.no_driver_since = {}, bot.boated = true;
+    bot.press_until = bot.next_press = {};
+    std::memcpy(bot.ride_from, at, 12);
+    std::memcpy(bot.ride_last, at, 12);
+  }
+  const float d[3] = {at[0] - bot.ride_last[0], at[1] - bot.ride_last[1], at[2] - bot.ride_last[2]};
+  if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 0.75f * 0.75f) {
+    std::memcpy(bot.ride_last, at, 12);
+    bot.ride_moved = now;
+  }
+  int seat = -1;
+  const uint32_t entries = Load32(base, vehicle + 144);
+  const uint32_t count = Readable(entries, 4) ? std::min<uint32_t>((Load32(base, vehicle + 148) - entries) / 4, 16) : 0;
+  for (uint32_t i = 0; i < count; ++i)
+    if (SeatPlayer(base, vehicle, i) == bot.player) seat = int(i);
+  if (seat < 0) return;
+  const uint32_t driver = SeatPlayer(base, vehicle, 0);
+  if (driver) bot.no_driver_since = {};
+  else if (bot.no_driver_since == Clock::time_point{}) bot.no_driver_since = now;
+  const auto still = now - bot.ride_moved;
+  const char* why = nullptr;
+  float throttle = 0, steer = 0, brake = 0;
+  if (seat == 0 && IsBoat(base, vehicle)) {
+    // Driving a boat: passengers first (bots of its side on their way to it, 8 s at most, or till it is full), then
+    // along the way the players drove (BoatRoute) to the beach nearest its flag, or straight for the flag. Ran into
+    // something: backs off 2.5 s, three times at most. Stopped near its flag, or at its way's end: on the beach, off.
+    if (bot.ride_at == now) {
+      bot.boat_path.clear();
+      if (bot.goal >= 0 && bot.goal < int(g.flags.size())) {
+        bot.boat_path = BoatRoute(at, g.flags[bot.goal].pos);
+        const bool learned = !bot.boat_path.empty();
+        if (!learned) bot.boat_path.push_back({g.flags[bot.goal].pos[0], g.flags[bot.goal].pos[1], g.flags[bot.goal].pos[2]});
+        REXLOG_INFO("BF bots: {} drives {} for flag '{}' ({:.0f} m), {}", bot.name, VehicleName(base, vehicle),
+                    g.flags[bot.goal].name, Dist2D(at, g.flags[bot.goal].pos),
+                    learned ? fmt::format("the players' way, {} points", bot.boat_path.size()) : std::string("straight"));
+      }
+      bot.boat_wait_until = now + std::chrono::seconds(8), bot.reverses = 0, bot.reverse_until = {};
+    }
+    const uint32_t n = SeatCount(outer, base, vehicle);
+    uint32_t taken = 0;
+    for (uint32_t i = 0; i < n; ++i) taken += SeatPlayer(base, vehicle, i) ? 1 : 0;
+    const float* goal = bot.goal >= 0 && bot.goal < int(g.flags.size()) ? g.flags[bot.goal].pos : nullptr;
+    while (bot.boat_path.size() > 1 && Dist2D(at, bot.boat_path.front().data()) < 12.0f)
+      bot.boat_path.erase(bot.boat_path.begin());
+    if (bot.boat_path.empty() || !goal) {
+      why = "no way to drive";
+    } else if (now < bot.boat_wait_until && taken < n) {
+      bot.ride_moved = now;  // waiting is not being stuck
+    } else {
+      float heading = 0;
+      Heading(outer, base, vehicle, &heading);
+      const float want = YawTo(at, bot.boat_path.front().data());
+      const float diff = WrapAngle(want - heading);
+      if (now < bot.reverse_until) {
+        brake = 1.0f, steer = diff > 0 ? -1.0f : 1.0f;  // backing: the stern swings the other way
+      } else {
+        steer = std::clamp(diff * 2.0f, -1.0f, 1.0f);
+        throttle = std::fabs(diff) > 1.2f ? 0.4f : 1.0f;
+      }
+      const bool at_end = bot.boat_path.size() == 1 && Dist2D(at, bot.boat_path.front().data()) < 20.0f;
+      if (still > std::chrono::seconds(3) && now >= bot.reverse_until) {
+        if (Dist2D(at, goal) < 200.0f || at_end || bot.boat_path.size() == 1 && Dist2D(at, goal) < 260.0f)
+          why = "on the beach";
+        else if (bot.reverses < 3) {
+          ++bot.reverses;
+          bot.reverse_until = now + std::chrono::milliseconds(2500);
+          bot.ride_moved = now;
+          if (bot.boat_path.size() > 1) bot.boat_path.erase(bot.boat_path.begin());  // that point is blocked: the next
+          REXLOG_INFO("BF bots: {} backs {} off something ({:.0f} m from its flag)", bot.name,
+                      VehicleName(base, vehicle), Dist2D(at, goal));
+        } else {
+          why = "the boat is stuck";
+          g.stranded[vehicle] = now + std::chrono::minutes(5);
+        }
+      }
+      if (now >= bot.boat_log) {
+        bot.boat_log = now + std::chrono::seconds(5);
+        REXLOG_INFO("BF bots: {} drives {} at {:.0f} {:.0f}: heading {:.2f}, wants {:.2f}, {:.0f} m to its flag, {} points "
+                    "left, {} aboard",
+                    bot.name, VehicleName(base, vehicle), at[0], at[2], heading, want, Dist2D(at, goal),
+                    bot.boat_path.size(), taken);
+      }
+    }
+  } else if (bot.no_driver_since != Clock::time_point{} && now - bot.no_driver_since > std::chrono::seconds(1))
+    why = "its driver got off";
+  else if (driver && IsBot(driver))
+    ;  // a bot drives: off when it gets off, on the beach
+  else if (Dist2D(at, bot.ride_from) > 25.0f && still > std::chrono::seconds(2))
+    why = "the vehicle stopped";
+  else if (now - bot.ride_at > std::chrono::minutes(3) && still > std::chrono::seconds(5))
+    why = "a long wait";
+  if (why && now >= bot.next_press) {
+    bot.press_until = now + std::chrono::milliseconds(250);
+    bot.next_press = now + std::chrono::milliseconds(1500);  // still seated then: pressed again
+    REXLOG_INFO("BF bots: {} gets off {} (seat {}): {}", bot.name, VehicleName(base, vehicle), seat, why);
+  }
+  // The analog concepts in a boat (run boatin1, a player driving): 0 the throttle (LT), 4 the steering (the left
+  // stick, -1 left), 2 the brake and reverse (LB), 7 the gun (RT).
+  if (why) throttle = steer = brake = 0;
+  PPCContext call = outer;
+  const std::pair<uint32_t, float> analog[] = {{0u, throttle}, {1u, 0.0f}, {2u, brake}, {4u, steer}, {7u, 0.0f}};
+  for (const auto& [c, v] : analog) {
+    call = outer;
+    call.r3.u64 = bot.state, call.r4.u64 = c, call.f1.f64 = v;
+    sub_822BD518(call, base);
+  }
+  StoreF(base, bot.state + 128, float(dt));
+  call = outer;
+  call.r3.u64 = bot.input, call.r4.u64 = bot.state;
+  sub_822C15D0(call, base);
+  const uint32_t cur = Load32(base, bot.input + 352);
+  if (Readable(cur, 176)) {
+    base[cur + 122] |= 0x09;
+    if (now < bot.press_until) base[cur + 126] |= 0x20;
+    StoreF(base, cur + 136, bot.yaw);
+    StoreF(base, cur + 140, bot.pitch);
+    Store32(base, cur + 152, ++bot.tick);
+  }
+  const uint32_t vtable = Load32(base, vehicle);
+  if (!InImage(vtable)) return;
+  call = outer;
+  call.r3.u64 = vehicle, call.r4.u64 = uint32_t(seat);
   CostTimer t(&cost.input_step);
   CallGuest(call, base, Load32(base, vtable + 260));
 }
@@ -1894,6 +2190,7 @@ bool BotIsPlayer(uint32_t player) { return player && IsBot(player); }
 
 // A new level: the old one's spawn points and players are gone.
 void BotsLevelChange() {
+  vehicle_kinds.clear();
   if (learn.dirty) SaveLearned();
   if (!learn.map.empty() && !nav.cells.empty()) SaveGrid();
   learn.map.clear();
@@ -1918,6 +2215,7 @@ void BotsLevelChange() {
   }
   g.scanned_manager = 0;  // the new level's kits and flags found again
   g.flags.clear();
+  g.stranded.clear();
   g.level_seen = false;
   nav.cells.clear();
   nav.scan.clear(), nav.scanned.clear(), nav.scan_started = nav.scan_done = false;
@@ -2440,6 +2738,8 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
         bot.died = now;
         bot.kit_choice = -1;  // a kit chosen again for the next life
         if (REXCVAR_GET(bf_bots_log_detail)) REXLOG_INFO("BF bots: {} died", bot.name);
+      } else {
+        bot.life_at = now, bot.boated = false;
       }
       bot.last_soldier = soldier;
     }
@@ -2479,8 +2779,17 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       if (spawned) bot.spawn_tries = 0;
       continue;
     }
-    // In a vehicle: a passenger's seat, given up only with its life for now (bots do not drive yet), no input of ours.
-    if (const uint32_t controls = Load32(base, bot.player + 312); controls && controls != soldier) continue;
+    // In a vehicle: a passenger's seat (bots do not drive yet), left by the enter/exit button where a passenger would.
+    if (const uint32_t controls = Load32(base, bot.player + 312); controls && controls != soldier) {
+      Ride(ctx, base, bot, controls, now, dt);
+      continue;
+    }
+    if (bot.ride) {
+      REXLOG_INFO("BF bots: {} is off {}", bot.name, VehicleName(base, bot.ride));
+      bot.off_vehicle = bot.ride, bot.off_until = now + std::chrono::seconds(30);
+      bot.ride = 0, bot.press_until = {};
+      bot.boat_check = now + std::chrono::seconds(60);  // on its feet a while: no boat back out
+    }
     float pos[3] = {};
     if (!CachedPosition(ctx, base, soldier, pos)) continue;
     // Riding along (the user, 19 Nov 2026: "get into friendly boats passing by close enough if a seat is available"):
@@ -2496,23 +2805,131 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       }
       const uint32_t side = Load32(base, bot.player + 48);
       for (uint32_t v : vs) {
+        if (v == bot.off_vehicle && now < bot.off_until) continue;  // just got off it
         const uint32_t driver = SeatPlayer(base, v, 0);
         if (!driver || IsBot(driver) || !Readable(driver, 0x40) || Load32(base, driver + 48) != side) continue;
         float at[3];
         if (!CachedPosition(ctx, base, v, at) || Dist2D(at, pos) > 6.0f || std::fabs(at[1] - pos[1]) > 4.0f) continue;
+        // Every free seat in turn (the game refuses some: US Central 20 Nov, a landing craft's seats 3 to 5); none
+        // taken: the enter/exit button, as a player at the boat's side would press it, the game's own pick.
         const uint32_t n = SeatCount(ctx, base, v);
-        for (uint32_t seat = 1; seat < n; ++seat) {
+        bool seated = false, tried = false;
+        for (uint32_t seat = 1; seat < n && !seated; ++seat) {
           if (SeatPlayer(base, v, seat)) continue;
           PPCContext call = ctx;
           call.r3.u64 = bot.player, call.r4.u64 = v, call.r5.u64 = seat;
           sub_82398B98(call, base);
-          REXLOG_INFO("BF bots: {} rides in {} (seat {}), {}", bot.name, VehicleName(base, v), seat,
-                      Load32(base, bot.player + 312) == v ? "seated" : "refused");
-          break;
+          seated = Load32(base, bot.player + 312) == v;
+          if (seated || !tried)
+            REXLOG_INFO("BF bots: {} rides in {} (seat {}), {}", bot.name, VehicleName(base, v), seat,
+                        seated ? "seated" : "refused");
+          tried = true;
+        }
+        if (!seated && tried && now >= bot.next_press) {
+          bot.press_until = now + std::chrono::milliseconds(250);
+          bot.next_press = now + std::chrono::milliseconds(1500);
+          REXLOG_INFO("BF bots: {} presses enter at {}", bot.name, VehicleName(base, v));
         }
         break;
       }
       if (const uint32_t controls = Load32(base, bot.player + 312); controls && controls != soldier) continue;
+    }
+    // Boats, in the first 45 s of a life and once (the way off a carrier; ashore, a beached boat taken again was
+    // driven at the land, run boatdrive8): a bot whose way to its flag swims 60 m or more (or with its flag 250 m
+    // off, has no way there yet, or 150 m of the straight line is sea) takes a boat within 60 m instead (one with no driver and
+    // no human player within 6 m of it, to drive; or one a bot of its side drives, to ride), walks to it and gets in
+    // (the driver's seat if free, else a passenger's; refused: the enter/exit button). 25 s to reach it.
+    if (!bot.boat && !bot.boated && now - bot.life_at < std::chrono::seconds(45) && now >= bot.boat_check &&
+        bot.goal >= 0) {
+      bot.boat_check = now + std::chrono::seconds(3);
+      // Only for a long way (the beach's shallows count as water: a bot just landed 100 m from its flag took the
+      // next beached boat back out, run boatdrive5).
+      const bool far_off = Dist2D(pos, bot.goal_pos) > 250.0f;
+      const bool no_way = bot.path.empty() || Dist2D(bot.path.back().data(), bot.goal_pos) > 50.0f;
+      if (far_off && (no_way || SwimAhead(bot, pos) > 60.0f || StraightWater(pos, bot.goal_pos) > 150.0f)) {
+        std::vector<uint32_t> vs;
+        {
+          std::lock_guard lock(g.mutex);
+          vs.assign(g.vehicles.begin(), g.vehicles.end());
+        }
+        const uint32_t side = Load32(base, bot.player + 48);
+        float best = 60.0f;
+        for (uint32_t v : vs) {
+          if ((v == bot.off_vehicle && now < bot.off_until) || !IsBoat(base, v)) continue;
+          if (const auto st = g.stranded.find(v); st != g.stranded.end() && now < st->second) continue;
+          float at[3];
+          if (!CachedPosition(ctx, base, v, at)) continue;
+          const float d = Dist2D(at, pos);
+          if (d >= best) continue;
+          const uint32_t driver = SeatPlayer(base, v, 0);
+          if (driver && (!IsBot(driver) || !Readable(driver, 0x40) || Load32(base, driver + 48) != side)) continue;
+          const uint32_t n = SeatCount(ctx, base, v);
+          uint32_t taken = 0;
+          for (uint32_t i = 0; i < n; ++i) taken += SeatPlayer(base, v, i) ? 1 : 0;
+          if (taken >= n) continue;
+          bool human_near = false;
+          for (uint32_t q : listed) {
+            if (driver || IsBot(q) || !Readable(q, 0x140)) continue;
+            const uint32_t so = Load32(base, q + 288);
+            float qp[3];
+            if (so && CachedPosition(ctx, base, so, qp) && Dist2D(qp, at) < 6.0f) human_near = true;
+          }
+          if (human_near) continue;  // a player at its side is about to take it
+          best = d, bot.boat = v;
+        }
+        if (bot.boat) {
+          bot.boat_until = now + std::chrono::seconds(25), bot.presses = 0;
+          REXLOG_INFO("BF bots: {} heads for {} ({:.0f} m): its flag {:.0f} m off, {:.0f} m of it sea", bot.name,
+                      VehicleName(base, bot.boat), best, Dist2D(pos, bot.goal_pos), StraightWater(pos, bot.goal_pos));
+        }
+      }
+    }
+    if (bot.boat) {
+      bool keep = now < bot.boat_until;
+      {
+        std::lock_guard lock(g.mutex);
+        keep = keep && g.vehicles.count(bot.boat);
+      }
+      float at[3] = {};
+      keep = keep && CachedPosition(ctx, base, bot.boat, at);
+      const uint32_t driver = keep ? SeatPlayer(base, bot.boat, 0) : 0;
+      keep = keep && (!driver || IsBot(driver));
+      if (keep && Dist2D(at, pos) < 5.0f && std::fabs(at[1] - pos[1]) < 6.0f) {
+        const uint32_t n = SeatCount(ctx, base, bot.boat);
+        for (uint32_t seat = 0; seat < n; ++seat) {
+          if (SeatPlayer(base, bot.boat, seat)) continue;
+          PPCContext call = ctx;
+          call.r3.u64 = bot.player, call.r4.u64 = bot.boat, call.r5.u64 = seat;
+          sub_82398B98(call, base);
+          if (Load32(base, bot.player + 312) == bot.boat) {
+            REXLOG_INFO("BF bots: {} gets in {} (seat {})", bot.name, VehicleName(base, bot.boat), seat);
+            bot.boated = true;
+            break;
+          }
+        }
+        if (Load32(base, bot.player + 312) == bot.boat) {
+          bot.boat = 0;
+          continue;
+        }
+        if (now >= bot.next_press) {
+          bot.press_until = now + std::chrono::milliseconds(250);
+          bot.next_press = now + std::chrono::milliseconds(1500);
+          if (++bot.presses > 4) keep = false;  // the game will not have it in that boat
+          else REXLOG_INFO("BF bots: {} presses enter at {}", bot.name, VehicleName(base, bot.boat));
+        }
+      }
+      if (!keep) {
+        REXLOG_INFO("BF bots: {} gives up on {}", bot.name, VehicleName(base, bot.boat));
+        bot.off_vehicle = bot.boat, bot.off_until = now + std::chrono::minutes(3);
+        bot.boat = 0;
+      } else {
+        bot.want_yaw = YawTo(pos, at), bot.want_pitch = 0;
+        bot.forward = Dist2D(at, pos) < 2.0f ? 0.0f : 1.0f, bot.strafe = 0, bot.fire = false, bot.ads = false;
+        bot.sprint = Dist2D(at, pos) > 8.0f;
+        CostTimer t(&cost.drive);
+        Drive(ctx, base, bot, soldier, dt);
+        continue;
+      }
     }
     if (now >= bot.next_think) {
       bot.next_think = now + std::chrono::milliseconds(250);
