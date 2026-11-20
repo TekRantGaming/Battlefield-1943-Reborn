@@ -121,6 +121,7 @@
   <nav id="nav">
     <button data-tab="servers" class="on">Servers</button>
     <button data-tab="dashboard">Dashboard</button>
+    <button data-tab="community">Community page</button>
     <button data-tab="network">Network</button>
     <button data-tab="messages">Messages</button>
     <button data-tab="moderation">Moderation</button>
@@ -144,17 +145,67 @@
       <p class="lead">Your servers live and over time: who plays, when, on which maps, and how this machine copes. History covers the last 90 days, by player name only.</p>
       <div id="dash-alerts"></div>
       <div id="dash-root"><p class="muted">Loading...</p></div>
-      <div class="paper" style="margin-top:16px">
-        <h3>Public stats page</h3>
-        <p class="hint">A read only page of these numbers for your website or Discord, on its own port: who is playing, the charts, the leaderboard and the Reborn server list. Never player ids, addresses, bans or anything of this manager. Players outside your network reach it once the port is open (UPnP opens it with your servers' ports).</p>
-        <label class="check"><input type="checkbox" id="pub-on"><span>Serve the public stats page</span></label>
+      <p class="hint" style="margin-top:16px">Want players to see this? The <a href="#" style="color:inherit" onclick="goTab('community'); return false">Community page</a> tab makes a public page of it with your name, logo and links.</p>
+    </section>
+
+    <section id="community">
+      <div class="row"><h2>Community page</h2><span class="spacer"></span><button class="btn" id="cp-preview">Preview</button></div>
+      <p class="lead">A web page of your servers for your players, your website or your Discord: your name, logo, words and links, how to join, and the numbers you choose. It runs on this machine, on its own port. It never shows player ids, addresses of players or anything of this manager.</p>
+      <div class="paper">
+        <h3>The page</h3>
+        <label class="check"><input type="checkbox" id="cp-on"><span>Serve the community page<br><small>Players outside your network reach it once its port is open (UPnP opens it with your servers' ports; on Windows, Open Windows Firewall on the Network page).</small></span></label>
         <div class="grid2">
-          <label class="field"><span>Port (TCP)</span><input type="number" id="pub-port" min="1024" max="65535"></label>
-          <label class="field"><span>Its title (default: your first server's name)</span><input type="text" id="pub-title" maxlength="60"></label>
+          <label class="field"><span>Port (TCP)</span><input type="number" id="cp-port" min="1024" max="65535"></label>
+          <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Its address</span><div id="cp-where" class="hint"></div></div>
         </div>
-        <label class="check"><input type="checkbox" id="pub-names"><span>Show player names (off: counts and charts only)</span></label>
-        <div class="row"><button class="btn go" id="pub-save">Save</button><span class="hint" id="pub-note"></span></div>
       </div>
+      <div class="paper">
+        <h3>Your name and words</h3>
+        <label class="field"><span>Name (default: your first server's name)</span><input type="text" id="cp-title" maxlength="60" placeholder="[EU] My Battlefield Community"></label>
+        <label class="field"><span>Description <small id="cp-desc-count" style="float:right"></small></span><textarea id="cp-desc" maxlength="1000" rows="5" placeholder="Who you are, what your servers play, events, anything you want players to know."></textarea></label>
+        <label class="field"><span>Server rules (optional) <small id="cp-rules-count" style="float:right"></small></span><textarea id="cp-rules" maxlength="1500" rows="4" placeholder="No team killing. Be respectful in chat."></textarea></label>
+      </div>
+      <div class="paper">
+        <h3>Your look</h3>
+        <div class="grid2">
+          <label class="field"><span>Theme</span><select id="cp-theme"><option value="field">Field Report (olive, the game's own)</option><option value="night">Night (navy)</option><option value="desert">Desert (sand)</option><option value="steel">Steel (grey)</option><option value="light">Light</option></select></label>
+          <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Accent colour</span>
+            <div class="row"><label class="check" style="margin:0"><input type="checkbox" id="cp-accent-on"><span>Use my own</span></label><input type="color" id="cp-accent" value="#6e9a3c" style="width:60px;height:34px;padding:2px"></div></div>
+        </div>
+        <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Logo (PNG, JPEG, WebP or GIF, 1 MB at most; square looks best)</span>
+          <div class="row"><img id="cp-logo-img" alt="" style="width:64px;height:64px;object-fit:contain;background:#14170f;display:none"><input type="file" id="cp-logo-file" accept="image/png,image/jpeg,image/webp,image/gif" style="max-width:280px"><button class="btn small" id="cp-logo-remove">Remove logo</button></div></div>
+      </div>
+      <div class="paper">
+        <h3>What it shows</h3>
+        <div class="grid2" id="cp-sections"></div>
+        <label class="check"><input type="checkbox" id="cp-names"><span>Show player names (off: counts and charts only, no names anywhere)</span></label>
+      </div>
+      <div class="paper">
+        <h3>Links</h3>
+        <label class="check"><input type="checkbox" id="cp-link-download"><span>Download Battlefield 1943 Reborn (the project's releases)</span></label>
+        <label class="check"><input type="checkbox" id="cp-link-discord"><span>The Battlefield 1943 Reborn Discord</span></label>
+        <p class="hint" style="margin:10px 0 6px">Your own links: your Discord, website, YouTube... (up to 6, http or https)</p>
+        <div id="cp-links"></div>
+        <button class="btn small" id="cp-link-add">Add a link</button>
+      </div>
+      <div class="paper">
+        <h3>How to join</h3>
+        <label class="check"><input type="checkbox" id="cp-addr-on"><span>Show each server's address, with a Copy button (for Direct connect)</span></label>
+        <label class="field"><span>Address to show (optional: a name like play.example.com; default: the address players reach your servers on)</span><input type="text" id="cp-addr" maxlength="80" placeholder="play.example.com"></label>
+        <label class="field"><span>Instructions (optional; default: find it in the Server Browser, or Direct connect)</span><textarea id="cp-how" maxlength="600" rows="3" placeholder="Open the Server Browser, Community tab, and look for [EU] My Community."></textarea></label>
+      </div>
+      <div class="paper">
+        <h3>Your own code (optional)</h3>
+        <p class="hint">Restyle this page with your own CSS, or put a website of your own in its place.</p>
+        <label class="field"><span>Your CSS, laid over this page <small id="cp-css-count" style="float:right"></small></span>
+          <textarea id="cp-css" maxlength="20000" rows="8" spellcheck="false" style="font:13px Consolas,monospace" placeholder=":root { --accent: #c0392b; }  /* the theme's colours: --bg --bar --card --line --cream --accent */
+header { background: url(logo) right center / contain no-repeat, #111; }
+.dcard b { color: #c0392b; }  /* the numbers; .dpanel the white panels, .box About and How to join */"></textarea></label>
+        <label class="check"><input type="checkbox" id="cp-own"><span>Use my own website instead of this page<br><small>Everything in the folder below is your site, with its index.html as the front page. Your code reads the live numbers from /stats.json; /dash.js (our charts) and /logo stay there for you. The folder's README.txt lists every number.</small></span></label>
+        <div class="hint" id="cp-site"></div>
+        <div class="row" style="margin-top:8px"><button class="btn small" id="cp-starter">Make a starter in the folder</button><button class="btn small" id="cp-site-refresh">Look again</button></div>
+      </div>
+      <div class="row"><button class="btn go" id="cp-save">Save</button><span class="hint" id="cp-note"></span></div>
     </section>
 
     <section id="network">
@@ -446,6 +497,7 @@ $('nav').addEventListener('click', e => {
   if (tab === 'logs') loadLog();
   if (tab === 'moderation') loadModeration();
   if (tab === 'dashboard') loadDashboard();
+  if (tab === 'community') { cpFilled = false; renderCommunity(); }
 });
 function goTab(tab) { document.querySelector('nav button[data-tab="' + tab + '"]').click(); }
 
@@ -791,20 +843,82 @@ async function loadDashboard() {
   $('dash-when').textContent = 'Updated ' + new Date(dash.now * 1000).toLocaleTimeString();
   sync($('dash-alerts'), dash.alerts, () => dash.alerts.map(a => h('div', { class: 'banner' + (a.level === 'info' ? ' info' : ''), text: a.text })));
   if (!document.querySelector('#dash-root .dtabs button:hover')) Dash.render($('dash-root'), dash, { public: false });
-  const p = dash.public_page;
-  if (!dashFilled) {
-    dashFilled = true;
-    $('pub-on').checked = p.on; $('pub-port').value = p.port; $('pub-names').checked = p.names; $('pub-title').value = p.title;
-  }
-  const where = (state && (state.addresses.public || (state.addresses.lan || [])[0])) || '127.0.0.1';
-  $('pub-note').replaceChildren(...(p.on ? ['On: ', h('a', { href: 'http://127.0.0.1:' + p.port + '/', target: '_blank', rel: 'noopener', style: 'color:inherit', text: 'open it here' }),
-    ', or give players http://' + where + ':' + p.port + '/'] : ['Off.']));
 }
-$('pub-save').onclick = async () => {
-  const port = Number($('pub-port').value);
+// ---- the community page (the public stats page with the owner's branding; docs/DASHBOARD.md)
+const CP_SECTIONS = [['connect', 'How to join'], ['cards', 'The headline numbers'], ['servers', 'Each server, live'],
+  ['players', 'Players over time'], ['maps', 'Maps played'], ['hours', 'Busiest hours'], ['leaderboard', 'Veterans leaderboard'],
+  ['activity', 'Recent joins and leaves'], ['network', 'The Reborn server list'], ['rules', 'Server rules']];
+let cpLinks = [], cpFilled = false;
+function cpLinkRows() {
+  $('cp-links').replaceChildren(...cpLinks.map((l, i) => h('div', { class: 'row', style: 'margin-bottom:8px;flex-wrap:nowrap' },
+    h('input', { type: 'text', maxlength: 40, placeholder: 'Our Discord', value: l.label, style: 'max-width:200px', oninput: e => { l.label = e.target.value; } }),
+    h('input', { type: 'text', maxlength: 300, placeholder: 'https://discord.gg/...', value: l.url, oninput: e => { l.url = e.target.value; } }),
+    h('button', { class: 'btn small', onclick: () => { cpLinks.splice(i, 1); cpLinkRows(); } }, 'Remove'))));
+  $('cp-link-add').disabled = cpLinks.length >= 6;
+}
+function fillCommunity() {
+  const p = state.config.public_page;
+  $('cp-on').checked = p.on; $('cp-port').value = p.port; $('cp-title').value = p.title; $('cp-desc').value = p.description;
+  $('cp-rules').value = p.rules; $('cp-theme').value = p.theme; $('cp-accent-on').checked = !!p.accent; $('cp-accent').value = p.accent || '#6e9a3c';
+  $('cp-names').checked = p.names; $('cp-link-download').checked = p.links.download; $('cp-link-discord').checked = p.links.discord;
+  $('cp-addr-on').checked = p.connect.address; $('cp-addr').value = p.connect.custom_address; $('cp-how').value = p.connect.instructions;
+  $('cp-sections').replaceChildren(...CP_SECTIONS.map(([k, label]) => h('label', { class: 'check', style: 'margin:4px 0' },
+    h('input', { type: 'checkbox', 'data-section': k, checked: p.sections[k] !== false }), h('span', { text: label }))));
+  cpLinks = p.links.custom.map(l => ({ label: l.label, url: l.url })); cpLinkRows();
+  $('cp-css').value = p.custom_css || ''; $('cp-own').checked = !!p.own_site;
+  cpCounts();
+}
+function cpCounts() {
+  $('cp-desc-count').textContent = $('cp-desc').value.length + ' / 1000'; $('cp-rules-count').textContent = $('cp-rules').value.length + ' / 1500';
+  $('cp-css-count').textContent = $('cp-css').value.length + ' / 20000';
+}
+function renderCommunity() {
+  if (!state) return;
+  if (!cpFilled) { cpFilled = true; fillCommunity(); }
+  const p = state.config.public_page, where = state.addresses.public || (state.addresses.lan || [])[0] || '127.0.0.1';
+  $('cp-where').replaceChildren(...(p.on ? [h('a', { href: 'http://127.0.0.1:' + p.port + '/', target: '_blank', rel: 'noopener', style: 'color:inherit', text: 'Open it' }),
+    ' · give players http://' + where + ':' + p.port + '/'] : ['Off. Preview shows it anyway.']));
+  const img = $('cp-logo-img');
+  if (p.logo) { img.src = '/preview/logo?v=' + Date.now(); img.style.display = ''; } else img.style.display = 'none';
+  $('cp-logo-remove').disabled = !p.logo;
+  cpSite();
+}
+async function cpSite(r) {
+  try { r = r || await api('/api/public/site', {}); } catch (e) { return; }
+  const s = r.site;
+  $('cp-site').replaceChildren('Folder: ', h('span', { class: 'mono', text: s.folder }), ' · ',
+    s.ready ? s.files.length + ' file' + (s.files.length === 1 ? '' : 's') + ', index.html there' : 'no index.html yet (Make a starter, or copy your site in)',
+    s.files.length ? h('div', { class: 'mono', style: 'margin-top:4px;font-size:12px', text: s.files.slice(0, 12).join('   ') + (s.files.length > 12 ? '   ...' : '') }) : null);
+  $('cp-own').disabled = !s.ready && !$('cp-own').checked;
+}
+['cp-desc', 'cp-rules', 'cp-css'].forEach(id => $(id).addEventListener('input', cpCounts));
+$('cp-starter').onclick = async () => { const r = await act('/api/public/starter', {}); if (r) { toast(r.made.length ? 'Made ' + r.made.join(' and ') : 'The folder already has them: kept'); cpSite(r); } };
+$('cp-site-refresh').onclick = () => cpSite();
+$('cp-link-add').onclick = () => { if (cpLinks.length < 6) { cpLinks.push({ label: '', url: '' }); cpLinkRows(); } };
+$('cp-preview').onclick = () => window.open('/preview/', '_blank', 'noopener');
+$('cp-save').onclick = async () => {
+  const port = Number($('cp-port').value);
   if (!(port >= 1024 && port <= 65535)) return toast('A port is 1024 to 65535.', true);
-  if (await saveConfig({ public_page: { on: $('pub-on').checked, port: port, names: $('pub-names').checked, title: $('pub-title').value.trim() } }, 'Saved')) loadDashboard();
+  const bad = cpLinks.find(l => l.url.trim() && !/^https?:\/\/[^\s"<>]+$/i.test(l.url.trim()));
+  if (bad) return toast('A link must start with https:// or http:// (' + bad.url + ').', true);
+  const sections = {};
+  document.querySelectorAll('#cp-sections input').forEach(i => { sections[i.dataset.section] = i.checked; });
+  const page = { on: $('cp-on').checked, port: port, title: $('cp-title').value.trim(), description: $('cp-desc').value, rules: $('cp-rules').value,
+    theme: $('cp-theme').value, accent: $('cp-accent-on').checked ? $('cp-accent').value : '', names: $('cp-names').checked, sections: sections,
+    links: { download: $('cp-link-download').checked, discord: $('cp-link-discord').checked, custom: cpLinks.filter(l => l.url.trim()).map(l => ({ label: l.label.trim(), url: l.url.trim() })) },
+    connect: { address: $('cp-addr-on').checked, custom_address: $('cp-addr').value.trim(), instructions: $('cp-how').value },
+    custom_css: $('cp-css').value, own_site: $('cp-own').checked };
+  if (await saveConfig({ public_page: page }, 'Saved')) { cpFilled = false; renderCommunity(); }
 };
+$('cp-logo-file').onchange = () => {
+  const f = $('cp-logo-file').files[0];
+  if (!f) return;
+  if (f.size > 1048576) { $('cp-logo-file').value = ''; return toast('A logo is 1 MB at most.', true); }
+  const reader = new FileReader();
+  reader.onload = async () => { if (await act('/api/public/logo', { data: reader.result }, 'Logo saved')) { $('cp-logo-file').value = ''; renderCommunity(); } };
+  reader.readAsDataURL(f);
+};
+$('cp-logo-remove').onclick = async () => { if (await act('/api/public/logo', { remove: true }, 'Logo removed')) renderCommunity(); };
 
 // ---- moderation (server/bans.py, docs/MODERATION.md)
 let mod = null, modTarget = null, modAction = 'ban';

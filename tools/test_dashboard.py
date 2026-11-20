@@ -184,7 +184,7 @@ def manager_part(tmp, serve=False):
     def get(path):
         try:
             with urllib.request.urlopen(base + path, timeout=5) as r:
-                return r.status, r.read().decode('utf-8'), dict(r.headers)
+                return r.status, r.read().decode('utf-8', 'replace'), dict(r.headers)
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode('utf-8', 'replace'), dict(e.headers)
         except OSError as e:
@@ -215,14 +215,16 @@ def manager_part(tmp, serve=False):
         codes = [get('/stats.json')[0] for _ in range(130)]
         check('at most 120 requests a minute from one address', 429 in codes and codes.count(200) <= 120,
               codes.count(429))
+        manager.PublicHandler.hits.clear()  # the limit met: the checks below ask again
     m.set_config({'public_page': {'on': True, 'port': 18297, 'names': False, 'title': ''}})
     time.sleep(5.5)
-    body = get('/stats.json')[1] if not serve else ''
+    code, body, _ = get('/stats.json') if not serve else (0, '', {})
     if not serve:
-        check('names off: the public numbers name nobody', not any(n in body for n in NAMES),
+        check('names off: the public numbers name nobody', code == 200 and not any(n in body for n in NAMES),
               [n for n in NAMES if n in body][:3])
+    community_page(m, get, serve)
     if serve:
-        m.set_config({'public_page': {'on': True, 'port': 18297, 'names': True, 'title': '[EU] Reborn Test Servers'}})
+        pass
         import threading
         srv = manager.Server(('127.0.0.1', 18296), manager.Handler)  # the manager's page answers on 127.0.0.1 only
         manager.Handler.manager = m
@@ -236,6 +238,109 @@ def manager_part(tmp, serve=False):
             pass
     m.cfg['public_page']['on'] = False
     m.public_page()
+
+
+PNG = bytes.fromhex('89504e470d0a1a0a0000000d4948445200000001000000010806000000'
+                    '1f15c4890000000d4944415478da63f8cfc0f01f0005000201a5f6a1d90000000049454e44ae426082')
+
+
+def community_page(m, get, serve):
+    """The community page: the owner's words, look, links and how to join (TekRantGaming, 20 Nov 2026)."""
+    import base64
+    import manager
+    manager.PublicHandler.hits.clear()
+    clean = manager.clean_public_page
+    c = clean({'links': {'custom': [{'label': 'Our Discord', 'url': 'https://discord.gg/abc'},
+                                    {'label': 'x', 'url': 'javascript:alert(1)'}, {'label': 'y', 'url': 'data:text/html,hi'},
+                                    {'label': 'z', 'url': 'https://a b.com'}, {'label': 'w', 'url': 'https://user@evil.com'}]},
+               'accent': '#12AB34', 'theme': 'neon', 'description': 'Line one\n\n\n\nLine two <b>x</b>' + 'y' * 2000})
+    check('links: only http and https, no spaces, no user in them', [l['url'] for l in c['links']['custom']] ==
+          ['https://discord.gg/abc'], c['links']['custom'])
+    check('a colour is #rrggbb, an unknown theme is the default one', c['accent'] == '#12ab34' and c['theme'] == 'field')
+    check('the description keeps its lines (never three empty ones in a row), 1000 characters at most',
+          c['description'].startswith('Line one\n\nLine two <b>x</b>') and len(c['description']) == 1000,
+          c['description'][:40])
+    check("every section on by default, the project's links on", all(c['sections'].values()) and
+          c['links']['download'] and c['links']['discord'])
+    for bad, why in ((b'not a picture', 'not a picture'), (b'\x89PNG\r\n\x1a\n' + b'0' * (1 << 20), 'over 1 MB')):
+        try:
+            m.set_logo({'data': base64.b64encode(bad).decode()})
+            check('a logo that is %s is refused' % why, False)
+        except RuntimeError:
+            check('a logo that is %s is refused' % why, True)
+    m.set_logo({'data': 'data:image/png;base64,' + base64.b64encode(PNG).decode()})
+    page = {'on': True, 'port': 18297, 'names': True, 'title': '[EU] Reborn Test Servers',
+            'description': 'Friendly EU servers. Events every Friday.\nAll maps, 60 Hz.', 'theme': 'night',
+            'accent': '#d1a03a', 'rules': 'No team killing.\nNo spawn camping the carrier.',
+            'links': {'download': True, 'discord': True,
+                      'custom': [{'label': 'Our Discord', 'url': 'https://discord.gg/example'},
+                                 {'label': 'Website', 'url': 'https://example.com'}]},
+            'connect': {'address': True, 'custom_address': 'play.example.com', 'instructions': ''},
+            'sections': {'activity': False}}
+    m.set_config({'public_page': page})
+    check('saving the page keeps the logo', m.cfg['public_page']['logo'] == 'png', m.cfg['public_page']['logo'])
+    code, body, headers = get('/logo')
+    check('the logo is served as a PNG', code == 200 and headers.get('Content-Type') == 'image/png', (code, headers))
+    time.sleep(5.5)
+    pg = json.loads(get('/stats.json')[1]).get('page', {})
+    check('the page: name, words, theme, accent, rules', pg.get('description', '').startswith('Friendly EU') and
+          pg.get('theme') == 'night' and pg.get('accent') == '#d1a03a' and pg.get('rules', '').startswith('No team'), pg)
+    check("its links: the download, the Reborn Discord, the owner's own", [l['kind'] for l in pg.get('links', [])] ==
+          ['download', 'discord', 'custom', 'custom'] and 'releases/latest' in pg['links'][0]['url'] and
+          'discord.gg/8eakYSvBZS' in pg['links'][1]['url'], pg.get('links'))
+    check('how to join: each server with the address the owner gave and its port',
+          [j['address'] for j in pg.get('join', [])] == ['play.example.com:18440', 'play.example.com:18441',
+                                                          'play.example.com:18442'], pg.get('join'))
+    check('the sections the owner turned off are off', pg['sections']['activity'] is False and pg['sections']['maps'])
+    check("the logo's address, made new when it changes", pg.get('logo', '').startswith('logo?v='), pg.get('logo'))
+    m.set_config({'public_page': dict(page, connect={'address': False, 'custom_address': '', 'instructions': 'Ask in Discord'})})
+    time.sleep(5.5)
+    pg = json.loads(get('/stats.json')[1]).get('page', {})
+    check('the address left out when the owner turns it off', all(not j['address'] for j in pg.get('join', [])) and
+          pg.get('instructions') == 'Ask in Discord', pg.get('join'))
+    own_code(m, get, page)
+    if not serve:
+        m.set_logo({'remove': True})
+        check('the logo removed: gone', get('/logo')[0] == 404 and m.cfg['public_page']['logo'] == '')
+    else:
+        m.set_config({'public_page': page})
+
+
+def own_code(m, get, page):
+    """The owner's own code: CSS over our page, or a site of their own in its place (TekRantGaming, 20 Nov 2026)."""
+    import manager
+    manager.PublicHandler.hits.clear()
+    m.set_config({'public_page': dict(page, custom_css=':root { --accent: #c0392b; }\n.dcard b { color: #c0392b; }')})
+    time.sleep(5.5)
+    check("the owner's CSS reaches the page", '#c0392b' in json.loads(get('/stats.json')[1])['page']['css'])
+    m.set_config({'public_page': dict(page, own_site=True)})
+    code, body, _ = get('/')
+    check('own site on but no index.html yet: our page still', code == 200 and 'dash.js' in body)
+    made = m.make_starter()
+    check('the starter: index.html and README.txt in the folder', made == ['index.html', 'README.txt'] and
+          m.site_info()['ready'], made)
+    check('a second starter keeps what is there', m.make_starter() == [])
+    with open(os.path.join(manager.COMMUNITY_SITE, 'index.html'), 'a', encoding='utf-8') as f:
+        f.write('<!-- mine -->')
+    os.makedirs(os.path.join(manager.COMMUNITY_SITE, 'img'), exist_ok=True)
+    with open(os.path.join(manager.COMMUNITY_SITE, 'img', 'banner.png'), 'wb') as f:
+        f.write(PNG)
+    for name in ('secret.py', '.env'):
+        with open(os.path.join(manager.COMMUNITY_SITE, name), 'w') as f:
+            f.write('SECRET')
+    code, body, headers = get('/')
+    check('their own site in place of ours', code == 200 and '<!-- mine -->' in body and
+          "https:" in headers.get('Content-Security-Policy', ''), (code, body[:80]))
+    check('its files, in folders too', get('/img/banner.png')[0] == 200 and get('/README.txt')[2].get('Content-Type', '')
+          .startswith('text/plain'))
+    check('the numbers, our charts and the logo still there for their code', get('/stats.json')[0] == 200 and
+          'window.Dash' in get('/dash.js')[1] and get('/logo')[0] == 200)
+    for bad in ('/../server.json', '/%2e%2e/server.json', '/..%2fserver.json', '/img/../../server.json', '/.env',
+                '/secret.py', '/index.html%00.png', '/C:%5cWindows%5cwin.ini', '/img/', '/nothing.html'):
+        code, body, _ = get(bad)
+        check('nothing outside its files: %s' % bad, code == 404 and 'SECRET' not in body, (code, body[:60]))
+    m.set_config({'public_page': dict(page, own_site=False)})
+    check('own site off: our page again', 'mine' not in get('/')[1])
 
 
 def main():

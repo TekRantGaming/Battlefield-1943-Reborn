@@ -82,9 +82,14 @@ yet.
 The manager's Dashboard tab shows your servers live and over the last 90 days: who is playing and their ping, the map,
 the round's tickets, the tick rate each server really holds, players over 6 hours, a day and a week, the busiest
 hours, the maps played, a playtime leaderboard with kills and deaths, recent joins and leaves, this machine's CPU and
-memory, and alerts when something needs you. Turn on its **public stats page** to give your players a live page of
-it on its own port (TCP 18290 by default), with names but never player ids or addresses. More in
-[DASHBOARD.md](DASHBOARD.md).
+memory, and alerts when something needs you.
+
+The **Community page** tab makes a website of it for your players, on its own port (TCP 18290 by default): your
+server's name, description, rules, logo, theme and accent colour, links to the game's download, the Reborn Discord and
+your own Discord or website, how to join (each server's address with a Copy button, or your own instructions), and the
+numbers you choose to show. It shows player names if you want, never player ids or addresses. Want it your own way?
+Add your own CSS to restyle it, or build your own site in the `community_site` folder (the tab makes a starter for you),
+reading the live numbers from `/stats.json`. More in [DASHBOARD.md](DASHBOARD.md).
 
 ## Moderation
 

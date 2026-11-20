@@ -32,7 +32,9 @@
     .dtabs button { background: #e3dabd; border: 0; padding: 5px 11px; margin-left: 4px; font: 600 12px var(--body); cursor: pointer; border-radius: 2px; color: var(--ink); }
     .dtabs button.on { background: #24251f; color: #f1ead6; }
     .dchart { width: 100%; height: auto; display: block; } .dgrid { stroke: #ddd3b4; stroke-width: 1; } .daxis { fill: #7a7259; font: 10.5px Consolas, monospace; }
-    .darea { fill: rgba(110,154,60,.22); } .dline { fill: none; stroke: #55792e; stroke-width: 2.2; stroke-linejoin: round; } .dpeak { fill: #ce3e30; } .dhit { fill: transparent; }
+    /* Blue lines (TekRantGaming, 20 Nov 2026: green was hard to see on the green page); a page's own accent may replace it. */
+    .darea { fill: var(--chart-fill, rgba(61,116,184,.20)); } .dline { fill: none; stroke: var(--chart, #2f66a8); stroke-width: 2.4; stroke-linejoin: round; }
+    .dpeak { fill: #ce3e30; } .dhit { fill: transparent; }
     .dpanel .dmuted.dsmall { margin: -4px 0 8px; }
     .dbars { display: grid; gap: 7px; } .dbar { display: grid; grid-template-columns: 120px 1fr 64px; gap: 10px; align-items: center; font-size: 13.5px; }
     .dbar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .dbar-value { text-align: right; font: 12.5px Consolas, monospace; color: #6b6450; }
@@ -184,6 +186,7 @@
   let range = '24h';
   function render(root, d, opts) {
     opts = opts || {};
+    const on = k => !opts.sections || opts.sections[k] !== false;  // the community page's choice of sections
     const names = {};
     d.servers.forEach(sv => { names[sv.n] = sv.name; });
     const c = d.cards;
@@ -201,16 +204,18 @@
     const tabs = h('div', { class: 'dtabs' }, ['6h', '24h', '7d'].map(r => h('button', { class: r === range ? 'on' : '', onclick: () => { range = r; render(root, d, opts); } }, r)));
     chartBox.append(lineChart(d.series[range] || [], { label: 'Players over ' + range, from: d.now - { '6h': 21600, '24h': 86400, '7d': 604800 }[range], to: d.now }));
     const maps = Object.entries(d.maps || {});
+    const half = on('maps') !== on('hours');  // one of the two: the whole width
     const sections = [
-      h('div', { class: 'dpanel dwide' }, h('div', { class: 'dpanel-head' }, h('h3', { text: 'Players' }), tabs), chartBox),
-      h('div', { class: 'dpanel' }, h('h3', { text: 'Maps played, 7 days' }), h('p', { class: 'dmuted dsmall', text: 'Player-minutes on each map.' }), bars(maps, { fmt: v => dur(v * 60) })),
-      h('div', { class: 'dpanel' }, h('h3', { text: 'Busiest hours, 30 days (UTC)' }), heat(d.heatmap)),
+      on('players') ? h('div', { class: 'dpanel dwide' }, h('div', { class: 'dpanel-head' }, h('h3', { text: 'Players' }), tabs), chartBox) : null,
+      on('maps') ? h('div', { class: 'dpanel' + (half ? ' dwide' : '') }, h('h3', { text: 'Maps played, 7 days' }), h('p', { class: 'dmuted dsmall', text: 'Player-minutes on each map.' }), bars(maps, { fmt: v => dur(v * 60) })) : null,
+      on('hours') ? h('div', { class: 'dpanel' + (half ? ' dwide' : '') }, h('h3', { text: 'Busiest hours, 30 days (UTC)' }), heat(d.heatmap)) : null,
       d.health && d.health.length && !opts.public ? h('div', { class: 'dpanel dwide' }, h('h3', { text: 'This machine, 24 h: CPU' }),
         lineChart(d.health.map(p => [p[0], p[1] || 0]), { pct: true, min: 10, h: 130, from: d.now - 86400, to: d.now, label: 'CPU over 24 hours' })) : null,
-      h('div', { class: 'dpanel dwide' }, h('h3', { text: 'Veterans: the most playtime, 90 days' }), leaderboard(d.leaderboard, d.now)),
-      h('div', { class: 'dpanel dwide' }, h('h3', { text: 'Recent activity' }), feed(d.events, names)),
-      h('div', { class: 'dpanel dwide' }, h('h3', { text: 'Reborn network now' }), network(d.network))];
-    root.replaceChildren(cards, h('h3', { class: 'dsection', text: 'Servers' }), servers, h('div', { class: 'dgrid2' }, sections));
+      on('leaderboard') && (!opts.public || d.leaderboard.length || !d.page || d.public_page.names) ? h('div', { class: 'dpanel dwide' }, h('h3', { text: 'Veterans: the most playtime, 90 days' }), leaderboard(d.leaderboard, d.now)) : null,
+      on('activity') ? h('div', { class: 'dpanel dwide' }, h('h3', { text: 'Recent activity' }), feed(d.events, names)) : null,
+      on('network') ? h('div', { class: 'dpanel dwide' }, h('h3', { text: 'Reborn network now' }), network(d.network)) : null];
+    root.replaceChildren(on('cards') ? cards : '', on('servers') ? h('h3', { class: 'dsection', text: 'Servers' }) : '', on('servers') ? servers : '',
+                         h('div', { class: 'dgrid2' }, sections));
   }
   window.Dash = { render: render, h: h, dur: dur };
 })();

@@ -189,6 +189,29 @@ SEEN_DAYS = 7
 # (off unless the owner turns it on). BF_SERVER_PUBLIC_BIND (tests): the address that page listens on (every one).
 DASHBOARD_DIR = os.path.join(DATA, 'dashboard')
 PUBLIC_PORT = 18290
+# The community page (TekRantGaming, 20 Nov 2026: "a fully customizable community server external page that they can
+# host as a website for people to look at their server"): the public stats page with the owner's branding. Its logo
+# lives in the data folder; the project's own links are these.
+PUBLIC_LOGO = os.path.join(DATA, 'public_logo')        # + .png, .jpg, .webp or .gif
+PUBLIC_LOGO_TYPES = {'png': 'image/png', 'jpg': 'image/jpeg', 'webp': 'image/webp', 'gif': 'image/gif'}
+PUBLIC_LOGO_MOST = 1 << 20
+PUBLIC_THEMES = ('field', 'night', 'desert', 'steel', 'light')
+PUBLIC_SECTIONS = ('connect', 'cards', 'servers', 'players', 'maps', 'hours', 'leaderboard', 'activity', 'network',
+                   'rules')
+# Their own code (TekRantGaming, 20 Nov 2026: "they don't have to use our kind of implementation, they can use their own
+# custom ... they can code it themselves and then it'll display"): CSS over our page, or a whole site of their own in
+# this folder (index.html and its files), which reads the same numbers from /stats.json.
+PUBLIC_CSS_MOST = 20000
+COMMUNITY_SITE = os.path.join(DATA, 'community_site')
+SITE_TYPES = {'.html': 'text/html', '.htm': 'text/html', '.css': 'text/css', '.js': 'text/javascript',
+              '.json': 'application/json', '.txt': 'text/plain', '.png': 'image/png', '.jpg': 'image/jpeg',
+              '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+              '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf',
+              '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg'}
+SITE_FILE_MOST = 20 << 20
+PROJECT_DOWNLOAD = 'https://github.com/TekRantGaming/Battlefield-1943-Reborn/releases/latest'
+PROJECT_SITE = 'https://github.com/TekRantGaming/Battlefield-1943-Reborn'
+PROJECT_DISCORD = 'https://discord.gg/8eakYSvBZS'
 PUBLIC_BIND = os.environ.get('BF_SERVER_PUBLIC_BIND') or ''
 
 
@@ -205,6 +228,15 @@ def write_atomic(path, text):
     tmp = '%s.tmp%d' % (path, os.getpid())
     with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
+    os.replace(tmp, path)
+
+
+def write_atomic_bytes(path, data):
+    """A file's bytes written whole (the community page's logo)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = '%s.tmp%d' % (path, os.getpid())
+    with open(tmp, 'wb') as f:
+        f.write(data)
     os.replace(tmp, path)
 
 
@@ -471,6 +503,59 @@ def clean_text(value, limit):
     return ' '.join(''.join(c if c.isprintable() else ' ' for c in str(value or '')).split())[:limit]
 
 
+def clean_long_text(value, limit):
+    """A page's text with its lines kept (the community page's description and rules): printable, no runs of empty
+    lines, at most `limit` characters."""
+    lines = [' '.join(''.join(c if c.isprintable() else ' ' for c in line).split())
+             for line in str(value or '').replace('\r\n', '\n').split('\n')]
+    out = '\n'.join(lines)
+    while '\n\n\n' in out:
+        out = out.replace('\n\n\n', '\n\n')
+    return out.strip()[:limit]
+
+
+def clean_url(value):
+    """An http or https link the community page may show, or ''."""
+    url = str(value or '').strip()
+    if not url or len(url) > 300 or any(c.isspace() or c in '"<>\\`' for c in url):
+        return ''
+    parts = urllib.parse.urlsplit(url)
+    return url if parts.scheme in ('http', 'https') and parts.netloc and '@' not in parts.netloc else ''
+
+
+def clean_public_page(page):
+    """The public stats page's settings: the community page's branding, sections, links and how to join."""
+    page = page if isinstance(page, dict) else {}
+    port = PUBLIC_PORT
+    with contextlib.suppress(TypeError, ValueError):
+        port = int(page.get('port') or PUBLIC_PORT)
+    accent = str(page.get('accent') or '').strip().lower()
+    sections = page.get('sections') if isinstance(page.get('sections'), dict) else {}
+    links = page.get('links') if isinstance(page.get('links'), dict) else {}
+    connect = page.get('connect') if isinstance(page.get('connect'), dict) else {}
+    custom = []
+    for link in (links.get('custom') or [])[:6] if isinstance(links.get('custom'), list) else []:
+        if isinstance(link, dict) and clean_url(link.get('url')):
+            custom.append({'label': clean_text(link.get('label'), 40) or 'Link', 'url': clean_url(link.get('url'))})
+    logo = str(page.get('logo') or '')
+    return {'on': page.get('on') is True, 'port': port if 1024 <= port <= 65535 else PUBLIC_PORT,
+            'names': page.get('names') is not False, 'title': clean_text(page.get('title'), 60),
+            'description': clean_long_text(page.get('description'), 1000),
+            'theme': page.get('theme') if page.get('theme') in PUBLIC_THEMES else 'field',
+            'accent': accent if re.fullmatch(r'#[0-9a-f]{6}', accent) else '',
+            'logo': logo if logo in PUBLIC_LOGO_TYPES else '',
+            'sections': {k: sections.get(k) is not False for k in PUBLIC_SECTIONS},
+            'links': {'download': links.get('download') is not False, 'discord': links.get('discord') is not False,
+                      'custom': custom},
+            'connect': {'address': connect.get('address') is not False,
+                        'custom_address': clean_text(connect.get('custom_address'), 80),
+                        'instructions': clean_long_text(connect.get('instructions'), 600)},
+            'rules': clean_long_text(page.get('rules'), 1500),
+            # Their own code: CSS over our page, or their own site (COMMUNITY_SITE) in its place.
+            'custom_css': ''.join(c for c in str(page.get('custom_css') or '') if c.isprintable() or c in '\n\t')[:PUBLIC_CSS_MOST],
+            'own_site': page.get('own_site') is True}
+
+
 def clean_config(raw):
     """server.json as this version keeps it (version 3), from any earlier one: every field present and in range.
     Version 1 was one server (name, maps); version 2 a list without ports (they followed the list: 18300 and on)."""
@@ -557,12 +642,7 @@ def clean_config(raw):
     out['version_gate'] = raw.get('version_gate') is not False
     out['required_version'] = clean_text(raw.get('required_version'), 24)
     # The public stats page (the dashboard's, docs/DASHBOARD.md): off unless turned on; player names on it or counts only.
-    page = raw.get('public_page') if isinstance(raw.get('public_page'), dict) else {}
-    port = PUBLIC_PORT
-    with contextlib.suppress(TypeError, ValueError):
-        port = int(page.get('port') or PUBLIC_PORT)
-    out['public_page'] = {'on': page.get('on') is True, 'port': port if 1024 <= port <= 65535 else PUBLIC_PORT,
-                          'names': page.get('names') is not False, 'title': clean_text(page.get('title'), 60)}
+    out['public_page'] = clean_public_page(raw.get('public_page'))
     return out
 
 
@@ -1760,9 +1840,106 @@ class Manager:
         view = self.dash.view(public=public, names=not public or self.cfg['public_page']['names'])
         view['title'] = self.cfg['public_page']['title'] or (self.cfg['servers'][0]['name'] if self.cfg['servers'] else '')
         view['public_page'] = dict(self.cfg['public_page'])
+        view['page'] = self.community_page()
         if not public:
             view['alerts'] = self.alerts(view)
         return view
+
+    def community_page(self):
+        """What the community page shows besides the numbers: the owner's words, look, links and how to join (only
+        what the owner set; the address only when the owner leaves it on)."""
+        p = self.cfg['public_page']
+        links = []
+        if p['links']['download']:
+            links.append({'label': 'Download Battlefield 1943 Reborn', 'url': PROJECT_DOWNLOAD, 'kind': 'download'})
+        if p['links']['discord']:
+            links.append({'label': 'Battlefield 1943 Reborn Discord', 'url': PROJECT_DISCORD, 'kind': 'discord'})
+        links += [dict(link, kind='custom') for link in p['links']['custom']]
+        joins = []
+        host = p['connect']['custom_address'] or self.public_address() or ''
+        for n, s in enumerate(self.cfg['servers'], 1):
+            st = self.server_status(n)
+            address = ''
+            if p['connect']['address']:
+                if p['connect']['custom_address']:
+                    address = p['connect']['custom_address'] if len(self.cfg['servers']) == 1 or ':' in host \
+                        else '%s:%d' % (host, s['port'])
+                elif st.get('address') and not st['address'].startswith('127.'):
+                    address = st['address']  # where the main backend saw it register
+                elif host:
+                    address = '%s:%d' % (host, s['port'])
+            joins.append({'name': s['name'], 'state': st['state'], 'players': st['players'], 'max': s['max_players'],
+                          'address': address, 'listed': s['listed'], 'lan': self.cfg['lan_only']})
+        logo_at = 0
+        if p['logo']:
+            with contextlib.suppress(OSError):
+                logo_at = int(os.path.getmtime(PUBLIC_LOGO + '.' + p['logo']))
+        return {'title': p['title'], 'description': p['description'], 'theme': p['theme'], 'accent': p['accent'],
+                'logo': 'logo?v=%d' % logo_at if logo_at else '', 'sections': p['sections'], 'links': links,
+                'join': joins, 'instructions': p['connect']['instructions'], 'rules': p['rules'],
+                'project': PROJECT_SITE, 'css': p['custom_css']}
+
+    def site_info(self):
+        """The owner's own site folder for the Community page tab: where it is, whether it has an index.html, its files."""
+        files = []
+        for root, dirs, names in os.walk(COMMUNITY_SITE):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for name in names:
+                if not name.startswith('.'):
+                    files.append(os.path.relpath(os.path.join(root, name), COMMUNITY_SITE).replace(os.sep, '/'))
+            if len(files) > 200:
+                break
+        return {'folder': COMMUNITY_SITE, 'ready': os.path.isfile(os.path.join(COMMUNITY_SITE, 'index.html')),
+                'files': sorted(files)[:200]}
+
+    def make_starter(self):
+        """A starting point for the owner's own site: our page as index.html, and a README of the numbers. Files
+        already there are kept."""
+        os.makedirs(COMMUNITY_SITE, exist_ok=True)
+        made = []
+        page = read_text(os.path.join(UI, 'public.html'))
+        page = page.replace('<script src="dash.js"></script>', '<script src="/dash.js"></script>').replace(
+            "fetch('stats.json'", "fetch('/stats.json'")
+        header = ('<!-- Your own community page (docs/DASHBOARD.md). Change anything: this folder is served as your site, '
+                  'with index.html at its root.\n     Your page reads the live numbers from /stats.json; /dash.js (our '
+                  'charts) and /logo (your logo) are there to use too. -->\n')
+        for name, text in (('index.html', header + page), ('README.txt', STARTER_README)):
+            path = os.path.join(COMMUNITY_SITE, name)
+            if not os.path.exists(path):
+                write_atomic(path, text)
+                made.append(name)
+        self.note('community page: starter files in %s (%s)' % (COMMUNITY_SITE, ', '.join(made) or 'kept what was there'))
+        return made
+
+    def set_logo(self, data):
+        """The community page's logo: a PNG, JPEG, WebP or GIF of 1 MB at most (its own bytes say which), or none."""
+        import base64
+        if data.get('remove'):
+            kind = ''
+        else:
+            try:
+                raw = base64.b64decode(str(data.get('data', '')).split(',', 1)[-1], validate=True)
+            except (ValueError, TypeError):
+                raise RuntimeError('That picture could not be read.')
+            if len(raw) > PUBLIC_LOGO_MOST:
+                raise RuntimeError('A logo is 1 MB at most.')
+            kind = 'png' if raw.startswith(b'\x89PNG\r\n\x1a\n') else 'jpg' if raw.startswith(b'\xff\xd8\xff') else \
+                'gif' if raw[:6] in (b'GIF87a', b'GIF89a') else 'webp' if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP' else ''
+            if not kind:
+                raise RuntimeError('A logo is a PNG, JPEG, WebP or GIF picture.')
+        for ext in PUBLIC_LOGO_TYPES:
+            with contextlib.suppress(OSError):
+                os.remove(PUBLIC_LOGO + '.' + ext)
+        if kind:
+            write_atomic_bytes(PUBLIC_LOGO + '.' + kind, raw)
+        page = dict(self.cfg['public_page'], logo=kind)
+        self.set_config({'public_page': page})
+        self.note('community page: logo %s' % ('set (%s, %d KB)' % (kind, len(raw) // 1024) if kind else 'removed'))
+
+    def logo_file(self):
+        kind = self.cfg['public_page']['logo']
+        path = PUBLIC_LOGO + '.' + kind if kind else ''
+        return (path, PUBLIC_LOGO_TYPES[kind]) if path and os.path.exists(path) else (None, None)
 
     def alerts(self, view):
         """What needs the owner's eye, in a few words each."""
@@ -1855,6 +2032,8 @@ class Manager:
                         'public_page'):
                 if key in new:
                     merged[key] = new[key]
+            if isinstance(new.get('public_page'), dict) and 'logo' not in new['public_page']:
+                merged['public_page'] = dict(new['public_page'], logo=self.cfg['public_page']['logo'])  # (set_logo's)
             cleaned = clean_config(merged)
             cleaned['web_port'], cleaned['web_password'], cleaned['backend'] = self.cfg['web_port'], self.cfg['web_password'], self.cfg['backend']
             if cleaned['web_remote'] and not cleaned['web_password']:
@@ -2051,6 +2230,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, page, 'text/html')
         if path == '/dash.js':  # the dashboard's drawing, shared with the public stats page
             return self.send(200, read_text(os.path.join(UI, 'dash.js')), 'text/javascript')
+        if path in ('/preview', '/preview/', '/preview/dash.js', '/preview/stats.json', '/preview/logo'):
+            # The community page as players would see it (Preview on the Community page tab), signed in only.
+            if not self.allowed():
+                return self.send(401, {'error': 'Sign in first.'})
+            if path == '/preview':
+                return self.send(302, b'', headers=[('Location', '/preview/')])
+            if path == '/preview/':
+                return self.send(200, read_text(os.path.join(UI, 'public.html')), 'text/html')
+            if path == '/preview/dash.js':
+                return self.send(200, read_text(os.path.join(UI, 'dash.js')), 'text/javascript')
+            if path == '/preview/stats.json':
+                return self.send(200, m.dashboard(public=True))
+            logo, kind = m.logo_file()
+            return self.send(200, open(logo, 'rb').read(), kind) if logo else self.send(404, {'error': 'no logo'})
         if path == '/api/session':
             return self.send(200, {'signed_in': self.allowed(), 'password': bool(m.cfg['web_password'])})
         if not path.startswith('/api/'):
@@ -2133,6 +2326,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/moderation/action':
             e = m.moderate(data, 'command line' if self.headers.get('X-BF-Token') else 'manager page')
             return {'entry': m.bans.public(e), 'moderation': m.moderation()}
+        elif path == '/api/public/logo':
+            m.set_logo(data)
+        elif path == '/api/public/starter':
+            return {'made': m.make_starter(), 'site': m.site_info()}
+        elif path == '/api/public/site':
+            return {'site': m.site_info()}
         elif path == '/api/moderation/lookup':
             return {'players': m.lookup(data.get('text', ''), bool(data.get('network')))}
         elif path == '/api/broadcast':
@@ -2238,6 +2437,43 @@ class Server(http.server.ThreadingHTTPServer):
     allow_reuse_address = not WINDOWS
 
 
+STARTER_README = """Your own Battlefield 1943 Reborn community page
+=============================================
+
+This folder is your page's whole website when "Use my own website" is on (the manager's Community page tab).
+index.html is its front page; add any .html, .css, .js, pictures, fonts or videos beside it, in folders if you like.
+Files and folders whose names start with a dot are never served.
+
+Three addresses always work on your page, whatever is in this folder:
+
+  /stats.json   the live numbers, made new every 5 seconds (fetch it from your page's script)
+  /dash.js      our dashboard's drawing: Dash.render(element, stats, {public: true, sections: {...}})
+  /logo         the logo set on the Community page tab (404 when none)
+
+/stats.json holds:
+  title                     your page's name
+  now                       the time (seconds since 1970, UTC)
+  page                      your Community page settings: description, theme, accent, logo, sections, rules, css,
+                            links [{label, url, kind}], join [{name, state, players, max, address, listed, lan}],
+                            instructions, project
+  cards                     online, slots, peak24, hours24, sessions24, tracked, mvp {name, seconds},
+                            top_killer {name, kills}, restarts24
+  servers                   [{n, name, state, map, next_map, players, max, tick, held, ping_avg, round {round, left},
+                            since, region, roster [{name, ping, since}]}]
+  series                    {"6h", "24h", "7d"}: [[time, players in all, {server number: players}]]
+  maps                      {map: player-minutes over 7 days}
+  heatmap                   7 weekdays (Monday first) x 24 hours (UTC): average players, null without data
+  leaderboard               [{name, seconds, sessions, kills, deaths, kd, captures, map, last}] (90 days)
+  events                    [{t, kind (join, leave, map, restart, server_up, server_down), name, server, map, played}]
+  machine                   {cpu, mem, mem_total}
+  network                   the Reborn server list: {players, online, servers [{name, players, max, map, region,
+                            tick, official, promoted, description}]}
+Names are left out (empty) when "Show player names" is off. Player ids and players' addresses are never in it.
+
+docs/DASHBOARD.md in the project has the rest.
+"""
+
+
 class PublicServer(Server):
     """The public stats page (docs/DASHBOARD.md): its own port, open to the internet when the owner turns it on."""
     manager = None
@@ -2256,17 +2492,39 @@ class PublicHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def reply(self, code, body, kind):
+    OUR_POLICY = ("default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; "
+                  "connect-src 'self'")
+    # The owner's own site may use web fonts, pictures and libraries from elsewhere (their choice, their page).
+    SITE_POLICY = ("default-src 'self' https: data:; script-src 'self' 'unsafe-inline' https:; "
+                   "style-src 'self' 'unsafe-inline' https:; img-src 'self' https: data:; font-src 'self' https: data:; "
+                   "connect-src 'self' https:; media-src 'self' https:; frame-ancestors 'self'")
+
+    def site_file(self, path):
+        """(the file, its type) of the owner's site for this path, or (None, None). Inside the folder only: no "..",
+        no hidden files, known types only, 20 MB at most."""
+        rel = urllib.parse.unquote(path).lstrip('/')
+        if rel == '' or rel.endswith('/'):
+            rel += 'index.html'
+        parts = rel.split('/')
+        if any(not x or x in ('.', '..') or x.startswith('.') or '\\' in x or ':' in x or '\0' in x for x in parts):
+            return None, None
+        root = os.path.realpath(COMMUNITY_SITE)
+        full = os.path.realpath(os.path.join(root, *parts))
+        kind = SITE_TYPES.get(os.path.splitext(full)[1].lower())
+        if not full.startswith(root + os.sep) or not kind or not os.path.isfile(full) or os.path.getsize(full) > SITE_FILE_MOST:
+            return None, None
+        return full, kind
+
+    def reply(self, code, body, kind, policy=None):
         data = body if isinstance(body, bytes) else body.encode('utf-8')
         self.send_response(code)
-        self.send_header('Content-Type', kind + '; charset=utf-8')
+        self.send_header('Content-Type', kind + ('; charset=utf-8' if kind.startswith('text/') or kind.endswith('json') else ''))
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'SAMEORIGIN')
         self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'self' 'unsafe-inline'; "
-                                                    "style-src 'unsafe-inline'; img-src data:; connect-src 'self'")
+        self.send_header('Content-Security-Policy', policy or self.OUR_POLICY)
         self.end_headers()
         if self.command != 'HEAD':
             self.wfile.write(data)
@@ -2285,11 +2543,26 @@ class PublicHandler(http.server.BaseHTTPRequestHandler):
         if len(times) >= 120:
             return self.reply(429, 'Too many requests.', 'text/plain')
         path = self.path.partition('?')[0]
+        own = self.server.manager.cfg['public_page']['own_site'] and \
+            os.path.isfile(os.path.join(COMMUNITY_SITE, 'index.html'))
+        if own and path not in ('/dash.js', '/logo', '/stats.json'):
+            # The owner's own site in place of ours; the numbers, our charts and the logo stay where they are.
+            full, kind = self.site_file(path)
+            if not full:
+                return self.reply(404, 'Not found.', 'text/plain', self.SITE_POLICY)
+            with open(full, 'rb') as f:
+                return self.reply(200, f.read(), kind, self.SITE_POLICY)
         if path in ('/', '/index.html'):
             page = read_text(os.path.join(UI, 'public.html'))
             return self.reply(200 if page else 500, page or 'The page is missing.', 'text/html')
         if path == '/dash.js':
             return self.reply(200, read_text(os.path.join(UI, 'dash.js')), 'text/javascript')
+        if path == '/logo':  # the community page's logo, when the owner gave one
+            logo, kind = self.server.manager.logo_file()
+            if not logo:
+                return self.reply(404, 'Not found.', 'text/plain')
+            with open(logo, 'rb') as f:
+                return self.reply(200, f.read(), kind)
         if path == '/stats.json':
             with PublicHandler.lock:
                 if now - PublicHandler.cache[0] > 5:
