@@ -23,11 +23,20 @@ namespace bf1943::dev {
 // True when [address, address + size) is committed, readable guest memory.
 inline bool GuestReadable(const uint8_t* base, uint32_t address, uint32_t size) {
 #if defined(_WIN32)
-  const uint8_t* p = base + address;
-  MEMORY_BASIC_INFORMATION mbi{};
-  if (!VirtualQuery(p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
-    return false;
-  return static_cast<const uint8_t*>(mbi.BaseAddress) + mbi.RegionSize >= p + size;
+  // One byte of each page in the range copied through the kernel (ReadProcessMemory fails on memory that is not there
+  // and raises nothing): about 0.35 us. VirtualQuery measures the whole region the address lies in, up to 100 us in
+  // the game's large committed regions, and this runs for every player and marker every frame (the user, 20 Nov 2026:
+  // 12 FPS at the start of a round on US Central's bot server, the game's thread 95% in VirtualQuery).
+  const uintptr_t first = reinterpret_cast<uintptr_t>(base + address);
+  const uintptr_t last = first + (size ? size - 1 : 0);
+  for (uintptr_t p = first & ~uintptr_t(0xFFF); p <= last; p += 0x1000) {
+    uint8_t byte;
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(p < first ? first : p), &byte, 1, &got) ||
+        got != 1)
+      return false;
+  }
+  return true;
 #else
   // Linux: a read through process_vm_readv of our own process fails (EFAULT) on a page that is not mapped or not
   // readable instead of faulting, so it is safe here and in signal handlers. One byte of each page in the range.

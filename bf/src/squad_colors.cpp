@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "capture_points.h"
+#include "dev_guest_memory.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -67,12 +68,12 @@ void StoreF(uint8_t* base, uint32_t a, float f) {
   p[0] = uint8_t(v >> 24), p[1] = uint8_t(v >> 16), p[2] = uint8_t(v >> 8), p[3] = uint8_t(v);
 }
 
+// Whether guest memory is there (dev_guest_memory.h: a one byte read of each page through the kernel; VirtualQuery,
+// used here before, took up to 100 us in the game's large committed regions, for every marker and every team mate
+// every frame: 12 FPS at the start of a round with bots, the user, 20 Nov 2026).
 bool Mapped(const uint8_t* base, uint32_t address, uint32_t size) {
 #if defined(_WIN32)
-  MEMORY_BASIC_INFORMATION mbi{};
-  if (address < 0x10000 || !VirtualQuery(base + address, &mbi, sizeof(mbi))) return false;
-  return mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
-         uint64_t(static_cast<const uint8_t*>(mbi.BaseAddress) - base) + mbi.RegionSize >= uint64_t(address) + size;
+  return address >= 0x10000 && bf1943::dev::GuestReadable(base, address, size);
 #else
   (void)base, (void)address, (void)size;
   return false;
