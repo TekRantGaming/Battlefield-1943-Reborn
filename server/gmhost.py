@@ -1006,23 +1006,46 @@ class World:
         self.at = time.monotonic()
         self.admins, self.key = set(), ''
         self.night_ops = False
-        self.base = None  # Night Ops: the weather and fogs a round starts with (configure)
-        self.round, self.raining = None, False
+        self.round, self.progress, self.stage = None, 0.0, -1  # Night Ops: the round's build (match)
+        self.ramp_from = time.monotonic()
 
     # Night Ops (16 Nov 2026, TekRantGaming: the night maps gone, "we would just start the match to always be at a set
     # time the full time so could have night ops maps"): a Night Ops server's world is the day and night cycle held at
-    # this hour for the whole match; its admins may change the weather, never the time.
-    # 20 Nov 2026, his presets: "time of day should be 1900h and is locked at that time"; "the games tickets are used to
-    # start the weather so when the game has reached its halfway point the rain should start right now rain starts when
-    # the weather is set to above 75%"; "When the rain starts at the halfway point also put ground fog and distant fog
-    # at 50%". The halfway point: the team with fewer tickets has half its round's count left (match(), from the
-    # server's match.txt, match_rules.cpp). Each new round starts dry again.
+    # this hour for the whole match. 20 Nov 2026, his presets: "time of day should be 1900h and is locked at that time";
+    # the weather follows the tickets.
     NIGHT_OPS_HOUR = 19.0
-    # The weather from the halfway point. Past 75% the rain falls, but since pull request 62 the weather is a hurricane
-    # that comes in from the sea and covers the whole map only at 100% (at 85% its centre stayed about 1 km off, run
-    # night048g); his pick, 20 Nov 2026: "Yes, use 100%".
-    NIGHT_OPS_RAIN = 1.0
-    NIGHT_OPS_RAIN_FOG = 0.5  # the distance fog and the ground fog from then
+    # The storm's build over a round (TekRantGaming, 20 Nov 2026: "a nice clear day at the start ... we still want to see
+    # the stars, and then the cloud coverage slowly builds up ... the weather gets stronger up until the point at the end
+    # of the game. Now it's all based on tickets ... I do want a good chunk of the first half of the game to be rain
+    # free"; 100% with 80% of the match gone). The progress is the share of its tickets the team with fewer left has
+    # lost (match.txt, match_rules.cpp). Each row: progress, cloud cover, weather, fog (distance and ground); between two
+    # rows the values go in a straight line, and players' games ease each change over about 25 s. Since pull request 62
+    # the weather is a hurricane that forms at sea from 25%, rains where it is past 75% and covers the whole map at
+    # 100% (85% left the carrier dry, run night048g). The progress never goes back within a round; a new round starts
+    # clear. On a Night Ops server these four are the build's: an admin's F9 keeps the rest (cloud rate, wind, height).
+    NIGHT_OPS_STAGES = (
+        (0.00, 0.15, 0.00, 0.00),  # a clear night: stars and the moon
+        (0.40, 0.15, 0.00, 0.00),  # still clear at 40%
+        (0.55, 0.60, 0.30, 0.00),  # the clouds gather, the storm forms out at sea: far lightning, no rain on the map
+        (0.80, 0.90, 1.00, 0.50),  # it rolls in: the rain reaches the map about two thirds in, the fog rises with it
+        (1.00, 0.90, 1.00, 0.50),  # the full storm to the end
+    )
+    NIGHT_OPS_STAGE_NAMES = ('a clear night', 'the clouds gather', 'the storm rolls in', 'the full storm')
+
+    @classmethod
+    def night_ops_values(cls, progress):
+        """Cloud cover, weather and fog at a round's progress (0 to 1), and the stage's index (NIGHT_OPS_STAGE_NAMES:
+        the clear night up to the second row, then one stage for each row after it, the last row's from its start)."""
+        rows = cls.NIGHT_OPS_STAGES
+        p = max(0.0, min(1.0, progress))
+        i = 0
+        while i < len(rows) - 2 and p > rows[i + 1][0]:
+            i += 1
+        a, b = rows[i], rows[i + 1]
+        t = 0.0 if b[0] <= a[0] else max(0.0, min(1.0, (p - a[0]) / (b[0] - a[0])))
+        cover, weather, fog = (a[k] + (b[k] - a[k]) * t for k in (1, 2, 3))
+        stage = 0 if p <= rows[1][0] else min(len(cls.NIGHT_OPS_STAGE_NAMES) - 1, i if p < rows[-2][0] else i + 1)
+        return cover, weather, fog, stage
 
     def configure(self, args):
         clamp = lambda v, lo, hi: max(lo, min(hi, float(v)))
@@ -1037,8 +1060,9 @@ class World:
         self.fog, self.ground_fog = clamp(args.fog, 0, 1), clamp(args.ground_fog, 0, 1)
         self.wind = clamp(args.wind, 0, 1)
         self.cloud_height = clamp(args.cloud_height, 100, 1500)
-        self.base = (self.weather, self.fog, self.ground_fog)
-        self.round, self.raining = None, False
+        self.round, self.progress, self.stage = None, 0.0, -1
+        if self.night_ops:
+            self.set_night_ops(0.0)
         # Player IDs as the game shows them (eight hex digits, the low half of the XUID).
         self.admins = {a.strip().upper().rjust(8, '0') for a in args.admins.replace(';', ',').replace(' ', ',').split(',')
                        if a.strip()}
@@ -1051,22 +1075,36 @@ class World:
             'on' if self.day_night else 'off', self.hour, self.day_minutes, self.cover * 100, self.rate * 100,
             self.weather * 100, self.fog * 100, self.ground_fog * 100, self.wind * 100, self.cloud_height)
 
+    def set_night_ops(self, progress):
+        self.progress = progress
+        self.cover, self.weather, fog, stage = self.night_ops_values(progress)
+        self.fog = self.ground_fog = fog
+        if stage != self.stage:
+            self.stage = stage
+            self.host.note('world: Night Ops at %.0f%% of the round: %s, %s' % (
+                progress * 100, self.NIGHT_OPS_STAGE_NAMES[stage], self.said()))
+
     def match(self, round_number, left):
         """Night Ops: the round's progress from the server (round number, the share of tickets the team with fewer still
-        has): a new round starts with the server's own weather and fogs, and from the halfway point the rain and fog."""
-        if not self.night_ops or self.base is None:
+        has): the clouds, weather and fog of NIGHT_OPS_STAGES. A new round starts clear."""
+        if not self.night_ops:
             return
+        progress = max(0.0, min(1.0, 1.0 - left))
+        test = os.environ.get('BF_DEV_NIGHT_RAMP', '')  # tests: the whole build in this many seconds, not the tickets
+        if test:
+            try:
+                progress = min(1.0, (time.monotonic() - self.ramp_from) / max(1.0, float(test)))
+            except ValueError:
+                test = ''
         if round_number != self.round:
-            if self.round is not None or self.raining:
-                self.weather, self.fog, self.ground_fog = self.base
-                self.host.note('world: Night Ops round %s starts dry: %s' % (round_number, self.said()))
-            self.round, self.raining = round_number, False
-        if not self.raining and left <= 0.5:
-            self.raining = True
-            self.weather = max(self.weather, self.NIGHT_OPS_RAIN)
-            self.fog = self.ground_fog = self.NIGHT_OPS_RAIN_FOG
-            self.host.note('world: Night Ops halfway (%.0f%% of the tickets left): the rain starts, %s' % (
-                left * 100, self.said()))
+            if self.round is not None:
+                self.host.note('world: Night Ops round %s starts clear' % round_number)
+            self.round, self.stage = round_number, -1
+            self.ramp_from = time.monotonic()
+            self.set_night_ops(0.0 if not test else progress)
+            return
+        if progress > self.progress + 1e-6:
+            self.set_night_ops(progress)
 
     def advance(self):
         now = time.monotonic()
@@ -1103,8 +1141,10 @@ class World:
                     self.day_night = day_night
                     self.hour = max(0.0, values[0]) % 24
                     self.day_minutes = max(0.0, min(1440.0, values[1]))
-                (self.cover, self.rate, self.weather, self.fog, self.ground_fog,
+                (cover, self.rate, weather, fog, ground_fog,
                  self.wind) = (max(0.0, min(1.0, v)) for v in values[2:8])
+                if not self.night_ops:  # a Night Ops server's clouds, weather and fogs follow its tickets (match)
+                    self.cover, self.weather, self.fog, self.ground_fog = cover, weather, fog, ground_fog
                 if len(data) >= at + 37:
                     height = struct.unpack_from('>f', data, at + 33)[0]
                     if math.isfinite(height):
@@ -1485,7 +1525,7 @@ async def serve(args):
                                         names=host.player_names()))
                 for m in stats_lines():  # each player's stats since the last beat (player_stats.py)
                     send(m)
-                if args.match_file:  # the round's progress (match_rules.cpp): Night Ops' rain at the halfway point
+                if args.match_file:  # the round's progress (match_rules.cpp): Night Ops' storm builds with it
                     try:
                         with open(args.match_file, encoding='utf-8') as f:
                             parts = f.read().split()
@@ -1577,9 +1617,9 @@ def main():
     # Night Ops (TekRantGaming, 11 Nov 2026): the maps at night, shown in the server list. Since 16 Nov 2026 the night
     # is the server's world: the day and night cycle held at one hour for the whole match (World.NIGHT_OPS_HOUR, 19:00
     # since 20 Nov 2026), drawn by players' games with the levels' lamps lit (NativeXRenderer D175); --day-night, --time
-    # and --day-minutes are then not used. From each round's halfway point (World.match, --match-file) the rain and fog.
+    # and --day-minutes are then not used. Its storm builds with each round's tickets (World.match, --match-file).
     ap.add_argument('--night', action='store_true',
-                    help='a night server (Night Ops): its world held at 19:00, the rain and fog from the halfway point')
+                    help='a night server (Night Ops): its world held at 19:00, the storm building with the tickets')
     # Where the server is (TekRantGaming, 13 Nov 2026: the browser shows the region with its flag): one of the game's
     # region codes (bf/src/regions.h, the manager's drop down). And its tick rate, for the browser: the game's own
     # 30 Hz today.
@@ -1612,7 +1652,7 @@ def main():
     ap.add_argument('--tick', type=int, default=60, help="the server's tick rate in Hz (shown in the browser; 60 by default since 14 Nov 2026)")
     ap.add_argument('--map-file', default='', help="the server's current_map.txt (its map rotation)")
     ap.add_argument('--match-file', default='',
-                    help="the server's match.txt (match_rules.cpp): the round and its tickets left, for Night Ops' rain")
+                    help="the server's match.txt (match_rules.cpp): the round and its tickets left, for Night Ops' storm")
     ap.add_argument('--maps', default='', help='the rotation, map titles separated by commas (for the next map)')
     ap.add_argument('--description', default='', help='shown in the server browser (200 characters)')
     ap.add_argument('--unlisted', action='store_true', help='registered but not listed: Direct connect only')
