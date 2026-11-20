@@ -487,6 +487,15 @@ bool CloudCheckerNow() {
   if (ab) return g_device && (g_device->frames_presented() / 600) % 2 == 0;
   return REXCVAR_GET(native_x_renderer_cloud_checkerboard);
 }
+// BF_CLOUD_DENSITY_AB=1 (tests): the clouds' shape looked up for every sample (the old way) and only where it may
+// show (the new) by turns, 600 frames each.
+bool CloudDensityOldNow() {
+  static const bool ab = [] {
+    const char* v = std::getenv("BF_CLOUD_DENSITY_AB");
+    return v && *v == '1';
+  }();
+  return ab && g_device && (g_device->frames_presented() / 600) % 2 == 1;
+}
 bool CloudSkipNow() {
   static const bool ab = [] {
     const char* v = std::getenv("BF_CLOUD_AB");
@@ -2581,7 +2590,7 @@ void ApplyOpaqueEffects() {
         MsaaWrite(g_scene_color);
         in.color = g_scene_color->texture;
         in.depth_srv = g_scene_depth->srv;
-        if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); in.checker_clouds = CloudCheckerNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
+        if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); in.checker_clouds = CloudCheckerNow(); in.old_cloud_density = CloudDensityOldNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
       }
       g_last_sky_in = in, g_last_sky_valid = true;
       // The fog waits for the game's water (ApplyFog).
@@ -2774,7 +2783,7 @@ void ApplyLateSky() {
     MsaaWrite(g_scene_color);
     in.color = g_scene_color->texture;
     in.depth_srv = g_scene_depth->srv;
-    if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); in.checker_clouds = CloudCheckerNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
+    if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); in.checker_clouds = CloudCheckerNow(); in.old_cloud_density = CloudDensityOldNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
   }
   static bool said = false;
   if (!said) {
@@ -2851,6 +2860,22 @@ void ApplyFog() {
       g_draw->TargetsChanged();
       g_device->context();  // (what was recorded is done before the fog reads it)
     }
+  }
+  {
+    // BF_FOG_AB=1 (tests): the rain's cover looked up the old way and the new by turns, 600 frames each.
+    static const bool fog_ab = [] {
+      const char* v = std::getenv("BF_FOG_AB");
+      return v && *v == '1';
+    }();
+    g_fog_in.old_rain_order = fog_ab && (g_device->frames_presented() / 600) % 2 == 1;
+    // BF_FOG_PARTS=1 (tests): by turns of 600 frames, all of the fog pass, then without its ground fog, its rain
+    // shafts, the rain here (streaks, rings, splashes), the sea's reflection: what each costs.
+    static const bool fog_parts = [] {
+      const char* v = std::getenv("BF_FOG_PARTS");
+      return v && *v == '1';
+    }();
+    static const int kOff[5] = {0, 8, 16, 32, 64};
+    g_fog_in.fog_parts_off = fog_parts ? kOff[(g_device->frames_presented() / 600) % 5] : 0;
   }
   const bool drawn = Timed(SectionTimers::kFog, [&] { return g_own_sky.Fog(g_device->context(), g_fog_in); });
   if (drawn || over) g_draw->TargetsChanged();

@@ -61,6 +61,9 @@ class Sky {
   struct Inputs {
     Diligent::ITexture* color = nullptr;      // the view's colour: its sky pixels are drawn anew
     Diligent::ITextureView* depth_srv = nullptr;
+    bool old_cloud_density = false;  // BF_CLOUD_DENSITY_AB (tests): the cloud's shape looked up for every sample
+    int fog_parts_off = 0;  // BF_FOG_PARTS (tests): parts of the fog pass off (8, 16, 32, 64: sky.cpp's kFogPS)
+    bool old_rain_order = false;  // BF_FOG_AB (tests): the rain's cover looked up for every pixel, as before
     bool checker_clouds = false;  // half the cloud texels marched a frame (native_x_renderer_cloud_checkerboard)
     bool skip_hidden_clouds = true;  // the clouds' march passes over the rays the scene hides (false: all, for comparisons)
     uint32_t width = 0, height = 0;           // the view's part of the colour, in its pixels
@@ -163,6 +166,12 @@ class Sky {
   float sway_ = 0.0f;
   float edge_ = 0.0f;  // D194: the storm's blurred edges, apart from the shake
   Diligent::RefCntAutoPtr<Diligent::ITexture> fog_scene_, no_scene_;  // D190: the scene before the fog
+  // BF_FOG_CHECK (tests): the picture before the fog, the two ways' results read back, and the passes counted.
+  Diligent::RefCntAutoPtr<Diligent::ITexture> fog_before_, fog_staging_[2];
+  // BF_CLOUD_CHECK (tests): the march's two outputs read back, this way and the old.
+  Diligent::RefCntAutoPtr<Diligent::ITexture> cloud_staging_[4];
+  uint64_t cloud_check_count_ = 0;
+  uint64_t fog_check_count_ = 0;
   std::vector<uint8_t> last_fill_;
  public:
   // D190: the sea's draws drawn again (DrawPath::DrawGlassMask, sea), for the fog pass's reflection: where the sea

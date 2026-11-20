@@ -119,6 +119,48 @@ run perf_cbU_ab, 36 s into a match). Now 4 a section, the timers off by default 
 for tests; the night pass's own timers with them), and the pool 512 (device.cpp). The same run again: no crash.
 Builds pushed before this fix (v0.4.8-testing 4c77eb82 and 34f15612) had the timers on and could crash this way.
 
+## The storm and the map
+
+Run with the test launcher passing the server's match file (`perf_night.ps1` now does), the storm built through every
+stage over 5 minutes (`BF_DEV_NIGHT_RAMP=300`), the dev camera touring 24 random inland and coast spots (14 s each),
+8 bots, on all four maps (scratchpad `night_suite.ps1`, `stage_report.py`; runs suite_a_*). Each 600 frame reading
+put with the stage the server reported then. GPU ms a frame, averages by stage:
+
+| Map | Stage | Frame | GPU | Sky | Fog and rain | Night pass | SSGI | GTAO |
+|---|---|---|---|---|---|---|---|---|
+| Wake Island | clear night | 14.42 | 10.73 | 2.46 | 0.59 | 0.45 | 1.67 | 0.88 |
+| | clouds gather | 13.87 | 11.32 | 1.93 | 0.71 | 0.50 | 2.22 | 1.06 |
+| | storm rolls in | 11.27 | 10.84 | 1.35 | 1.04 | 0.48 | 2.09 | 1.00 |
+| | full storm | 12.15 | 11.74 | 1.21 | 1.45 (max 2.59) | 0.50 | 2.27 | 1.05 |
+| Guadalcanal | clear night | 11.97 | 11.04 | 1.74 | 0.32 | 0.64 | 1.90 | 0.97 |
+| | full storm | 12.78 | 12.35 | 0.94 | 1.27 | 0.73 | 2.13 | 1.03 |
+| Iwo Jima | clear night | 11.19 | 10.31 | 2.69 | 0.59 | 0.34 | 1.49 | 0.86 |
+| | full storm | 12.07 | 11.65 | 1.47 | 1.71 | 0.36 | 1.77 | 0.94 |
+| Coral Sea | clear night | 12.76 | 9.50 | 2.26 | 0.62 | 0.32 | 1.42 | 0.88 |
+| | full storm | 10.83 | 10.41 | 1.48 | 1.94 | 0.27 | 1.51 | 0.90 |
+
+At the clear night the sky's clouds are the most (their march finds thin cloud far along every ray); in the storm
+the deck stops the rays early and the sky costs less, while the fog and rain pass grows to 1.3 to 1.9 ms. The night
+pass stays at 0.3 to 0.7 ms everywhere. (Guadalcanal, Iwo Jima and Coral Sea ran with the rain cover change below
+already in; Wake without it.)
+
+The fog and rain pass at the full storm by part (`BF_FOG_PARTS`, Wake, touring, run perf_fogparts1; the pass 1.92 ms
+with all of it): the rain shafts 0.64 ms, the rain here (streaks, rings, splashes) 0.38, the ground fog 0.26, the
+sea's reflection 0.20.
+
+### 5. The fog and rain pass: look ups only where they count
+
+- **The rain's cover:** each of the six rain cylinders looked up the game's shadow map (`Covered`: under a roof?) for
+  every pixel, before finding whether a streak is drawn there at all; most of a cylinder's pixels are between its thin
+  streaks. Now the streak first, the look up only where one is drawn. And the wet surfaces' cover look up only where
+  it is used (not the sky's pixels). The same arithmetic in the same order. Measured (`BF_FOG_AB`, run perf_fogZ_ab):
+  1.81 ms against 1.87.
+- **The rain shafts:** each of their 20 steps a pixel read the streak texture even where the step adds nothing (no
+  rain cell there, or above the cloud base); now only where it adds.
+- **The ground fog:** each of its 16 steps read the patches' texture above the layer's top too, where the step adds
+  nothing; now only within the layer.
+- Both read with `textureGrad` and the gradients the old reads had, so the texture's level is the same.
+
 ## Looked at, not changed
 
 - **The sky's cloud march** (about 2.9 ms at the clear night stage, half size, temporal): the remaining cost is the march over

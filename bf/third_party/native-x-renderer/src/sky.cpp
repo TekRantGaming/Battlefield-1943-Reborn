@@ -8,6 +8,7 @@
 #include <rex/logging.h>
 
 #include <algorithm>
+#include <memory>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -476,13 +477,19 @@ float cloud_density(vec3 p, vec3 cam, bool cheap) {
   local_thick *= mix(0.32, 1.0, pow(foot, mix(0.6, 0.95, lay)));
   float h = (alt - local_base) / local_thick;
   float low = 0.0;
-  if (h >= 0.0 && h <= 1.0) {
+  // The shape at this height can be no more than its profile here (`shape_most`: the noise's remap is 0 to 1), and
+  // the cloud is 0 wherever that is under the cover's threshold, while the storm does not fill the deck in (under 0.3
+  // its fill below is exactly nothing): then the shape's look up and the rest are passed over (the Night Ops
+  // performance pass, 20 Nov 2026: the clear night's thin cloud made the march the sky's most). gale.y 1: the old way.
+  float dome = smoothstep(0.0, 0.05, h) * sqrt(max(1.0 - pow(h, 1.7), 0.0)) * mix(1.0, 0.8, smoothstep(0.55, 1.0, h));
+  float shape_most = h >= 0.0 && h <= 1.0 ? mix(height_gradient(h, local_type), dome, lay) : 0.0;
+  bool can_show = shape_most > 1.0 - cover || storm > 0.3 || gale.y > 0.5;
+  if (h >= 0.0 && h <= 1.0 && can_show) {
     vec3 sp = vec3(wp.x, p.y + evolve * 40.0, wp.y) / shape_scale;
     vec4 s = textureLod(shapeTex, sp + vec3(0.0, 0.0, evolve * 0.002), 0.0);
     float wfbm = s.g * 0.625 + s.b * 0.25 + s.a * 0.125;
     float base = remap(s.r, wfbm - 1.0, 1.0, 0.0, 1.0);
-    float dome = smoothstep(0.0, 0.05, h) * sqrt(max(1.0 - pow(h, 1.7), 0.0)) * mix(1.0, 0.8, smoothstep(0.55, 1.0, h));
-    base *= mix(height_gradient(h, local_type), dome, lay);
+    base *= shape_most;
     float c = remap(base, 1.0 - cover, 1.0, 0.0, 1.0);
     c = clamp(c * (1.0 + 0.3 * lay), 0.0, 1.0);
     if (c > 0.0 && !cheap) {
@@ -926,7 +933,8 @@ void main() {
   // from the ground under what is seen, not the sea (2 m under it: so over the island too, not only the shore).
   float tau_low = 0.0;
   float top = fog_a.w;
-  if (fog_a.z > 0.0 && fog_b.z > 0.5) {
+  int fog_off = int(bolt.w + 0.5);  // BF_FOG_PARTS (tests): 8 the ground fog off, 16 the shafts, 32 the rain here, 64 the sea
+  if (fog_a.z > 0.0 && fog_b.z > 0.5 && (fog_off & 8) == 0) {
     float floor_h = nothing ? 0.0 : max(eye_h + rd.y * L - 2.0, 0.0) * gale.x;
     float eh = eye_h - floor_h;  // the eye over the layer's floor
     float ta = 0.0, tb = L;
@@ -947,11 +955,16 @@ void main() {
       for (int i = 0; i < n; ++i) {
         float h = eh + rd.y * t;
         vec2 xz = eye.xz + rd.xz * t + wind;
-        float patches = smoothstep(0.32, 0.68, texture(weatherTex, xz / 900.0).r);
-        patches = mix(patches, 0.55 + 0.45 * patches, gale.x);
         float up = exp(-max(h, 0.0) / (top * 0.3)) * (1.0 - smoothstep(top * 0.6, top, h));
-        // Thinner right at the eye, so that what is held in the hand stays clear.
-        tau_low += fog_a.z * patches * up * dt * smoothstep(0.0, 6.0, t);
+        // The patches' look up only within the layer (over its top `up` is 0 and the step adds nothing; a ray going up
+        // leaves it in a few steps), its texture's level from the same gradients the look up everywhere had.
+        vec2 pq = xz / 900.0, pdx = dFdx(pq), pdy = dFdy(pq);
+        if (up > 0.0 || (fog_off & 4) != 0) {
+          float patches = smoothstep(0.32, 0.68, textureGrad(weatherTex, pq, pdx, pdy).r);
+          patches = mix(patches, 0.55 + 0.45 * patches, gale.x);
+          // Thinner right at the eye, so that what is held in the hand stays clear.
+          tau_low += fog_a.z * patches * up * dt * smoothstep(0.0, 6.0, t);
+        }
         t += dt;
       }
     }
@@ -964,7 +977,7 @@ void main() {
 
   // The rain shafts: under the thicker cloud (the clouds' own map), from the cloud base down, slanted by the wind.
   float tau_rain = 0.0;
-  if (fog_b.y > 0.0) {
+  if (fog_b.y > 0.0 && (fog_off & 16) == 0) {
     float base = cloud.z;
     float t_end = min(L, 16000.0);
     if (rd.y > 1e-4) t_end = min(t_end, (base + 200.0 - eye_h) / rd.y);
@@ -979,9 +992,15 @@ void main() {
         float a = eye_h + rd.y * t;
         vec2 wp = eye.xz + rd.xz * t + drift.xy - along * (base - a) * (0.1 + rain.x);
         float cell = smoothstep(edge, edge + 0.1, texture(weatherTex, wp / 40000.0).r);
-        float streak = 0.5 + 0.5 * texture(weatherTex, wp / 1700.0).r;
         float under = 1.0 - smoothstep(base - 350.0, base + 150.0, a);
-        tau_rain += 0.0007 * fog_b.y * cell * streak * under * dt * smoothstep(t_start, t_start + 700.0, t);
+        // The streaks' look up only where there is a shaft to streak (a cell and under the cloud): elsewhere the step
+        // adds nothing (the Night Ops performance pass, 20 Nov 2026: the shafts were a third of the fog pass in a full
+        // storm). Its texture's level as the look up made everywhere chose it: the same gradients, taken here.
+        vec2 sq = wp / 1700.0, sdx = dFdx(sq), sdy = dFdy(sq);
+        if (cell * under > 0.0 || (fog_off & 4) != 0) {
+          float streak = 0.5 + 0.5 * textureGrad(weatherTex, sq, sdx, sdy).r;
+          tau_rain += 0.0007 * fog_b.y * cell * streak * under * dt * smoothstep(t_start, t_start + 700.0, t);
+        }
         t += dt;
       }
     }
@@ -1015,7 +1034,7 @@ void main() {
   // one in the picture (the ground there, and whether a drop has just landed on it).
   vec3 rain_light = vec3(0.0);
   float wet = 1.0, streaks = 0.0;
-  if (fog_b.w > 0.0) {
+  if (fog_b.w > 0.0 && (fog_off & 32) == 0) {
     float amount = fog_b.w, tsec = eye.w;
     // (With most of the lightning's light again, now that a flash is one smooth swell: unlit, the streaks went dark
     // against the lit scene for the flash's half second and came back after it, as if the rain stopped and began
@@ -1047,7 +1066,6 @@ void main() {
       float u = ang * R * per_m + fi * 17.3;
       float wpx = max(fwidth(u), 1e-4);
       if (t > seen || flat_len < 0.05) continue;
-      if (Covered(eye_world.xyz + rd * t) > 0.5) continue;
       float col = floor(u);
       float h1 = h21(vec2(col, fi * 7.0 + 1.0)), h2 = h21(vec2(col, fi * 7.0 + 2.0)), h3 = h21(vec2(col, fi * 7.0 + 3.0));
       float period = (1.2 + 1.3 * h2) * (1.0 - 0.35 * heavy);
@@ -1060,7 +1078,16 @@ void main() {
       float half_w = 0.002 * per_m;  // half as thick as at first ("make the world rain itself about 50% thinner")
       float across = 1.0 - smoothstep(0.0, max(half_w, wpx), abs(fract(u) - 0.5 - (h1 - 0.5) * 0.6));
       across *= clamp(half_w / wpx, 0.15, 1.0);
-      sum += on * along * across * 0.55 / (1.0 + 0.3 * fi);
+      // Under cover (a roof, the carrier's island) only where a drop is drawn at all: most of a cylinder's pixels are
+      // between its thin streaks, and the shadow map's look up was made for every one of them (the Night Ops
+      // performance pass, 20 Nov 2026: the fog and rain pass 0.5 ms at the clear night, 1.85 in the full storm).
+      float drop_here = on * along * across;
+      if ((int(bolt.w + 0.5) & 4) != 0) {  // BF_FOG_AB's old order, for comparisons: the look up first, for all
+        if (Covered(eye_world.xyz + rd * t) > 0.5) continue;
+      } else if (drop_here <= 0.0 || Covered(eye_world.xyz + rd * t) > 0.5) {
+        continue;
+      }
+      sum += drop_here * 0.55 / (1.0 + 0.3 * fi);
     }
     // A streak brightens what is behind it by a share (the pass's alpha, over 1) more than it adds a light of its
     // own, so it shows as well against a bright sky as against a dark one. (Only adding, the streaks were lost
@@ -1074,8 +1101,11 @@ void main() {
     rain_light = streak * streaks * (0.45 + 0.45 * heavy);
     // (Not what faces down, a roof's or a porch's underside: 30 cm over a thin roof's underside is out in the rain
     // above it, and rings, splashes and the wet showed on the inside of the roofs: the user, 17 Nov 2026.)
-    float open = facing.y < -0.5 ? 0.0 : 1.0 - Covered(P + vec3(0.0, 0.3, 0.0));
+    float open_all = (int(bolt.w + 0.5) & 4) != 0 ? 1.0 - Covered(P + vec3(0.0, 0.3, 0.0)) : 0.0;  // BF_FOG_AB's old way
     if (!nothing && seen > 1.2) {
+      // (Only here is it used: the sky's pixels, and those right at the eye, look nothing up.)
+      float open = facing.y < -0.5 ? 0.0 : 1.0 - Covered(P + vec3(0.0, 0.3, 0.0));
+      if (open_all > 2.0) open = 0.0;  // (never: it only keeps the old way's look up in the comparison's build)
       wet = 1.0 - 0.12 * amount * open;
       if (seen < 45.0 && facing.y > 0.96 && open > 0.5 && P.y < eye_world.y - 0.05) {
         vec4 drop = Drop(P.xz, amount, tsec);
@@ -1138,7 +1168,7 @@ void main() {
   float dbg_src = 0.0;
   vec3 dbg_add = vec3(0.0);
   float dbg_self = 0.0, dbg_f0 = 0.0, dbg_got = 0.0;
-  if (ssr.x > 0.0 && fog_b.z > 0.5 && rd.y < -1e-4 && eye_h > 0.05) {
+  if (ssr.x > 0.0 && fog_b.z > 0.5 && rd.y < -1e-4 && eye_h > 0.05 && (fog_off & 64) == 0) {
     float ts = eye_h / -rd.y;
     // (Where the sea's draws are, when they could be drawn again (ssr.z); flat ground at the sea's height is not it.
     // With them, the sea is wherever they are, its waves too: by the plane alone the crests near the eye, above it,
@@ -1474,13 +1504,17 @@ void main() {
   vec2 px = gl_FragCoord.xy;
   vec2 q = px / view.y;  // squares stay square
   float t = eye.w, amount = rain.z;
-  vec3 a = Beads(q, 13.0, t, amount), b = Beads(q + 3.7, 27.0, t * 1.3, amount), r = Runners(q, t, amount);
   // Few of them. The beads, which sit, keep out of the middle of the view; the drops that run down may cross it, but
   // nothing covers the sights themselves ("drops can occasionally streak down the screen ... we just don't want
   // droplets obscuring the crosshair", 14 Nov 2026).
   vec2 mid = (px - 0.5 * view.xy) / view.y;
   float clear = smoothstep(0.24, 0.46, length(mid * vec2(0.7, 1.0)));
   float sights = smoothstep(0.045, 0.1, length(mid));
+  // (The beads only where they may show: everything of theirs is times `clear`, 0 in the middle of the view; the
+  // runners only where `sights` lets them. The Night Ops performance pass, 20 Nov 2026.)
+  vec3 a = vec3(0.0), b = vec3(0.0), r = vec3(0.0);
+  if (clear > 0.0) a = Beads(q, 13.0, t, amount), b = Beads(q + 3.7, 27.0, t * 1.3, amount);
+  if (sights > 0.0) r = Runners(q, t, amount);
   // D195: in a vehicle (ssr.y) the drops are on its glass (the user, 18 Nov 2026: "For the planes, the camera droplet
   // effect should be on the first-person cockpit glass"): where what is seen is more than about 2 m off, not on the
   // cockpit's frame and instruments nearer than that (its glass writes no depth).
@@ -2917,6 +2951,7 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   }
   SkyConstantBlock k{};
   Fill(in, k);
+  k.bolt[3] = (in.old_rain_order ? 4.0f : 0.0f) + float(in.fog_parts_off);  // BF_FOG_AB, BF_FOG_PARTS (tests)
   {
     // How wet the lens is: it builds up in two seconds of rain on the eye, and dries in four under cover or once
     // the rain stops.
@@ -3057,8 +3092,79 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   }
   if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "shapeTex")) v->Set(shape_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));  // D214
   if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "detailTex")) v->Set(detail_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
+  // BF_FOG_CHECK=1 (tests): every 60th fog pass drawn twice from the same picture, this way and the old way (bolt.w's
+  // 4: the rain's cover, the shafts' streaks and the ground fog's patches looked up for every pixel and step), the
+  // two read back and compared: the pixels that differ and by how much.
+  static const bool fog_check = [] {
+    const char* v = std::getenv("BF_FOG_CHECK");
+    return v && *v == '1';
+  }();
+  const TextureDesc& cd = in.color->GetDesc();
+  bool check = fog_check && (fog_check_count_++ % 60) == 0;
+  if (check) {
+    for (RefCntAutoPtr<ITexture>* t : {std::addressof(fog_before_), std::addressof(fog_staging_[0]), std::addressof(fog_staging_[1])}) {
+      if (*t && (*t)->GetDesc().Width == cd.Width && (*t)->GetDesc().Height == cd.Height && (*t)->GetDesc().Format == cd.Format)
+        continue;
+      t->Release();
+      TextureDesc d;
+      d.Name = "NativeXRenderer fog check";
+      d.Type = RESOURCE_DIM_TEX_2D;
+      d.Width = cd.Width, d.Height = cd.Height, d.Format = cd.Format;
+      if (t == std::addressof(fog_before_)) {
+        d.BindFlags = BIND_SHADER_RESOURCE;
+      } else {
+        d.Usage = USAGE_STAGING, d.CPUAccessFlags = CPU_ACCESS_READ;
+      }
+      device_->CreateTexture(d, nullptr, &(*t));
+      if (!*t) check = false;
+    }
+  }
+  if (check) {
+    context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+    CopyTextureAttribs keep(in.color, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, fog_before_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    context->CopyTexture(keep);
+  }
   draw(target, in.width, in.height, fog_pso_, fog_srb_);
   context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+  if (check) {
+    CopyTextureAttribs first(in.color, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, fog_staging_[0], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    context->CopyTexture(first);
+    CopyTextureAttribs back(fog_before_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, in.color, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    context->CopyTexture(back);
+    SkyConstantBlock old = k;
+    old.bolt[3] = 4.0f + float(in.fog_parts_off);
+    void* data = nullptr;
+    context->MapBuffer(constants_, MAP_WRITE, MAP_FLAG_DISCARD, data);
+    std::memcpy(data, &old, sizeof(old));
+    context->UnmapBuffer(constants_, MAP_WRITE);
+    draw(target, in.width, in.height, fog_pso_, fog_srb_);
+    context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+    CopyTextureAttribs second(in.color, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, fog_staging_[1], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    context->CopyTexture(second);
+    context->WaitForIdle();
+    MappedTextureSubresource ma, mb;
+    context->MapTextureSubresource(fog_staging_[0], 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, ma);
+    context->MapTextureSubresource(fog_staging_[1], 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, mb);
+    uint64_t differ = 0;
+    int most = 0;
+    if (ma.pData && mb.pData) {
+      const uint32_t bytes = uint32_t(std::min<uint64_t>(std::min<uint64_t>(ma.Stride, mb.Stride), uint64_t(in.width) * 4));
+      for (uint32_t y = 0; y < in.height; ++y) {
+        const uint8_t* pa = static_cast<const uint8_t*>(ma.pData) + size_t(y) * ma.Stride;
+        const uint8_t* pb = static_cast<const uint8_t*>(mb.pData) + size_t(y) * mb.Stride;
+        if (std::memcmp(pa, pb, bytes) == 0) continue;
+        for (uint32_t x = 0; x + 4 <= bytes; x += 4) {
+          int d = 0;
+          for (int c = 0; c < 4; ++c) d = std::max(d, std::abs(int(pa[x + c]) - int(pb[x + c])));
+          if (d) ++differ, most = std::max(most, d);
+        }
+      }
+    }
+    if (ma.pData) context->UnmapTextureSubresource(fog_staging_[0], 0, 0);
+    if (mb.pData) context->UnmapTextureSubresource(fog_staging_[1], 0, 0);
+    REXLOG_INFO("[native_x_renderer] sky: fog check: {}x{} format {}, rain {:.2f}: {} pixels differ, by {} at most (a byte)",
+                in.width, in.height, int(cd.Format), k.fog_b[3], differ, most);
+  }
   return true;
 }
 
@@ -3239,6 +3345,7 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
   SkyConstantBlock k{};
   Fill(in, k);
   k.bolt[3] = (in.skip_hidden_clouds ? 1.0f : 0.0f) + (in.checker_clouds ? 2.0f : 0.0f);  // the clouds' march's flags
+  k.gale[1] = in.old_cloud_density ? 1.0f : 0.0f;  // BF_CLOUD_DENSITY_AB (tests): the shape looked up for every sample
   for (int r = 0; r < 3; ++r)
     for (int c = 0; c < 3; ++c) k.last[r][c] = last_forward_[r][c];
   std::memcpy(k.last_to_ndc, last_to_ndc_, sizeof(k.last_to_ndc));
@@ -3302,6 +3409,69 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
     draw2(clouds_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), where_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET),
           in.checker_clouds ? (cw + 1) / 2 : cw, ch, cloud_pso_, cloud_srb_);
     renderer::SkySectionEnd(0);
+    // BF_CLOUD_CHECK=1 (tests): every 60th march made again the old way (gale.y 1: the shape looked up for every
+    // sample) from the same constants, both read back and compared (the march's two outputs, 16 bit floats).
+    static const bool cloud_check = [] {
+      const char* v = std::getenv("BF_CLOUD_CHECK");
+      return v && *v == '1';
+    }();
+    if (cloud_check && (cloud_check_count_++ % 60) == 0) {
+      bool ok = true;
+      for (RefCntAutoPtr<ITexture>* t : {std::addressof(cloud_staging_[0]), std::addressof(cloud_staging_[1]),
+                                          std::addressof(cloud_staging_[2]), std::addressof(cloud_staging_[3])}) {
+        if (*t && (*t)->GetDesc().Width == cw && (*t)->GetDesc().Height == ch) continue;
+        t->Release();
+        TextureDesc d;
+        d.Name = "NativeXRenderer clouds check";
+        d.Type = RESOURCE_DIM_TEX_2D;
+        d.Width = cw, d.Height = ch, d.Format = TEX_FORMAT_RGBA16_FLOAT;
+        d.Usage = USAGE_STAGING, d.CPUAccessFlags = CPU_ACCESS_READ;
+        device_->CreateTexture(d, nullptr, &(*t));
+        if (!*t) ok = false;
+      }
+      if (ok) {
+        context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+        CopyTextureAttribs c0(clouds_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, cloud_staging_[0], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        CopyTextureAttribs w0(where_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, cloud_staging_[1], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        context->CopyTexture(c0), context->CopyTexture(w0);
+        SkyConstantBlock old = k;
+        old.gale[1] = 1.0f;
+        void* data = nullptr;
+        context->MapBuffer(constants_, MAP_WRITE, MAP_FLAG_DISCARD, data);
+        std::memcpy(data, &old, sizeof(old));
+        context->UnmapBuffer(constants_, MAP_WRITE);
+        draw2(clouds_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), where_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET),
+              in.checker_clouds ? (cw + 1) / 2 : cw, ch, cloud_pso_, cloud_srb_);
+        context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+        CopyTextureAttribs c1(clouds_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, cloud_staging_[2], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        CopyTextureAttribs w1(where_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, cloud_staging_[3], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        context->CopyTexture(c1), context->CopyTexture(w1);
+        context->MapBuffer(constants_, MAP_WRITE, MAP_FLAG_DISCARD, data);
+        std::memcpy(data, &k, sizeof(k));
+        context->UnmapBuffer(constants_, MAP_WRITE);
+        context->WaitForIdle();
+        uint64_t differ[2] = {0, 0};
+        for (int pair = 0; pair < 2; ++pair) {
+          MappedTextureSubresource ma, mb;
+          context->MapTextureSubresource(cloud_staging_[pair], 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, ma);
+          context->MapTextureSubresource(cloud_staging_[pair + 2], 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, mb);
+          if (ma.pData && mb.pData) {
+            const uint32_t bytes = std::min<uint32_t>(uint32_t(std::min<uint64_t>(ma.Stride, mb.Stride)), cw * 8);
+            for (uint32_t y = 0; y < ch; ++y) {
+              const uint8_t* pa = static_cast<const uint8_t*>(ma.pData) + size_t(y) * ma.Stride;
+              const uint8_t* pb = static_cast<const uint8_t*>(mb.pData) + size_t(y) * mb.Stride;
+              if (std::memcmp(pa, pb, bytes) == 0) continue;
+              for (uint32_t x = 0; x + 8 <= bytes; x += 8) differ[pair] += std::memcmp(pa + x, pb + x, 8) != 0 ? 1 : 0;
+            }
+          }
+          if (ma.pData) context->UnmapTextureSubresource(cloud_staging_[pair], 0, 0);
+          if (mb.pData) context->UnmapTextureSubresource(cloud_staging_[pair + 2], 0, 0);
+        }
+        REXLOG_INFO("[native_x_renderer] sky: clouds check: {}x{}, coverage {:.2f}: {} texels of the clouds and {} of "
+                    "where they are differ",
+                    cw, ch, k.cloud[0], differ[0], differ[1]);
+      }
+    }
     // Blended with the frames before, into the other of the two kept textures.
     history_now_ ^= 1;
     set(resolve_srb_, "SkyConstants", constants_);
