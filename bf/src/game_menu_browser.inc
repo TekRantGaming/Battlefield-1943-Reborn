@@ -676,6 +676,20 @@
     if (in.back) BackFromBrowser();
   }
 
+  // The clipboard's text as Direct connect's address (the letters, numbers and . : - an address or name may have; the
+  // rest, spaces and line ends, left out). It replaces what the box holds: an address pasted after one typed or filled
+  // in from the recent ones made neither (test dpaste1: "207.244.236.140:1830010.0.0.7").
+  void DirectPaste(const std::string& text, const char* how) {
+    int n = 0;
+    std::string pasted;
+    for (char c : text) {
+      const unsigned u = static_cast<unsigned char>(c);
+      if (pasted.size() >= 64) break;
+      if (u < 128 && (std::isalnum(int(u)) || c == '.' || c == ':' || c == '-')) pasted += c, ++n;
+    }
+    if (n) direct_text_ = pasted, direct_error_.clear(), direct_keys_ = false;
+    REXLOG_INFO("BF browser: {} characters pasted into Direct connect ({})", n, how);
+  }
   // ---- Direct connect in the new look: the address typed (the keyboard, or the on screen keys with a controller) on
   // the left paper with the recent servers under it; the keys on the right card.
   void DirectPanel(ImDrawList* d, ImGuiIO& io, const Stage& st, Input& in, ImVec2 ta, ImVec2 tb, ImVec2 pa, ImVec2 pb) {
@@ -692,10 +706,11 @@
       if (c < 128 && allowed(c) && direct_text_.size() < 64) direct_text_ += char(c), direct_keys_ = false;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !direct_text_.empty()) direct_text_.pop_back();
-    if (ImGui::IsKeyPressed(ImGuiKey_V) && io.KeyCtrl)
-      if (const char* clip = ImGui::GetClipboardText())
-        for (const char* c = clip; *c && direct_text_.size() < 64; ++c)
-          if (allowed(static_cast<unsigned char>(*c))) direct_text_ += *c;
+    // Ctrl+V or Shift+Insert (paste_keys.h), and a right click on the box for PASTE and CLEAR (TekRantGaming, 20 Nov
+    // 2026: "unable to paste text or numbers into the direct connect forcing you to manually type it every time": this
+    // waited for io.KeyCtrl, which our menus never see set, the name page's bug of 16 Nov).
+    const bool menu_click = BoxMenu(st);  // game_menu_clan.inc: a click the menu took is not the page's
+    if (paste::Pressed()) DirectPaste(paste::Text(), "keys");
     // The finished lookup: the server found joins (and is kept among the recent ones), or the reason shows.
     if (direct_job_ && direct_job_->load() != 0) {
       if (direct_job_->load() == 1) {
@@ -739,6 +754,10 @@
     const ImVec2 f0(x, y), f1(x + st(430), y + st(42));
     d->AddRectFilled(f0, f1, kit::kPaperLight);
     d->AddRect(f0, f1, kit::kGreen, 0, 0, st(2));
+    if (!menu_click && ImGui::IsMouseHoveringRect(f0, f1) && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+      box_menu_ = true, box_menu_at_ = io.MousePos, box_menu_direct_ = true;
+      REXLOG_INFO("BF browser: Direct connect's right click menu opened");
+    }
     const float size = st(17);
     d->AddText(f.ui_bold, size, ImVec2(f0.x + st(12), f0.y + (st(42) - size * 1.45f) * 0.5f), kit::kInk, direct_text_.c_str());
     if (std::fmod(ImGui::GetTime(), 1.0) < 0.6) {
@@ -768,7 +787,7 @@
         d->AddText(f.ui_bold, st(13.75f), ImVec2(x + st(8), y + (st(34) - st(12) * 1.45f) * 0.5f), kit::kInk, name.c_str());
         const float aw = kit::SpacedWidth(f.typed, st(10), address, st(1.5f));
         kit::Spaced(d, f.typed, st(10), ImVec2(r1.x - st(8) - aw, y + st(12)), kit::kInkSection, address, st(1.5f));
-        if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) direct_text_ = address, direct_error_.clear();
+        if (hover && !menu_click && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) direct_text_ = address, direct_error_.clear();
         y += st(34);
       }
       if (in.y) direct_text_ = recent[0].substr(recent[0].find('|') + 1), direct_error_.clear();
