@@ -49,7 +49,7 @@
 
 // D172: DiligentCore's dynamic heap, host-visible system memory held for the whole run (resident: it is mapped and
 // written every frame). Battlefield 1943 Reborn in play needs under 16 MB of it; a level's load between 32 and 64 MB.
-REXCVAR_DEFINE_INT32(native_x_renderer_dynamic_heap_mb, 64, "NativeXRenderer",
+REXCVAR_DEFINE_INT32(native_x_renderer_dynamic_heap_mb, 256, "NativeXRenderer",
                      "Size of DiligentCore's dynamic heap in MB (D172): system memory for the draws' constants and "
                      "uploads, held for the whole run; when it is short, DiligentCore waits for the GPU");
 REXCVAR_DEFINE_INT32(native_x_renderer_compile_threads, 0, "NativeXRenderer",
