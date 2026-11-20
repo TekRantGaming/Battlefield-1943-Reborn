@@ -230,6 +230,31 @@ its history and apply 0.24 to 0.5.
   the storm, run perf_girepeat1: the gather 0.782 / 0.781, 0.844 / 0.842, 0.832 / 0.831, 0.838 / 0.840 ms new / old by
   stage). It was in the 0.4.8-test8 build (bd92a91f); taken out after.
 
+## The storm at the user's own settings (20 Nov 2026, evening)
+
+His settings file of the evening (Ultra rows, NVIDIA NIS at Quality: 2560x1440 drawn for his 4K screen, 120 Hz with
+VSync), 22 bots, the dev build of 87538683:
+
+- **Through every stage** (Iwo Jima, the storm built over 5 minutes, touring 24 spots, run heap22): 120 FPS held
+  throughout (99% of frames 8.4 ms, the longest 9.7 ms after the loading), the GPU 4.7 to 6.2 ms a frame of the 8.33.
+- **The full storm in first person** (the rifle firing, turning on the spot, lightning striking 200 m to 1 km off;
+  runs storm1p_iwo, storm1p_wake): 120 FPS held (the longest frame 9.3 ms after the loading), the GPU 5.4 to 5.6 ms:
+  the sky 0.8 (the clouds' march 0.55), fog and rain 0.6 to 0.8, SSGI 0.6 to 0.7, GTAO 0.4 to 0.5, lens 0.17.
+- **The fog and rain pass by part** at the full storm (BF_FOG_PARTS, Wake, run fogparts_his; 0.75 ms with all of
+  it): the rain shafts 0.38, the rain here 0.16, the ground fog 0.15, the sea's reflection 0 (Reflections Off by
+  default since cbf18714).
+- **The CPU** (sampled in the full storm, run cpuprof2): the game's thread about 60% in the frame limit's wait, the
+  renderer's thread 95% waiting for the GPU's frame two back. Neither limits the frame rate there.
+- **His session's stalls:** five minutes on Iwo Jima's deploy screen on US Central with DiligentCore's "dynamic heap
+  almost exhausted ... forced idling the GPU" twice a second; on the deploy screen the night pass and the
+  antialiasing run twice a frame. Not seen locally (runs deploy1, heap22); the heap is 256 MB by default since
+  87538683 (was 64).
+
+So at his settings the storm is held by the 120 Hz cap with about a third of the GPU's frame to spare; what remains
+is for slower GPUs. The rain shafts' 20 steps are the storm's largest part: their reads can be passed over only with
+explicit gradients, which cost more than they save (taken back, section 5), or with quad operations inside a branch
+that differs pixel to pixel (not safe on every GPU), so they are left.
+
 ## Looked at, not changed
 
 - **The sky's cloud march** (about 2.9 ms at the clear night stage, half size, temporal): the remaining cost is the march over
