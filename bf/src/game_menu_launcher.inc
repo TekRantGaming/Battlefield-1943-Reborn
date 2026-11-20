@@ -2489,7 +2489,7 @@
       d->AddText(f.typed, st(16), ImVec2(score_right - kit::TextWidth(f.typed, st(16), sc), y + st(10)), ink, sc.c_str());
       // The player's ping (scoreboard_ping.h): bars and ms at the right edge; BOT for a bot; nothing when not known.
       if (show_ping) {
-        const bool bot = ping::IsBot(r.name);
+        const bool bot = world::IsBot(r.name);
         ping::DrawCell(d, f.ui_bold, x1 - st(24), y + st(20), st(20), bot ? -1 : world::PingOf(r.name), bot, false, ink);
       }
       y += st(44);

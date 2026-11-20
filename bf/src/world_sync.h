@@ -51,6 +51,10 @@ double Now();
 // match, an older host, a player whose game is older, or a bot).
 int OwnPing();
 int PingOf(const std::string& name);  // "[TAG]Name" or "Name"; the player's own name gives OwnPing()
+// A bot (its scoreboard row says BOT, never a number): a name the joined server's host does not list among its joined
+// players (bots wear no tag since 20 Nov 2026), or a "[BOT]" name from a server before that. False when the host
+// keeps no such list (an older server).
+bool IsBot(const std::string& name);
 
 // The in-game admin panel (F9) is open: the mouse and the keys are its own.
 bool AdminPanelOpen();

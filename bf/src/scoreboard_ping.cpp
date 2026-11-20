@@ -15,8 +15,6 @@ unsigned Colour(int ms) {
   return ms < 60 ? IM_COL32(104, 196, 74, 255) : ms < 120 ? IM_COL32(222, 172, 44, 255) : IM_COL32(226, 70, 52, 255);
 }
 
-bool IsBot(const std::string& name) { return name.rfind("[BOT]", 0) == 0; }
-
 float DrawBars(ImDrawList* d, float left, float base, float h, int ms, unsigned off) {
   const int lit = Bars(ms);
   const unsigned on = Colour(ms);

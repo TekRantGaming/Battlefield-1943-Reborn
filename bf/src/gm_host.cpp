@@ -666,24 +666,34 @@ class Host {
     }
     sendto(sock, reply.data(), int(reply.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
     if (flags & 4) {
-      // BF43PNGL: version 1, a count, then each joined player's ping (u16 ms) and name (a length byte and text), the
-      // ones heard from in the last 10 s, at most 64, under 1200 bytes (server/gmhost.py's ping_list).
+      // BF43PNGL (server/gmhost.py's ping_list): version, a count, then each joined player's ping (u16 ms, 0xFFFF not
+      // known) and name (a length byte and text). Version 2: every joined player is on it, so a scoreboard row that is
+      // not is a bot (bots wear no tag since 20 Nov 2026); version 1 when they do not all fit (64, under 1400 bytes).
       const auto now = Clock::now();
       for (auto it = pings.begin(); it != pings.end();)
         it = now - it->second.second > std::chrono::seconds(10) ? pings.erase(it) : std::next(it);
+      std::vector<std::string> names;
+      for (const auto& p : peers)
+        if (p->state == Peer::State::kJoined && p->player) names.push_back(p->player->name);
+      for (const auto& [n, v] : pings)
+        if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
       Bytes body;
       int count = 0;
-      for (const auto& [n, v] : pings) {
-        if (count >= 64) break;
+      bool complete = true;
+      for (const std::string& n : names) {
         const std::string raw = n.substr(0, 64);
-        if (body.size() + 3 + raw.size() > 1180) break;
-        Put16(body, uint32_t(std::min(v.first, 0xFFFE)));
+        if (count >= 64 || body.size() + 3 + raw.size() > 1380) {
+          complete = false;
+          break;
+        }
+        const auto it = pings.find(n);
+        Put16(body, it == pings.end() ? 0xFFFFu : uint32_t(std::min(it->second.first, 0xFFFE)));
         body += char(raw.size());
         body += raw;
         ++count;
       }
       Bytes list = "BF43PNGL";
-      list += char(1);
+      list += char(complete ? 2 : 1);
       list += char(count);
       list += body;
       sendto(sock, list.data(), int(list.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));

@@ -1163,21 +1163,27 @@ class World:
                    '%08X' % (p.player.xuid & 0xFFFFFFFF) in self.admins for p in self.host.peers.values())
 
     def ping_list(self):
-        """BF43PNGL: version 1, a count, then each joined player's ping (u16 ms) and name (a length byte and text),
-        for the players' scoreboards (bf/src/world_sync.cpp). Players heard from in the last 10 s, at most 64, and the
-        datagram kept under 1200 bytes."""
+        """BF43PNGL: version, a count, then each joined player's ping (u16 ms, 0xFFFF not known: a game from before
+        20 Nov 2026) and name (a length byte and text), for the players' scoreboards (bf/src/world_sync.cpp). Version 2:
+        every joined player is on it, so a scoreboard row that is not is a bot (bots wear no tag since 20 Nov 2026);
+        version 1 when they do not all fit (at most 64, the datagram under 1400 bytes): pings only, nobody taken for a
+        bot. Pings heard in the last 10 s."""
         now = time.monotonic()
         for name in [n for n, (_, at) in self.pings.items() if now - at > 10]:
             del self.pings[name]
-        body, count = b'', 0
-        for name, (ms, _) in list(self.pings.items())[:64]:
+        names = self.host.player_names()
+        names += [n for n in self.pings if n not in names]
+        body, count, complete = b'', 0, True
+        for name in names:
             raw = name.encode('utf-8')[:64]
-            entry = struct.pack('>HB', min(ms, 0xFFFE), len(raw)) + raw
-            if len(body) + len(entry) > 1180:
+            ms = self.pings[name][0] if name in self.pings else 0xFFFF
+            entry = struct.pack('>HB', min(ms, 0xFFFF), len(raw)) + raw
+            if count >= 64 or len(body) + len(entry) > 1380:
+                complete = False
                 break
             body += entry
             count += 1
-        return b'BF43PNGL' + bytes([1, count]) + body
+        return b'BF43PNGL' + bytes([2 if complete else 1, count]) + body
 
     def receive(self, data, addr):
         try:

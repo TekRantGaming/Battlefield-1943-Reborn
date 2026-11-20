@@ -377,7 +377,7 @@ void DrawOverGame(ImGuiIO& io) {
       for (const Row& row : rows) {
         if (row.table != ti) continue;
         bottom = std::max(bottom, (row.pen.y - t.name.y) / u + 22.0f);
-        const bool bot = ping::IsBot(row.name);
+        const bool bot = world::IsBot(row.name);
         const int ms = bot ? -1 : world::PingOf(row.name);
         any = ping::DrawCell(d, f.ui_bold, right, row.pen.y + 10.0f * u, h, ms, bot, true, 0) > 0 || any;
       }

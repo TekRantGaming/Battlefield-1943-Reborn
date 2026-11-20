@@ -25,9 +25,10 @@
 // "BF43PING", "PNG1" and a u32 count on the same socket; every host answers BF43PONG with the same bytes at once (the
 // server browser's ping), and the time it took is a sample. The ping is the median of the last five. An ask without a
 // change sets flag 4 and puts the ping after the key (u16 ms, 0xFFFF unknown): an older host reads neither. A host
-// that keeps them answers such an ask with a second datagram, "BF43PNGL": version 1, a count, then for each player a
-// u16 ms, and a name (a length byte and text). Only an ask with flag 4 gets it, so an older game (its 128 byte buffer)
-// never sees one.
+// that keeps them answers such an ask with a second datagram, "BF43PNGL": version, a count, then for each player a
+// u16 ms (0xFFFF not known) and a name (a length byte and text). Version 2 lists every joined player, so a scoreboard
+// row not on it is a bot (IsBot; bots wear no tag since 20 Nov 2026). Only an ask with flag 4 gets it, so an older game
+// (its 128 byte buffer) never sees one.
 
 #include "world_sync.h"
 
@@ -109,7 +110,8 @@ std::atomic<bool> g_started{false};
 
 // The pings (g_mutex): this game's own, and the host's list of every player's (names lower case, without a clan tag).
 std::atomic<int> g_own_ping{-1};
-std::vector<std::pair<std::string, int>> g_board;
+std::vector<std::pair<std::string, int>> g_board;  // -1: a joined player whose ping is not known
+bool g_board_complete = false;                     // version 2: every joined player is on it (IsBot)
 double g_board_at = -100;
 
 std::string BoardKey(const std::string& name) {
@@ -186,7 +188,7 @@ void Run() {
       g_own_ping = -1;
       {
         std::lock_guard lock(g_mutex);
-        g_board.clear(), g_board_at = -100;
+        g_board.clear(), g_board_at = -100, g_board_complete = false;
       }
       if (!target.empty()) {
         const size_t colon = target.rfind(':');
@@ -296,7 +298,7 @@ void Run() {
         continue;
       }
       // The host's list of every player's ping (an answer to an ask with flag 4).
-      if (n >= 10 && std::memcmp(buf, "BF43PNGL", 8) == 0 && buf[8] == 1) {
+      if (n >= 10 && std::memcmp(buf, "BF43PNGL", 8) == 0 && (buf[8] == 1 || buf[8] == 2)) {
         std::vector<std::pair<std::string, int>> board;
         const int count = buf[9];
         int at = 10;
@@ -306,7 +308,7 @@ void Run() {
           if (at + len > n) break;
           const std::string name(reinterpret_cast<const char*>(buf + at), size_t(len));
           at += len;
-          if (ms != 0xFFFF && !name.empty()) board.emplace_back(BoardKey(name), ms);
+          if (!name.empty()) board.emplace_back(BoardKey(name), ms == 0xFFFF ? -1 : ms);
         }
         static bool said_board = false;
         if (!said_board) {
@@ -314,7 +316,7 @@ void Run() {
           REXLOG_INFO("BF ping: the match's host keeps players' pings ({} now)", board.size());
         }
         std::lock_guard lock(g_mutex);
-        g_board = std::move(board), g_board_at = got_at;
+        g_board = std::move(board), g_board_at = got_at, g_board_complete = buf[8] == 2;
         continue;
       }
       if (n < 8 + 2 + 32 + 16 || std::memcmp(buf, "BF43WRLR", 8) != 0 || buf[8] != 1) continue;
@@ -690,6 +692,17 @@ int PingOf(const std::string& name) {
   for (const auto& [n, ms] : g_board)
     if (n == key) return ms;
   return -1;
+}
+
+bool IsBot(const std::string& name) {
+  if (name.rfind("[BOT]", 0) == 0) return true;  // a server from before 20 Nov 2026's untagged bots
+  if (name.empty() || comms::IsMe(name)) return false;
+  const std::string key = BoardKey(name);
+  std::lock_guard lock(g_mutex);
+  if (!g_board_complete || Now() - g_board_at > 10.0) return false;
+  for (const auto& entry : g_board)
+    if (entry.first == key) return false;
+  return true;
 }
 
 }  // namespace bf1943::world

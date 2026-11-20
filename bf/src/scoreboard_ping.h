@@ -2,7 +2,8 @@
 // scoreboard at the end. But like how Call of Duty Black Ops 1 would show everyone's connection and ping, and World at
 // War would even show you the number as well"). Each player's connection as four rising bars, more lit for a better
 // one (the server browser's steps and colours), with the number in ms beside them. A bot has no connection: its cell
-// says BOT, never a number. A player whose ping is not known (an older game, an older server) gets no cell.
+// says BOT, never a number (world_sync.h IsBot; bots wear no tag since 20 Nov 2026). A player whose ping is not known
+// (an older game, an older server) gets no cell.
 //
 // The pings come from world_sync.h (OwnPing, PingOf). Drawn on the game's own scoreboards (in a match, the deploy
 // screen's, the end of round screen's: voice_mute.cpp finds their rows) and on our pause's Scoreboard.
@@ -20,7 +21,6 @@ constexpr int kFarMs = 90;
 
 int Bars(int ms);         // 4 under 60 ms, 3 under 120, 2 under 200, else 1; 0 unknown
 unsigned Colour(int ms);  // green, amber, red (the server browser's)
-bool IsBot(const std::string& name);  // a bot's name, "[BOT]Name" (bots.cpp)
 
 // The four bars, `h` tall, from x `left` with their feet on y `base`; unlit ones in `off`. Returns their width.
 float DrawBars(ImDrawList* d, float left, float base, float h, int ms, unsigned off);

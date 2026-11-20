@@ -410,12 +410,12 @@ std::string PlayerName(const uint8_t* base, uint32_t player) {
   return GuestText(base, Load32(base, player + 0x18), Load32(base, player + 0x1C));
 }
 
-// Every bot wears the clan tag BOT (TekRantGaming, 20 Nov 2026: "all bots should use clan tag [bot]"): in its name
-// itself, so every player's game shows it in the scoreboard, kill feed and name tags with no backend. A player cannot
-// take the tag (text_filter's reserved tags), and a player's name holds no brackets.
-const std::string kBotTag = "[BOT]";
+// A bot's name is its own, with no tag (TekRantGaming, 20 Nov 2026, after the scoreboards' ping: "update all bots to no
+// longer use the bot tag, because we'll just be showing your version of the bot tag within the ping window"; until then
+// every bot wore "[BOT]"). Players' games tell a bot from a player by the match host's list of its joined players
+// (world_sync.cpp IsBot): a scoreboard row not on it is a bot, and its ping cell says BOT.
 
-// A new name for a bot of this team ("[BOT]" and up to 15 letters), none of the names taken.
+// A new name for a bot of this team (up to 15 letters), none of the names taken.
 std::string PickName(int team, const std::set<std::string>& taken) {
   static std::mt19937 rng{std::random_device{}()};
   for (int tries = 0; tries < 400; ++tries) {
@@ -425,9 +425,9 @@ std::string PickName(int team, const std::set<std::string>& taken) {
     } else {
       name = std::string(kUsFirst[rng() % std::size(kUsFirst)]) + " " + kUsLast[rng() % std::size(kUsLast)];
     }
-    if (name.size() <= 15 && !taken.count(kBotTag + name)) return kBotTag + name;
+    if (name.size() <= 15 && !taken.count(name)) return name;
   }
-  return kBotTag + std::string(team == 2 ? "Heitai " : "Private ") + std::to_string(taken.size() + 1);
+  return std::string(team == 2 ? "Heitai " : "Private ") + std::to_string(taken.size() + 1);
 }
 
 bool Position(PPCContext& outer, uint8_t* base, uint32_t entity, float out[3]) {
