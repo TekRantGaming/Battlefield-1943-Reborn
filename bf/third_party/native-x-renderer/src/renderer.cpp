@@ -205,6 +205,11 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_lamp_bloom, true, "NativeXRenderer",
                     "Night's lights (D183): a soft bloom round a lit lamp's glass");
 REXCVAR_DEFINE_BOOL(native_x_renderer_lens_flare, true, "NativeXRenderer",
                     "Night's lights (D183): a subtle lens flare, halo and haze from the brightest lamps in view");
+REXCVAR_DEFINE_BOOL(native_x_renderer_gpu_sections, true, "NativeXRenderer",
+                    "The GPU time of the renderer's own passes (sky, fog, grass, AO, ...), logged every 600 frames");
+REXCVAR_DEFINE_BOOL(native_x_renderer_night_lamp_visibility_pass, true, "NativeXRenderer",
+                    "Night's lights: each lamp's visibility (for its bloom and lens flare) found once a frame in a small "
+                    "pass, not again for every pixel (false: the old per pixel way, for comparisons)");
 REXCVAR_DEFINE_INT32(native_x_renderer_night_debug, 0, "NativeXRenderer",
                      "Night (D163), tests: 1 shows each pixel's place in the world (5 m checks), 2 the lights alone");
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_hitch_ms, 0.0, "NativeXRenderer",
@@ -466,6 +471,15 @@ bool SkyLoaded() {
   return g_sky_state == 1;
 }
 bool SkyOn() { return REXCVAR_GET(native_x_renderer_sky) && SkyLoaded(); }
+// The clouds' march passes over the rays the scene hides (sky.cpp's kCloudPS). BF_CLOUD_AB=1 (tests): on and off by
+// turns, 600 frames each (a stats line's span), so both ways are timed in one run.
+bool CloudSkipNow() {
+  static const bool ab = [] {
+    const char* v = std::getenv("BF_CLOUD_AB");
+    return v && *v == '1';
+  }();
+  return !ab || !g_device || (g_device->frames_presented() / 600) % 2 == 0;
+}
 // The fog (sky.h's Fog), with either sky: whether the world now has any (ExecuteDraw keeps it), the camera and the
 // settings of this frame's view kept from the end of its opaque draws, and the game's sky dome seen being drawn
 // (the fog is laid right after it: the game's water is drawn by then, its smoke and fire are not yet).
@@ -923,6 +937,83 @@ class FrameTimer {
   double total_ms_ = 0, max_ms_ = 0;
   uint32_t frames_ = 0, late_ = 0;
 } g_timer;
+
+// The GPU time of the renderer's own passes, each by name (native_x_renderer_gpu_sections, on by default: a few
+// duration queries a frame): a ring of queries a section, read when a query comes round again (16 uses on), so
+// nothing waits for the GPU. Logged every 600 frames as milliseconds a frame, to tell what a frame's GPU time is
+// spent on (the Night Ops performance pass, 20 Nov 2026).
+class SectionTimers {
+ public:
+  enum Id { kSky, kCloudsOver, kFog, kLens, kWet, kGrass, kGtao, kSsgi, kAa, kUpscale, kMotionBlur, kDof, kCount };
+  static constexpr const char* kNames[kCount] = {"sky",  "clouds over", "fog and rain", "lens", "wet copies", "grass",
+                                                 "GTAO", "SSGI",        "AA",           "upscaler", "motion blur",
+                                                 "DOF"};
+  void Begin(IRenderDevice* device, IDeviceContext* context, Id id) {
+    if (!REXCVAR_GET(native_x_renderer_gpu_sections) || !device || !context) return;
+    Section& sec = sections_[id];
+    if (!sec.tried) {
+      sec.tried = true;
+      if (device->GetDeviceInfo().Features.DurationQueries != DEVICE_FEATURE_STATE_ENABLED) return;
+      for (auto& q : sec.queries) {
+        QueryDesc d;
+        d.Name = "NativeXRenderer section time";
+        d.Type = QUERY_TYPE_DURATION;
+        device->CreateQuery(d, &q);
+        if (!q) return;
+      }
+      sec.on = true;
+    }
+    if (!sec.on || sec.active) return;
+    if (sec.pending[sec.index]) {
+      QueryDataDuration data;
+      if (sec.queries[sec.index]->GetData(&data, sizeof(data), true) && data.Frequency)
+        sec.total_ms += double(data.Duration) * 1000.0 / double(data.Frequency), ++sec.uses;
+      sec.pending[sec.index] = false;
+    }
+    context->BeginQuery(sec.queries[sec.index]);
+    sec.active = true;
+  }
+  void End(IDeviceContext* context, Id id) {
+    Section& sec = sections_[id];
+    if (!sec.active) return;
+    context->EndQuery(sec.queries[sec.index]);
+    sec.pending[sec.index] = true;
+    sec.index = (sec.index + 1) % kQueries;
+    sec.active = false;
+  }
+  // "sky 1.20 (600), fog and rain 3.40 (600)": each timed section's milliseconds a frame over `frames`, and its uses.
+  std::string Take(uint64_t frames) {
+    std::string out;
+    for (int i = 0; i < kCount; ++i) {
+      Section& sec = sections_[i];
+      if (!sec.uses) continue;
+      out += fmt::format("{}{} {:.3f} ({})", out.empty() ? "" : ", ", kNames[i],
+                         frames ? sec.total_ms / double(frames) : 0.0, sec.uses);
+      sec.total_ms = 0.0, sec.uses = 0;
+    }
+    return out;
+  }
+
+ private:
+  static constexpr uint32_t kQueries = 16;
+  struct Section {
+    RefCntAutoPtr<IQuery> queries[kQueries];
+    bool pending[kQueries] = {};
+    uint32_t index = 0;
+    bool tried = false, on = false, active = false;
+    double total_ms = 0.0;
+    uint64_t uses = 0;
+  };
+  Section sections_[kCount];
+} g_sections;
+// A GPU section around `work` (a call returning what it returns).
+template <typename F>
+auto Timed(SectionTimers::Id id, F&& work) {
+  g_sections.Begin(g_device ? g_device->device() : nullptr, g_device ? g_device->context() : nullptr, id);
+  auto result = work();
+  if (g_device) g_sections.End(g_device->context(), id);
+  return result;
+}
 
 // Frame pacing on the CPU side, for the log: time spent in the renderer (on the render thread, inside the
 // game's D3D calls), time waiting for the GPU (Device::Present), interval between presents.
@@ -1404,8 +1495,11 @@ void ExecuteDraw(const Command& c) {
         plain.TextureDim = RESOURCE_DIM_TEX_2D;
         RefCntAutoPtr<ITextureView> from;
         w.original->GetTexture()->CreateView(plain, &from);
-        if (from && g_own_sky.WetCopy(g_device->context(), from, copy->GetTexture(), g_draw->wet_count(), g_draw->wet_show(),
-                                  g_draw->wet_tint() >= 0, g_draw->wet_seconds(), w.skin, w.vehicle, w.relief_only)) {
+        if (from && Timed(SectionTimers::kWet, [&] {
+              return g_own_sky.WetCopy(g_device->context(), from, copy->GetTexture(), g_draw->wet_count(),
+                                       g_draw->wet_show(), g_draw->wet_tint() >= 0, g_draw->wet_seconds(), w.skin,
+                                       w.vehicle, w.relief_only);
+            })) {
           g_draw->SetWetCopy(w.original, copy);
         } else {
           static bool said_failed = false;
@@ -1650,6 +1744,26 @@ void ExecuteDraw(const Command& c) {
       night.debug = REXCVAR_GET(native_x_renderer_night_debug);
       night.bloom = REXCVAR_GET(native_x_renderer_lamp_bloom) ? 1.0f : 0.0f;
       night.flare = REXCVAR_GET(native_x_renderer_lens_flare) ? 1.0f : 0.0f;
+      night.seen_pass = REXCVAR_GET(native_x_renderer_night_lamp_visibility_pass);
+      // BF_NIGHT_AB=1 (tests): the lamps' visibility pass on and off by turns, 600 frames each (a stats line's span),
+      // so both ways are timed in one run over the same scene.
+      static const bool night_ab = [] {
+        const char* v = std::getenv("BF_NIGHT_AB");
+        return v && *v == '1';
+      }();
+      if (night_ab) night.seen_pass = (g_device->frames_presented() / 600) % 2 == 0;
+      // BF_NIGHT_FX_AB=1 (tests): the effects' lights' compute search and the old pixel pass by turns, 600 frames each.
+      static const bool fx_ab = [] {
+        const char* v = std::getenv("BF_NIGHT_FX_AB");
+        return v && *v == '1';
+      }();
+      if (fx_ab) night.compute_lights = (g_device->frames_presented() / 600) % 2 == 0;
+      // BF_NIGHT_TILES_AB=1 (tests): the lights' screen tiles and all lights for every pixel by turns, 600 frames each.
+      static const bool tiles_ab = [] {
+        const char* v = std::getenv("BF_NIGHT_TILES_AB");
+        return v && *v == '1';
+      }();
+      if (tiles_ab) night.tiles = (g_device->frames_presented() / 600) % 2 == 0;
       // D177: the cycle's midnight draws the scene about a twelfth as bright as the game's day.
       night.scene_gain = 1.0f + 11.0f * g_cycle_dark.load(std::memory_order_relaxed);
       NightFrame f;
@@ -1666,6 +1780,18 @@ void ExecuteDraw(const Command& c) {
       if (BuildNightCamera(f, to_u, to_v, night)) {
         f.lights = g_night_frame_lights.data(), f.light_count = uint32_t(g_night_frame_lights.size());
         f.sprites = g_night_frame_sprites.data(), f.sprite_count = uint32_t(g_night_frame_sprites.size());
+      }
+      // BF_NIGHT_PARTS=1 (tests): the night pass's parts off by turns, 600 frames each, to time each: all on, the lens
+      // flare off, the lamps' bloom off, the lamps' light on the scene off (their glass and bloom kept).
+      static const bool parts = [] {
+        const char* v = std::getenv("BF_NIGHT_PARTS");
+        return v && *v == '1';
+      }();
+      if (parts) {
+        const uint64_t part = (g_device->frames_presented() / 600) % 4;
+        if (part == 1) night.flare = 0.0f;
+        if (part == 2) night.bloom = 0.0f;
+        if (part == 3) f.light_count = 0;
       }
       MsaaWrite(t);
       g_night.Apply(g_device->device(), g_device->context(), t->texture, t->view, f, night);
@@ -2341,9 +2467,11 @@ void ApplyOpaqueEffects() {
       MsaaWrite(g_scene_color);
       MsaaWrite(g_scene_depth);
     }
-    if (g_grass.Apply(g_device->context(), g_terrain, g_scene_color->texture,
-                      twins ? g_scene_color->msaa_view : g_scene_color->view, g_scene_depth->texture,
-                      twins ? g_scene_depth->msaa_view : g_scene_depth->view, g_device->frames_presented())) {
+    if (Timed(SectionTimers::kGrass, [&] {
+          return g_grass.Apply(g_device->context(), g_terrain, g_scene_color->texture,
+                               twins ? g_scene_color->msaa_view : g_scene_color->view, g_scene_depth->texture,
+                               twins ? g_scene_depth->msaa_view : g_scene_depth->view, g_device->frames_presented());
+        })) {
       if (twins) g_scene_color->single_stale = g_scene_depth->single_stale = true;
       g_draw->TargetsChanged();
     }
@@ -2424,7 +2552,7 @@ void ApplyOpaqueEffects() {
         MsaaWrite(g_scene_color);
         in.color = g_scene_color->texture;
         in.depth_srv = g_scene_depth->srv;
-        if (g_own_sky.Apply(g_device->context(), in)) g_draw->TargetsChanged();
+        if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
       }
       g_last_sky_in = in, g_last_sky_valid = true;
       // The fog waits for the game's water (ApplyFog).
@@ -2502,7 +2630,7 @@ void ApplyOpaqueEffects() {
       in.votes = votes;
       in.offers = offers;
     }
-    const bool ao_applied = g_gtao.Apply(g_device->context(), in);
+    const bool ao_applied = Timed(SectionTimers::kGtao, [&] { return g_gtao.Apply(g_device->context(), in); });
     if (ao_applied && ao_twin) g_scene_color->single_stale = true;
     applied = ao_applied || applied;
   }
@@ -2524,7 +2652,7 @@ void ApplyOpaqueEffects() {
       in.offers = offers;
     }
     in.ao_on = ao_on;  // KK's rule: with the AO on, the GI only adds light
-    applied = g_ssgi.Apply(g_device->context(), in) || applied;
+    applied = Timed(SectionTimers::kSsgi, [&] { return g_ssgi.Apply(g_device->context(), in); }) || applied;
   }
   if (applied) g_draw->TargetsChanged();
 }
@@ -2617,7 +2745,7 @@ void ApplyLateSky() {
     MsaaWrite(g_scene_color);
     in.color = g_scene_color->texture;
     in.depth_srv = g_scene_depth->srv;
-    if (g_own_sky.Apply(g_device->context(), in)) g_draw->TargetsChanged();
+    if (Timed(SectionTimers::kSky, [&] { in.skip_hidden_clouds = CloudSkipNow(); return g_own_sky.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
   }
   static bool said = false;
   if (!said) {
@@ -2650,7 +2778,7 @@ void ApplyFog() {
   // D190: the picture after the sea, if the sea was the last drawn (before the clouds go over it).
   if (g_draw->sea_after_due()) g_draw->TakeSeaAfter();
   // The clouds over what the view holds (planes in them, the ground under them), then the fog over all.
-  const bool over = SkyOn() && g_own_sky.CloudsOver(g_device->context(), g_fog_in);
+  const bool over = SkyOn() && Timed(SectionTimers::kCloudsOver, [&] { return g_own_sky.CloudsOver(g_device->context(), g_fog_in); });
   // D190: where the sea is drawn, from its draws drawn again (flat ground at its height is not it).
   g_own_sky.sea_mask = nullptr;
   g_own_sky.sea_after = nullptr;
@@ -2695,7 +2823,7 @@ void ApplyFog() {
       g_device->context();  // (what was recorded is done before the fog reads it)
     }
   }
-  const bool drawn = g_own_sky.Fog(g_device->context(), g_fog_in);
+  const bool drawn = Timed(SectionTimers::kFog, [&] { return g_own_sky.Fog(g_device->context(), g_fog_in); });
   if (drawn || over) g_draw->TargetsChanged();
   static bool said = false;
   if (!said) {
@@ -2771,9 +2899,12 @@ void ExecuteResolve(const Command& c) {
       g_lens_due = false;
       RendererTime time(&g_phase.effects);
       MsaaWrite(g_scene_color);
-      if (g_own_sky.Lens(g_device->context(), g_scene_color->texture, g_scene_color->scale.HostWidth(g_profile->output_width),
-                     g_scene_color->scale.HostHeight(g_profile->output_height), drops,
-                     glassy || glass.world_depth ? &glass : nullptr)) {
+      if (Timed(SectionTimers::kLens, [&] {
+            return g_own_sky.Lens(g_device->context(), g_scene_color->texture,
+                                  g_scene_color->scale.HostWidth(g_profile->output_width),
+                                  g_scene_color->scale.HostHeight(g_profile->output_height), drops,
+                                  glassy || glass.world_depth ? &glass : nullptr);
+          })) {
         g_draw->TargetsChanged();
       }
     }
@@ -3092,7 +3223,9 @@ void ExecuteResolve(const Command& c) {
       target->guest_width == g_profile->output_width &&
       target->guest_height == g_profile->output_height &&
       !(g_profile->scene_resolve_once && g_scene_antialiased)) {
+    g_sections.Begin(g_device->device(), g_device->context(), SectionTimers::kAa);
     g_aa.Apply(g_device->context(), target->texture, target_view);
+    g_sections.End(g_device->context(), SectionTimers::kAa);
     g_scene_antialiased = true;
   }
   // Profile::box_2d_after_composite: the scene's copy; the composite comes next, then the HUD.
@@ -3262,12 +3395,12 @@ void UpscaleScene() {
         g_vote_stats.votes += votes;
       }
     }
-    upscaled = output && g_upscaler.Apply(g_device->context(), g_scene_color->texture, g_scene_depth->texture,
+    upscaled = output && Timed(SectionTimers::kUpscale, [&] { return g_upscaler.Apply(g_device->context(), g_scene_color->texture, g_scene_depth->texture,
                                           g_scene_depth->srv, output->texture, g_scene_view_projection,
                                           g_draw ? g_draw->jittered_z_min() : 0.0f,
                                           g_draw ? g_draw->jittered_z_max() : 1.0f, [](ITextureView* motion) {
                                             if (g_draw) g_draw->DrawObjectMotion(motion, g_scene_depth->view);
-                                          }, voted ? &vote : nullptr);
+                                          }, voted ? &vote : nullptr); });
     // Frame generation's inputs (D123), prepared at Present.
     if (upscaled && g_frame_generation && g_upscaler.frame_inputs().depth) {
       g_frame_inputs = g_upscaler.frame_inputs();
@@ -3340,7 +3473,7 @@ void UpscaleScene() {
       in.strength = float(std::clamp(REXCVAR_GET(native_x_renderer_motion_blur_strength), 0.0, 100.0) / 100.0);
       in.samples = taps;
       in.frame_seconds = seconds;
-      if (g_motion_blur.Apply(g_device->context(), in)) g_draw->TargetsChanged();
+      if (Timed(SectionTimers::kMotionBlur, [&] { return g_motion_blur.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
     }
   }
   g_blur_voted = false;
@@ -3364,7 +3497,7 @@ void UpscaleScene() {
       in.depth_height = g_scene_depth->scale.HostHeight(g_profile->output_height);
       in.blend = ads;
       in.taps = quality == "low" ? 24 : quality == "high" ? 80 : 48;
-      if (g_dof.Apply(g_device->context(), in)) g_draw->TargetsChanged();
+      if (Timed(SectionTimers::kDof, [&] { return g_dof.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
     }
   }
   PromoteReduced(upscaled ? g_scene_color : nullptr);
@@ -5013,6 +5146,8 @@ void ExecuteFrameEnd(const Command& c) {
                 frame, g_stats.clears, g_stats.resolves, g_stats.skipped_resolves, g_stats.mirror_writes, g_targets.count(),
                 g_resolved.count(), g_resolved.TakeInvalidated(), g_resolved.TakeKept(), g_resolved.TakeGoneReads());
     FrameTimer::Result gpu = g_timer.Take();
+    if (const std::string sections = g_sections.Take(g_uploads.frames); !sections.empty())
+      REXLOG_INFO("[native_x_renderer] renderer: frame {}: GPU ms a frame by pass: {}", frame, sections);
     REXLOG_INFO("[native_x_renderer] renderer: frame {}: {} draw calls, {} drawn, {} without targets, {} failed, {} waiting for "
                 "their pipeline; "
                 "{} KB uploaded in {} copies; textures: {} resolved, {} guest, {} placeholders (and {} for the "
@@ -5048,6 +5183,15 @@ void ExecuteFrameEnd(const Command& c) {
                   world, glow, g_night_glow_frames, lights, sprites, g_night_models_placed);
       g_night_glow_frames = 0;
       g_night_models_placed = 0;
+      double night_ms = 0.0, night_max_ms = 0.0;
+      uint64_t night_timed = 0, night_seen = 0;
+      double night_lights_ms = 0.0;
+      uint64_t night_compute = 0;
+      g_night.TakeGpu(night_ms, night_max_ms, night_timed, night_seen, night_lights_ms, night_compute);
+      REXLOG_INFO("[native_x_renderer] renderer: frame {}: night pass GPU {:.3f} ms average, {:.3f} ms max over {} "
+                  "frames (the effects' lights' search {:.3f} ms of it, by compute in {}); the lamps' visibility "
+                  "found once a frame in {}",
+                  frame, night_ms, night_max_ms, night_timed, night_lights_ms, night_compute, night_seen);
     }
     if (g_gtao_on) {
       REXLOG_INFO("[native_x_renderer] renderer: frame {}: ambient occlusion (GTAO) applied {} times in {} frames",

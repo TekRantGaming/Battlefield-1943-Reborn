@@ -247,7 +247,7 @@ layout(std140, set = 0, binding = 0) uniform SkyConstants {
   vec4 cover_m[9];           // the rain's cover: three cascades' transforms from the world, three rows each
   vec4 rain;                 // x how far the rain leans (the tangent); y 1 with a cover map; the lens: z how many of the rain's drops, w of a splash's (view.z and view.w: how strongly each shows)
   vec4 ssr;                  // D190: x the sea's reflection of the renderer's own (0 off, 1 on); y the wind, 0 to 1
-  vec4 bolt;                 // D192: x how many of the bolt's pieces (0: none); y its light now; z pixels a metre makes at 1 m
+  vec4 bolt;                 // D192: x how many of the bolt's pieces (0: none); y its light now; z pixels a metre makes at 1 m; w 1: the clouds skip hidden rays
   vec4 bolt_box;             // the view's pixels it may show in (x0, y0, x1, y1)
   vec4 bolt_seg[144];        // each piece: its ends in the view's pixels (ax, ay, bx, by); their distances along the view, its half width (m), how bright
   vec4 gale;                 // D194: x the storm's mist, 0 to 1 (the ground fog filled in, low on the ground under what is seen)
@@ -401,6 +401,7 @@ vec3 sky_color(vec3 rd) {
 constexpr const char* kCloudBindings = R"(
 layout(set = 0, binding = 2) uniform sampler3D shapeTex;
 layout(set = 0, binding = 3) uniform sampler3D detailTex;
+layout(set = 0, binding = 7) uniform sampler2D cloudDepthTex;  // the view's depth (full size), for the hidden rays
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec4 out_where;
@@ -557,6 +558,27 @@ void main() {
   float thickness = cloud.w, base_altitude = cloud.z;
   float len_low = t1 - t0;
   if (len_low < 1.0) return;
+  // A hidden ray is not marched (the Night Ops performance pass, 20 Nov 2026: the march was most of the sky's 3 ms a
+  // frame in a storm, and its long low rays, up to 144 steps, are the ones the island, the ship and the buildings
+  // hide). Hidden: every full size pixel this one covers, and one more round them (the reach of the passes' bilinear
+  // reads of this texture), shows the scene nearer than where the ray enters the layer. Those pixels show no sky and
+  // none of this ray's cloud (the over pass takes only cloud that lies before the scene), so what is written here is
+  // never seen.
+  if (bolt.w > 0.5) {
+    ivec2 full = ivec2(view.xy);
+    ivec2 b = ivec2(gl_FragCoord.xy) * 2 - 1;
+    float far_depth = 1e9;  // the smallest stored depth among them: the farthest (0: the sky)
+    for (int y = 0; y < 4; ++y) {
+      for (int x = 0; x < 4; ++x)
+        far_depth = min(far_depth, texelFetch(cloudDepthTex, clamp(b + ivec2(x, y), ivec2(0), full - 1), 0).r);
+    }
+    if (far_depth > 1e-6) {
+      vec2 ndc = v_uv * to_ndc.xy + to_ndc.zw;
+      vec3 c = vec3(ndc, 1.0);
+      vec3 r = vec3(dot(inv0.xyz, c), dot(inv1.xyz, c), dot(inv2.xyz, c));
+      if (fog_b.x / far_depth * length(r) < t0 * world_scale * 0.9) return;
+    }
+  }
   // Long grazing paths get more steps.
   int n = clamp(int(len_low / 150.0), steps, steps * 3);
   float dt = len_low / float(n);
@@ -3101,9 +3123,10 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
   if (!cloud_pso_) {
     ImmutableSamplerDesc samplers[] = {{SHADER_TYPE_PIXEL, "shapeTex", repeat},
                                        {SHADER_TYPE_PIXEL, "detailTex", repeat},
-                                       {SHADER_TYPE_PIXEL, "weatherTex", repeat}};
+                                       {SHADER_TYPE_PIXEL, "weatherTex", repeat},
+                                       {SHADER_TYPE_PIXEL, "cloudDepthTex", point}};
     targets = 2;
-    pipeline("NativeXRenderer sky clouds", cloud_ps_, TEX_FORMAT_RGBA16_FLOAT, samplers, 3, cloud_pso_, cloud_srb_);
+    pipeline("NativeXRenderer sky clouds", cloud_ps_, TEX_FORMAT_RGBA16_FLOAT, samplers, 4, cloud_pso_, cloud_srb_);
   }
   if (!resolve_pso_) {
     ImmutableSamplerDesc samplers[] = {{SHADER_TYPE_PIXEL, "weatherTex", repeat},
@@ -3164,6 +3187,7 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
 
   SkyConstantBlock k{};
   Fill(in, k);
+  k.bolt[3] = in.skip_hidden_clouds ? 1.0f : 0.0f;  // the march passes over the rays the scene hides
   for (int r = 0; r < 3; ++r)
     for (int c = 0; c < 3; ++c) k.last[r][c] = last_forward_[r][c];
   std::memcpy(k.last_to_ndc, last_to_ndc_, sizeof(k.last_to_ndc));
@@ -3222,6 +3246,7 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
     set(cloud_srb_, "shapeTex", shape_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
     set(cloud_srb_, "detailTex", detail_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
     set(cloud_srb_, "weatherTex", weather_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
+    set(cloud_srb_, "cloudDepthTex", in.depth_srv);
     draw2(clouds_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), where_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), cw, ch,
           cloud_pso_, cloud_srb_);
     // Blended with the frames before, into the other of the two kept textures.

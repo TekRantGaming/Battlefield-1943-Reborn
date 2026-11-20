@@ -61,6 +61,7 @@ class Sky {
   struct Inputs {
     Diligent::ITexture* color = nullptr;      // the view's colour: its sky pixels are drawn anew
     Diligent::ITextureView* depth_srv = nullptr;
+    bool skip_hidden_clouds = true;  // the clouds' march passes over the rays the scene hides (false: all, for comparisons)
     uint32_t width = 0, height = 0;           // the view's part of the colour, in its pixels
     // The camera, as night.h's: the view's 0 to 1 coordinate to NDC (uv * xy + zw), the world from clip x, y and w
     // (world = inverse x ((x, y, w) - t), rows), and the eye.
