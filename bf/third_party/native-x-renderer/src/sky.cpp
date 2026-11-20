@@ -1072,7 +1072,7 @@ void main() {
       float half_w = 0.002 * per_m;  // half as thick as at first ("make the world rain itself about 50% thinner")
       float across = 1.0 - smoothstep(0.0, max(half_w, wpx), abs(fract(u) - 0.5 - (h1 - 0.5) * 0.6));
       across *= clamp(half_w / wpx, 0.15, 1.0);
-      if (across <= 0.0) continue;
+      if (across <= 0.0 && (fog_off & 4) == 0) continue;  // (BF_FOG_AB's old way: every drop's hashes)
       float h2 = h21(vec2(col, fi * 7.0 + 2.0)), h3 = h21(vec2(col, fi * 7.0 + 3.0));
       float period = (1.2 + 1.3 * h2) * (1.0 - 0.35 * heavy);
       float v = (y + tsec * (8.0 + 3.0 * h1)) / period + h3 * 10.0;

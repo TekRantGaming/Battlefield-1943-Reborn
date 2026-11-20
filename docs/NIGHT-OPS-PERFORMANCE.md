@@ -160,6 +160,23 @@ sea's reflection 0.20.
 - **The ground fog:** each of its 16 steps read the patches' texture above the layer's top too, where the step adds
   nothing; now only within the layer.
 - Both read with `textureGrad` and the gradients the old reads had, so the texture's level is the same.
+- **The rain's streaks:** each cylinder worked out a drop's four hashes before knowing whether the pixel is across a
+  streak at all; now across first, the rest only there.
+- **The rain on the lens:** its beads only outside the clear middle, its runners only outside the sights (both are
+  multiplied by those masks).
+- **Same picture:** `BF_FOG_CHECK` draws the fog pass both ways from the same picture: 231 frames on Wake and 225 on
+  Guadalcanal (with the streaks' change), rain at 0, 0.5 and 1, 0 pixels differed (runs perf_fogcheck2, perf_fogcheck3).
+- **Measured** (`BF_FOG_AB`, Coral Sea, full storm, touring 40 spots, run perf_fogAB2): the fog and rain pass 1.86 ms
+  against 1.99 (the old side already had the streaks' change). The shafts' cost is mostly their cloud cells' own read
+  and arithmetic at every step, which no exact change takes away.
+
+### 6. The clouds' shape only where it can show (confirmed exact, small)
+
+Inside the layer each sample read the fine shape texture. The shape there can be no more than its height profile,
+and where that is under the cover's threshold the cloud is exactly 0 (while the storm under 0.3 does not fill the deck
+in). Now the read and the rest are passed over there. `BF_CLOUD_CHECK` ran the march both ways in 410 frames on Iwo
+Jima from 15% to 91% cover: 0 texels differed. Measured (`BF_CLOUD_DENSITY_AB`, run perf_densityAB1): 2.40 ms against
+2.46 at the clear night, the same in the storm: the shape read is a small part of a sample.
 
 ## Looked at, not changed
 
