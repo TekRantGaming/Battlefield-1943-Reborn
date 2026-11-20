@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <tuple>
@@ -69,6 +70,8 @@ namespace native_x_renderer {
 namespace renderer {
 void SkySectionBegin(int part);  // renderer.cpp: GPU sections
 void SkySectionEnd(int part);
+bool AoDiscardOldNow();  // renderer.cpp: BF_AO_DISCARD_AB
+bool GiRepeatOldNow();   // renderer.cpp: BF_GI_REPEAT_AB
 }  // namespace renderer
 
 using namespace Diligent;
@@ -106,7 +109,7 @@ struct Constants {
   float gather[4];         // slices, steps per side, largest radius on the screen (working pixels), intensity x 3
   float ambient[4];        // rgb the flat ambient light (picture values), w the albedo limit (linear)
   float mode[4];           // occlusion, debug view, radiance mips, denoise step
-  float extra[4];          // unused, noise index, history (1 or 0), the new light's weight
+  float extra[4];          // 1: the composite writes every pixel (tests), noise index, history (1 or 0), the new light's weight
   float reprojection[16];  // rows: last clip = R x this clip
   float depth_range[4];    // z_max - z_min, z_min, last frame's depth unpack mul and add
   float shape[4];          // multi-bounce strength, largest darkening share, gamma, sunlit restoration
@@ -699,6 +702,9 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
   k.mode[1] = float(s.mode >= 2 && s.debug == 0 ? 1 : s.debug);
   k.mode[2] = float(kRadianceMips);
   k.mode[3] = 1.0f;
+  // Test switches (the old ways): 1 the composite writes every pixel (BF_AO_DISCARD_AB), 2 the gather samples a step
+  // that lands on the last step's pixel again (BF_GI_REPEAT_AB).
+  k.extra[0] = float((renderer::AoDiscardOldNow() ? 1 : 0) | (renderer::GiRepeatOldNow() ? 2 : 0));
   k.extra[1] = float(noise);
   k.extra[2] = history ? 1.0f : 0.0f;
   k.extra[3] = kNewWeight;
@@ -727,9 +733,11 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
   // The depth is read as a texture and the colour copied: neither left bound as a target.
   context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
   {
+    renderer::SkySectionBegin(8);
     CopyTextureAttribs copy{color_texture, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, copy_,
                             RESOURCE_STATE_TRANSITION_MODE_TRANSITION};
     context->CopyTexture(copy);
+    renderer::SkySectionEnd(8);
   }
   ITextureView* copy_srv = copy_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
   ITextureView* raw_srv = raw_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
@@ -757,6 +765,7 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
                pw / 16, ph / 16) &&
       Dispatch(context, normals_, {{"g_srcRawDepth", raw_srv}, {"g_outNormalmap", normals_uav}}, pw / 8, ph / 8);
   renderer::SkySectionEnd(3);
+  renderer::SkySectionBegin(5);
   ok = ok &&
       Dispatch(context, radiance_pass_,
                {{"g_srcSceneColor", copy_srv},
@@ -774,6 +783,63 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
                 {"g_srcRawDepth", raw_srv},
                 {"g_outGi", a_uav}},
                pw / 8, ph / 8);
+  // BF_GI_GATHER_CHECK=1 (tests): every 60th gather made again the old way (kk_Extra.x's 2: every step sampled) from
+  // the same inputs, both read back and compared (16 bit floats, byte by byte).
+  static const bool gather_check = [] {
+    const char* v = std::getenv("BF_GI_GATHER_CHECK");
+    return v && *v == '1';
+  }();
+  if (ok && gather_check && (int(k.extra[0]) & 2) == 0 && (gather_check_count_++ % 60) == 0) {
+    const TextureDesc& ad = gi_a_->GetDesc();
+    bool have = true;
+    for (auto& t : gather_staging_) {
+      if (t && t->GetDesc().Width == ad.Width && t->GetDesc().Height == ad.Height) continue;
+      t.Release();
+      TextureDesc d;
+      d.Name = "NativeXRenderer GI gather check";
+      d.Type = RESOURCE_DIM_TEX_2D;
+      d.Width = ad.Width, d.Height = ad.Height, d.Format = ad.Format;
+      d.Usage = USAGE_STAGING, d.CPUAccessFlags = CPU_ACCESS_READ;
+      device_->CreateTexture(d, nullptr, &t);
+      if (!t) have = false;
+    }
+    if (have) {
+      CopyTextureAttribs first(gi_a_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, gather_staging_[0], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->CopyTexture(first);
+      Constants old = k;
+      old.extra[0] = float(int(k.extra[0]) | 2);
+      WriteConstants(context, &old, sizeof(old));
+      Dispatch(context, gather_,
+               {{"g_srcViewDepth", depth_mips_srv},
+                {"g_srcNormalmap", normals_srv},
+                {"g_srcRadiance", radiance_srv},
+                {"g_srcRawDepth", raw_srv},
+                {"g_outGi", a_uav}},
+               pw / 8, ph / 8);
+      WriteConstants(context, &k, sizeof(k));
+      CopyTextureAttribs second(gi_a_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, gather_staging_[1], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->CopyTexture(second);
+      context->WaitForIdle();
+      MappedTextureSubresource ma, mb;
+      context->MapTextureSubresource(gather_staging_[0], 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, ma);
+      context->MapTextureSubresource(gather_staging_[1], 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, mb);
+      uint64_t differ = 0;
+      if (ma.pData && mb.pData) {
+        const size_t bytes = std::min<size_t>(std::min<size_t>(size_t(ma.Stride), size_t(mb.Stride)), size_t(ad.Width) * 8);
+        for (uint32_t y = 0; y < ad.Height; ++y) {
+          const uint8_t* pa = static_cast<const uint8_t*>(ma.pData) + size_t(y) * ma.Stride;
+          const uint8_t* pb = static_cast<const uint8_t*>(mb.pData) + size_t(y) * mb.Stride;
+          if (std::memcmp(pa, pb, bytes) == 0) continue;
+          for (size_t x = 0; x + 8 <= bytes; x += 8) differ += std::memcmp(pa + x, pb + x, 8) != 0;
+        }
+      }
+      if (ma.pData) context->UnmapTextureSubresource(gather_staging_[0], 0, 0);
+      if (mb.pData) context->UnmapTextureSubresource(gather_staging_[1], 0, 0);
+      REXLOG_INFO("[native_x_renderer] global illumination: gather check: {}x{}: {} texels differ", ad.Width, ad.Height, differ);
+    }
+  }
+  renderer::SkySectionEnd(5);
+  renderer::SkySectionBegin(6);
   // Temporal accumulation: a into b with the history (or a alone without one), b kept as the next frame's history
   // with this frame's view depth; the blur then starts from b.
   bool from_b = false;
@@ -818,9 +884,11 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
                   pw / 8, ph / 8);
     last = a_to_b ? gi_b_.RawPtr() : gi_a_.RawPtr();
   }
+  renderer::SkySectionEnd(6);
   result_ = ok ? last : nullptr;
 
   // Into the scene's colour: one triangle over the picture, reading the copy.
+  renderer::SkySectionBegin(9);
   Pass* composite = ok ? CompositePass(in.color->GetDesc().Format) : nullptr;
   bool bound = false;
   if (composite) {
@@ -842,6 +910,9 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
     }
   }
   if (bound) {
+    // BF_AO_DISCARD_CHECK=1 (tests): every 60th composite drawn this way and the old way (every pixel written) on the
+    // same picture, both read back and compared (the colour kept before its target is bound).
+    const bool check = (int(k.extra[0]) & 1) == 0 && check_.Begin(device_, context, color_texture);
     ITextureView* color = in.color;
     context->SetRenderTargets(1, &color, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     Viewport viewport;
@@ -859,9 +930,22 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
     DrawAttribs draw;
     draw.NumVertices = 3;
     context->Draw(draw);
+    if (check) {
+      check_.TakeFirst(context, color_texture);
+      k.extra[0] = float(int(k.extra[0]) | 1);
+      WriteConstants(context, &k, sizeof(k));
+      context->SetRenderTargets(1, &color, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->SetViewports(1, &viewport, 0, 0);
+      context->SetScissorRects(1, &scissor, 0, 0);
+      context->SetPipelineState(composite->pso);
+      context->CommitShaderResources(composite->srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->Draw(draw);
+      check_.Finish(context, color_texture, "global illumination: composite");
+    }
     // The renderer binds its own targets again (DrawPath::TargetsChanged).
     context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
   }
+  renderer::SkySectionEnd(9);
   TimerEnd(context);
   if (!bound) return refuse("a pass could not be bound or the colour format has no pipeline");
 

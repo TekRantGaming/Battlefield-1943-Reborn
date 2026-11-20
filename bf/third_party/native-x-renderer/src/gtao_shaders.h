@@ -95,7 +95,8 @@ layout(set = 0, binding = 0) uniform GtaoConstants {
   ivec4 kk_Source;          // xy: the picture's origin in the targets (host pixels), zw: its size
   uvec4 kk_Working;         // xy: the working size covering the picture, zw: the padded size (multiples of 16)
   vec4 kk_Params;           // x: step (1 full, 2 half resolution), y, z: sky test (y * stored >= z), w: ao_mode
-  vec4 kk_Fade;             // x: view depth at which the occlusion has faded out linearly, 0: no fade
+  vec4 kk_Fade;             // x: view depth at which the occlusion has faded out linearly, 0: no fade; y: 1 the apply
+                            // blends every pixel (BF_AO_DISCARD_AB, tests)
   vec4 kk_Reprojection[4];  // rows: last frame's clip = R x this frame's clip (the camera vote, D118)
   vec4 kk_DepthRange;       // x: z_max - z_min, y: z_min (stored depth = x * clip z / clip w + y)
   vec4 kk_Temporal;         // x: history weight (0: none), y, z: last frame's depth unpack mul, add
@@ -871,6 +872,9 @@ void main() {
   ivec2 q = ivec2(gl_FragCoord.xy) - kk_Source.xy;
   float ao = 1.0;
   if (all(greaterThanEqual(q, ivec2(0))) && all(lessThan(q, kk_Source.zw))) ao = texelFetch(g_srcOcclusion, q, 0).x;
+  // Nothing occluded (the sky, and past the fade: exactly 1) leaves the colour as it is under the blend (times 1), so
+  // it is not blended at all (the Night Ops performance pass, 20 Nov 2026: at night much of the picture is sky).
+  if (ao >= 1.0 && kk_Fade.y < 0.5) discard;
   out_color = vec4(ao, ao, ao, 1.0);
 }
 )GLSL";

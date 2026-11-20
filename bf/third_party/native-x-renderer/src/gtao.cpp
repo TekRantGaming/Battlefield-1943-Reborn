@@ -59,6 +59,7 @@ namespace native_x_renderer {
 namespace renderer {
 void SkySectionBegin(int part);  // renderer.cpp: GPU sections
 void SkySectionEnd(int part);
+bool AoDiscardOldNow();  // renderer.cpp: BF_AO_DISCARD_AB
 }  // namespace renderer
 
 using namespace Diligent;
@@ -709,6 +710,8 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
   k.params[2] = sky_sign * (zo + zs * (1.0f - 1e-6f));
   k.params[3] = float(s.mode);
   k.fade[0] = s.fade > 0.0f ? s.fade * near_plane : 0.0f;
+  const bool fade_old = renderer::AoDiscardOldNow();
+  k.fade[1] = fade_old ? 1.0f : 0.0f;  // 1: the apply blends every pixel (BF_AO_DISCARD_AB)
   k.depth_range[0] = zs;
   k.depth_range[1] = zo;
   const Smoothing smoothing = SmoothingFor(s.normal_smoothing);
@@ -802,6 +805,7 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
                   pw / 8, ph / 8);
   }
   Pass& main_pass = s.samples <= 1 ? main_low_ : s.samples == 2 ? main_medium_ : main_high_;
+  renderer::SkySectionBegin(7);
   ok = ok &&
        Dispatch(context, main_pass,
                 {{"g_srcWorkingDepth", depth_mips_srv},
@@ -821,6 +825,8 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
                  {"g_srcViewDepth", depth_mip0_srv},
                  {"g_outOcclusion", spatial_uav}},
                 (in.width + 7) / 8, (in.height + 7) / 8);
+  renderer::SkySectionEnd(7);
+  renderer::SkySectionBegin(10);
   if (ok && temporal) {
     ok = Dispatch(context, temporal_,
                   {{"g_srcSpatialAO", spatial_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE)},
@@ -847,6 +853,10 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
   // Into the scene's colour: one triangle over the picture.
   Pass* apply = ok ? ApplyPass(in.color->GetDesc().Format, s.mode >= 2, in.color->GetTexture()->GetDesc().SampleCount) : nullptr;
   if (apply) {
+    // BF_AO_DISCARD_CHECK=1 (tests): every 60th apply drawn this way and the old way (every pixel blended) on the
+    // same picture, both read back and compared (the colour kept before its target is bound).
+    ITexture* color_texture = in.color->GetTexture();
+    const bool check = !fade_old && check_.Begin(device_, context, color_texture);
     ITextureView* color = in.color;
     context->SetRenderTargets(1, &color, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     apply->srb->GetVariableByName(SHADER_TYPE_PIXEL, "g_srcOcclusion")->Set(output_srv);
@@ -865,9 +875,25 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
     DrawAttribs draw;
     draw.NumVertices = 3;
     context->Draw(draw);
+    if (check) {
+      check_.TakeFirst(context, color_texture);
+      k.fade[1] = 1.0f;
+      void* data = nullptr;
+      context->MapBuffer(constants_, MAP_WRITE, MAP_FLAG_DISCARD, data);
+      std::memcpy(data, &k, sizeof(k));
+      context->UnmapBuffer(constants_, MAP_WRITE);
+      context->SetRenderTargets(1, &color, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->SetViewports(1, &viewport, 0, 0);
+      context->SetScissorRects(1, &scissor, 0, 0);
+      context->SetPipelineState(apply->pso);
+      context->CommitShaderResources(apply->srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->Draw(draw);
+      check_.Finish(context, color_texture, "ambient occlusion: apply");
+    }
     // The renderer binds its own targets again (DrawPath::TargetsChanged).
     context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
   }
+  renderer::SkySectionEnd(10);
   TimerEnd(context);
   if (!apply) return refuse("a pass could not be bound or the colour format has no pipeline");
 

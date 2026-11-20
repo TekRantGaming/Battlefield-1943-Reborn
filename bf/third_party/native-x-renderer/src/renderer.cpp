@@ -1003,11 +1003,14 @@ class FrameTimer {
 class SectionTimers {
  public:
   enum Id { kSky, kCloudsOver, kFog, kLens, kWet, kGrass, kGtao, kSsgi, kAa, kUpscale, kMotionBlur, kDof,
-            kSkyMarch, kSkyResolve, kSkyDraw, kGiDepth, kAoDepth, kCount };
+            kSkyMarch, kSkyResolve, kSkyDraw, kGiDepth, kAoDepth, kGiGather, kGiBlur, kAoMain, kGiCopy, kGiComposite, kAoRest, kCount };
   static constexpr const char* kNames[kCount] = {"sky",  "clouds over", "fog and rain", "lens", "wet copies", "grass",
                                                  "GTAO", "SSGI",        "AA",           "upscaler", "motion blur",
                                                  "DOF",  "(sky: the clouds' march", "the clouds' blend", "the sky drawn)",
-                                                 "(SSGI's depth and normals)", "(GTAO's depth and normals)"};
+                                                 "(SSGI's depth and normals)", "(GTAO's depth and normals)",
+                                                 "(SSGI's light and gather)", "(SSGI's history and blur)",
+                                                 "(GTAO's occlusion and blur)", "(SSGI's colour copy)",
+                                                 "(SSGI's composite)", "(GTAO's history and apply)"};
   void Begin(IRenderDevice* device, IDeviceContext* context, Id id) {
     if (!REXCVAR_GET(native_x_renderer_gpu_sections) || !device || !context) return;
     Section& sec = sections_[id];
@@ -1079,14 +1082,33 @@ class SectionTimers {
   Section sections_[kCount];
 } g_sections;
 // Parts of passes timed from their own files (SkySectionBegin / End: 0 the clouds' march, 1 their blend, 2 the sky
-// drawn; 3 SSGI's depth and normals, 4 GTAO's).
+// drawn; 3 SSGI's depth and normals, 4 GTAO's; 5 SSGI's light and gather, 6 its history and blur; 7 GTAO's occlusion
+// and blur; 8 SSGI's colour copy, 9 its composite; 10 GTAO's history and apply).
 }  // namespace
+// BF_AO_DISCARD_AB=1 (tests): GTAO's apply and SSGI's composite write every pixel (the old way) or leave the ones they
+// do not change (the new), by turns.
+bool AoDiscardOldNow() {
+  static const bool ab = [] {
+    const char* v = std::getenv("BF_AO_DISCARD_AB");
+    return v && *v == '1';
+  }();
+  return ab && g_device && AbPhase() == 1;
+}
+// BF_GI_REPEAT_AB=1 (tests): SSGI's gather samples every step (the old way) or not a step that lands on the last
+// step's pixel again (the new), by turns.
+bool GiRepeatOldNow() {
+  static const bool ab = [] {
+    const char* v = std::getenv("BF_GI_REPEAT_AB");
+    return v && *v == '1';
+  }();
+  return ab && g_device && AbPhase() == 1;
+}
 void SkySectionBegin(int part) {
-  if (g_device && part >= 0 && part < 5)
+  if (g_device && part >= 0 && part < 11)
     g_sections.Begin(g_device->device(), g_device->context(), SectionTimers::Id(SectionTimers::kSkyMarch + part));
 }
 void SkySectionEnd(int part) {
-  if (g_device && part >= 0 && part < 5) g_sections.End(g_device->context(), SectionTimers::Id(SectionTimers::kSkyMarch + part));
+  if (g_device && part >= 0 && part < 11) g_sections.End(g_device->context(), SectionTimers::Id(SectionTimers::kSkyMarch + part));
 }
 namespace {
 // A GPU section around `work` (a call returning what it returns).

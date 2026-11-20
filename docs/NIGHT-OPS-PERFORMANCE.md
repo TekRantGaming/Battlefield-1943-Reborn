@@ -209,6 +209,28 @@ change takes it away.
   (Bands: Iwo Jima, run perf_bands1, with the column's depth change in both sides. Column's depth: Iwo Jima, run
   perf_reach1.) The fog and rain pass in the same runs: unchanged (within 0.006 ms).
 
+### 7. SSGI and GTAO: the pixels they do not change left alone; the gather's repeated samples (confirmed)
+
+Both are the user's Ultra settings (SSGI quality 3 at half of 4K: 4 slices of 10 steps each way; GTAO high), about
+3 ms a frame together, by day too. Timed by part (new GPU sections, Wake at night, run perf_aoparts2), ms a frame:
+SSGI 1.8 to 2.7 = its depth and normals 0.09, its light and gather 0.7 to 1.36, its history and blur 0.43 to 0.65, its
+4K colour copy 0.21, its composite 0.31; GTAO 0.95 to 1.3 = its depth and normals 0.08, its occlusion and blur 0.55,
+its history and apply 0.24 to 0.5.
+
+- **The sky and the far pixels:** SSGI's composite wrote every pixel, the sky's and those past its 64 m reach with the
+  colour they already had (read back from its copy); GTAO's apply blended the sky and the pixels past its fade with
+  1.0 (times 1). Now neither touches them (`discard`).
+  - **Same picture:** `BF_AO_DISCARD_CHECK` (every 60th apply and composite drawn both ways on the same picture, both
+    read back): 245 checks of each on Guadalcanal through the storm, 0 pixels differed.
+  - **Measured** (`BF_AO_DISCARD_AB`, every frame, Wake through the storm, run perf_aodiscard1): SSGI's composite 0.31
+    to 0.17 ms, GTAO's history and apply 0.25 to 0.21; the two passes 0.18 ms a frame lighter at every stage.
+- **The gather's repeats:** each slice's steps go outward from the pixel, each rounded to a whole pixel; for a far
+  pixel (a few pixels of reach) many land on the last step's pixel again, read the same sample and add nothing (its
+  sectors are already in the mask). They are passed over.
+  - **Same picture:** `BF_GI_GATHER_CHECK` (every 60th gather made again the old way from the same inputs, read back):
+    362 checks on Guadalcanal through the storm, 0 texels differed.
+  - **Measured:** `BF_GI_REPEAT_AB`, run perf_girepeat1 (results below when in).
+
 ## Looked at, not changed
 
 - **The sky's cloud march** (about 2.9 ms at the clear night stage, half size, temporal): the remaining cost is the march over
