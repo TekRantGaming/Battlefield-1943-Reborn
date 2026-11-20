@@ -1018,7 +1018,10 @@ class World:
     # at 50%". The halfway point: the team with fewer tickets has half its round's count left (match(), from the
     # server's match.txt, match_rules.cpp). Each new round starts dry again.
     NIGHT_OPS_HOUR = 19.0
-    NIGHT_OPS_RAIN = 0.85  # the weather from the halfway point: past 75%, where the rain falls
+    # The weather from the halfway point. Past 75% the rain falls, but since pull request 62 the weather is a hurricane
+    # that comes in from the sea and covers the whole map only at 100% (at 85% its centre stayed about 1 km off, run
+    # night048g); his pick, 20 Nov 2026: "Yes, use 100%".
+    NIGHT_OPS_RAIN = 1.0
     NIGHT_OPS_RAIN_FOG = 0.5  # the distance fog and the ground fog from then
 
     def configure(self, args):
