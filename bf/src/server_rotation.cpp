@@ -152,6 +152,10 @@ void TeamBalanceLevelChange();  // team_balance.cpp: a new level, a new round
 void TeamBalanceTick(PPCContext& ctx, uint8_t* base);  // team_balance.cpp: once a second
 void BotsLevelChange();                               // bots.cpp: the old level's spawn points and bots gone
 void BotsTick(PPCContext& ctx, uint8_t* base);        // bots.cpp: every tick
+#if defined(BF_DEV_TOOLS)
+void BenchExplodeTick(PPCContext& ctx, uint8_t* base);  // bench_explode.cpp
+void BenchExplodeLevelChange();                        // bench_explode.cpp: the old level's props gone
+#endif
 void ServerStatsTick();  // server_stats.cpp: each player's counts to the host's file, every 5 s
 void MatchRulesRoundOver();                         // match_rules.cpp: the round's clock stops
 void MatchRulesTick(PPCContext& ctx, uint8_t* base);  // match_rules.cpp: the time limit
@@ -240,6 +244,9 @@ REX_HOOK_RAW(sub_823F7168) {
                 uint32_t(ctx.lr));
     bf1943::TeamBalanceLevelChange();
     bf1943::BotsLevelChange();
+#if defined(BF_DEV_TOOLS)
+    bf1943::BenchExplodeLevelChange();
+#endif
     return __imp__sub_823F7168(ctx, base);
   }
   {
@@ -257,6 +264,9 @@ REX_HOOK_RAW(sub_823F7168) {
   bf1943::NoteLevelChange();  // the new level's data: the modern mode's values again (modern_mode.cpp)
   bf1943::TeamBalanceLevelChange();
   bf1943::BotsLevelChange();
+#if defined(BF_DEV_TOOLS)
+  bf1943::BenchExplodeLevelChange();
+#endif
   WriteCurrent(next);
 }
 
@@ -706,6 +716,9 @@ REX_HOOK_RAW(sub_824123F0) {
   bf1943::ServerStatsTick();
   bf1943::TeamBalanceTick(ctx, base);  // team_balance.cpp: an uneven match evened, a player who has died at a time
   bf1943::BotsTick(ctx, base);  // bots.cpp: the bots made, spawned and driven
+#if defined(BF_DEV_TOOLS)
+  bf1943::BenchExplodeTick(ctx, base);  // bench_explode.cpp: BF_BENCH_EXPLODE (tools/bench)
+#endif
   bf1943::MatchRulesTick(ctx, base);  // match_rules.cpp: a round's time limit
   std::string next;
   {
@@ -750,6 +763,9 @@ REX_HOOK_RAW(sub_824123F0) {
   bf1943::NoteLevelChange();  // the new level's data: the modern mode's values again (modern_mode.cpp)
   bf1943::TeamBalanceLevelChange();
   bf1943::BotsLevelChange();
+#if defined(BF_DEV_TOOLS)
+  bf1943::BenchExplodeLevelChange();
+#endif
   REXLOG_INFO("BF rotation: changing level to {} ({}), the pause between rounds over", TitleOf(next), next);
   WriteCurrent(next);
 }

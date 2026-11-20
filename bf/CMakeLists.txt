@@ -132,6 +132,8 @@ set(BF1943_SOURCES
     src/private_match.cpp
     src/dev_watch.cpp
     src/dev_renderdoc.cpp
+    src/bench_freecam.cpp
+    src/bench_explode.cpp
     src/dev_profiler.cpp
     src/dev_io_stats.cpp
 )
