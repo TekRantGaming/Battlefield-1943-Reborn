@@ -91,6 +91,10 @@ std::string CurrentMapTitle();  // server_rotation.cpp: the map now ("" without 
 using bf1943::CurrentMapTitle;
 
 REX_EXTERN(sub_82387EF0);  // the player manager's factory (manager, flag): a new ServerPlayer, or 0 when full
+// The player manager's removal (manager, player): a player out of its list (+84), its id and slot freed, and the
+// player deleted (its vtable +4). What the server does to a player who left, about 30 s after (run bfstudy3: a
+// human's ServerPlayer deleted from 82388114, inside it). Backfill's way out for a bot.
+REX_EXTERN(sub_82387FA0);
 REX_EXTERN(sub_821D51C8);  // the game's string assign (string, C text)
 REX_EXTERN(sub_8238EFD8);  // the player manager's add (manager, player, eastl string* name)
 REX_EXTERN(sub_822C1478);  // EntryInput's constructor (360 bytes)
@@ -269,6 +273,7 @@ struct Bot {
   bool sprinter = true;    // sprints on its way to this goal
   Clock::time_point next_ride{};  // when it looks for a vehicle to ride in next
   bool paused = false;            // waiting: no human on the server (BotsTick)
+  bool leaving = false;           // backfill: a player needs its slot; it leaves when dead (now, or when it next dies)
   bool defending = false;  // its goal is a flag its side holds
   std::vector<std::array<float, 3>> path;  // the way to its goal (cell centres), the next first
   float path_goal[3] = {};
@@ -625,6 +630,7 @@ constexpr int kRaysPerTick = 300, kExpandPerSearch = 4000, kScanRaysPerTick = 25
 // at most kSearchesPerTick path searches a tick.
 constexpr double kScanMsPlayed = 0.5, kScanMsAlone = 2.0, kPathRayMs = 0.6;
 constexpr int kSearchesPerTick = 2;
+constexpr int kBackfillSpare = 2;  // slots the bots leave free for joining players (backfill)
 
 // Each cell keeps its own 8 steps (the optimization pass, 20 Nov 2026: the steps' own map held 2.8 million entries
 // on Wake, about 100 MB, and its growth stalled the server's tick by up to 250 ms): a bit a direction for open and
@@ -1734,11 +1740,19 @@ void Drive(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t soldier, double 
 REX_EXTERN(__imp__sub_82399AE8);
 REX_HOOK_RAW(sub_82399AE8) {
   if (REXCVAR_GET(server)) {
-    for (const Bot& b : g.bots)
-      if (b.player == ctx.r3.u32 && b.team && int(ctx.r4.s32) != b.team) {
-        ctx.r4.u64 = uint32_t(b.team);
-        break;
-      }
+    bool bot = false, leaving = false;
+    for (const Bot& b : g.bots) {
+      leaving = leaving || b.leaving;
+      if (b.player != ctx.r3.u32) continue;
+      bot = true;
+      if (b.team && int(ctx.r4.s32) != b.team) ctx.r4.u64 = uint32_t(b.team);
+    }
+    // Backfill: a bot on its way out (it leaves at its next death) still holds its team's place; a human player's
+    // pick then passes over the team's cap, so a joining player always gets a side (the game takes up to 64).
+    if (!bot && leaving && ctx.r6.u32) {
+      REXLOG_INFO("BF bots: a player's team pick passes over the team's cap while a bot is leaving");
+      ctx.r6.u64 = 0;
+    }
   }
   __imp__sub_82399AE8(ctx, base);
 }
@@ -1974,15 +1988,31 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     }
   }
   // Bots still listed (a player the game dropped is no longer ours to drive).
-  const std::vector<uint32_t> listed = ListedPlayers(base, manager);
+  std::vector<uint32_t> listed = ListedPlayers(base, manager);
+  bool removed = false;
   for (auto it = g.bots.begin(); it != g.bots.end();) {
     if (std::find(listed.begin(), listed.end(), it->player) == listed.end()) {
       REXLOG_INFO("BF bots: {} is no longer in the player list", it->name);
       it = g.bots.erase(it);
+    } else if (it->leaving && !Load32(base, it->player + 288)) {
+      // Backfill: out through the game's own removal, as a player who left; dead, so no soldier of its own is left
+      // behind. Its input is ours (Alloc): taken off the player first and freed after.
+      REXLOG_INFO("BF bots: {} leaves to make room for a player (+312 {:08X})", it->name, Load32(base, it->player + 312));
+      const uint32_t input = it->input, state = it->state;
+      Store32(base, it->player + 280, 0);
+      PPCContext call = ctx;
+      call.r3.u64 = manager, call.r4.u64 = it->player;
+      sub_82387FA0(call, base);
+      if (input) REX_KERNEL_MEMORY()->SystemHeapFree(input);
+      if (state) REX_KERNEL_MEMORY()->SystemHeapFree(state);
+      it = g.bots.erase(it);
+      removed = true;
     } else {
       ++it;
     }
   }
+  // (A bot that left is no longer listed: the list read again, or it would count as a human now.)
+  if (removed) listed = ListedPlayers(base, manager);
   // As many as asked for, within the room the humans leave (the user's match of 19 Nov 2026: 23 bots and the player
   // made 24, the US side was full and the 23rd bot got no team and never spawned); each on the side with fewer players
   // as it joins (the humans' sides counted too).
@@ -1994,15 +2024,50 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       if (t == 1 || t == 2) ++side[t];
     }
     g.humans = humans;
-    const int room = std::max(0, int(REXCVAR_GET(bf_gm_max_players)) - humans);
+    // Backfill (TekRantGaming, 20 Nov 2026: "when a player joins, they'll replace a bot that's in the game, and when
+    // a player leaves, a bot will fill their slot"): the bots take the room the humans leave but kBackfillSpare slots,
+    // so a joining player always gets in and gets a team; past that, bots leave (the side with more players first).
+    const int room = std::max(0, int(REXCVAR_GET(bf_gm_max_players)) - humans - kBackfillSpare);
     const int target = std::min(wanted, room);
+    {
+      int staying = 0;
+      for (const Bot& b : g.bots) staying += b.leaving ? 0 : 1;
+      while (staying > target) {
+        // The side with more players gives one up: a dead bot first (it leaves at once), else a living one (when it
+        // next dies; until then it plays on).
+        const int more = side[1] >= side[2] ? 1 : 2;
+        Bot* pick = nullptr;
+        for (Bot& b : g.bots) {
+          if (b.leaving || int(Load32(base, b.player + 48)) != more) continue;
+          if (!pick || (!Load32(base, b.player + 288) && Load32(base, pick->player + 288))) pick = &b;
+        }
+        if (!pick)
+          for (Bot& b : g.bots)
+            if (!b.leaving) {
+              pick = &b;
+              break;
+            }
+        if (!pick) break;
+        pick->leaving = true;
+        --side[int(Load32(base, pick->player + 48)) == 2 ? 2 : 1];
+        --staying;
+        REXLOG_INFO("BF bots: {} will leave for a player ({} humans, {} bots wanted, room for {})", pick->name, humans,
+                    wanted, target);
+      }
+      // A player left again: a bot that was leaving and is still here stays after all.
+      for (Bot& b : g.bots)
+        if (b.leaving && staying < target) {
+          b.leaving = false, ++staying;
+          REXLOG_INFO("BF bots: {} stays after all (a player left)", b.name);
+        }
+    }
     static int told = -1;
     if (target < wanted && told != target) {
       told = target;
       REXLOG_INFO("BF bots: {} wanted, room for {} beside {} human player(s) ({} at most)", wanted, target, humans,
                   REXCVAR_GET(bf_gm_max_players));
     }
-    while (int(g.bots.size()) < target) {
+    while (int(g.bots.size()) < target) {  // (the leaving ones are counted: they are still in the list)
       const int team = side[1] <= side[2] ? 1 : 2;
       if (!MakeBot(ctx, base, manager, int(g.bots.size()), team, listed)) break;
       ++side[team];
@@ -2351,6 +2416,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       bot.last_soldier = soldier;
     }
     if (!soldier) {
+      if (bot.leaving) continue;  // backfill: it leaves (above) instead of spawning again
       if (now - bot.died < std::chrono::seconds(5) || bot.spawn_tries > 20) continue;
       ChooseKit(base, bot);
       if (!Load32(base, bot.player + 500)) continue;  // no kit: the spawn would read the null page
