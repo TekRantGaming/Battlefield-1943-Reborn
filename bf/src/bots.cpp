@@ -95,6 +95,10 @@ REX_EXTERN(sub_82387EF0);  // the player manager's factory (manager, flag): a ne
 // player deleted (its vtable +4). What the server does to a player who left, about 30 s after (run bfstudy3: a
 // human's ServerPlayer deleted from 82388114, inside it). Backfill's way out for a bot.
 REX_EXTERN(sub_82387FA0);
+// The scoring's "player left" (scoring, player): its record of the player gone. A connection's teardown
+// (sub_823A9EF0) calls it just before sub_82387FA0; a bot left without it kept a record of a deleted player, and the
+// next round's scoring walk crashed the server (run levelchg3: sub_82402F00 > sub_82391098, a read past the heap).
+REX_EXTERN(sub_82410950);
 REX_EXTERN(sub_821D51C8);  // the game's string assign (string, C text)
 REX_EXTERN(sub_8238EFD8);  // the player manager's add (manager, player, eastl string* name)
 REX_EXTERN(sub_822C1478);  // EntryInput's constructor (360 bytes)
@@ -315,6 +319,7 @@ struct State {
   std::set<uint32_t> vehicles;
   uint32_t ray_scratch = 0;  // guest memory for the ray test's vectors (16 byte aligned)
   int searches_left = 0;     // path searches this tick may still make (kSearchesPerTick)
+  uint8_t* base = nullptr;   // guest memory (BotsTick), for BotsLevelChange
   int humans = 0;            // human players on the server
   uint64_t rays = 0;         // ray tests made, and the time they took (logged every 10 s)
   double ray_ms = 0;
@@ -1895,7 +1900,24 @@ void BotsLevelChange() {
   std::lock_guard lock(g.mutex);
   g.spawns.clear();
   g.vehicle_spawns.clear();
-  g.bots.clear();
+  // The bots stay: the game keeps its players through a level change, so a bot forgotten here stayed in its player
+  // list undriven and was counted as a human (US Central, 0.4.8-test3, 20 Nov 2026: "room for 0 beside 22 human
+  // player(s)" after Wake's second round). Each keeps its player, input, name and side and starts the level afresh.
+  for (Bot& b : g.bots) {
+    // Its kit was the old level's (soldier data at +500, freed with it): taken off, so the new level's setup reads
+    // none of the old level's memory, and chosen again from the new level's kits before its next spawn.
+    if (g.base && b.player && Readable(b.player, 0x210)) Store32(g.base, b.player + 500, 0);
+    Bot fresh;
+    fresh.player = b.player, fresh.input = b.input, fresh.state = b.state;
+    fresh.index = b.index, fresh.team = b.team, fresh.name = b.name, fresh.leaving = b.leaving;
+    std::memcpy(fresh.jitter, b.jitter, sizeof(fresh.jitter));
+    fresh.died = Clock::now() - std::chrono::seconds(10);
+    fresh.next_think = Clock::now() + std::chrono::milliseconds((b.index * 37) % 250);
+    fresh.next_ride = Clock::now() + std::chrono::milliseconds((b.index * 53) % 500);
+    b = fresh;
+  }
+  g.scanned_manager = 0;  // the new level's kits and flags found again
+  g.flags.clear();
   g.level_seen = false;
   nav.cells.clear();
   nav.scan.clear(), nav.scanned.clear(), nav.scan_started = nav.scan_done = false;
@@ -1925,6 +1947,7 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
 }
 
 static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
+  g.base = base;
   const int wanted = WantedBots();
   const auto now = Clock::now();
   TickPositions();
@@ -1997,9 +2020,14 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     } else if (it->leaving && !Load32(base, it->player + 288)) {
       // Backfill: out through the game's own removal, as a player who left; dead, so no soldier of its own is left
       // behind. Its input is ours (Alloc): taken off the player first and freed after.
-      REXLOG_INFO("BF bots: {} leaves to make room for a player (+312 {:08X})", it->name, Load32(base, it->player + 312));
+      REXLOG_INFO("BF bots: {} leaves to make room for a player", it->name);
       const uint32_t input = it->input, state = it->state;
       Store32(base, it->player + 280, 0);
+      if (const uint32_t scoring = Load32(base, kGameContext + 68); Readable(scoring, 16)) {
+        PPCContext left = ctx;
+        left.r3.u64 = scoring, left.r4.u64 = it->player;
+        sub_82410950(left, base);
+      }
       PPCContext call = ctx;
       call.r3.u64 = manager, call.r4.u64 = it->player;
       sub_82387FA0(call, base);

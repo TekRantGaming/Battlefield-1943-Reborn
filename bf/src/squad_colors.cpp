@@ -164,16 +164,32 @@ void SquadColorsMapIcon(uint8_t* base, uint32_t vec) {
 void SquadColorsWorldMarker(uint8_t* base, uint32_t item) {
   if (!REXCVAR_GET(bf_hud_squad_icons_smooth) || REXCVAR_GET(server) || !Mapped(base, item + 0x40, 12)) return;
   const float x = LoadF(base, item + 0x40), y = LoadF(base, item + 0x44), z = LoadF(base, item + 0x48);
+  // The team mates' feet, found once a frame for every marker of it (the user, 20 Nov 2026: 27 FPS on US Central's bot
+  // server: this ran for each marker over every player, copying the list and checking each soldier's memory twice, so
+  // with a dozen friendly bots round the player it cost the game's thread 10 to 25 ms a frame; runs fpsab_*).
+  struct Mate {
+    float at[3];
+    bool squad;
+  };
+  thread_local std::vector<Mate> mates;
+  thread_local std::chrono::steady_clock::time_point built{};
+  if (const auto now = std::chrono::steady_clock::now(); now - built > std::chrono::milliseconds(3)) {
+    built = now;
+    mates.clear();
+    for (const MapPlayer& m : MapPlayers()) {
+      if (m.enemy) continue;
+      Mate mate{{m.x, m.y, m.z}, m.squad};
+      SoldierNow(base, m.id, mate.at);
+      mates.push_back(mate);
+    }
+  }
   float best = 1.5f, feet[3] = {};
   bool squad = false;
-  for (const MapPlayer& m : MapPlayers()) {
-    if (m.enemy) continue;
-    float at[3] = {m.x, m.y, m.z};
-    SoldierNow(base, m.id, at);
-    const float d = std::hypot(at[0] - x, at[2] - z), up = y - at[1];
+  for (const Mate& m : mates) {
+    const float d = std::hypot(m.at[0] - x, m.at[2] - z), up = y - m.at[1];
     if (d >= best || up < 1.2f || up > 2.0f) continue;
     best = d, squad = m.squad;
-    std::copy(at, at + 3, feet);
+    std::copy(m.at, m.at + 3, feet);
   }
   if (!squad) return;
   const float up = y - feet[1];
