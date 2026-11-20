@@ -94,7 +94,7 @@ layout(set = 0, binding = 0) uniform SsgiConstants {
                                // w: intensity (with KK's x3 calibration)
   vec4 kk_Ambient;             // rgb: the frame's flat ambient light (picture values), w: the largest albedo (linear)
   vec4 kk_Mode;                // x: occlusion of the ambient (0 to 1), y: debug view, z: radiance mips, w: denoise step
-  vec4 kk_Extra;               // x: tests' old ways (1 the composite writes every pixel, 2 the gather samples repeats), y: noise index, z: 1 with a history, w: the new light's weight
+  vec4 kk_Extra;               // x: 1 the composite writes every pixel (BF_AO_DISCARD_AB, tests), y: noise index, z: 1 with a history, w: the new light's weight
   vec4 kk_Reprojection[4];     // rows: last frame's clip = R x this frame's clip (the camera vote, D118)
   vec4 kk_DepthRange;          // x: z_max - z_min, y: z_min, z, w: last frame's depth unpack mul, add
   vec4 kk_Shape;               // x: multi-bounce strength, y: largest darkening share, z: gamma, w: sunlit restoration
@@ -536,17 +536,11 @@ void main() {
     vec3 sliceLight = vec3(0.0);
     for (uint side = 0u; side < 2u; ++side) {
       float sideSign = side == 0u ? 1.0 : -1.0;
-      vec2 lastOffset = vec2(1e9);
       for (uint s = 0u; s < stepCount; ++s) {
         float stepNoise = fract(noise.y + float(slice + s * sliceCount + side * 7u) * 0.6180339887);
         float t = (float(s) + stepNoise) / float(stepCount);
         t = t * t + minS;  // denser near the pixel
         vec2 offset = round(t * omega) * sideSign;
-        // A step that lands on the last step's pixel (the steps only go outward) reads the same sample: the same
-        // sectors, already in the mask, so nothing new (the Night Ops performance pass, 20 Nov 2026: a far pixel's
-        // few pixels of reach gave many repeats). kk_Extra.x's 2: the old way.
-        if (offset == lastOffset && (int(kk_Extra.x + 0.5) & 2) == 0) continue;
-        lastOffset = offset;
         vec2 sp = vec2(pix) + 0.5 + offset;
         if (any(lessThan(sp, vec2(0.0))) || any(greaterThanEqual(sp, vec2(kk_Working.xy)))) break;
         float offsetLength = length(offset);

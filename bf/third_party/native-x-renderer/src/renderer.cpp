@@ -1094,15 +1094,6 @@ bool AoDiscardOldNow() {
   }();
   return ab && g_device && AbPhase() == 1;
 }
-// BF_GI_REPEAT_AB=1 (tests): SSGI's gather samples every step (the old way) or not a step that lands on the last
-// step's pixel again (the new), by turns.
-bool GiRepeatOldNow() {
-  static const bool ab = [] {
-    const char* v = std::getenv("BF_GI_REPEAT_AB");
-    return v && *v == '1';
-  }();
-  return ab && g_device && AbPhase() == 1;
-}
 void SkySectionBegin(int part) {
   if (g_device && part >= 0 && part < 11)
     g_sections.Begin(g_device->device(), g_device->context(), SectionTimers::Id(SectionTimers::kSkyMarch + part));

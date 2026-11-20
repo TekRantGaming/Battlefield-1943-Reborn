@@ -71,7 +71,6 @@ namespace renderer {
 void SkySectionBegin(int part);  // renderer.cpp: GPU sections
 void SkySectionEnd(int part);
 bool AoDiscardOldNow();  // renderer.cpp: BF_AO_DISCARD_AB
-bool GiRepeatOldNow();   // renderer.cpp: BF_GI_REPEAT_AB
 }  // namespace renderer
 
 using namespace Diligent;
@@ -702,9 +701,7 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
   k.mode[1] = float(s.mode >= 2 && s.debug == 0 ? 1 : s.debug);
   k.mode[2] = float(kRadianceMips);
   k.mode[3] = 1.0f;
-  // Test switches (the old ways): 1 the composite writes every pixel (BF_AO_DISCARD_AB), 2 the gather samples a step
-  // that lands on the last step's pixel again (BF_GI_REPEAT_AB).
-  k.extra[0] = float((renderer::AoDiscardOldNow() ? 1 : 0) | (renderer::GiRepeatOldNow() ? 2 : 0));
+  k.extra[0] = renderer::AoDiscardOldNow() ? 1.0f : 0.0f;  // 1: the composite writes every pixel (BF_AO_DISCARD_AB)
   k.extra[1] = float(noise);
   k.extra[2] = history ? 1.0f : 0.0f;
   k.extra[3] = kNewWeight;
@@ -783,61 +780,6 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
                 {"g_srcRawDepth", raw_srv},
                 {"g_outGi", a_uav}},
                pw / 8, ph / 8);
-  // BF_GI_GATHER_CHECK=1 (tests): every 60th gather made again the old way (kk_Extra.x's 2: every step sampled) from
-  // the same inputs, both read back and compared (16 bit floats, byte by byte).
-  static const bool gather_check = [] {
-    const char* v = std::getenv("BF_GI_GATHER_CHECK");
-    return v && *v == '1';
-  }();
-  if (ok && gather_check && (int(k.extra[0]) & 2) == 0 && (gather_check_count_++ % 60) == 0) {
-    const TextureDesc& ad = gi_a_->GetDesc();
-    bool have = true;
-    for (auto& t : gather_staging_) {
-      if (t && t->GetDesc().Width == ad.Width && t->GetDesc().Height == ad.Height) continue;
-      t.Release();
-      TextureDesc d;
-      d.Name = "NativeXRenderer GI gather check";
-      d.Type = RESOURCE_DIM_TEX_2D;
-      d.Width = ad.Width, d.Height = ad.Height, d.Format = ad.Format;
-      d.Usage = USAGE_STAGING, d.CPUAccessFlags = CPU_ACCESS_READ;
-      device_->CreateTexture(d, nullptr, &t);
-      if (!t) have = false;
-    }
-    if (have) {
-      CopyTextureAttribs first(gi_a_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, gather_staging_[0], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-      context->CopyTexture(first);
-      Constants old = k;
-      old.extra[0] = float(int(k.extra[0]) | 2);
-      WriteConstants(context, &old, sizeof(old));
-      Dispatch(context, gather_,
-               {{"g_srcViewDepth", depth_mips_srv},
-                {"g_srcNormalmap", normals_srv},
-                {"g_srcRadiance", radiance_srv},
-                {"g_srcRawDepth", raw_srv},
-                {"g_outGi", a_uav}},
-               pw / 8, ph / 8);
-      WriteConstants(context, &k, sizeof(k));
-      CopyTextureAttribs second(gi_a_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, gather_staging_[1], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-      context->CopyTexture(second);
-      context->WaitForIdle();
-      MappedTextureSubresource ma, mb;
-      context->MapTextureSubresource(gather_staging_[0], 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, ma);
-      context->MapTextureSubresource(gather_staging_[1], 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, mb);
-      uint64_t differ = 0;
-      if (ma.pData && mb.pData) {
-        const size_t bytes = std::min<size_t>(std::min<size_t>(size_t(ma.Stride), size_t(mb.Stride)), size_t(ad.Width) * 8);
-        for (uint32_t y = 0; y < ad.Height; ++y) {
-          const uint8_t* pa = static_cast<const uint8_t*>(ma.pData) + size_t(y) * ma.Stride;
-          const uint8_t* pb = static_cast<const uint8_t*>(mb.pData) + size_t(y) * mb.Stride;
-          if (std::memcmp(pa, pb, bytes) == 0) continue;
-          for (size_t x = 0; x + 8 <= bytes; x += 8) differ += std::memcmp(pa + x, pb + x, 8) != 0;
-        }
-      }
-      if (ma.pData) context->UnmapTextureSubresource(gather_staging_[0], 0, 0);
-      if (mb.pData) context->UnmapTextureSubresource(gather_staging_[1], 0, 0);
-      REXLOG_INFO("[native_x_renderer] global illumination: gather check: {}x{}: {} texels differ", ad.Width, ad.Height, differ);
-    }
-  }
   renderer::SkySectionEnd(5);
   renderer::SkySectionBegin(6);
   // Temporal accumulation: a into b with the history (or a alone without one), b kept as the next frame's history

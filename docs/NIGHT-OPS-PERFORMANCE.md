@@ -224,12 +224,11 @@ its history and apply 0.24 to 0.5.
     read back): 245 checks of each on Guadalcanal through the storm, 0 pixels differed.
   - **Measured** (`BF_AO_DISCARD_AB`, every frame, Wake through the storm, run perf_aodiscard1): SSGI's composite 0.31
     to 0.17 ms, GTAO's history and apply 0.25 to 0.21; the two passes 0.18 ms a frame lighter at every stage.
-- **The gather's repeats:** each slice's steps go outward from the pixel, each rounded to a whole pixel; for a far
-  pixel (a few pixels of reach) many land on the last step's pixel again, read the same sample and add nothing (its
-  sectors are already in the mask). They are passed over.
-  - **Same picture:** `BF_GI_GATHER_CHECK` (every 60th gather made again the old way from the same inputs, read back):
-    362 checks on Guadalcanal through the storm, 0 texels differed.
-  - **Measured:** `BF_GI_REPEAT_AB`, run perf_girepeat1 (results below when in).
+- **Tried and taken back: the gather's repeats.** Each slice's steps go outward from the pixel, rounded to whole
+  pixels; a step landing on the last step's pixel reads the same sample and adds nothing, so it was passed over. Exact
+  (`BF_GI_GATHER_CHECK`: 362 checks on Guadalcanal, 0 texels differed) but no faster (`BF_GI_REPEAT_AB`, Wake through
+  the storm, run perf_girepeat1: the gather 0.782 / 0.781, 0.844 / 0.842, 0.832 / 0.831, 0.838 / 0.840 ms new / old by
+  stage). It was in the 0.4.8-test8 build (bd92a91f); taken out after.
 
 ## Looked at, not changed
 
