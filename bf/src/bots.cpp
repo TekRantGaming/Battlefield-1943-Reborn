@@ -32,9 +32,11 @@
 // server has room for besides its human players (bf_gm_max_players). Everything here runs on the server thread, from the server's tick (server_rotation.cpp).
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -167,6 +169,27 @@ bool Readable(uint32_t address, uint32_t size) {
   return true;
 }
 
+#if !defined(_WIN32)
+// Linux: the guest's 4 GB as the process maps it (/proc/self/maps), readable ranges only, in guest addresses (read at
+// each call: the level's scans and its kits' checks, a few times a level).
+std::vector<std::pair<uint64_t, uint64_t>> GuestHostRanges(const uint8_t* base) {
+  std::vector<std::pair<uint64_t, uint64_t>> ranges;
+  std::ifstream maps("/proc/self/maps");
+  std::string line;
+  const uint64_t b = reinterpret_cast<uint64_t>(base);
+  while (std::getline(maps, line)) {
+    uint64_t lo = 0, hi = 0;
+    char perms[8] = {};
+    if (std::sscanf(line.c_str(), "%llx-%llx %7s", reinterpret_cast<unsigned long long*>(&lo),
+                    reinterpret_cast<unsigned long long*>(&hi), perms) != 3 || perms[0] != 'r')
+      continue;
+    if (hi <= b || lo >= b + 0x100000000ull) continue;
+    ranges.push_back({std::max<uint64_t>(lo, b) - b, std::min<uint64_t>(hi, b + 0x100000000ull) - b});
+  }
+  return ranges;
+}
+#endif
+
 // Guest memory committed in the host's view (the level's data, outside the heaps Readable knows).
 bool Mapped(const uint8_t* base, uint32_t address, uint32_t size) {
 #if defined(_WIN32)
@@ -175,7 +198,10 @@ bool Mapped(const uint8_t* base, uint32_t address, uint32_t size) {
   return mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
          uint64_t(static_cast<const uint8_t*>(mbi.BaseAddress) - base) + mbi.RegionSize >= uint64_t(address) + size;
 #else
-  return Readable(address, size);
+  if (address < 0x10000) return false;
+  for (const auto& [start, end] : GuestHostRanges(base))
+    if (start <= address && uint64_t(address) + size <= end) return true;
+  return false;
 #endif
 }
 
@@ -451,13 +477,20 @@ void ForEachGuestRange(const uint8_t* base, Fn&& fn) {
     if (end <= a) break;
     a = end;
   }
+#else
+  // Linux (US Central's test of 20 Nov 2026: every bot joined with no kit and never spawned, the scan having found
+  // nothing): the process's own map of committed, readable memory within the guest's 4 GB (GuestHostRanges).
+  for (const auto& [start, end] : GuestHostRanges(base)) {
+    const bool image = start >= 0x80000000ull && start < 0xA0000000ull;
+    if (!image && end > start) fn(start, end);
+  }
 #endif
 }
 
-// The teams' kits, from the level's TeamData objects (a scan of guest memory: about half a second, once a level).
-// TODO(bots): off the server thread, or from the level's loading.
-void ScanTeams(const uint8_t* base) {
-  g.team_kits.clear();
+// The teams' kits, from the level's TeamData objects (a scan of guest memory: about half a second, once a level; on a
+// thread of its own since the optimization pass, LevelScan).
+void ScanTeams(const uint8_t* base, std::map<uint32_t, std::vector<uint32_t>>& team_kits) {
+  team_kits.clear();
   const auto t0 = Clock::now();
   ForEachGuestRange(base, [&](uint64_t start, uint64_t end) {
     for (uint64_t a64 = start; a64 + 0x38 <= end; a64 += 4) {
@@ -476,7 +509,7 @@ void ScanTeams(const uint8_t* base) {
         names += " " + GuestText(base, Load32(base, kit + 0x0C), Load32(base, kit + 0x10));
       }
       REXLOG_INFO("BF bots: team {} ({}) kits:{}", team, path, names);
-      g.team_kits[team] = kits;
+      team_kits[team] = kits;
     }
   });
   REXLOG_INFO("BF bots: kits found in {:.0f} ms", std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
@@ -484,8 +517,8 @@ void ScanTeams(const uint8_t* base) {
 
 // The level's capture points: their data objects, then the server's entities that point at them.
 constexpr uint32_t kFlagDataVtable = 0x8205CF60;
-void ScanFlags(const uint8_t* base) {
-  g.flags.clear();
+void ScanFlags(const uint8_t* base, std::vector<Flag>& flags) {
+  flags.clear();
   std::set<uint32_t> datas;
   ForEachGuestRange(base, [&](uint64_t start, uint64_t end) {
     for (uint64_t a64 = start; a64 + 0x140 <= end; a64 += 4) {
@@ -496,7 +529,7 @@ void ScanFlags(const uint8_t* base) {
       for (int i = 0; i < 3; ++i) f.pos[i] = LoadF(base, a + 0x60 + 4 * i);
       f.name = GuestText(base, Load32(base, a + 0x11C), Load32(base, a + 0x120));
       f.takeable = base[a + 0x135] == 0 && base[a + 0x12E] != 0;
-      g.flags.push_back(f);
+      flags.push_back(f);
       datas.insert(a);
     }
   });
@@ -506,13 +539,13 @@ void ScanFlags(const uint8_t* base) {
       const uint32_t a = uint32_t(a64);
       const uint32_t d = Load32(base, a + 0x14);
       if (!datas.count(d) || !InImage(Load32(base, a))) continue;
-      for (Flag& f : g.flags)
+      for (Flag& f : flags)
         if (f.data == d && !f.entity) f.entity = a;
     }
   });
   // The level's data is in memory more than once (run bots_s1a: three copies); the server's entities point at one.
-  g.flags.erase(std::remove_if(g.flags.begin(), g.flags.end(), [](const Flag& f) { return !f.entity; }), g.flags.end());
-  for (const Flag& f : g.flags) {
+  flags.erase(std::remove_if(flags.begin(), flags.end(), [](const Flag& f) { return !f.entity; }), flags.end());
+  for (const Flag& f : flags) {
     std::string w;
     for (uint32_t o = 0x60; o < 0xA0 && f.entity; o += 4) w += fmt::format(" {:08X}", Load32(base, f.entity + o));
     REXLOG_INFO("BF bots: flag '{}' at {:.1f} {:.1f} {:.1f} {} entity {:08X} (vtable {:08X}) +60..:{}", f.name, f.pos[0],
@@ -1903,9 +1936,32 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
   }
   if (now - g.level_at < std::chrono::seconds(10)) return;
   if (g.scanned_manager != manager) {
+    // The level's kits and flags: scanned on a thread of their own (the optimization pass: the scans of guest memory
+    // held the server's tick for about 2.3 s at each level's start); the bots wait for them.
+    struct LevelScan {
+      uint32_t manager = 0;
+      std::map<uint32_t, std::vector<uint32_t>> kits;
+      std::vector<Flag> flags;
+      std::atomic<bool> done{false};
+    };
+    static std::shared_ptr<LevelScan> scan;
+    if (!scan || scan->manager != manager) {
+      scan = std::make_shared<LevelScan>();
+      scan->manager = manager;
+      std::thread([base, s = scan] {
+        const auto t0 = Clock::now();
+        ScanTeams(base, s->kits);
+        ScanFlags(base, s->flags);
+        REXLOG_INFO("BF bots: the level's kits and flags found in {:.0f} ms (on a thread of its own)",
+                    std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+        s->done = true;
+      }).detach();
+    }
+    if (!scan->done) return;
+    g.team_kits = scan->kits;
+    g.flags = scan->flags;
+    scan.reset();
     g.scanned_manager = manager;
-    ScanTeams(base);
-    ScanFlags(base);
     // What earlier matches learned here: by the map's title (the rotation's), else its first flag's name.
     std::string map = CurrentMapTitle();
     if (map.empty() && !g.flags.empty()) map = g.flags.front().name;
