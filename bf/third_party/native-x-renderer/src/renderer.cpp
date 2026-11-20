@@ -91,7 +91,7 @@ REXCVAR_DEFINE_INT32(native_x_renderer_replay_threads, 3, "NativeXRenderer",
 REXCVAR_DEFINE_BOOL(native_x_renderer_replay_recorded_targets, false, "NativeXRenderer",
                     "Draws replayed from recorded command buffers render into the targets the recording device had "
                     "bound (D129) instead of the running device's (D131); for diagnosis");
-REXCVAR_DEFINE_BOOL(native_x_renderer_ads_dof, true, "NativeXRenderer",
+REXCVAR_DEFINE_BOOL(native_x_renderer_ads_dof, false, "NativeXRenderer",
                     "Depth of field of the renderer's own while the player aims down the sights (dof.h): the back "
                     "of the gun at the eye is blurred, less toward its front, the sights in the middle not; taken at once");
 REXCVAR_DEFINE_STRING(native_x_renderer_dof_quality, "medium", "NativeXRenderer",

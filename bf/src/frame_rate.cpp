@@ -636,7 +636,7 @@ REX_HOOK_RAW(sub_821F3248) {
 // The game's own cut-offs are 1000 m for soldiers, vehicles and the carriers, 500 to 643 m for larger objects, 250 to
 // 350 m for buildings, palm trees and boulders (their lodsettings files); the map is 2048 m across, so 2x carries the
 // first across it, 4x the second, and 8x the buildings and trees. 2 by default (the doubling first asked for).
-REXCVAR_DEFINE_DOUBLE(bf_lod_distance, 2.0, "BF1943", "How far models keep their detail, 1.0 (the game's own) to 8.0 times as far");
+REXCVAR_DEFINE_DOUBLE(bf_lod_distance, 1.0, "BF1943", "How far models keep their detail, 1.0 (the game's own) to 8.0 times as far");
 REXCVAR_DEFINE_DOUBLE(bf_dev_lod_scale, 0.0, "BF1943", "Developer: the level of detail's distance times this instead (0: not)");
 // (19 Nov 2026, D202: as the game runs, MaxBillboardCount 8192, BillboardScale 1, ShadowMaxLod 0, LodBlendOverlap 1.
 // BillboardScale is the size of the flat pictures far trees are drawn as, not where they switch: at 4 the far forests

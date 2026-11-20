@@ -2706,10 +2706,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     joined_gid_ = sv.gid;  // the pause's Scoreboard and the match score sent to the backend
     comms::NoteJoined(sv.address);  // voice and text chat go to this server's host (comms.cpp)
     world::NoteJoined(sv.address);  // and the match's clock and weather come from it (world_sync.cpp)
-    // A dedicated server's look (TekRantGaming, 20 Nov 2026): a Night Ops server turns its night's settings on, any
-    // other server's turns them off. A match a player's game hosts (Custom Match, LAN) keeps the player's own.
-    // Only in a build with Night Ops (night_ops.h): without it no server is one, and nothing is changed.
-    if (kNightOps && !sv.player_hosted && !pm_hosting_ && own_backend_.empty()) ApplyNightOpsLook(sv.night);
+    // The server's look (TekRantGaming, 20 Nov 2026): a regular server plays as the released game, with the server's
+    // look settings off; a Night Ops server turns them on (none is one in a build without Night Ops, night_ops.h). A
+    // match a player's game hosts (Custom Match, LAN) has them on: its host's world (time, weather) decides what shows.
+    const bool player_match = sv.player_hosted || pm_hosting_ || !own_backend_.empty();
+    ApplyServerLook(player_match || sv.night, player_match ? "a Custom Match or LAN" : sv.night ? "a Night Ops" : "a regular");
     joined_from_start_ = MenuDriverStage() < 2;  // its joining page shows the game's start first
     tutorial_ = false;
     NotePlayedLevel(sv.map.empty() ? "Wake Island" : sv.map);
@@ -3483,16 +3484,17 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
   static bool Truthy(const std::string& v) { return v == "true" || v == "1" || v == "on"; }
 
-  // The settings a Night Ops server's night is made for (TekRantGaming, 20 Nov 2026: "these settings should turn on
-  // when joining a night ops server. But if the user's joining one of our normal regular servers ... these settings
-  // need to be turned off"): in Graphics, Day and night, the Volumetric clouds sky, Lightning, Storm shake, Rain on
-  // the lens and Wet weapon and hands; in Enhancements, Lamp glow and Lens flare. Saved like the player's own choice,
-  // so the rows show them; each applies at once. The server holds the hour (19:00) and the weather (gmhost.py).
-  void ApplyNightOpsLook(bool night) {
+  // The server's look (TekRantGaming, 20 Nov 2026: "these settings should turn on when joining a night ops server. But
+  // if the user's joining one of our normal regular servers ... these settings need to be turned off"; "some of these
+  // settings are going to be determined by the server they join and shouldn't be offered to the player"): Day and
+  // night, the Volumetric clouds sky, Rain on the lens, Wet weapon and hands, Lamp glow and Lens flare. None is in
+  // Settings; each join sets them (saved, so the menus keep the last match's), and each applies at once. Lightning
+  // and Storm shake are the player's own (Graphics > Weather). Night Ops' hour and storm are the server's (gmhost.py).
+  void ApplyServerLook(bool on, const char* what) {
+    const bool night = on;
     static constexpr const char* kNightOpsCvars[] = {
-        "native_x_renderer_day_night", "native_x_renderer_sky",     "native_x_renderer_lightning",
-        "native_x_renderer_storm_sway", "native_x_renderer_rain_lens", "native_x_renderer_wetness",
-        "native_x_renderer_lamp_bloom", "native_x_renderer_lens_flare"};
+        "native_x_renderer_day_night", "native_x_renderer_sky",        "native_x_renderer_rain_lens",
+        "native_x_renderer_wetness",   "native_x_renderer_lamp_bloom", "native_x_renderer_lens_flare"};
     const std::string value = night ? "true" : "false";
     int changed = 0;
     for (const char* name : kNightOpsCvars) {
@@ -3505,8 +3507,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     settings_.Save();
     std::string now;
     for (const char* name : kNightOpsCvars) now += fmt::format(" {}={}", name + 18, rex::cvar::GetFlagByName(name));
-    REXLOG_INFO("BF night ops: {} server: its night's settings {} ({} changed):{}", night ? "a Night Ops" : "a regular",
-                night ? "on" : "off", changed, now);
+    REXLOG_INFO("BF night ops: {} server: the server's look settings {} ({} changed):{}", what, on ? "on" : "off",
+                changed, now);
   }
 
   // The Upscaler row's choices: Off and TAA always, the others only where this GPU runs them (the renderer's answer,
@@ -3958,36 +3960,21 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // 13 Nov 2026, "Let's build MSAA 2x and 4x": the renderer's own multisampling of the game's view (NativeXRenderer
     // targets.h), for what is thinner than a pixel at a distance (the radio mast, power lines), which the antialiasing
     // above cannot put back. Works together with it.
-    // 14 Nov 2026, stage 1 of the day and night work (NativeXRenderer sky.h): a sky of the renderer's own.
-    rows.push_back(Toggle("Sky", "Day and night (experimental)",
-                          "The time of day changes the game's own light: warm and low at dusk, moonlit at night. The "
-                          "sun's direction and the shadows turn with it, and the sky follows, whichever sky is chosen "
-                          "below. In a match whose server keeps its world, the server decides this and sets the "
-                          "hour and the weather. Applies at once.",
-                          "native_x_renderer_day_night"));
-    rows.push_back(Choice("Sky", "Sky",
-                          "The game's original painted sky, or a sky drawn live with volumetric clouds that drift, a "
-                          "sun and a moon, and stars at night. Applies at once.",
-                          "native_x_renderer_sky", {{"Original", "false"}, {"Volumetric clouds", "true"}}));
+    // 14 Nov 2026, stage 1 of the day and night work (NativeXRenderer sky.h): a sky of the renderer's own. Since 20 Nov
+    // 2026 (TekRantGaming: "some of these settings are going to be determined by the server they join and shouldn't be
+    // offered to the player as a customizable option at all") Day and night, the Sky, Rain on the lens and Wet weapon
+    // and hands are not here: the server joined decides them (ApplyServerLook). Lightning and Storm shake stay the
+    // player's (flashes and a shaking view: some players need them off).
     // (The clock and the weather are not here: "take them out of the graphics settings. Players use what the server
     // sets", 15 Nov 2026. A match's host sets them: Custom match's Weather and time, the admin's F9, a server's page.)
-    rows.push_back(Toggle("Sky", "Lightning",
+    rows.push_back(Toggle("Weather", "Lightning",
                           "A storm's lightning: flashes in the clouds, on the fog and on the ground. Off, the storm "
                           "keeps its rain, mist and wind without them. Applies at once.",
                           "native_x_renderer_lightning"));
-    rows.push_back(Toggle("Sky", "Storm shake",
+    rows.push_back(Toggle("Weather", "Storm shake",
                           "In a strong storm's wind the view shakes lightly and its edges blur, while you are on foot "
                           "and outside (not in a vehicle or under a roof). Off, the view stays still. Applies at once.",
                           "native_x_renderer_storm_sway"));
-    rows.push_back(Toggle("Sky", "Rain on the lens",
-                          "While you stand in the rain, drops gather on the view and run down it; they dry off under "
-                          "cover. Off, the rain only falls in the world. Applies at once.",
-                          "native_x_renderer_rain_lens"));
-    rows.push_back(Toggle("Sky", "Wet weapon and hands",
-                          "What you hold gets wet in the rain, and at once if you go under the sea: darker, with beads "
-                          "of water that stay where they are on it. It dries in about half a minute under cover. "
-                          "Applies at once.",
-                          "native_x_renderer_wetness"));
     rows.push_back(Choice("Image", "MSAA",
                           "Draws the edges of everything in the world with 2 or 4 samples in each pixel, so thin "
                           "distant things (masts, power lines, railings) stay whole instead of breaking into dots, "
@@ -4645,18 +4632,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           [](float v) {
                             return v < 1.5f ? std::string("1\xC3\x97 (original)") : fmt::format("{:.0f}\xC3\x97", v);
                           },
-                          2.0f));
-    // The night's lamps (NativeXRenderer D183; the user, 17 Nov 2026: "illuminate without that floating light ball
-    // ... a bloom with a clean and subtle camera lens flare ... Togglable from the Enhancements menu tab"). A lamp's own
-    // glass always lights; these two are the camera's.
-    rows.push_back(Toggle("Night lights", "Lamp glow",
-                          "A soft bloom round the lit glass of street lamps, vehicle headlights and other lamps at night. "
-                          "Off: the glass still lights, with no glow round it. Applies at once.",
-                          "native_x_renderer_lamp_bloom"));
-    rows.push_back(Toggle("Night lights", "Lens flare",
-                          "A subtle lens flare, a soft halo and a faint haze on the camera's lens when you look toward a "
-                          "bright lamp at night. Applies at once.",
-                          "native_x_renderer_lens_flare"));
+                          1.0f));
+    // The night's lamps (NativeXRenderer D183): Lamp glow and Lens flare, in Enhancements until 20 Nov 2026, are the
+    // server's since then (ApplyServerLook): on at night on Night Ops, off on the regular servers.
     // Lighting and HD textures, moved here from Graphics (the user, 17 Nov 2026: "we also need to move Lighting and HD
     // Textures sections to the Enhancements menu tab").
     // Soft sun shadows (NativeXRenderer D197; the user, 18 Nov 2026: "Is there a way we can also drastically improve
