@@ -1808,7 +1808,8 @@ async def serve(args):
                 send({'op': 'status', 'players': host.player_count(), 'map': current, 'next_map': upcoming,
                       'names': host.player_names()})
                 write_status(args, dict(state, players=host.player_count(), map=current, next_map=upcoming,
-                                        names=host.player_names(), roster=host.roster()))
+                                        names=host.player_names(), roster=host.roster(),
+                                        pings={n: v[0] for n, v in host.world.pings.items()}))  # the dashboard
                 for m in stats_lines():  # each player's stats since the last beat (player_stats.py)
                     send(m)
                 host.world.read_match(every=0)  # the round's progress (match_rules.cpp): Night Ops' storm builds with it

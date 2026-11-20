@@ -185,6 +185,11 @@ NETWORK_BANS_FILE = os.path.join(DATA, 'network_bans.json')
 MODERATION_LOG = os.path.join(DATA, 'moderation_log.jsonl')
 SEEN_FILE = os.path.join(DATA, 'players_seen.json')
 SEEN_DAYS = 7
+# The dashboard (server/dashboard.py, docs/DASHBOARD.md): its 90 days of history, and the public stats page's port
+# (off unless the owner turns it on). BF_SERVER_PUBLIC_BIND (tests): the address that page listens on (every one).
+DASHBOARD_DIR = os.path.join(DATA, 'dashboard')
+PUBLIC_PORT = 18290
+PUBLIC_BIND = os.environ.get('BF_SERVER_PUBLIC_BIND') or ''
 
 
 def read_text(path, default=''):
@@ -274,6 +279,14 @@ def bans_module():
         sys.path.insert(0, HERE)
     import bans
     return bans
+
+
+def dashboard_module():
+    """server/dashboard.py: the dashboard's history and views."""
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import dashboard
+    return dashboard
 
 
 def host_module():
@@ -543,6 +556,13 @@ def clean_config(raw):
     out['start_servers'] = raw.get('start_servers') is not False
     out['version_gate'] = raw.get('version_gate') is not False
     out['required_version'] = clean_text(raw.get('required_version'), 24)
+    # The public stats page (the dashboard's, docs/DASHBOARD.md): off unless turned on; player names on it or counts only.
+    page = raw.get('public_page') if isinstance(raw.get('public_page'), dict) else {}
+    port = PUBLIC_PORT
+    with contextlib.suppress(TypeError, ValueError):
+        port = int(page.get('port') or PUBLIC_PORT)
+    out['public_page'] = {'on': page.get('on') is True, 'port': port if 1024 <= port <= 65535 else PUBLIC_PORT,
+                          'names': page.get('names') is not False, 'title': clean_text(page.get('title'), 60)}
     return out
 
 
@@ -835,6 +855,10 @@ class Manager:
             self.seen = {k: v for k, v in raw.items() if isinstance(v, dict)} if isinstance(raw, dict) else {}
         except ValueError:
             self.seen = {}
+        # The dashboard: its history (90 days), the main backend's list as last asked, the public page's server.
+        self.dash = dashboard_module().Dashboard(DASHBOARD_DIR, self.note)
+        self.network_asked = 0.0
+        self.public = None
 
     # ---- notes
     def note(self, text):
@@ -1091,6 +1115,8 @@ class Manager:
         ports = [(s['port'], 'UDP') for s in self.cfg['servers']]
         if self.own_backend():
             ports += [(p, 'TCP') for p in BACKEND_PORTS]
+        if self.cfg['public_page']['on']:
+            ports.append((self.cfg['public_page']['port'], 'TCP'))  # the public stats page
         return ports
 
     def open_ports(self, quiet=False):
@@ -1168,10 +1194,12 @@ class Manager:
             out['names'] = [str(x)[:32] for x in status['names']][:64]
         if isinstance(status.get('roster'), list):  # moderation: each player's id, address and account (gmhost.py)
             bans = bans_module()
+            pings = status.get('pings') if isinstance(status.get('pings'), dict) else {}
             out['roster'] = [{'name': bans.clean_name(r.get('name')), 'id': bans.clean_id(r.get('id')),
                               'ip': bans.clean_ip(r.get('ip')), 'account': bans.clean_account(r.get('account')),
-                              'since': int(r.get('since') or 0)}
-                             for r in status['roster'][:64] if isinstance(r, dict)]
+                              'since': int(r.get('since') or 0),
+                              'ping': pings.get(r.get('name')) if isinstance(pings.get(r.get('name')), int) else None}
+                             for r in status['roster'][:128] if isinstance(r, dict)]
         return out
 
     def watch(self):
@@ -1198,6 +1226,7 @@ class Manager:
                         state['restarts'] = recent + [time.time()]
                         what = 'its game process ended' if 'game' in gone else 'its host ended'
                     self.note('server %d: %s; starting it again' % (n, what))
+                    self.dash.note_restart(n, what)
                     try:
                         self.start_server(n, 'started again')
                     except RuntimeError as e:
@@ -1211,6 +1240,12 @@ class Manager:
                 self.tick_countdowns()
                 with contextlib.suppress(Exception):
                     self.note_seen()
+                try:
+                    self.dash_tick()
+                except Exception as e:  # never the watch loop for the dashboard
+                    if time.time() - getattr(self, 'dash_error_at', 0) > 600:
+                        self.dash_error_at = time.time()
+                        self.note('dashboard: %s: %s' % (type(e).__name__, e))
                 # The router's forwards are leased (Upnp.LEASE): asked for again before they end.
                 if self.cfg['upnp'] and any(self.upnp.mapped.values()) and time.time() - self.ports_at > Upnp.RENEW:
                     self.ports_at = time.time()
@@ -1671,6 +1706,110 @@ class Manager:
             e['reason'] or 'no reason'))
         return e
 
+    # ---- the dashboard (server/dashboard.py, docs/DASHBOARD.md)
+    def dash_tick(self):
+        """Every turn of the watch loop: each server's state, players and processes into the dashboard."""
+        servers, procs, folders = [], {}, {}
+        for n in range(1, len(self.cfg['servers']) + 1):
+            st = self.server_status(n)
+            s = self.cfg['servers'][n - 1]
+            rnd = None
+            with contextlib.suppress(OSError, ValueError, IndexError):
+                parts = read_text(os.path.join(self.server_dir(n), 'user', 'match.txt'), '').split()
+                if len(parts) >= 2:
+                    rnd = {'round': int(parts[0]), 'left': round(float(parts[1]), 3)}
+            servers.append(dict(st, max=s['max_players'], tick=s.get('tick') or self.cfg['tick'],
+                                region=self.cfg['region'], round=rnd if st['state'] == 'running' else None))
+            run = self.run.get(n) or {}
+            procs[n] = {role: run[role].pid for role in ('game', 'host')
+                        if run.get(role) is not None and run[role].poll() is None}
+            folders[n] = self.server_dir(n)
+        self.dash.tick(servers, procs, folders=folders)
+        if time.time() - self.network_asked > 60:
+            self.network_asked = time.time()
+            threading.Thread(target=self.ask_network, daemon=True).start()
+
+    def ask_network(self):
+        """The main backend's server list (every Reborn and community server listed now), for the dashboard: names,
+        players, maps and regions, never addresses."""
+        if self.cfg['lan_only']:
+            self.dash.network = None
+            return
+        host = (BACKEND_BIND or '127.0.0.1') if self.own_backend() else self.cfg['backend']
+        try:
+            with socket.create_connection((host, REGISTRY_PORT), timeout=8) as sock:
+                sock.sendall((json.dumps({'op': 'list', 'version': self.version, 'platform': 'windows',
+                                          'notice': 1}) + '\n').encode())
+                reply = json.loads(sock.makefile('rb').readline() or b'{}')
+        except (OSError, ValueError):
+            return
+        rows = []
+        for g in reply.get('servers') or []:
+            if not isinstance(g, dict) or str(g.get('gid', '')).startswith('update-'):
+                continue
+            rows.append({'name': clean_text(g.get('name'), 48), 'players': int(g.get('players') or 0),
+                         'max': int(g.get('max_players') or 0), 'map': clean_text(g.get('map'), 32),
+                         'region': clean_text(g.get('region'), 16), 'tick': int(g.get('tick') or 0),
+                         'official': bool(g.get('official')), 'promoted': bool(g.get('promoted')),
+                         'description': clean_text(g.get('description'), 120)})
+        rows.sort(key=lambda r: (not r['promoted'], not r['official'], -r['players'], r['name'].lower()))
+        self.dash.network = {'servers': rows[:100], 'players': sum(r['players'] for r in rows),
+                             'online': int(reply.get('players_online') or 0), 'at': int(time.time())}
+
+    def dashboard(self, public=False):
+        view = self.dash.view(public=public, names=not public or self.cfg['public_page']['names'])
+        view['title'] = self.cfg['public_page']['title'] or (self.cfg['servers'][0]['name'] if self.cfg['servers'] else '')
+        view['public_page'] = dict(self.cfg['public_page'])
+        if not public:
+            view['alerts'] = self.alerts(view)
+        return view
+
+    def alerts(self, view):
+        """What needs the owner's eye, in a few words each."""
+        out = []
+        for sv in view['servers']:
+            if sv.get('wanted') and sv['state'] in ('waiting', 'restarting'):
+                out.append(('bad', '%s is down: %s' % (sv['name'], sv.get('why') or 'starting again')))
+            if sv['state'] == 'running' and sv.get('reachable') is False:
+                out.append(('bad', '%s cannot be reached from the internet: open its UDP port on your router.' % sv['name']))
+            if sv['state'] == 'running' and sv.get('held') and sv.get('tick') and sv['held'] < sv['tick'] * 0.9:
+                out.append(('warn', '%s held %.1f of its %d ticks a second: the machine is too busy for it.' % (
+                    sv['name'], sv['held'], sv['tick'])))
+        if view['cards']['restarts24']:
+            out.append(('warn', '%d server restart%s in the last 24 hours after a game or host ended (the Logs page '
+                                'has them).' % (view['cards']['restarts24'], '' if view['cards']['restarts24'] == 1 else 's')))
+        cpu, mem, total = view['machine'].get('cpu'), view['machine'].get('mem'), view['machine'].get('mem_total')
+        if cpu is not None and cpu > 90:
+            out.append(('warn', 'The machine\'s CPU is at %d%%.' % cpu))
+        if mem and total and mem > total * 0.92:
+            out.append(('warn', 'The machine\'s memory is %d%% used.' % (100 * mem / total)))
+        with contextlib.suppress(OSError):
+            free = shutil.disk_usage(DATA).free
+            if free < 2 << 30:
+                out.append(('warn', 'Only %.1f GB of disk space is left for the logs and the game.' % (free / (1 << 30))))
+        if self.update.get('state') in ('available', 'downloaded'):
+            out.append(('info', 'Version %s is out (Updates).' % self.update.get('latest')))
+        return [{'level': a, 'text': b} for a, b in out]
+
+    def public_page(self):
+        """The public stats page: started, stopped or moved to follow the settings."""
+        want = self.cfg['public_page']
+        if self.public and (not want['on'] or self.public.server_port != want['port']):
+            server, self.public = self.public, None
+            threading.Thread(target=server.shutdown, daemon=True).start()
+            server.server_close()
+            self.note('public stats page stopped')
+        if want['on'] and not self.public:
+            try:
+                self.public = PublicServer((PUBLIC_BIND or '0.0.0.0', want['port']), PublicHandler)
+            except OSError as e:
+                self.note('public stats page: port %d could not be opened (%s)' % (want['port'], e))
+                return
+            self.public.manager = self
+            threading.Thread(target=self.public.serve_forever, daemon=True).start()
+            self.note('public stats page on port %d (TCP)' % want['port'])
+            self.open_ports(quiet=True)
+
     # ---- what the page shows
     def state(self):
         with self.lock:
@@ -1712,7 +1851,8 @@ class Manager:
         with self.lock:
             merged = dict(self.cfg)
             for key in ('servers', 'region', 'tick', 'lan_only', 'public_address', 'upnp', 'auto_update',
-                        'update_warning_minutes', 'start_servers', 'version_gate', 'required_version', 'web_remote'):
+                        'update_warning_minutes', 'start_servers', 'version_gate', 'required_version', 'web_remote',
+                        'public_page'):
                 if key in new:
                     merged[key] = new[key]
             cleaned = clean_config(merged)
@@ -1725,6 +1865,7 @@ class Manager:
                     self.stop_server(n)
             self.cfg = cleaned
             save_config(cleaned)
+        self.public_page()  # the public stats page on, off or moved
         return cleaned
 
 
@@ -1908,6 +2049,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not page:
                 return self.send(500, 'The manager\'s page is missing (server/manager_ui/index.html).', 'text/plain')
             return self.send(200, page, 'text/html')
+        if path == '/dash.js':  # the dashboard's drawing, shared with the public stats page
+            return self.send(200, read_text(os.path.join(UI, 'dash.js')), 'text/javascript')
         if path == '/api/session':
             return self.send(200, {'signed_in': self.allowed(), 'password': bool(m.cfg['web_password'])})
         if not path.startswith('/api/'):
@@ -1929,6 +2072,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, browse((params.get('path') or [''])[0]))
         if path == '/api/moderation':
             return self.send(200, m.moderation())
+        if path == '/api/dashboard':
+            return self.send(200, m.dashboard())
         return self.send(404, {'error': 'not found'})
 
     def do_POST(self):
@@ -2093,6 +2238,67 @@ class Server(http.server.ThreadingHTTPServer):
     allow_reuse_address = not WINDOWS
 
 
+class PublicServer(Server):
+    """The public stats page (docs/DASHBOARD.md): its own port, open to the internet when the owner turns it on."""
+    manager = None
+
+
+class PublicHandler(http.server.BaseHTTPRequestHandler):
+    """Read only: the page and its numbers, nothing else (never the manager's own page or anything it does). What it
+    shows is the dashboard's public view: names when the owner allows them, never a player id, an address, a ban or a
+    path on this machine. At most 120 requests a minute from one address; the numbers are made once each 5 s."""
+    server_version = 'BF1943Reborn'
+    sys_version = ''
+    hits = {}
+    cache = [0.0, b'']
+    lock = threading.Lock()
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def reply(self, code, body, kind):
+        data = body if isinstance(body, bytes) else body.encode('utf-8')
+        self.send_response(code)
+        self.send_header('Content-Type', kind + '; charset=utf-8')
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'SAMEORIGIN')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'self' 'unsafe-inline'; "
+                                                    "style-src 'unsafe-inline'; img-src data:; connect-src 'self'")
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(data)
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def do_GET(self):
+        now = time.time()
+        with PublicHandler.lock:
+            ip = self.client_address[0]
+            times = [t for t in PublicHandler.hits.get(ip, []) if now - t < 60]
+            if len(PublicHandler.hits) > 5000:
+                PublicHandler.hits.clear()
+            PublicHandler.hits[ip] = times + [now]
+        if len(times) >= 120:
+            return self.reply(429, 'Too many requests.', 'text/plain')
+        path = self.path.partition('?')[0]
+        if path in ('/', '/index.html'):
+            page = read_text(os.path.join(UI, 'public.html'))
+            return self.reply(200 if page else 500, page or 'The page is missing.', 'text/html')
+        if path == '/dash.js':
+            return self.reply(200, read_text(os.path.join(UI, 'dash.js')), 'text/javascript')
+        if path == '/stats.json':
+            with PublicHandler.lock:
+                if now - PublicHandler.cache[0] > 5:
+                    PublicHandler.cache[:] = [now, json.dumps(self.server.manager.dashboard(public=True)).encode()]
+                body = PublicHandler.cache[1]
+            return self.reply(200, body, 'application/json')
+        return self.reply(404, 'Not found.', 'text/plain')
+
+
 # ---------------------------------------------------------------------------------------------------------- commands
 
 def running_manager():
@@ -2200,6 +2406,7 @@ def run(args):
     remove_update_leftovers()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=m.watch, daemon=True).start()
+    m.public_page()  # the public stats page, when it is on
     threading.Thread(target=m.update_loop, daemon=True).start()
     # The servers that were running come back: at a start with "start the servers with the manager" on, and always
     # after an update (the manager stopped them itself to install it).

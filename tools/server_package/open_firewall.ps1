@@ -12,11 +12,13 @@ $rules = @(
     @{ Name = 'Battlefield 1943 Reborn servers (UDP 18300 to 18315)'; Protocol = 'UDP'; Port = '18300-18315' },
     @{ Name = 'Battlefield 1943 Reborn backend login (TCP 18241)'; Protocol = 'TCP'; Port = 18241 },
     @{ Name = 'Battlefield 1943 Reborn backend games (TCP 18246)'; Protocol = 'TCP'; Port = 18246 },
-    @{ Name = 'Battlefield 1943 Reborn backend server list (TCP 18250)'; Protocol = 'TCP'; Port = 18250 })
+    @{ Name = 'Battlefield 1943 Reborn backend server list (TCP 18250)'; Protocol = 'TCP'; Port = 18250 },
+    # The public stats page (the manager's Dashboard, when its owner turns it on; docs/DASHBOARD.md)
+    @{ Name = 'Battlefield 1943 Reborn public stats page (TCP 18290)'; Protocol = 'TCP'; Port = 18290 })
 foreach ($r in $rules) {
     if (-not (Get-NetFirewallRule -DisplayName $r.Name -ErrorAction SilentlyContinue)) {
         New-NetFirewallRule -DisplayName $r.Name -Direction Inbound -Action Allow -Protocol $r.Protocol -LocalPort $r.Port | Out-Null
     }
 }
 Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.MessageBox]::Show('Windows Firewall now lets players in (TCP 18241, 18246, 18250; UDP 18300 to 18315).', 'Battlefield 1943 Reborn Server') | Out-Null
+[System.Windows.Forms.MessageBox]::Show('Windows Firewall now lets players in (TCP 18241, 18246, 18250, 18290; UDP 18300 to 18315).', 'Battlefield 1943 Reborn Server') | Out-Null

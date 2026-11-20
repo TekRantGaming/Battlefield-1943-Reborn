@@ -120,6 +120,7 @@
 <div class="layout">
   <nav id="nav">
     <button data-tab="servers" class="on">Servers</button>
+    <button data-tab="dashboard">Dashboard</button>
     <button data-tab="network">Network</button>
     <button data-tab="messages">Messages</button>
     <button data-tab="moderation">Moderation</button>
@@ -136,6 +137,24 @@
       <div class="row"><h2>Your servers</h2><span class="spacer"></span><button class="btn" id="add-server">Add a server</button></div>
       <p class="lead">Each server is one match with its own name, maps and port. Players find a listed server in the game's server browser.</p>
       <div id="server-list"></div>
+    </section>
+
+    <section id="dashboard">
+      <div class="row"><h2>Dashboard</h2><span class="spacer"></span><span class="muted mono" id="dash-when"></span></div>
+      <p class="lead">Your servers live and over time: who plays, when, on which maps, and how this machine copes. History covers the last 90 days, by player name only.</p>
+      <div id="dash-alerts"></div>
+      <div id="dash-root"><p class="muted">Loading...</p></div>
+      <div class="paper" style="margin-top:16px">
+        <h3>Public stats page</h3>
+        <p class="hint">A read only page of these numbers for your website or Discord, on its own port: who is playing, the charts, the leaderboard and the Reborn server list. Never player ids, addresses, bans or anything of this manager. Players outside your network reach it once the port is open (UPnP opens it with your servers' ports).</p>
+        <label class="check"><input type="checkbox" id="pub-on"><span>Serve the public stats page</span></label>
+        <div class="grid2">
+          <label class="field"><span>Port (TCP)</span><input type="number" id="pub-port" min="1024" max="65535"></label>
+          <label class="field"><span>Its title (default: your first server's name)</span><input type="text" id="pub-title" maxlength="60"></label>
+        </div>
+        <label class="check"><input type="checkbox" id="pub-names"><span>Show player names (off: counts and charts only)</span></label>
+        <div class="row"><button class="btn go" id="pub-save">Save</button><span class="hint" id="pub-note"></span></div>
+      </div>
     </section>
 
     <section id="network">
@@ -362,6 +381,7 @@
 
 <div id="toast"></div>
 
+<script src="dash.js"></script>
 <script>
 'use strict';
 // The page of the Battlefield 1943 Reborn server manager (server/manager.py serves it and answers /api/...).
@@ -425,6 +445,7 @@ $('nav').addEventListener('click', e => {
   document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === tab));
   if (tab === 'logs') loadLog();
   if (tab === 'moderation') loadModeration();
+  if (tab === 'dashboard') loadDashboard();
 });
 function goTab(tab) { document.querySelector('nav button[data-tab="' + tab + '"]').click(); }
 
@@ -763,6 +784,28 @@ $('quit').onclick = async () => {
   if (await act('/api/quit', {})) { clearInterval(tick.timer); document.body.replaceChildren(h('div', { style: 'padding:60px 30px;font:600 24px var(--head);letter-spacing:.06em' }, 'THE MANAGER HAS SHUT DOWN. START IT AGAIN TO OPEN THIS PAGE.')); }
 };
 
+// ---- the dashboard (server/dashboard.py, dash.js, docs/DASHBOARD.md)
+let dash = null, dashFilled = false;
+async function loadDashboard() {
+  try { dash = await api('/api/dashboard'); } catch (e) { return; }
+  $('dash-when').textContent = 'Updated ' + new Date(dash.now * 1000).toLocaleTimeString();
+  sync($('dash-alerts'), dash.alerts, () => dash.alerts.map(a => h('div', { class: 'banner' + (a.level === 'info' ? ' info' : ''), text: a.text })));
+  if (!document.querySelector('#dash-root .dtabs button:hover')) Dash.render($('dash-root'), dash, { public: false });
+  const p = dash.public_page;
+  if (!dashFilled) {
+    dashFilled = true;
+    $('pub-on').checked = p.on; $('pub-port').value = p.port; $('pub-names').checked = p.names; $('pub-title').value = p.title;
+  }
+  const where = (state && (state.addresses.public || (state.addresses.lan || [])[0])) || '127.0.0.1';
+  $('pub-note').replaceChildren(...(p.on ? ['On: ', h('a', { href: 'http://127.0.0.1:' + p.port + '/', target: '_blank', rel: 'noopener', style: 'color:inherit', text: 'open it here' }),
+    ', or give players http://' + where + ':' + p.port + '/'] : ['Off.']));
+}
+$('pub-save').onclick = async () => {
+  const port = Number($('pub-port').value);
+  if (!(port >= 1024 && port <= 65535)) return toast('A port is 1024 to 65535.', true);
+  if (await saveConfig({ public_page: { on: $('pub-on').checked, port: port, names: $('pub-names').checked, title: $('pub-title').value.trim() } }, 'Saved')) loadDashboard();
+};
+
 // ---- moderation (server/bans.py, docs/MODERATION.md)
 let mod = null, modTarget = null, modAction = 'ban';
 const KIND_WORDS = { ban: 'Ban', kick: 'Kick', mute: 'Mute' };
@@ -901,6 +944,7 @@ async function tick() {
   try { state = await api('/api/state'); render(); } catch (e) { $('mode').textContent = 'No answer'; $('mode').className = 'pill red'; }
   if ($('logs').classList.contains('on') && $('log-auto').checked) loadLog();
   if ($('moderation').classList.contains('on') && !$('mod-modal').classList.contains('on')) loadModeration();
+  if ($('dashboard').classList.contains('on') && (tick.n = (tick.n || 0) + 1) % 3 === 0) loadDashboard();
 }
 tick(); tick.timer = setInterval(tick, 2000);
 </script>

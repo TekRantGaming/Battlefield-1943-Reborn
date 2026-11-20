@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Server stats · Battlefield 1943 Reborn</title>
+<style>
+  /* The public stats page of a Battlefield 1943 Reborn server (server/manager.py PublicHandler, docs/DASHBOARD.md).
+     The launcher's Field Report colours; nothing is loaded from anywhere else. */
+  :root {
+    --bg: #23271c; --card: #2b3022; --line: #3a4030; --bar: #14170f;
+    --cream: #ece4cc; --paper: #f1ead6; --ink: #24251f; --khaki: #b9ad7c; --faint: #9d9578;
+    --head: "Bahnschrift SemiBold Condensed", "Bahnschrift Condensed", "Oswald", "Arial Narrow", "Segoe UI", sans-serif;
+    --body: "Segoe UI", system-ui, -apple-system, "Noto Sans", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--bg); color: var(--cream); font: 15px/1.45 var(--body); }
+  h1, h2, h3 { font-family: var(--head); font-weight: 600; letter-spacing: .04em; margin: 0; text-transform: uppercase; }
+  header { background: var(--bar); border-bottom: 1px solid var(--line); padding: 16px 24px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
+  header h1 { font-size: 26px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  header small { display: block; font: 600 11px Consolas, monospace; letter-spacing: .16em; color: var(--khaki); margin-bottom: 2px; }
+  .live { font: 600 11px/1 var(--body); letter-spacing: .14em; padding: 6px 10px; background: #6e9a3c; color: #fff; border-radius: 2px; }
+  .live.off { background: #5d5d55; }
+  .when { color: var(--faint); font: 12px Consolas, monospace; }
+  main { max-width: 1180px; margin: 0 auto; padding: 22px 16px 50px; }
+  footer { max-width: 1180px; margin: 0 auto; padding: 0 16px 30px; color: var(--faint); font-size: 12.5px; }
+  .error { background: #4a2a22; border: 1px solid #7a3a30; color: #f6d3cc; padding: 12px 16px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><small>BATTLEFIELD 1943 REBORN · LIVE SERVER STATS</small><span id="title">Server stats</span></h1>
+  <span class="live off" id="live">CONNECTING</span>
+  <span class="when" id="when"></span>
+</header>
+<main><div id="root"></div></main>
+<footer>Names only: no player ids or addresses are shown. Playtime and history cover the last 90 days. This page reads the server manager's numbers every 15 seconds.</footer>
+<script src="dash.js"></script>
+<script>
+'use strict';
+let failed = 0;
+async function load() {
+  try {
+    const r = await fetch('stats.json', { cache: 'no-store' });
+    if (!r.ok) throw new Error('The server said ' + r.status);
+    const d = await r.json();
+    failed = 0;
+    document.getElementById('title').textContent = d.title || 'Server stats';
+    document.title = (d.title || 'Server stats') + ' · Battlefield 1943 Reborn';
+    const live = document.getElementById('live');
+    live.textContent = d.cards.online + ' PLAYING NOW'; live.className = 'live' + (d.servers.some(s => s.state === 'running') ? '' : ' off');
+    document.getElementById('when').textContent = 'Updated ' + new Date(d.now * 1000).toLocaleTimeString();
+    Dash.render(document.getElementById('root'), d, { public: true });
+  } catch (e) {
+    if (++failed >= 2) {
+      document.getElementById('live').textContent = 'NO ANSWER'; document.getElementById('live').className = 'live off';
+      if (!document.querySelector('.dcards')) document.getElementById('root').replaceChildren(Dash.h('div', { class: 'error', text: 'The server\'s stats did not answer. It may be restarting: this page tries again by itself.' }));
+    }
+  }
+}
+load(); setInterval(load, 15000);
+</script>
+</body>
+</html>

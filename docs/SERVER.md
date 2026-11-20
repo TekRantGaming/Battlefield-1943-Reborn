@@ -77,6 +77,15 @@ A dedicated server takes the same as `--bf_match_tickets=<n>`, `--bf_match_time_
 `--bf_world_dynamic_storm=true` on its command line; the server package's own host (`gmhost.py`) does not pass them
 yet.
 
+## Dashboard
+
+The manager's Dashboard tab shows your servers live and over the last 90 days: who is playing and their ping, the map,
+the round's tickets, the tick rate each server really holds, players over 6 hours, a day and a week, the busiest
+hours, the maps played, a playtime leaderboard with kills and deaths, recent joins and leaves, this machine's CPU and
+memory, and alerts when something needs you. Turn on its **public stats page** to give your players a live page of
+it on its own port (TCP 18290 by default), with names but never player ids or addresses. More in
+[DASHBOARD.md](DASHBOARD.md).
+
 ## Moderation
 
 The manager's Moderation page lists the players on your servers, with Kick, Ban and Mute:
