@@ -66,6 +66,8 @@ ARRIVED_COUNTED = 3  # a host's status this long after the address counts the pl
 QUEUE = []  # the waiting players, oldest first: {'token', 'gid', 'address', 'server', 'since', 'seen'}
 QUEUE_TIMEOUT = 15
 QUEUE_MOST = 64        # a server's queue holds at most this many
+MOST_PLAYERS = 128     # lists of a server's players are cut at this
+BIGGEST_SERVER = 64    # server sizes: 24 (the game's own) and less, 32, 64 (docs/SERVER-SIZES.md)
 ADMIT_WINDOW = 90      # a player let in from the queue counts as on the way this long (from Home, the game starts first)
 SERVER_GONE_GRACE = 30
 GONE = {}  # GID -> when its server's link ended
@@ -1617,7 +1619,7 @@ class Registry:
             return None
         try:
             uid, pid = int(asked.get('uid')), int(asked.get('pid'))
-            pids = [int(x) for x in asked.get('pids') or []][:64]
+            pids = [int(x) for x in asked.get('pids') or []][:MOST_PLAYERS]
         except (TypeError, ValueError):
             return None
         top = 10 ** 7
@@ -1963,7 +1965,7 @@ class Registry:
                             host, local = self.public, True
                     GAMES[gid] = {'GID': gid, 'LID': '1', 'I': host, 'P': int(port), 'HU': uid,
                                   'HN': name, 'N': name, 'TYPE': 'G',
-                                  'JOIN': 'O', 'MAX-PLAYERS': int(m.get('max_players', 24)), 'AP': 0,
+                                  'JOIN': 'O', 'MAX-PLAYERS': max(2, min(BIGGEST_SERVER, int(m.get('max_players', 24)))), 'AP': 0,
                                   'UGID': 'NOGUID', 'B-version': 'RETAIL429432', 'B-U-type': 'RANKED',
                                   'gmhost': RemoteHost(writer), 'map': m.get('map', ''),
                                   'local': local,  # on this backend's own machine (for_player)
@@ -2020,7 +2022,7 @@ class Registry:
                     GAMES[gid]['map'] = m.get('map', GAMES[gid]['map'])
                     GAMES[gid]['next_map'] = str(m.get('next_map', ''))[:32]
                     names = m.get('names', [])
-                    GAMES[gid]['names'] = [str(n)[:15] for n in names][:64] if isinstance(names, list) else []
+                    GAMES[gid]['names'] = [str(n)[:15] for n in names][:MOST_PLAYERS] if isinstance(names, list) else []
                 elif op == 'players':
                     # Join Match With Friends (our main menu): the players signed in now and the listed server each
                     # plays on (no address), the servers' own names left out. A player in a private match (a server
@@ -2052,7 +2054,7 @@ class Registry:
                         score = None
                     if name and score is not None:
                         table = MATCH_SCORES.setdefault(str(m['gid']), {})
-                        if len(table) < 64 or name.lower() in table:
+                        if len(table) < MOST_PLAYERS or name.lower() in table:
                             table[name.lower()] = {'name': name, 'score': score, 'at': int(time.time())}
                     writer.write((json.dumps({'op': 'match_score', 'ok': bool(name)}) + '\n').encode())
                 elif op == 'scoreboard':
@@ -2064,7 +2066,7 @@ class Registry:
                         if n.lower() not in table:
                             rows.append({'name': n, 'score': 0, 'at': 0})
                     rows.sort(key=lambda e: (-e['score'], e['name'].lower()))
-                    writer.write((json.dumps({'op': 'scoreboard', 'rows': with_tags(rows[:64])}) + '\n').encode())
+                    writer.write((json.dumps({'op': 'scoreboard', 'rows': with_tags(rows[:MOST_PLAYERS])}) + '\n').encode())
                 elif op == 'tag':  # clan tags (tag_for, above)
                     reply = put_tag(m, address)
                     self.note('%s %s the clan tag "%s" for %s%s' % (

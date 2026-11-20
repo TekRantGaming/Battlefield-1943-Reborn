@@ -42,6 +42,8 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
+#include "player_limits.h"
+
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
 REXCVAR_DEFINE_BOOL(bf_team_balance, false, "BF1943/Server",
                     "A dedicated server evens its teams: a player who has died on the bigger team moves to the other "
@@ -129,7 +131,8 @@ std::vector<Player> Players(const uint8_t* base) {
   const uint32_t manager = Load32(base, kGameContext + 40);
   if (!Readable(manager, 96) || !InImage(Load32(base, manager))) return out;
   const uint32_t begin = Load32(base, manager + 84), end = Load32(base, manager + 88);
-  if (begin == end || end < begin || end - begin > 64 * 4 || !Readable(begin, end - begin)) return out;
+  if (begin == end || end < begin || end - begin > uint32_t(bf1943::kPlayerListLimit) * 4 || !Readable(begin, end - begin))
+    return out;
   for (uint32_t at = begin; at < end; at += 4) {
     const uint32_t p = Load32(base, at);
     if (!Readable(p, 0x300) || !InImage(Load32(base, p))) continue;

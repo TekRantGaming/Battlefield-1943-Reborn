@@ -109,6 +109,10 @@
   }
   bool browser_has_players_ = false, browser_not_full_ = false, browser_night_ = false;  // the filter chips
   std::string browser_region_;       // the region chip: only this region's servers (a code of regions.h); empty: all
+  // The size chip (server sizes, docs/SERVER-SIZES.md; TekRantGaming, 20 Nov 2026: the size shown, no pop-up): only
+  // servers of this size (24: the game's own and smaller, 32, 64); 0: all.
+  int browser_size_ = 0;
+  static int SizeOf(const ServerInfo& sv) { return sv.max_players <= 24 ? 24 : sv.max_players <= 32 ? 32 : 64; }
   std::string browser_search_;       // the search box: a part of a server's name or map
   bool browser_typing_ = false;      // the search box has the keyboard (its letters are letters, not the prompts' keys)
   bool servers_from_pause_ = false;  // opened from the pause (a match running): Back goes there
@@ -169,6 +173,7 @@
       if (browser_not_full_ && sv.max_players > 0 && sv.players >= sv.max_players) continue;
       if (browser_night_ && !sv.night) continue;
       if (!browser_region_.empty() && sv.region != browser_region_) continue;
+      if (browser_size_ && SizeOf(sv) != browser_size_) continue;
       if (!search.empty() && Lower(sv.name + " " + sv.map).find(search) == std::string::npos) continue;
       out.push_back(sv);
     }
@@ -359,7 +364,7 @@
         Chip(d, st, ImVec2(cx, cy), ch, t, on ? kit::kStrip : kit::kPaper, on ? kit::kStripText : kit::kInk, !on, clicked);
         cx -= st(8);
       };
-      bool c_sort = false, c_night = false, c_full = false, c_players = false, c_region = false;
+      bool c_sort = false, c_night = false, c_full = false, c_players = false, c_region = false, c_size = false;
       chip_right(sort_by_ping_ ? "SORT: PING" : "SORT: PLAYERS", false, &c_sort);
       if (kNightOps) chip_right("NIGHT OPS", browser_night_, &c_night);  // night_ops.h: not in every build
       chip_right("NOT FULL", browser_not_full_, &c_full);
@@ -376,6 +381,20 @@
         chip_right("REGION: " + (browser_region_.empty() ? std::string("ALL") : Upper(r ? r->name : browser_region_)), !browser_region_.empty(),
                    &c_region);
       }
+      // The size chip, once any server listed is bigger than the game's own 24: a click goes through the sizes listed.
+      std::vector<int> sizes;
+      for (const ServerInfo& sv : all)
+        if (std::find(sizes.begin(), sizes.end(), SizeOf(sv)) == sizes.end()) sizes.push_back(SizeOf(sv));
+      std::sort(sizes.begin(), sizes.end());
+      if (browser_size_ && std::find(sizes.begin(), sizes.end(), browser_size_) == sizes.end()) browser_size_ = 0;
+      if (!sizes.empty() && sizes.back() > 24)
+        chip_right(browser_size_ ? fmt::format("SIZE: {}", browser_size_ == 24 ? std::string("24 OR LESS") : std::to_string(browser_size_))
+                                 : std::string("SIZE: ALL"),
+                   browser_size_ != 0, &c_size);
+      if (c_size) {
+        const auto at = std::find(sizes.begin(), sizes.end(), browser_size_);
+        browser_size_ = !browser_size_ ? sizes.front() : at == sizes.end() || at + 1 == sizes.end() ? 0 : *(at + 1);
+      }
       if (c_region) {
         const auto at = std::find(regions.begin(), regions.end(), browser_region_);
         browser_region_ = browser_region_.empty() ? regions.front() : at + 1 == regions.end() ? std::string() : *(at + 1);
@@ -384,7 +403,7 @@
       if (c_night) browser_night_ = !browser_night_;
       if (c_full) browser_not_full_ = !browser_not_full_;
       if (c_players) browser_has_players_ = !browser_has_players_;
-      if (c_sort || c_night || c_full || c_players || c_region) row_ = 0, scroll_ = 0;
+      if (c_sort || c_night || c_full || c_players || c_region || c_size) row_ = 0, scroll_ = 0;
       const ImVec2 s0 = st.P(679, 159), s1(cx - st(2), st.P(0, 193).y);
       const bool typing = browser_typing_;
       d->AddRectFilled(s0, s1, typing ? kit::kPaperLight : kit::kPaper);
@@ -548,7 +567,7 @@
       else if (browser_tab_ == kTabFavourites)
         why = fmt::format("No favourites yet. {} on a server keeps it here.",
                           device_ == Device::kKeyboard ? KeyFor(kit::Button::kY) : "Y");
-      else if (browser_has_players_ || browser_not_full_ || browser_night_) why = "No server passes the filters. Switch one off.";
+      else if (browser_has_players_ || browser_not_full_ || browser_night_ || browser_size_) why = "No server passes the filters. Switch one off.";
       else
         why = fmt::format("No {} server right now. The list refreshes every 5 seconds.",
                           browser_tab_ == kTabOfficial ? "Reborn" : "community");

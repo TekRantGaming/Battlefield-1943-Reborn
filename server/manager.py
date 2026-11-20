@@ -93,6 +93,19 @@ MAP_LEVEL = {k: l for k, _, l in MAPS}
 # 60 Hz by default since 14 Nov 2026 (TekRantGaming: "all servers are going to be 60 Hertz", and dedicated servers "30,60
 # and above ... recommend 60hz"); 30 the original game's, 75 and 100 experimental.
 BASE_PORT, MAX_SERVERS, WEB_PORT, TICK_HZ = 18300, 16, 18280, 60
+# Server sizes (TekRantGaming, 20 Nov 2026: "support the game's default ... then 32, 64, and 128", then "Drop 128 for
+# now"; docs/SERVER-SIZES.md): the game's own 24 and smaller, or 32 or 64. A value between them goes up to the next.
+# 32 is the default (TekRantGaming, 20 Nov 2026: "32 players is becoming the new default even on official servers but we
+# will still allow 24 as (original) to be an option").
+SERVER_SIZES = (24, 32, 64)
+DEFAULT_SIZE = 32
+
+
+def server_size(value):
+    n = int(value or DEFAULT_SIZE)
+    if n <= 24:
+        return max(2, n)
+    return next((size for size in SERVER_SIZES if size >= n), SERVER_SIZES[-1])
 # The dedicated game's own socket: UDP 1003 on its loopback address; Linux moves ports under 1024 up by 30000
 # (bf/src/socket_fixes.cpp HostBindPort).
 GAME_PORT = 1003 if WINDOWS else 31003
@@ -490,7 +503,7 @@ def game_installed():
 
 def new_server(name, port):
     return {'name': name, 'description': '', 'maps': [k for k, _, _ in MAPS], 'round_end_delay': 45, 'listed': True,
-            'night': False, 'port': port, 'max_players': 24, 'autostart': True, 'tick': 0,
+            'night': False, 'port': port, 'max_players': DEFAULT_SIZE, 'bots': 0, 'autostart': True, 'tick': 0,
             'team_balance': True, 'balance_gap': 2, 'balance_min_players': 4, 'balance_delay': 20,
             'balance_block_stacking': True,
             # The server's world (gmhost.py's World; 14 Nov 2026): its clock and weather, per cent where it says, and
@@ -575,7 +588,11 @@ def clean_config(raw):
         with contextlib.suppress(TypeError, ValueError):
             entry['round_end_delay'] = max(15, min(300, int(s.get('round_end_delay') or 45)))
         with contextlib.suppress(TypeError, ValueError):
-            entry['max_players'] = max(2, min(24, int(s.get('max_players') or 24)))
+            entry['max_players'] = server_size(s.get('max_players'))
+        # Bots (TekRantGaming, 20 Nov 2026: past 24 "Host chooses"): how many play, up to the size (bf/src/bots.cpp keeps 2
+        # places free for joining players and has bots leave as players join).
+        with contextlib.suppress(TypeError, ValueError):
+            entry['bots'] = max(0, min(entry['max_players'], int(s.get('bots') or 0)))
         entry['listed'] = s.get('listed') is not False
         entry['night'] = s.get('night') is True
         entry['day_night'] = s.get('day_night') is True
@@ -1032,7 +1049,12 @@ class Manager:
                 '--user_data_root=' + os.path.join(directory, 'user'),
                 '--log_file=' + os.path.join(directory, 'server.log'), '--fullscreen=false', '--window_start=hidden',
                 '--server', '--cl=-dedicated -level ' + MAP_LEVEL[maps[0]], '--bf_map_rotation=' + ','.join(maps),
-                '--bf_round_end_delay=%d' % s['round_end_delay']]
+                '--bf_round_end_delay=%d' % s['round_end_delay'],
+                # Its size: the game's own cap (Game.MaxPlayerCount) is raised to it past 64, and its bots fill to it.
+                '--bf_gm_max_players=%d' % s['max_players']]
+        # Its bots, when it has any (none: the flag left out, so BF_SERVER_GAME_ARGS below may still give some).
+        if s['bots']:
+            game.append('--bf_bots=%d' % s['bots'])
         # Team balance: the server's own switches, and the file its moves go to for the host to tell the players.
         game += ['--bf_team_balance=%s' % ('true' if s['team_balance'] else 'false'),
                  '--bf_balance_gap=%d' % s['balance_gap'], '--bf_balance_min_players=%d' % s['balance_min_players'],

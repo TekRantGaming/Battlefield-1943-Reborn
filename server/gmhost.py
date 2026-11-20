@@ -35,6 +35,8 @@ RESEND_SECONDS = 0.3
 # and at most this many log lines in 10 s.
 MAX_LINKING = 64
 NOTE_BUDGET = 200
+# Lists of players sent on are cut at this (server sizes: the game's own 24, then 32 and 64; docs/SERVER-SIZES.md).
+MOST_PLAYERS = 128
 
 
 PING, PROBE, PONG = b'BF43PING', b'BF43PRBE', b'BF43PONG'
@@ -819,7 +821,9 @@ class Peer:
             return  # a host being replaced (GameHost.close): its server sockets may still deliver a packet
         if not self.client_bound:
             subs = [self.control()] + subs
-        transport.sendto(self.datagram(subs), self.addr)
+        data = self.datagram(subs)
+        self.host.bytes_out += len(data) + 28  # (with the IP and UDP headers)
+        transport.sendto(data, self.addr)
 
     def link_packet(self, seq, body):
         return LINK, struct.pack('>II', seq, self.peer_ack if seq >= UNREL else self.connident) + body
@@ -1299,6 +1303,7 @@ class GameHost(asyncio.DatagramProtocol):
         self.error_noted = 0  # monotonic time of the last socket error written to the log
         self.note_window, self.notes_in_window, self.notes_dropped = 0.0, 0, 0
         self.bad_packets, self.refused_peers, self.quiet_noted = 0, 0, 0.0
+        self.bytes_in, self.bytes_out, self.traffic_at = 0, 0, time.monotonic()  # players' traffic (tick)
         # Moderation (server/bans.py; docs/MODERATION.md): this server's ban list (the manager's, --bans-file), the
         # players the main backend told it to remove (a network ban: player id -> entry), addresses kept out for a
         # while after a removal, players being removed (address -> when their link is dropped) and the moderation log.
@@ -1511,6 +1516,7 @@ class GameHost(asyncio.DatagramProtocol):
             else:
                 self.transport.sendto(PONG + data[8:40], addr)
             return
+        self.bytes_in += len(data) + 28
         if addr in self.blocked:
             return  # removed by moderation a moment ago (GameHost.remove): nothing answered for a while
         # The match's clock and weather (World): asked for from a socket of the game's own.
@@ -1559,11 +1565,11 @@ class GameHost(asyncio.DatagramProtocol):
         player id, address and account."""
         return [{'name': p.player.name, 'id': p.player.player_id(), 'ip': p.addr[0],
                  'account': getattr(p.player, 'account', ''), 'since': int(getattr(p, 'joined_at', 0))}
-                for p in self.peers.values() if p.state == 'joined' and p.player][:64]
+                for p in self.peers.values() if p.state == 'joined' and p.player][:MOST_PLAYERS]
 
     def player_names(self):
         """The joined players' names, for the backend's Join Match With Friends (our main menu)."""
-        return [p.player.name for p in self.peers.values() if p.state == 'joined' and p.player][:64]
+        return [p.player.name for p in self.peers.values() if p.state == 'joined' and p.player][:MOST_PLAYERS]
 
     async def tick(self):
         pruned_at = time.monotonic()
@@ -1579,6 +1585,15 @@ class GameHost(asyncio.DatagramProtocol):
                                                             ' (it never linked; its first packet %s)' % (peer.first or b'').hex()))
                     self.drop(addr)
             self.comms.tick(now)
+            # The players' traffic each minute (server sizes, docs/SERVER-SIZES.md: what a bigger server costs).
+            if now - self.traffic_at >= 60:
+                players = self.player_count()
+                seconds = now - self.traffic_at
+                if players and (self.bytes_out or self.bytes_in):
+                    self.note('traffic over %d s: %d players, to them %.1f kB/s each (%.0f kB/s in all), from them '
+                              '%.1f kB/s each' % (seconds, players, self.bytes_out / seconds / 1000 / players,
+                                                  self.bytes_out / seconds / 1000, self.bytes_in / seconds / 1000 / players))
+                self.traffic_at, self.bytes_out, self.bytes_in = now, 0, 0
             try:
                 self.moderation_tick(now)
             except Exception as e:  # never the host's own loop for it
@@ -1671,7 +1686,7 @@ async def serve(args):
         # replaced as before.
         if host is not None:
             reg['resume'] = {'uid': host.user_id, 'pid': host.pid,
-                             'pids': sorted({p.player.pid for p in host.peers.values() if p.player})[:64]}
+                             'pids': sorted({p.player.pid for p in host.peers.values() if p.player})[:MOST_PLAYERS]}
         # Listening before the backend is told: its reachability probe comes at once (a kept host listens already).
         sock = None
         try:
@@ -1787,7 +1802,7 @@ async def serve(args):
                 except ValueError:
                     continue
                 if isinstance(m, dict) and m.get('op') == 'player_stats' and isinstance(m.get('rows'), list):
-                    out.append({'op': 'player_stats', 'rows': m['rows'][:64]})
+                    out.append({'op': 'player_stats', 'rows': m['rows'][:MOST_PLAYERS]})
             return out
 
         async def beat_loop():
@@ -1910,7 +1925,7 @@ def main():
     ap.add_argument('--game-server', default='127.0.0.1:1003', help="the dedicated server's game socket (UDP)")
     ap.add_argument('--name', default='BF1943 server')
     ap.add_argument('--map', default='Wake Island')
-    ap.add_argument('--max-players', type=int, default=24)
+    ap.add_argument('--max-players', type=int, default=32, help='the size of the server: 2 to 24 (24: the original), 32 (the default) or 64')
     # Movement and aiming: every server plays the game's own since v0.4.0 (Modern was retired; TekRantGaming, 13 Nov
     # 2026). The option is still accepted, so an older start script does no harm, and is not used: the server is
     # registered as classic, which is what the game plays.

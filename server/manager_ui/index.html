@@ -365,6 +365,7 @@ header { background: url(logo) right center / contain no-repeat, #111; }
   <label class="field"><span>Description (optional)</span><input type="text" id="e-description" maxlength="200" placeholder="Shown when a player selects the server"></label>
   <div class="grid2">
     <label class="field"><span>Players</span><select id="e-max"></select></label>
+    <label class="field"><span>Bots</span><select id="e-bots"></select></label>
     <label class="field"><span>Port (UDP)</span><input type="number" id="e-port" min="1024" max="65535"></label>
     <label class="field"><span>Pause between rounds</span><select id="e-delay"></select></label>
     <label class="field"><span>Tick rate</span><select id="e-tick"></select></label>
@@ -682,12 +683,27 @@ function openEdit(n) {
   const fresh = n > state.config.servers.length;
   const used = state.config.servers.map(x => x.port);
   let port = 18300; while (used.includes(port)) port++;
-  const sv = fresh ? { name: 'Battlefield 1943 Reborn ' + n, description: '', maps: state.maps.map(m => m.key), round_end_delay: 45, listed: true, night: false, port: port, max_players: 24, autostart: true, team_balance: true } : state.config.servers[n - 1];
+  const sv = fresh ? { name: 'Battlefield 1943 Reborn ' + n, description: '', maps: state.maps.map(m => m.key), round_end_delay: 45, listed: true, night: false, port: port, max_players: 32, autostart: true, team_balance: true } : state.config.servers[n - 1];
   $('edit-title').textContent = fresh ? 'A new server' : 'Server ' + n;
   $('e-name').value = sv.name; $('e-description').value = sv.description; $('e-port').value = sv.port;
-  $('e-max').replaceChildren(...[8, 12, 16, 20, 24].map(m => h('option', { value: m, text: m + ' players' })));
-  if (![8, 12, 16, 20, 24].includes(sv.max_players)) $('e-max').append(h('option', { value: sv.max_players, text: sv.max_players + ' players' }));
+  // Server sizes (docs/SERVER-SIZES.md): the game's own 24 (the original) and smaller, 32 (the default since 20 Nov
+  // 2026) and 64.
+  const sizes = [[8, '8 players'], [12, '12 players'], [16, '16 players'], [20, '20 players'], [24, '24 players (original)'],
+                 [32, '32 players (default)'], [64, '64 players']];
+  $('e-max').replaceChildren(...sizes.map(([m, text]) => h('option', { value: m, text: text })));
+  if (!sizes.some(([m]) => m === sv.max_players)) $('e-max').append(h('option', { value: sv.max_players, text: sv.max_players + ' players' }));
   $('e-max').value = sv.max_players;
+  // Bots (TekRantGaming, 20 Nov 2026: the host chooses): how many play; they keep 2 places free and leave as players
+  // join, so a full server has no bots.
+  const drawBots = (size, bots) => {
+    const counts = [0, ...[8, 16, 22, 30, 46, 62].filter(b => b < size - 2), size];
+    $('e-bots').replaceChildren(...counts.map(b => h('option', { value: b, text: b === 0 ? 'No bots' : b === size ? 'Fill the server (' + (size - 2) + ', they leave as players join)' : 'Up to ' + b })));
+    if (!counts.includes(bots)) $('e-bots').append(h('option', { value: bots, text: 'Up to ' + bots }));
+    $('e-bots').value = String(bots);
+  };
+  drawBots(sv.max_players, sv.bots ?? 0);
+  $('e-max').onchange = () => { const was = Number($('e-bots').value), size = Number($('e-max').value); drawBots(size, was >= Number($('e-max').dataset.size || 0) && was > 0 ? size : Math.min(was, size)); $('e-max').dataset.size = size; };
+  $('e-max').dataset.size = sv.max_players;
   $('e-delay').replaceChildren(...[30, 45, 60, 90, 120].map(m => h('option', { value: m, text: m + ' seconds' })));
   if (![30, 45, 60, 90, 120].includes(sv.round_end_delay)) $('e-delay').append(h('option', { value: sv.round_end_delay, text: sv.round_end_delay + ' seconds' }));
   $('e-delay').value = sv.round_end_delay;
@@ -733,7 +749,7 @@ async function saveEdit(restart) {
   for (const k of ['balance_gap', 'balance_min_players', 'balance_delay', 'balance_block_stacking'])
     if (servers[editing - 1] && servers[editing - 1][k] !== undefined) kept[k] = servers[editing - 1][k];
   servers[editing - 1] = { ...kept, team_balance: $('e-balance').checked, name: name, description: $('e-description').value.trim(), maps: maps, round_end_delay: Number($('e-delay').value), listed: $('e-listed').checked,
-    night: $('e-night').checked, port: port, max_players: Number($('e-max').value), autostart: $('e-autostart').checked,
+    night: $('e-night').checked, port: port, max_players: Number($('e-max').value), bots: Number($('e-bots').value) || 0, autostart: $('e-autostart').checked,
     tick: Number($('e-tick').value) || 0,
     day_night: $('e-daynight').checked, time: Number($('e-time').value) || 0, day_minutes: Number($('e-dayminutes').value) || 0,
     cloud_cover: Number($('e-cloud').value) || 0, cloud_rate: Number($('e-cloudrate').value) || 0, weather: Number($('e-weather').value) || 0,

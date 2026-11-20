@@ -38,6 +38,7 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
+#include "player_limits.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -62,6 +63,7 @@ REXCVAR_DEFINE_BOOL(bf_unlock_fps, true, "BF1943", "Run above the original 30 fr
 namespace bf1943 {
 int TickRate();  // tick_rate.cpp
 }
+REXCVAR_DECLARE(int32_t, bf_gm_max_players);  // gm_host.cpp: the server's size (server.json max_players)
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp: a dedicated server keeps the game's own timing
 REXCVAR_DEFINE_DOUBLE(bf_max_fps, 60.0, "BF1943", "Frame rate limit with bf_unlock_fps (0: none)");
 
@@ -960,6 +962,23 @@ REX_HOOK_RAW(sub_82616750) {
     }
   }
 #endif
+  // A server's size (player_limits.h, docs/SERVER-SIZES.md): Network.MaxClientCount (24, the players' connections;
+  // bots take none) is raised on a bigger server to its size and a few more, the room a player joining while a backfill
+  // bot is still on its way out takes. Game.MaxPlayerCount (64) is never raised: each machine sends and reads a
+  // player's id in as many bits as its own count needs (6 for 64), so a server at 68 sent 7 bit ids to games reading 6
+  // and the first game to join its 63 player match died (run size64a).
+  if (REXCVAR_GET(server) && ctx.r3.u32 && name == "Network.MaxClientCount") {
+    const uint32_t was = uint32_t(base[ctx.r3.u32]) << 24 | base[ctx.r3.u32 + 1] << 16 | base[ctx.r3.u32 + 2] << 8 |
+                         base[ctx.r3.u32 + 3];
+    const int size = std::clamp(int(REXCVAR_GET(bf_gm_max_players)), 2, bf1943::kMaxServerSize);
+    const uint32_t want = uint32_t(size) + 4;
+    if (size > bf1943::kDefaultServerSize && want > was && was <= 256) {
+      base[ctx.r3.u32] = uint8_t(want >> 24), base[ctx.r3.u32 + 1] = uint8_t(want >> 16),
+      base[ctx.r3.u32 + 2] = uint8_t(want >> 8), base[ctx.r3.u32 + 3] = uint8_t(want);
+      static std::atomic<bool> told{false};
+      if (!told.exchange(true)) REXLOG_INFO("BF server size: Network.MaxClientCount {} -> {}", was, want);
+    }
+  }
   if (ctx.r3.u32 && name == "Game.MaxFps") g_max_fps = ctx.r3.u32;
   // A dedicated server's main timer ticks once a frame, paced by Game.MaxFps (60 Hz research, tick_rate.cpp): at
   // another rate than 30 it is paced at that rate, so its ticks a second match its players'.

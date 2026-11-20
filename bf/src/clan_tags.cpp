@@ -27,6 +27,7 @@
 
 #include "server_list.h"
 #include "text_filter.h"
+#include "player_limits.h"
 
 REXCVAR_DECLARE(bool, server);
 REXCVAR_DEFINE_BOOL(bf_clan_tags_in_game, true, "BF1943/Online",
@@ -297,7 +298,7 @@ void GameNamesTick(void* ctx, uint8_t* base, bool level_loaded) {
   const uint32_t manager = Load32(base, kManager);
   const uint32_t begin = Plausible(manager) ? Load32(base, manager + 0x98) : 0,
                  end = Plausible(manager) ? Load32(base, manager + 0x9C) : 0;
-  const bool list_ok = Plausible(begin) && Plausible(end) && end >= begin && (end - begin) / 4 <= 64;
+  const bool list_ok = Plausible(begin) && Plausible(end) && end >= begin && (end - begin) / 4 <= uint32_t(bf1943::kPlayerListLimit);
   if (!level_loaded || !on || !list_ok) {
     // The level is going (or the tags were turned off): the plain names back in every player still listed, so the
     // game's own bookkeeping at the end of a level sees the names it knows.

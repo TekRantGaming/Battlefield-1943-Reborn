@@ -51,6 +51,7 @@
 #include "capture_points.h"
 #include "clan_tags.h"
 #include "display_modes.h"
+#include "player_limits.h"
 #include "game_install.h"
 #include "achievement_toast.h"  // the achievement popup, the pictures (game_menu_progress.inc)
 #include "reborn_achievements.h"  // Reborn's own achievements (NoteRebornAchievements)
@@ -1383,7 +1384,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                    browser_typing_, browser_has_players_, browser_not_full_, browser_night_, quick_waiting_ > 0,
                    direct_keys_, direct_letters_, name_keys_})
       HashIn(h, b);
-    for (int v : {pause_confirm_, handing_over_, passing_}) HashIn(h, uint64_t(int64_t(v)));
+    for (int v : {pause_confirm_, handing_over_, passing_, browser_size_}) HashIn(h, uint64_t(int64_t(v)));
     HashIn(h, capture_), HashIn(h, browser_region_);
     // What the on screen keys typed (a key pressed is a press that did something).
     for (const std::string* t : {&direct_text_, &name_text_, &pm_edit_text_, &pw_text_, &browser_search_}) HashIn(h, *t);

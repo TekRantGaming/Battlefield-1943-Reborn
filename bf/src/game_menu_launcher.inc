@@ -2391,6 +2391,7 @@
   double sb_asked_at_ = -100;
   std::atomic<bool> sb_busy_{false};
   int sb_row_ = 0;  // the row cursor (the voice mute)
+  int sb_scroll_ = 0;  // the first row shown (a 32 or 64 player server has more rows than the page holds)
 
   void ScoreboardPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
     const ImVec2 sz = io.DisplaySize;
@@ -2404,7 +2405,7 @@
         std::string reply;
         const bool ok = RegistryRequest(req, reply);
         std::vector<LbRow> rows;
-        for (size_t at = ok ? reply.find("\"rows\"") : std::string::npos; at != std::string::npos && rows.size() < 64;) {
+        for (size_t at = ok ? reply.find("\"rows\"") : std::string::npos; at != std::string::npos && rows.size() < size_t(bf1943::kPlayerListLimit);) {
           const size_t a = reply.find('{', at), b = a == std::string::npos ? a : reply.find('}', a);
           if (a == std::string::npos || b == std::string::npos) break;
           const std::string obj = reply.substr(a, b - a + 1);
@@ -2446,6 +2447,14 @@
     sb_row_ = std::clamp(sb_row_, 0, std::max(0, n - 1));
     const float x0 = st.P(40, 0).x, x1 = st.P(1240, 0).x;
     float y = st.P(0, 176).y;
+    // The rows the page holds (10); more scroll (server sizes, docs/SERVER-SIZES.md): the cursor kept in view, the
+    // wheel over the list moves it.
+    const int shown = std::max(1, int((st.P(0, 640).y - y) / st(44)));
+    if (n && io.MouseWheel != 0 && ImGui::IsMouseHoveringRect(ImVec2(x0, y), ImVec2(x1, st.P(0, 640).y)))
+      sb_row_ = std::clamp(sb_row_ - int(io.MouseWheel * 3), 0, n - 1);
+    if (sb_row_ < sb_scroll_) sb_scroll_ = sb_row_;
+    if (sb_row_ >= sb_scroll_ + shown) sb_scroll_ = sb_row_ - shown + 1;
+    sb_scroll_ = std::clamp(sb_scroll_, 0, std::max(0, n - shown));
     int toggled = -1;
     // The columns' words over the score and the ping; the ping furthest right (TekRantGaming, 20 Nov 2026), the score
     // before it.
@@ -2460,7 +2469,11 @@
                   kit::kKhakiDim, "SCORE", st(2));
     }
     const double now = ImGui::GetTime();
-    for (int i = 0; i < n && y < st.P(0, 640).y; ++i) {
+    if (n > shown) {  // which rows these are, by the column words
+      const std::string range = fmt::format("{}-{} OF {}", sb_scroll_ + 1, std::min(n, sb_scroll_ + shown), n);
+      kit::Spaced(d, f.typed, st(11), ImVec2(x0 + st(24), st.P(0, 156).y), kit::kKhakiDim, range, st(2));
+    }
+    for (int i = sb_scroll_; i < n && i < sb_scroll_ + shown; ++i) {
       const LbRow& r = rows[size_t(i)];
       const bool me = !mine.empty() && r.name == mine;
       const bool sel = i == sb_row_;

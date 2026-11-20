@@ -75,6 +75,8 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
+#include "player_limits.h"
+
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
 REXCVAR_DECLARE(std::string, user_data_root);
 REXCVAR_DECLARE(int32_t, bf_gm_max_players);  // gm_host.cpp: the most players a match holds
@@ -349,7 +351,7 @@ int WantedBots() {
     const char* v = std::getenv("BF_BOTS");
     return v && *v ? std::atoi(v) : -1;
   }();
-  return std::clamp(env >= 0 ? env : REXCVAR_GET(bf_bots), 0, 24);
+  return std::clamp(env >= 0 ? env : REXCVAR_GET(bf_bots), 0, bf1943::kMaxServerSize);  // (the room is the server size's)
 }
 
 bool IsBot(uint32_t player) {
@@ -369,7 +371,8 @@ uint32_t Manager(const uint8_t* base) {
 std::vector<uint32_t> ListedPlayers(const uint8_t* base, uint32_t manager) {
   std::vector<uint32_t> out;
   const uint32_t begin = Load32(base, manager + 84), end = Load32(base, manager + 88);
-  if (begin == end || end < begin || end - begin > 64 * 4 || !Readable(begin, end - begin)) return out;
+  if (begin == end || end < begin || end - begin > uint32_t(bf1943::kPlayerListLimit) * 4 || !Readable(begin, end - begin))
+    return out;
   for (uint32_t at = begin; at < end; at += 4) out.push_back(Load32(base, at));
   return out;
 }

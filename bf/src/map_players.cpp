@@ -35,6 +35,7 @@
 
 #if defined(BF_DEV_TOOLS)
 #include "dev_guest_memory.h"
+#include "player_limits.h"
 #endif
 
 namespace bf1943 {
@@ -59,7 +60,7 @@ bool IsPlayer(const uint8_t* base, uint32_t p) {
 
 constexpr uint32_t kManager = 0x82AF3AE4;
 constexpr uint32_t kSoldierVtable = 0x82007518;
-constexpr int kMaxPlayers = 64;
+constexpr int kMaxPlayers = bf1943::kPlayerListLimit;
 
 std::mutex g_mutex;
 std::vector<MapPlayer> g_players;          // as last read (a few times a second)
