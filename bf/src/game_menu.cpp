@@ -3503,8 +3503,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       rex::cvar::SetFlagByName(name, value);
     }
     settings_.Save();
-    REXLOG_INFO("BF night ops: {} server: its night's settings {} ({} changed)", night ? "a Night Ops" : "a regular",
-                night ? "on" : "off", changed);
+    std::string now;
+    for (const char* name : kNightOpsCvars) now += fmt::format(" {}={}", name + 18, rex::cvar::GetFlagByName(name));
+    REXLOG_INFO("BF night ops: {} server: its night's settings {} ({} changed):{}", night ? "a Night Ops" : "a regular",
+                night ? "on" : "off", changed, now);
   }
 
   // The Upscaler row's choices: Off and TAA always, the others only where this GPU runs them (the renderer's answer,
