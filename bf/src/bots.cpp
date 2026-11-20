@@ -38,7 +38,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <thread>
 #include <array>
 #include <cctype>
 #include <deque>
@@ -75,6 +77,9 @@ REXCVAR_DECLARE(bool, server);  // server_mode.cpp
 REXCVAR_DECLARE(std::string, user_data_root);
 REXCVAR_DECLARE(int32_t, bf_gm_max_players);  // gm_host.cpp: the most players a match holds
 REXCVAR_DEFINE_INT32(bf_bots, 0, "BF1943/Server", "Bots: how many bots play on this server (0: none)");
+REXCVAR_DEFINE_BOOL(bf_bots_log_detail, false, "BF1943/Server",
+                    "Bots: log each bot's moves, sights, flags, deaths and spawns (tests; off, the log keeps joins and "
+                    "what they learn)");
 REXCVAR_DEFINE_BOOL(bf_bots_squad_humans, true, "BF1943/Server",
                     "Bots: a player in no squad is put in a squad with its side's bots, as its leader");
 
@@ -100,6 +105,21 @@ REX_EXTERN(sub_82375280);  // a player made squad leader or not (player, leader,
 
 namespace {
 using Clock = std::chrono::steady_clock;
+
+// What the bots cost the server's tick (TekRantGaming, 20 Nov 2026: "These bots are quite heavy on the CPU"): the time
+// in BotsTick and its parts, logged every 30 s while bots play.
+struct BotCost {
+  double total = 0, worst = 0, learn = 0, scan = 0, think = 0, drive = 0, save = 0, input_step = 0;
+  int ticks = 0, searches = 0;
+  Clock::time_point since{};
+} cost;
+struct CostTimer {
+  double* into;
+  Clock::time_point t0 = Clock::now();
+  explicit CostTimer(double* d) : into(d) {}
+  ~CostTimer() { *into += std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
+};
+
 
 constexpr uint32_t kGameContext = 0x82AF56F0;
 constexpr uint32_t kServerPlayerVtable = 0x8201A990;
@@ -262,6 +282,8 @@ struct State {
   // (sub_822F1CF8, the game's own "is a vehicle" test, compares its type with 0x82D55EF0, that class's).
   std::set<uint32_t> vehicles;
   uint32_t ray_scratch = 0;  // guest memory for the ray test's vectors (16 byte aligned)
+  int searches_left = 0;     // path searches this tick may still make (kSearchesPerTick)
+  int humans = 0;            // human players on the server
   uint64_t rays = 0;         // ray tests made, and the time they took (logged every 10 s)
   double ray_ms = 0;
 } g;
@@ -360,6 +382,19 @@ bool Position(PPCContext& outer, uint8_t* base, uint32_t entity, float out[3]) {
   const uint32_t m = call.r3.u32;
   if (!Readable(m, 64)) return false;
   for (int i = 0; i < 3; ++i) out[i] = LoadF(base, m + 48 + 4 * i);
+  return true;
+}
+// The same, read once a server tick (the optimization pass: every bot's think read every soldier's and vehicle's
+// place again through the game, thousands of calls a second); TickPositions() empties it each tick.
+std::unordered_map<uint32_t, std::array<float, 3>> tick_positions;
+void TickPositions() { tick_positions.clear(); }
+bool CachedPosition(PPCContext& outer, uint8_t* base, uint32_t entity, float out[3]) {
+  if (const auto it = tick_positions.find(entity); it != tick_positions.end()) {
+    std::memcpy(out, it->second.data(), 12);
+    return true;
+  }
+  if (!Position(outer, base, entity, out)) return false;
+  tick_positions[entity] = {out[0], out[1], out[2]};
   return true;
 }
 
@@ -545,15 +580,26 @@ bool Ray(PPCContext& outer, uint8_t* base, uint32_t soldier, const float from[3]
 // between them hits nothing. A* over it, a budget of new rays per server tick so a long search spreads over ticks.
 constexpr float kCell = 2.0f, kMaxStep = 1.4f;
 constexpr int kRaysPerTick = 300, kExpandPerSearch = 4000, kScanRaysPerTick = 250;
+// The optimization pass (TekRantGaming, 20 Nov 2026: "make sure they don't hammer the system whilst they're in use"):
+// the rays' time budgets a server tick (60 a second): the level's scan 0.5 ms while people play (a full scan of Wake
+// takes several minutes then, once a map: it is saved), 2 ms on an empty server; the path searches' rays 0.6 ms; and
+// at most kSearchesPerTick path searches a tick.
+constexpr double kScanMsPlayed = 0.5, kScanMsAlone = 2.0, kPathRayMs = 0.6;
+constexpr int kSearchesPerTick = 2;
 
+// Each cell keeps its own 8 steps (the optimization pass, 20 Nov 2026: the steps' own map held 2.8 million entries
+// on Wake, about 100 MB, and its growth stalled the server's tick by up to 250 ms): a bit a direction for open and
+// for closed, and for a step a ray found closed (a soldier may have stood there) the time it is tried again from.
 struct NavCell {
   float y = 0;
   uint8_t state = 0;  // 0 not known, 1 walkable, 2 not walkable, 3 swimmable (water; y its surface)
+  uint8_t open = 0, closed = 0, retry = 0;  // steps by direction (bit d): open, closed, closed by a ray (tried again)
+  float retry_at = 0;  // Nav seconds from which its ray closed steps are tried again
 };
 struct Nav {
   std::unordered_map<uint64_t, NavCell> cells;
-  std::unordered_map<uint64_t, uint8_t> steps;  // (cell, direction) -> 1 open, 2 closed
-  std::unordered_map<uint64_t, Clock::time_point> closed_at;  // a closed step is tried again 20 s on
+  Clock::time_point epoch = Clock::now();
+  Clock::time_point ray_deadline{};  // the rays' time budget: none after it this tick
   int rays_left = 0;                            // this tick's budget
   // The level's scan (the user, 18 Nov 2026: "Pretty much all ground is walkable, just feed them the data on objects
   // you can't walk through ... and the water swimmable"): from the spawn points and flags outward over every step the
@@ -570,6 +616,21 @@ struct Nav {
 } nav;
 
 uint64_t CellKey(int ix, int iz) { return (uint64_t(uint32_t(ix)) << 32) | uint32_t(iz); }
+float NavNow() { return std::chrono::duration<float>(Clock::now() - nav.epoch).count(); }
+bool RaysSpent() { return nav.rays_left <= 0 || Clock::now() > nav.ray_deadline; }
+// A step's key (StepKey: the cell's key shifted by 3, the direction in the low 3) back to its cell: x keeps 29 bits.
+int StepCellX(uint64_t k) { return int32_t(uint32_t(k >> 35) << 3) >> 3; }
+int StepCellZ(uint64_t k) { return int(uint32_t(k >> 3)); }
+void SetStep(int ix, int iz, int d, bool open, float retry_at = -1.0f) {
+  NavCell& c = nav.cells[CellKey(ix, iz)];
+  const uint8_t bit = uint8_t(1 << d);
+  if (open) {
+    c.open |= bit, c.closed &= uint8_t(~bit), c.retry &= uint8_t(~bit);
+  } else {
+    c.closed |= bit, c.open &= uint8_t(~bit);
+    if (retry_at >= 0) c.retry |= bit, c.retry_at = std::max(c.retry_at, retry_at);
+  }
+}
 int CellOf(float v) { return int(std::floor(v / kCell)); }
 float CellCenter(int i) { return (float(i) + 0.5f) * kCell; }
 constexpr int kDx[8] = {1, -1, 0, 0, 1, 1, -1, -1}, kDz[8] = {0, 0, 1, -1, 1, -1, 1, -1};
@@ -579,11 +640,11 @@ constexpr int kBack[8] = {1, 0, 3, 2, 7, 6, 5, 4};  // the opposite direction
 // from 3 m, run bots_s1e's spawns under a roof found the roof) down to 5 m below. False: out of this tick's budget.
 bool ProbeCell(PPCContext& ctx, uint8_t* base, uint32_t soldier, int ix, int iz, float y_ref, NavCell* out) {
   auto it = nav.cells.find(CellKey(ix, iz));
-  if (it != nav.cells.end()) {
+  if (it != nav.cells.end() && it->second.state != 0) {
     *out = it->second;
     return true;
   }
-  if (nav.rays_left <= 0) return false;
+  if (RaysSpent()) return false;
   --nav.rays_left;
   const float cx = CellCenter(ix), cz = CellCenter(iz);
   const float from[3] = {cx, y_ref + 1.6f, cz}, to[3] = {cx, y_ref - 5.0f, cz};
@@ -601,8 +662,9 @@ bool ProbeCell(PPCContext& ctx, uint8_t* base, uint32_t soldier, int ix, int iz,
     c.state = to[1] < nav.water ? 3 : 2;  // no ground within reach: deep water, or a drop
     if (c.state == 3) c.y = nav.water - 0.2f;
   }
-  nav.cells[CellKey(ix, iz)] = c;
-  *out = c;
+  NavCell& slot = nav.cells[CellKey(ix, iz)];  // (its steps, if any were known, kept)
+  slot.y = c.y, slot.state = c.state;
+  *out = slot;
   return true;
 }
 
@@ -620,12 +682,14 @@ void NoteWater(const uint8_t* base, uint32_t phys) {
 // closed), so a step out of the searching bot's own cell (own) goes by the ground alone and is not kept, and a
 // closed step is tried again 20 s on (a soldier who stood there has moved).
 int Step(PPCContext& ctx, uint8_t* base, uint32_t soldier, int ix, int iz, float ya, int d, bool own = false) {
-  const uint64_t key = (CellKey(ix, iz) << 3) ^ uint64_t(d);  // a cell's key shifted, its direction in the low bits
-  auto it = nav.steps.find(key);
-  if (it != nav.steps.end() && !own) {
-    if (it->second == 1) return 1;
-    auto c = nav.closed_at.find(key);
-    if (c == nav.closed_at.end() || Clock::now() - c->second < std::chrono::seconds(20)) return 2;
+  const uint8_t bit = uint8_t(1 << d);
+  if (!own) {
+    const auto it = nav.cells.find(CellKey(ix, iz));
+    if (it != nav.cells.end()) {
+      const NavCell& a = it->second;
+      if (a.open & bit) return 1;
+      if ((a.closed & bit) && (!(a.retry & bit) || NavNow() < a.retry_at)) return 2;
+    }
   }
   NavCell b;
   if (!ProbeCell(ctx, base, soldier, ix + kDx[d], iz + kDz[d], ya, &b)) return 0;
@@ -633,17 +697,20 @@ int Step(PPCContext& ctx, uint8_t* base, uint32_t soldier, int ix, int iz, float
   const float rise = b.y - ya, limit = d < 4 ? kMaxStep : kMaxStep * 1.3f;
   const bool passable = b.state == 1 || b.state == 3;
   if (own) return passable && std::fabs(rise) <= limit ? 1 : 2;
+  bool by_ray = false;
   if (passable && std::fabs(rise) <= limit) {
-    if (nav.rays_left <= 0) return 0;
+    if (RaysSpent()) return 0;
     --nav.rays_left;
     const float ax = CellCenter(ix), az = CellCenter(iz), bx = CellCenter(ix + kDx[d]), bz = CellCenter(iz + kDz[d]);
     const float h = std::max(ya, b.y) + 0.9f;  // knee to chest of the higher end
     const float from[3] = {ax, h, az}, to[3] = {bx, h, bz};
     float frac = 1.0f;
     r = Ray(ctx, base, soldier, from, to, &frac) && frac < 0.99f ? 2 : 1;
+    by_ray = r == 2;
   }
-  nav.steps[key] = uint8_t(r);
-  if (r == 2) nav.closed_at[key] = Clock::now();
+  // Closed by the ground (too steep, no ground, a low roof) for good; closed by a ray (a wall, or a soldier who stood
+  // there) tried again 20 s on.
+  SetStep(ix, iz, d, r == 1, by_ray ? NavNow() + 20.0f : -1.0f);
   return r;
 }
 
@@ -694,39 +761,47 @@ int CellX(uint64_t key) { return int(uint32_t(key >> 32)); }
 int CellZ(uint64_t key) { return int(uint32_t(key)); }
 
 void SaveStyle();
+// The bots' files are written on a thread of their own (the optimization pass, 20 Nov 2026: a save on the server's
+// tick wrote hundreds of thousands of lines and stalled it), one at a time; the tick only takes a copy.
+std::mutex save_mutex;
 void SaveLearned() {
   const std::filesystem::path file = LearnedFile();
   if (file.empty()) return;
-  std::error_code ec;
-  std::filesystem::create_directories(file.parent_path(), ec);
-  const std::filesystem::path tmp = file.string() + ".new";
-  {
-    std::ofstream f(tmp, std::ios::trunc);
-    if (!f) return;
-    f << "BF1943 Reborn bots, what they learned on " << learn.map << " (1)\n";
-    for (const auto& [k, y] : learn.walk_y) f << "c " << CellX(k) << ' ' << CellZ(k) << ' ' << y << '\n';
-    for (const auto& [k, w] : learn.step_use)
-      f << "s " << CellX(k >> 3) << ' ' << CellZ(k >> 3) << ' ' << (k & 7) << ' ' << w << '\n';
-    const char* kinds[3] = {"k", "d", "w"};
-    const std::unordered_map<uint64_t, float>* maps[3][2] = {
-        {&learn.kills[0], &learn.kills[1]}, {&learn.deaths[0], &learn.deaths[1]}, {&learn.waits[0], &learn.waits[1]}};
-    for (int kind = 0; kind < 3; ++kind)
-      for (int side = 0; side < 2; ++side)
-        for (const auto& [k, w] : *maps[kind][side])
-          f << kinds[kind] << ' ' << side + 1 << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << w << '\n';
-    for (const auto& [flag, steps] : learn.ways_in)
-      for (const auto& [k, w] : steps)
-        f << "a " << flag << ' ' << CellX(k >> 3) << ' ' << CellZ(k >> 3) << ' ' << (k & 7) << ' ' << w << '\n';
-    for (const auto& [key, v] : learn.vehicles) {
-      f << "vt " << key << ' ' << v.time << ' ' << v.kills << ' ' << v.kill_dist << '\n';
-      for (const auto& [k, c] : v.cells)
-        f << "vc " << key << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << c.first / c.second << ' ' << c.second << '\n';
-      for (const auto& [k, w] : v.kills_at) f << "vk " << key << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << w << '\n';
-    }
-  }
-  std::filesystem::rename(tmp, file, ec);
+  auto snap = std::make_shared<Learned>(learn);
   learn.dirty = false, learn.saved_at = Clock::now();
   SaveStyle();
+  std::thread([file, snap] {
+    std::lock_guard lock(save_mutex);
+    const Learned& learn = *snap;
+    std::error_code ec;
+    std::filesystem::create_directories(file.parent_path(), ec);
+    const std::filesystem::path tmp = file.string() + ".new";
+    {
+      std::ofstream f(tmp, std::ios::trunc);
+      if (!f) return;
+      f << "BF1943 Reborn bots, what they learned on " << learn.map << " (1)\n";
+      for (const auto& [k, y] : learn.walk_y) f << "c " << CellX(k) << ' ' << CellZ(k) << ' ' << y << '\n';
+      for (const auto& [k, w] : learn.step_use)
+        f << "s " << CellX(k >> 3) << ' ' << CellZ(k >> 3) << ' ' << (k & 7) << ' ' << w << '\n';
+      const char* kinds[3] = {"k", "d", "w"};
+      const std::unordered_map<uint64_t, float>* maps[3][2] = {
+          {&learn.kills[0], &learn.kills[1]}, {&learn.deaths[0], &learn.deaths[1]}, {&learn.waits[0], &learn.waits[1]}};
+      for (int kind = 0; kind < 3; ++kind)
+        for (int side = 0; side < 2; ++side)
+          for (const auto& [k, w] : *maps[kind][side])
+            f << kinds[kind] << ' ' << side + 1 << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << w << '\n';
+      for (const auto& [flag, steps] : learn.ways_in)
+        for (const auto& [k, w] : steps)
+          f << "a " << flag << ' ' << CellX(k >> 3) << ' ' << CellZ(k >> 3) << ' ' << (k & 7) << ' ' << w << '\n';
+      for (const auto& [key, v] : learn.vehicles) {
+        f << "vt " << key << ' ' << v.time << ' ' << v.kills << ' ' << v.kill_dist << '\n';
+        for (const auto& [k, c] : v.cells)
+          f << "vc " << key << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << c.first / c.second << ' ' << c.second << '\n';
+        for (const auto& [k, w] : v.kills_at) f << "vk " << key << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << w << '\n';
+      }
+    }
+    std::filesystem::rename(tmp, file, ec);
+  }).detach();
 }
 
 // Steps' keys hold the cell in their upper bits (the cell key shifted by 3, the direction in the low 3).
@@ -771,8 +846,12 @@ void LoadLearned(const std::string& map) {
       if (kind == "vk" && (in >> x >> z >> a)) vu.kills_at[CellKey(x, z)] = float(a);
     }
   }
-  for (const auto& [k, y] : learn.walk_y) nav.cells[k] = NavCell{y, 1};
-  for (const auto& [k, w] : learn.step_use) nav.steps[k] = 1;
+  nav.cells.reserve(nav.cells.size() + learn.walk_y.size());
+  for (const auto& [k, y] : learn.walk_y) {
+    NavCell& c = nav.cells[k];
+    c.y = y, c.state = 1;
+  }
+  for (const auto& [k, w] : learn.step_use) SetStep(StepCellX(k), StepCellZ(k), int(k & 7), true);
   float kills = 0, deaths = 0;
   for (int s = 0; s < 2; ++s) {
     for (const auto& [k, w] : learn.kills[s]) kills += w;
@@ -813,8 +892,8 @@ void LearnWalk(const float a[3], const float b[3], float weight, std::deque<std:
     if (cx == px && cz == pz) continue;
     for (int d = 0; d < 8; ++d) {
       if (kDx[d] != cx - px || kDz[d] != cz - pz) continue;
-      const uint64_t there = StepKey(px, pz, d), back = StepKey(cx, cz, kBack[d]);
-      nav.steps[there] = 1, nav.steps[back] = 1;
+      const uint64_t there = StepKey(px, pz, d);
+      SetStep(px, pz, d, true), SetStep(cx, cz, kBack[d], true);
       learn.step_use[there] += weight, learn.dirty = true;
       if (trail) trail->push_back({now, there});
     }
@@ -1011,35 +1090,37 @@ std::filesystem::path GridFile() {
 void SaveGrid() {
   const std::filesystem::path file = GridFile();
   if (file.empty()) return;
-  std::error_code ec;
-  std::filesystem::create_directories(file.parent_path(), ec);
-  const std::filesystem::path tmp = file.string() + ".new";
-  {
-    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-    if (!f) return;
-    const uint32_t magic = 0x42475231, done = nav.scan_done ? 1u : 0u;  // "BGR1"
-    const uint64_t count = nav.cells.size();
-    f.write(reinterpret_cast<const char*>(&magic), 4);
-    f.write(reinterpret_cast<const char*>(&done), 4);
-    f.write(reinterpret_cast<const char*>(&count), 8);
-    for (const auto& [k, c] : nav.cells) {
-      uint8_t open = 0, closed = 0;
-      for (int d = 0; d < 8; ++d) {
-        const auto st = nav.steps.find(StepKey(CellX(k), CellZ(k), d));
-        if (st == nav.steps.end()) continue;
-        if (st->second == 1) open |= uint8_t(1 << d);
-        else if (st->second == 2) closed |= uint8_t(1 << d);
-      }
-      const int32_t x = CellX(k), z = CellZ(k);
-      f.write(reinterpret_cast<const char*>(&x), 4);
-      f.write(reinterpret_cast<const char*>(&z), 4);
-      f.write(reinterpret_cast<const char*>(&c.y), 4);
-      f.write(reinterpret_cast<const char*>(&c.state), 1);
-      f.write(reinterpret_cast<const char*>(&open), 1);
-      f.write(reinterpret_cast<const char*>(&closed), 1);
+  struct Row {
+    int32_t x, z;
+    float y;
+    uint8_t state, open, closed;
+  };
+  auto rows = std::make_shared<std::vector<Row>>();
+  rows->reserve(nav.cells.size());
+  for (const auto& [k, c] : nav.cells)
+    if (c.state != 0) rows->push_back(Row{CellX(k), CellZ(k), c.y, c.state, c.open, uint8_t(c.closed & ~c.open)});
+  const uint32_t done = nav.scan_done ? 1u : 0u;
+  std::thread([file, rows, done] {
+    std::lock_guard lock(save_mutex);
+    std::error_code ec;
+    std::filesystem::create_directories(file.parent_path(), ec);
+    const std::filesystem::path tmp = file.string() + ".new";
+    {
+      std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+      if (!f) return;
+      const uint32_t magic = 0x42475231;  // "BGR1"
+      const uint64_t count = rows->size();
+      f.write(reinterpret_cast<const char*>(&magic), 4);
+      f.write(reinterpret_cast<const char*>(&done), 4);
+      f.write(reinterpret_cast<const char*>(&count), 8);
+      std::vector<char> out;
+      out.reserve(rows->size() * 15);
+      auto put = [&](const void* v, size_t n) { out.insert(out.end(), static_cast<const char*>(v), static_cast<const char*>(v) + n); };
+      for (const Row& r : *rows) put(&r.x, 4), put(&r.z, 4), put(&r.y, 4), put(&r.state, 1), put(&r.open, 1), put(&r.closed, 1);
+      f.write(out.data(), std::streamsize(out.size()));
     }
-  }
-  std::filesystem::rename(tmp, file, ec);
+    std::filesystem::rename(tmp, file, ec);
+  }).detach();
 }
 
 void LoadGrid() {
@@ -1051,6 +1132,7 @@ void LoadGrid() {
   f.read(reinterpret_cast<char*>(&done), 4);
   f.read(reinterpret_cast<char*>(&count), 8);
   if (!f || magic != 0x42475231 || count > 20000000) return;
+  nav.cells.reserve(nav.cells.size() + count);
   for (uint64_t i = 0; i < count && f; ++i) {
     int32_t x = 0, z = 0;
     NavCell c;
@@ -1062,13 +1144,11 @@ void LoadGrid() {
     f.read(reinterpret_cast<char*>(&open), 1);
     f.read(reinterpret_cast<char*>(&closed), 1);
     const uint64_t k = CellKey(x, z);
-    if (!nav.cells.count(k)) nav.cells[k] = c;  // what was walked (already in) stands over what was scanned
+    NavCell& have = nav.cells[k];
+    if (have.state == 0) have.y = c.y, have.state = c.state;  // what was walked (already in) stands over the scan's
     nav.scanned.insert(k);
-    for (int d = 0; d < 8; ++d) {
-      const uint64_t sk = StepKey(x, z, d);
-      if (open & (1 << d)) nav.steps[sk] = 1;
-      else if ((closed & (1 << d)) && !nav.steps.count(sk)) nav.steps[sk] = 2;
-    }
+    have.open |= open;
+    have.closed |= uint8_t(closed & ~have.open);
   }
   nav.scan_done = done != 0;
   REXLOG_INFO("BF bots: the level's grid loaded: {} cells{}", count, nav.scan_done ? " (the whole level)" : " (a scan in part)");
@@ -1080,28 +1160,33 @@ void ScanFrom(const float at[3]) {
   nav.scan_min[1] = std::min(nav.scan_min[1], at[2] - 120.0f), nav.scan_max[1] = std::max(nav.scan_max[1], at[2] + 120.0f);
   const int x = CellOf(at[0]), z = CellOf(at[2]);
   const uint64_t k = CellKey(x, z);
-  if (!nav.cells.count(k)) nav.cells[k] = NavCell{at[1], 1};
+  NavCell& c = nav.cells[k];
+  if (c.state == 0) c.y = at[1], c.state = 1;
   if (nav.scanned.insert(k).second) nav.scan.push_back(k);
 }
 
 // One tick of the scan: cells taken from its queue, their 8 steps found (rays within its own budget), the new cells
 // reached queued. False when there was nothing to do.
-bool ScanTick(PPCContext& ctx, uint8_t* base, uint32_t soldier) {
+bool ScanTick(PPCContext& ctx, uint8_t* base, uint32_t soldier, double budget_ms) {
   if (nav.scan_done || nav.scan.empty() || !soldier) return false;
   nav.scan_rays_left = kScanRaysPerTick;
-  while (!nav.scan.empty()) {
+  // Its own time budget (the optimization pass: with players on the server a little each tick, alone more).
+  const auto keep_deadline = nav.ray_deadline;
+  nav.ray_deadline = Clock::now() + std::chrono::microseconds(int64_t(budget_ms * 1000));
+  while (!nav.scan.empty() && Clock::now() <= nav.ray_deadline) {
     const uint64_t k = nav.scan.front();
     const auto c = nav.cells.find(k);
     if (c == nav.cells.end() || (c->second.state != 1 && c->second.state != 3)) {
       nav.scan.pop_front();
       continue;
     }
+    const float cy = c->second.y;  // (Step may add cells and move the map's entries)
     // Step() spends the path budget: the scan lends it its own for the call.
     const int keep = nav.rays_left;
     nav.rays_left = nav.scan_rays_left;
     bool starved = false;
     for (int d = 0; d < 8; ++d) {
-      const int st = Step(ctx, base, soldier, CellX(k), CellZ(k), c->second.y, d);
+      const int st = Step(ctx, base, soldier, CellX(k), CellZ(k), cy, d);
       if (st == 0) {
         starved = true;
         break;
@@ -1116,9 +1201,10 @@ bool ScanTick(PPCContext& ctx, uint8_t* base, uint32_t soldier) {
     if (starved) break;  // this cell again next tick, its steps found so far kept
     nav.scan.pop_front();
   }
+  nav.ray_deadline = keep_deadline;
   if (nav.scan.empty()) {
     nav.scan_done = true;
-    REXLOG_INFO("BF bots: the level is mapped: {} cells, {} steps, in {:.0f} s", nav.cells.size(), nav.steps.size(),
+    REXLOG_INFO("BF bots: the level is mapped: {} cells in {:.0f} s", nav.cells.size(),
                 std::chrono::duration<double>(Clock::now() - nav.scan_began).count());
     SaveGrid();
   }
@@ -1265,6 +1351,9 @@ bool MakeBot(PPCContext& outer, uint8_t* base, uint32_t manager, int index, int 
   REXLOG_INFO("BF bots: {} joins: team {}, squad {}, kit {:08X}", bot.name, Load32(base, bot.player + 48),
               Load32(base, bot.player + 52), Load32(base, bot.player + 500));
   bot.died = Clock::now() - std::chrono::seconds(10);
+  // Its thinking spread over the ticks: each bot a little after the one before.
+  bot.next_think = Clock::now() + std::chrono::milliseconds((index * 37) % 250);
+  bot.next_ride = Clock::now() + std::chrono::milliseconds((index * 53) % 500);
   g.bots.push_back(bot);
   return true;
 }
@@ -1329,7 +1418,7 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
     const uint32_t so = Load32(base, p + 288);
     if (!so || !Readable(so, 0x140)) continue;
     Enemy e{so, {}, 0};
-    if (!Position(ctx, base, so, e.pos)) continue;
+    if (!CachedPosition(ctx, base, so, e.pos)) continue;
     e.dist = Dist2D(pos, e.pos);
     if (e.dist < kSightRange) enemies.push_back(e);
   }
@@ -1379,7 +1468,7 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
     if (seen->soldier != bot.enemy) {
       bot.enemy = seen->soldier;
       bot.aim_error_yaw = (Rand01() - 0.5f) * 4 * kAimError, bot.aim_error_pitch = (Rand01() - 0.5f) * 2 * kAimError;
-      REXLOG_INFO("BF bots: {} sees an enemy {:.0f} m away", bot.name, seen->dist);
+      if (REXCVAR_GET(bf_bots_log_detail)) REXLOG_INFO("BF bots: {} sees an enemy {:.0f} m away", bot.name, seen->dist);
     }
     const float chest[3] = {seen->pos[0], seen->pos[1] + 1.2f, seen->pos[2]};
     // The aim settles on the target: the error shrinks while it keeps the enemy in sight.
@@ -1408,7 +1497,7 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
     bot.path.clear();
     return;
   }
-  if (bot.enemy) REXLOG_INFO("BF bots: {} lost sight of its enemy", bot.name);
+  if (bot.enemy && REXCVAR_GET(bf_bots_log_detail)) REXLOG_INFO("BF bots: {} lost sight of its enemy", bot.name);
   bot.enemy = 0, bot.fire = false, bot.strafe = 0, bot.ads = false;
   bot.want_pitch = 0;
   // The flag: the nearest one its team does not hold; with all held, the nearest one (to hold it). A bot keeps its
@@ -1444,7 +1533,8 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
     bot.defending = FlagOwner(base, g.flags[best]) == team;
     bot.sprinter = Rand01() < SprintShare() * 1.6 * bot.jitter[0];
     std::memcpy(bot.goal_pos, g.flags[best].pos, sizeof(bot.goal_pos));
-    REXLOG_INFO("BF bots: {} goes for flag '{}' ({:.0f} m, held by {})", bot.name, g.flags[best].name, best_d,
+    if (REXCVAR_GET(bf_bots_log_detail))
+      REXLOG_INFO("BF bots: {} goes for flag '{}' ({:.0f} m, held by {})", bot.name, g.flags[best].name, best_d,
                 FlagOwner(base, g.flags[best]));
   }
   if (best < 0) {
@@ -1454,7 +1544,8 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
   // At the flag: in its capture area (the game's own list), or within kAtFlag of its pole (which may stand on a roof):
   // wander about it, a new spot now and then.
   const bool in_area = InCaptureArea(base, g.flags[best], bot.player, soldier);
-  if (in_area && !bot.was_in_area) REXLOG_INFO("BF bots: {} is in flag '{}''s area", bot.name, g.flags[best].name);
+  if (in_area && !bot.was_in_area && REXCVAR_GET(bf_bots_log_detail))
+    REXLOG_INFO("BF bots: {} is in flag '{}''s area", bot.name, g.flags[best].name);
   bot.was_in_area = in_area;
   const bool at_flag = in_area || best_d < kAtFlag;
   if (!at_flag && bot.no_reach >= 2) {
@@ -1490,7 +1581,11 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
     bot.check_at = now;
   }
   const bool goal_moved = Dist2D(bot.goal_pos, bot.path_goal) > 4.0f;
-  if (bot.path.empty() || goal_moved || now >= bot.replan_at || stuck) {
+  // At most kSearchesPerTick searches a server tick (the optimization pass: 23 bots replanning in one tick cost tens
+  // of milliseconds); a bot left over keeps its path and plans at its next think. A stuck bot plans at once.
+  const bool want_plan = bot.path.empty() || goal_moved || now >= bot.replan_at || stuck;
+  if (want_plan && (g.searches_left > 0 || stuck)) {
+    --g.searches_left;
     bool complete = false, starved = false;
     // Stuck with a path: the step it was taking is closed for a minute (something the rays did not see: a railing, a
     // fence's gap too small, a slope too steep), and the next plan goes round it.
@@ -1499,13 +1594,10 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
       const int ddx = (CellOf(bot.path.front()[0]) > cx) - (CellOf(bot.path.front()[0]) < cx);
       const int ddz = (CellOf(bot.path.front()[2]) > cz) - (CellOf(bot.path.front()[2]) < cz);
       for (int d = 0; d < 8; ++d)
-        if (kDx[d] == ddx && kDz[d] == ddz) {
-          const uint64_t key = (CellKey(cx, cz) << 3) ^ uint64_t(d);
-          nav.steps[key] = 2;
-          nav.closed_at[key] = now + std::chrono::seconds(40);
-        }
+        if (kDx[d] == ddx && kDz[d] == ddz) SetStep(cx, cz, d, false, NavNow() + 60.0f);
     }
     const auto ways = learn.ways_in.find(g.flags[best].name);
+    ++cost.searches;
     bot.path = FindPath(ctx, base, soldier, pos, bot.goal_pos, &complete, &starved, team,
                         ways != learn.ways_in.end() ? &ways->second : nullptr);
     if (!complete && !starved && !bot.path.empty() && Dist2D(bot.path.back().data(), bot.goal_pos) > 4.0f) ++bot.no_reach;
@@ -1521,10 +1613,11 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
         const int cx = CellOf(pos[0]), cz = CellOf(pos[2]);
         for (int d = 0; d < 8; ++d) {
           const auto c = nav.cells.find(CellKey(cx + kDx[d], cz + kDz[d]));
-          const auto st = nav.steps.find((CellKey(cx, cz) << 3) ^ uint64_t(d));
+          const auto own = nav.cells.find(CellKey(cx, cz));
+          const int st = own == nav.cells.end() ? -1 : (own->second.open >> d) & 1 ? 1 : (own->second.closed >> d) & 1 ? 2 : -1;
           around += fmt::format(" [{},{}: {} y {:.1f} step {}]", kDx[d], kDz[d],
                                 c == nav.cells.end() ? -1 : int(c->second.state),
-                                c == nav.cells.end() ? 0.0f : c->second.y, st == nav.steps.end() ? -1 : int(st->second));
+                                c == nav.cells.end() ? 0.0f : c->second.y, st);
         }
         REXLOG_INFO("BF bots: {} finds no way from {:.1f} {:.1f} {:.1f} (water {:.1f}):{}", bot.name, pos[0], pos[1],
                     pos[2], nav.water, around);
@@ -1589,6 +1682,9 @@ void Drive(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t soldier, double 
   if (!InImage(vtable)) return;
   call = outer;
   call.r3.u64 = soldier, call.r4.u64 = 0;
+  // (vtable 82013A40 +260: sub_822F05C8, the step a human's input runs too, 60 a second each, about 0.05 ms: run
+  // botsstep2 of the optimization pass. Most of what a bot costs is this, as a human player's soldier costs.)
+  CostTimer t(&cost.input_step);
   CallGuest(call, base, Load32(base, vtable + 260));
 }
 }  // namespace
@@ -1748,17 +1844,38 @@ void BotsLevelChange() {
   g.vehicle_spawns.clear();
   g.bots.clear();
   g.level_seen = false;
-  nav.cells.clear(), nav.steps.clear(), nav.closed_at.clear();
+  nav.cells.clear();
   nav.scan.clear(), nav.scanned.clear(), nav.scan_started = nav.scan_done = false;
   nav.scan_min[0] = nav.scan_min[1] = 1e9f, nav.scan_max[0] = nav.scan_max[1] = -1e9f;
 }
 
 // Every server tick (server_rotation.cpp, after the game's own tick).
+static void BotsTickImpl(PPCContext& ctx, uint8_t* base);
 void BotsTick(PPCContext& ctx, uint8_t* base) {
-  if (!REXCVAR_GET(server)) return;
+  if (!REXCVAR_GET(server) || WantedBots() <= 0) return;
+  const auto t0 = Clock::now();
+  BotsTickImpl(ctx, base);
+  const auto t1 = Clock::now();
+  const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  cost.total += ms, cost.worst = std::max(cost.worst, ms), ++cost.ticks;
+  if (cost.since == Clock::time_point{}) cost.since = t1;
+  if (t1 - cost.since >= std::chrono::seconds(30)) {
+    const double n = std::max(1, cost.ticks);
+    REXLOG_INFO("BF bots: cost over {:.0f} s with {} bots: {:.3f} ms a tick on average, {:.1f} ms the worst; learning "
+                "{:.3f}, mapping {:.3f}, thinking {:.3f}, steering {:.3f} (the game's input step {:.3f}), saving {:.3f} ms a "
+                "tick; {} path searches",
+                std::chrono::duration<double>(t1 - cost.since).count(), g.bots.size(), cost.total / n, cost.worst,
+                cost.learn / n, cost.scan / n, cost.think / n, cost.drive / n, cost.input_step / n, cost.save / n, cost.searches);
+    cost = BotCost{};
+    cost.since = t1;
+  }
+}
+
+static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
   const int wanted = WantedBots();
-  if (wanted <= 0) return;
   const auto now = Clock::now();
+  TickPositions();
+  g.searches_left = kSearchesPerTick;
   static Clock::time_point last = now;
   const double dt = std::clamp(std::chrono::duration<double>(now - last).count(), 0.0, 0.1);
   last = now;
@@ -1814,6 +1931,7 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
       const uint32_t t = Load32(base, p + 48);
       if (t == 1 || t == 2) ++side[t];
     }
+    g.humans = humans;
     const int room = std::max(0, int(REXCVAR_GET(bf_gm_max_players)) - humans);
     const int target = std::min(wanted, room);
     static int told = -1;
@@ -1853,10 +1971,10 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
 #endif
   nav.rays_left = kRaysPerTick;
   static Clock::time_point ray_log{};
-  if (now - ray_log > std::chrono::seconds(10)) {
+  if (now - ray_log > std::chrono::seconds(60)) {
     if (ray_log != Clock::time_point{})
-      REXLOG_INFO("BF bots: {} ray tests in 10 s, {:.3f} ms each; {} grid cells, {} steps known", g.rays,
-                  g.rays ? g.ray_ms / double(g.rays) : 0.0, nav.cells.size(), nav.steps.size());
+      REXLOG_INFO("BF bots: {} ray tests in 60 s, {:.3f} ms each; {} grid cells known", g.rays,
+                  g.rays ? g.ray_ms / double(g.rays) : 0.0, nav.cells.size());
     ray_log = now, g.rays = 0, g.ray_ms = 0;
   }
   // BF_BOT_INPUTLOG=1 (tests): each human's input as it changes, its digital concepts (the bits set) and its analog
@@ -1886,6 +2004,7 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
   }
   // Learning from the match (Learned): every soldier on foot's walk (a human's counts 1, a bot's 0.5), and a
   // human's trail of the last 90 s and its waits near enemies.
+  const auto learn_t0 = Clock::now();
   struct Seen {
     float pos[3];
     int side;
@@ -1897,7 +2016,7 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
     if (!Readable(p, 0x140)) continue;
     const uint32_t so = Load32(base, p + 288);
     Seen s{{}, int(Load32(base, p + 48)), !IsBot(p)};
-    if (!so || Load32(base, p + 312) != so || !Position(ctx, base, so, s.pos)) continue;
+    if (!so || Load32(base, p + 312) != so || !CachedPosition(ctx, base, so, s.pos)) continue;
     seen_of[p] = seen.size();
     seen.push_back(s);
   }
@@ -1990,7 +2109,11 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
       if (told.insert(key).second) REXLOG_INFO("BF bots: a player in {} (learning its way)", key);
     }
   }
-  if (learn.dirty && now - learn.saved_at > std::chrono::seconds(20)) SaveLearned();
+  cost.learn += std::chrono::duration<double, std::milli>(Clock::now() - learn_t0).count();
+  if (learn.dirty && now - learn.saved_at > std::chrono::seconds(20)) {
+    CostTimer t(&cost.save);
+    SaveLearned();
+  }
   // The level's scan: once the water's height is known (a bot's physics), from every spawn point and flag.
   {
     uint32_t any_soldier = 0;
@@ -2020,8 +2143,14 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
       REXLOG_INFO("BF bots: mapping the level from {} places (water at {:.1f})", nav.scan.size(), nav.water);
     }
     static Clock::time_point grid_saved{};
-    if (ScanTick(ctx, base, any_soldier) && now - grid_saved > std::chrono::seconds(60)) {
+    bool scanned;
+    {
+      CostTimer t(&cost.scan);
+      scanned = ScanTick(ctx, base, any_soldier, g.humans > 0 ? kScanMsPlayed : kScanMsAlone);
+    }
+    if (scanned && now - grid_saved > std::chrono::seconds(60)) {
       grid_saved = now;
+      CostTimer t(&cost.save);
       SaveGrid();
       REXLOG_INFO("BF bots: mapping: {} cells known, {} to look at", nav.cells.size(), nav.scan.size());
     }
@@ -2121,13 +2250,15 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
     }
     holders[f.entity] = h;
   }
+  // The path searches' rays: a time budget for this tick's thinking as well as a count.
+  nav.ray_deadline = Clock::now() + std::chrono::microseconds(int64_t(kPathRayMs * 1000));
   for (Bot& bot : g.bots) {
     const uint32_t soldier = Load32(base, bot.player + 288);
     if (soldier != bot.last_soldier) {
       if (!soldier) {
         bot.died = now;
         bot.kit_choice = -1;  // a kit chosen again for the next life
-        REXLOG_INFO("BF bots: {} died", bot.name);
+        if (REXCVAR_GET(bf_bots_log_detail)) REXLOG_INFO("BF bots: {} died", bot.name);
       }
       bot.last_soldier = soldier;
     }
@@ -2160,7 +2291,8 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
         REXLOG_INFO("BF bots: spawn point {:08X} seats its soldier in {:08X} (vtable {:08X}); data +80..:{}", at, controls,
                     Readable(controls, 4) ? Load32(base, controls) : 0, w);
       }
-      REXLOG_INFO("BF bots: {} spawns at {:.1f} {:.1f} {:.1f}: {}", bot.name, p[0], p[1], p[2],
+      if (REXCVAR_GET(bf_bots_log_detail) || !spawned)
+        REXLOG_INFO("BF bots: {} spawns at {:.1f} {:.1f} {:.1f}: {}", bot.name, p[0], p[1], p[2],
                   !spawned ? "refused" : seated ? "in a vehicle" : "on foot");
       if (spawned) bot.spawn_tries = 0;
       continue;
@@ -2168,7 +2300,7 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
     // In a vehicle: a passenger's seat, given up only with its life for now (bots do not drive yet), no input of ours.
     if (const uint32_t controls = Load32(base, bot.player + 312); controls && controls != soldier) continue;
     float pos[3] = {};
-    if (!Position(ctx, base, soldier, pos)) continue;
+    if (!CachedPosition(ctx, base, soldier, pos)) continue;
     // Riding along (the user, 19 Nov 2026: "get into friendly boats passing by close enough if a seat is available"):
     // a vehicle of its own side that a human drives, within 6 m (a swimmer's reach, or a step to it), gets the bot into
     // its first free seat other than the driver's, by the server's own seating (sub_82398B98, as a client's request).
@@ -2185,7 +2317,7 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
         const uint32_t driver = SeatPlayer(base, v, 0);
         if (!driver || IsBot(driver) || !Readable(driver, 0x40) || Load32(base, driver + 48) != side) continue;
         float at[3];
-        if (!Position(ctx, base, v, at) || Dist2D(at, pos) > 6.0f || std::fabs(at[1] - pos[1]) > 4.0f) continue;
+        if (!CachedPosition(ctx, base, v, at) || Dist2D(at, pos) > 6.0f || std::fabs(at[1] - pos[1]) > 4.0f) continue;
         const uint32_t n = SeatCount(ctx, base, v);
         for (uint32_t seat = 1; seat < n; ++seat) {
           if (SeatPlayer(base, v, seat)) continue;
@@ -2202,10 +2334,14 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
     }
     if (now >= bot.next_think) {
       bot.next_think = now + std::chrono::milliseconds(250);
+      CostTimer t(&cost.think);
       Think(ctx, base, bot, soldier, pos, listed, now);
     }
-    Drive(ctx, base, bot, soldier, dt);
-    if (now >= bot.next_log) {
+    {
+      CostTimer t(&cost.drive);
+      Drive(ctx, base, bot, soldier, dt);
+    }
+    if (now >= bot.next_log && REXCVAR_GET(bf_bots_log_detail)) {
       bot.next_log = now + std::chrono::seconds(3);
       REXLOG_INFO("BF bots: {} (team {}) at {:.1f} {:.1f} {:.1f}, heading {:.2f}{}{}", bot.name,
                   Load32(base, bot.player + 48), pos[0], pos[1], pos[2], bot.yaw, bot.enemy ? ", fighting" : "",
