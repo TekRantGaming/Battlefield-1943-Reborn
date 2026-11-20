@@ -24,6 +24,9 @@ import struct
 import sys
 import time
 
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:  # -I leaves the script's folder out (bans.py)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 CONTROL, LINK, VOICE = 7, 1, 0
 INIT, CONN, UNREL, DATA = 1, 2, 0x80, 0x100
 KIND_STREAM, KIND_DATAGRAM, KIND_SYNC = 6, 7, 0x40
@@ -433,8 +436,12 @@ def player_blob(pid, slot, name, xuid, address, port, stamp):
 
 
 class Player:
-    def __init__(self, pid, name, xuid, address, ticket):
+    def __init__(self, pid, name, xuid, address, ticket, account=''):
         self.pid, self.name, self.xuid, self.address, self.ticket = pid, name, xuid, address, ticket
+        self.account = account  # its Protect your name account's key, when the backend knows one (moderation)
+
+    def player_id(self):
+        return '%08X' % (self.xuid & 0xFFFFFFFF) if self.xuid & 0xFFFFFFFF else ''
 
 
 # ---- voice and text chat (bf/src/comms.cpp is the other end; docs/COMMS-PLAN.md)
@@ -449,6 +456,10 @@ C_HELLO, C_WELCOME, C_STATE, C_CHAT_RELAY, C_CHAT, C_ROSTER, C_VOICE, C_VOICE_RE
 # id (2 bytes), kind (BROADCAST_KINDS), seconds on screen, the text. A game older than v0.4.0 ignores the kind; one
 # older than v0.4.7 shows maintenance (3) as a message.
 C_BROADCAST = 11
+# Moderation (server/bans.py, 20 Nov 2026): the host to a player it removes (a kick, a ban, a network ban): the title and
+# the message (each a length byte and text). A game from v0.4.8 leaves the match and shows them in its notice pop-up;
+# an older one ignores it and gets the same text in the broadcast box (Comms.tell) just before its link is dropped.
+C_KICKED = 12
 BROADCAST_KINDS = {'custom': 0, 'update': 1, 'restart': 2, 'maintenance': 3}
 COMMS_PROTOCOL = 1
 CHAT_ALL, CHAT_TEAM, CHAT_SQUAD = 0, 1, 2
@@ -468,6 +479,8 @@ class CommsClient:
         self.chat_times = []
         self.chat_seen = []  # the last message numbers: each message comes twice (UDP may lose one)
         self.voice_second, self.voice_count = 0, 0
+        self.mute = (None, None)  # (the ban list's stamp, the mute entry then): GameHost.muted
+        self.mute_told = 0.0
 
 
 class Comms:
@@ -612,6 +625,16 @@ class Comms:
             seconds = 10
         self.broadcast(m.get('text', ''), str(m.get('kind', 'custom')), seconds)
 
+    def kicked(self, name, title, message):
+        """A player being removed (GameHost.remove): C_KICKED for a v0.4.8 game (it leaves and shows the pop-up), and the
+        message in the broadcast box for an older one."""
+        body = short_text(title) + short_text(message)
+        for c in self.clients.values():
+            if c.name == name:
+                for _ in range(3):
+                    self.send(C_KICKED, body, c.addr)
+        self.tell(name, message, seconds=15)
+
     def joined_player(self, name, addr):
         return any(p.state == 'joined' and p.player and p.player.name == name and p.addr[0] == addr[0]
                    for p in self.host.peers.values())
@@ -671,6 +694,9 @@ class Comms:
                 return  # empty, more than 5 in 5 s, or no such channel
             if (channel == CHAT_TEAM and not client.team) or (channel == CHAT_SQUAD and not client.squad):
                 return  # its team or squad not known (the client says so itself): never to the other team
+            if self.host.muted(client):
+                self.host.note('comms chat %s (muted, not passed on): %s' % (client.name, text_[:80]))
+                return
             name = client.name.encode('utf-8')[:64]
             raw = text_.encode('utf-8')[:CHAT_MAX]
             relay = struct.pack('>HHBBB', client.id, msg, channel, client.team, len(name)) + name + bytes([len(raw)]) + raw
@@ -692,6 +718,8 @@ class Comms:
                 client.voice_second, client.voice_count = second, 0
             client.voice_count += 1
             if client.voice_count > 60:  # 50 a second is a full 20 ms stream
+                return
+            if self.host.muted(client):
                 return
             relay = struct.pack('>H', client.id) + body[2:19 + n]
             for other in self.clients.values():
@@ -925,6 +953,14 @@ class Peer:
             if not self.player:
                 self.note('hello with unknown ticket %s' % ticket)
                 return
+            # Moderation (server/bans.py): a banned or kicked player is not let in, whatever its game did before.
+            entry, network = self.host.refused(self.player, self.addr)
+            if entry:
+                self.note('%s refused: %s' % (self.player.name, self.host.why_text(entry, network)))
+                self.host.moderation_event('refused', self.player, entry, network)
+                self.host.block(self.addr, 120)
+                self.host.drop(self.addr)
+                return
             self.note('hello from %s (PID %d)' % (self.player.name, self.player.pid))
             self.send_roster()
         elif t == 4:  # roster ack
@@ -957,11 +993,17 @@ class Peer:
         self.gm(i8(9) + i32(pid) + bytes.fromhex('80000000800000000000000000000400800000000000000000'))
         self.gm(i8(0x15) + b'\x01' + i32(self.host.pid) + b'\x00')
         self.state = 'joined'
+        self.joined_at = time.time()
         self.note('joined: game packets now go to the server')
 
     # ---- game packets
 
     def to_server(self, body):
+        if not self.player:
+            # Only a player the backend announced (its ticket) and this host let in has its game packets passed on: a
+            # client that never showed one (or one refused) gets nothing to the server (moderation, 20 Nov 2026).
+            self.host.unlet += 1
+            return
         if not self.server:
             loop = asyncio.get_running_loop()
             self.server = ServerSide(self)
@@ -1257,6 +1299,19 @@ class GameHost(asyncio.DatagramProtocol):
         self.error_noted = 0  # monotonic time of the last socket error written to the log
         self.note_window, self.notes_in_window, self.notes_dropped = 0.0, 0, 0
         self.bad_packets, self.refused_peers, self.quiet_noted = 0, 0, 0.0
+        # Moderation (server/bans.py; docs/MODERATION.md): this server's ban list (the manager's, --bans-file), the
+        # players the main backend told it to remove (a network ban: player id -> entry), addresses kept out for a
+        # while after a removal, players being removed (address -> when their link is dropped) and the moderation log.
+        self.bans = None
+        self.server_number = 0
+        self.network_out = {}
+        self.blocked = {}
+        self.removing = {}
+        self.modlog = None
+        self.backend_send = None    # the backend link's send (serve), for the ban list's summary
+        self.bans_salt = os.urandom(8).hex()
+        self.unlet, self.unlet_noted = 0, 0.0
+        self.enforce_at = 0.0
 
     def close(self):
         """This host is replaced by another (a registration that gave other ids): its players' links, their sockets to
@@ -1286,7 +1341,7 @@ class GameHost(asyncio.DatagramProtocol):
             self.log.write(line + '\n')
             self.log.flush()
 
-    def expect(self, ticket, pid, name, xuid, address_b64):
+    def expect(self, ticket, pid, name, xuid, address_b64, account=''):
         import base64
         try:
             address = base64.b64decode(address_b64)[:36]
@@ -1294,8 +1349,126 @@ class GameHost(asyncio.DatagramProtocol):
             address = b''
         if len(address) != 36:
             address = xnaddr('0.0.0.0')
-        self.players[ticket] = Player(int(pid), name, int(xuid or 0), address, ticket)
+        self.players[ticket] = Player(int(pid), name, int(xuid or 0), address, ticket, str(account or '')[:64])
         self.players[ticket].expected_at = time.monotonic()
+
+    # ---- moderation
+    def refused(self, player, addr):
+        """(the entry that keeps this player out, network: bool), or (None, False)."""
+        pid = player.player_id()
+        e = self.network_out.get(pid)
+        if e and e['until'] > time.time():
+            return e, True
+        if self.bans:
+            e = self.bans.match(pid, getattr(player, 'account', ''), addr[0], self.server_number)
+            if e:
+                return e, False
+        return None, False
+
+    def why_text(self, e, network):
+        if network:
+            return 'banned on the Reborn network'
+        import bans
+        return '%s %s (%s, %s): %s' % ('kicked' if e['kind'] == 'kick' else 'banned', e['id'],
+                                         'until ' + bans.when_text(e['until']) if e['until'] else 'permanent',
+                                         'by ' + e.get('by', ''), e.get('reason') or 'no reason given')
+
+    def moderation_event(self, action, player, e, network=False):
+        if self.modlog:
+            self.modlog.write(action=action, server=self.server_number or None, name=player.name,
+                              id=player.player_id(), ban=None if network else e.get('id'),
+                              kind='network' if network else e.get('kind'),
+                              reason=None if network else e.get('reason'), network=True if network else None)
+
+    def block(self, addr, seconds):
+        self.blocked[addr] = time.monotonic() + seconds
+
+    def remove(self, peer, e, network):
+        """A joined player taken off the server: told why (the pop-up in a v0.4.8 game, else the message box), then its
+        link dropped two seconds later and its address kept out for two minutes."""
+        if peer.addr in self.removing:
+            return
+        if network:
+            title, message = e['title'], e['message']
+        else:
+            import bans
+            title, message = bans.refusal(e, False)
+        self.note('%s removed: %s' % (peer.player.name, self.why_text(e, network)))
+        self.moderation_event('removed', peer.player, e, network)
+        self.comms.kicked(peer.player.name, title, message)
+        self.removing[peer.addr] = time.monotonic() + 2.0
+
+    def enforce(self):
+        """Every player on the server checked against the ban list as it is now."""
+        for addr, peer in list(self.peers.items()):
+            if peer.player and addr not in self.removing:
+                e, network = self.refused(peer.player, addr)
+                if e:
+                    self.remove(peer, e, network)
+
+    def muted(self, client):
+        """The mute that holds this comms client (its player on this server, by name and address), or None."""
+        if not self.bans:
+            return None
+        stamp, e = client.mute
+        if stamp != (self.bans.stamp, int(time.time()) // 30):
+            e = None
+            for peer in self.peers.values():
+                if peer.state == 'joined' and peer.player and peer.player.name == client.name and \
+                        peer.addr[0] == client.addr[0]:
+                    e = self.bans.match(peer.player.player_id(), getattr(peer.player, 'account', ''), peer.addr[0],
+                                        self.server_number, kinds=('mute',))
+                    break
+            client.mute = ((self.bans.stamp, int(time.time()) // 30), e)
+        if e and time.monotonic() - client.mute_told > 60:
+            import bans
+            client.mute_told = time.monotonic()
+            self.comms.tell(client.name, bans.mute_text(e), seconds=10)
+        return e
+
+    def bans_summary(self):
+        """This server's bans and kicks for the backend (plasma.py server_bans), so it refuses a banned player before
+        the join with the pop-up: every id, account and address salted and hashed, with the player's title and
+        message."""
+        import bans
+        rows = []
+        now = time.time()
+        for e in (self.bans.active() if self.bans else []):
+            if e['kind'] not in ('ban', 'kick') or (e['servers'] and self.server_number not in e['servers']):
+                continue
+            ips = e['ips'] if not e['ip_until'] or e['ip_until'] > now else []
+            title, message = bans.refusal(e, False, now)
+            rows.append({'id': e['id'], 'ids': [bans.hashed(self.bans_salt, x) for x in e['ids']],
+                         'accounts': [bans.hashed(self.bans_salt, x) for x in e['accounts']],
+                         'ips': [bans.hashed(self.bans_salt, x) for x in ips], 'until': e['until'],
+                         'ip_until': e['ip_until'], 'kind': e['kind'], 'title': title, 'message': message})
+        return {'op': 'server_bans', 'salt': self.bans_salt, 'bans': rows[:2000]}
+
+    def send_bans(self):
+        if self.backend_send:
+            try:
+                self.backend_send(self.bans_summary())
+            except Exception as e:  # never the host's loop for it
+                self.note('moderation: the ban list could not be sent to the backend (%s)' % type(e).__name__)
+
+    def moderation_tick(self, now):
+        for addr, at in list(self.removing.items()):
+            if now >= at:
+                del self.removing[addr]
+                self.block(addr, 120)
+                self.drop(addr)
+        for addr in [a for a, until in self.blocked.items() if until <= now]:
+            del self.blocked[addr]
+        changed = bool(self.bans and self.bans.reload())
+        if changed:
+            self.note('moderation: ban list read (%d entries)' % len(self.bans.entries))
+            self.send_bans()
+        if changed or now - self.enforce_at > 5:
+            self.enforce_at = now
+            self.enforce()
+        if self.unlet and now - self.unlet_noted > 30:
+            self.note('%d game packets from clients not let in were passed over' % self.unlet)
+            self.unlet, self.unlet_noted = 0, now
 
     def connection_made(self, transport):
         self.transport = transport
@@ -1338,6 +1511,8 @@ class GameHost(asyncio.DatagramProtocol):
             else:
                 self.transport.sendto(PONG + data[8:40], addr)
             return
+        if addr in self.blocked:
+            return  # removed by moderation a moment ago (GameHost.remove): nothing answered for a while
         # The match's clock and weather (World): asked for from a socket of the game's own.
         if data[:8] == b'BF43WRLD' and len(data) > 12:
             self.world.receive(data[8:], addr)
@@ -1379,6 +1554,13 @@ class GameHost(asyncio.DatagramProtocol):
     def player_count(self):
         return sum(1 for p in self.peers.values() if p.state == 'joined')
 
+    def roster(self):
+        """The joined players for the server manager's Moderation page (the status file, on this machine only): name,
+        player id, address and account."""
+        return [{'name': p.player.name, 'id': p.player.player_id(), 'ip': p.addr[0],
+                 'account': getattr(p.player, 'account', ''), 'since': int(getattr(p, 'joined_at', 0))}
+                for p in self.peers.values() if p.state == 'joined' and p.player][:64]
+
     def player_names(self):
         """The joined players' names, for the backend's Join Match With Friends (our main menu)."""
         return [p.player.name for p in self.peers.values() if p.state == 'joined' and p.player][:64]
@@ -1397,6 +1579,12 @@ class GameHost(asyncio.DatagramProtocol):
                                                             ' (it never linked; its first packet %s)' % (peer.first or b'').hex()))
                     self.drop(addr)
             self.comms.tick(now)
+            try:
+                self.moderation_tick(now)
+            except Exception as e:  # never the host's own loop for it
+                if now - getattr(self, 'moderation_error_at', 0) > 60:
+                    self.moderation_error_at = now
+                    self.note('moderation: %s: %s' % (type(e).__name__, e))
             # A join the backend announced whose client never linked (its game failed to connect): forgotten after
             # 5 minutes, so a server that runs for weeks keeps no list of them.
             if now - pruned_at > 10:
@@ -1537,6 +1725,14 @@ async def serve(args):
                     host.note('network broadcasts: no official broadcast key known, none will be shown')
             host.comms.balance_file = args.balance_file
             host.world.configure(args)
+            host.server_number = args.server_number
+            if args.bans_file:
+                import bans
+                host.bans = bans.BanList(args.bans_file, host.note)
+                host.note('moderation: %d entries in the ban list' % len(host.bans.entries))
+            if args.moderation_log:
+                import bans
+                host.modlog = bans.ModerationLog(args.moderation_log)
         host.note('registered with the backend as game %s%s%s' % (
             reply['gid'], ' (official)' if reply.get('official') else '', '' if reply.get('listed', True) else
             ' (not listed: Direct connect only)'))
@@ -1547,6 +1743,8 @@ async def serve(args):
                  'listed': reply.get('listed', True), 'address': reply.get('address', ''), 'reachable': None,
                  'hidden': str(reply.get('hidden', ''))}
         write_status(args, state)
+        host.backend_send = send
+        host.send_bans()  # the backend refuses this server's banned players before their join, with the pop-up
 
         reported = [args.map]
 
@@ -1610,7 +1808,7 @@ async def serve(args):
                 send({'op': 'status', 'players': host.player_count(), 'map': current, 'next_map': upcoming,
                       'names': host.player_names()})
                 write_status(args, dict(state, players=host.player_count(), map=current, next_map=upcoming,
-                                        names=host.player_names()))
+                                        names=host.player_names(), roster=host.roster()))
                 for m in stats_lines():  # each player's stats since the last beat (player_stats.py)
                     send(m)
                 host.world.read_match(every=0)  # the round's progress (match_rules.cpp): Night Ops' storm builds with it
@@ -1637,11 +1835,32 @@ async def serve(args):
                         else 'players cannot reach this server', m.get('address', '?')))
                 elif m.get('op') == 'join':
                     try:
-                        host.expect(m['ticket'], m['pid'], m['name'], m['xuid'], m['xnaddr'])
+                        host.expect(m['ticket'], m['pid'], m['name'], m['xuid'], m['xnaddr'], m.get('account', ''))
                     except (KeyError, TypeError, ValueError) as e:  # never the host's end: the message is passed over
                         host.note('backend: a join notice that cannot be read (%s)' % type(e).__name__)
                         continue
                     host.note('backend: %s joins (PID %s)' % (m['name'], m['pid']))
+                elif m.get('op') == 'remove':
+                    # The main backend: a player on this server was banned on the Reborn network (plasma.py
+                    # network bans). Only a player id: no address leaves the backend.
+                    import bans
+                    pid = bans.clean_id(m.get('player_id'))
+                    if pid:
+                        host.network_out[pid] = {'kind': 'network', 'title': str(m.get('title', ''))[:60],
+                                                 'message': str(m.get('message', ''))[:400],
+                                                 'until': time.time() + 600}
+                        host.enforce()
+                elif m.get('op') == 'refused_join':
+                    # The main backend refused a player's join here: said in this server's moderation log (for a
+                    # network ban only that it was the network's).
+                    if host.modlog:
+                        import bans
+                        network = m.get('network') is True
+                        host.modlog.write(action='refused', server=host.server_number or None,
+                                          name=bans.clean_name(m.get('name')), id=bans.clean_id(m.get('player_id')),
+                                          kind='network' if network else str(m.get('kind', ''))[:8],
+                                          ban=None if network else str(m.get('ban', ''))[:16],
+                                          network=True if network else None, where='backend')
                 elif m.get('op') == 'network_broadcast':
                     # A broadcast from the official machine, through the main backend (sign_network): checked here
                     # again, whoever passed it on.
@@ -1658,6 +1877,7 @@ async def serve(args):
         else:
             host.note('backend link lost (closed by the backend)')
         beat.cancel()
+        host.backend_send = None
         writer.close()
         await asyncio.sleep(2)  # the host keeps its players; the next registration asks to keep its ids
 
@@ -1740,6 +1960,11 @@ def main():
     ap.add_argument('--official-key-file', default='', help='official.key: the server shows as official')
     ap.add_argument('--host-key-file', default='', help="this host's key (the manager makes it in the data folder)")
     ap.add_argument('--status-file', default='', help="this server's state for the package's window (JSON)")
+    # Moderation (server/bans.py, docs/MODERATION.md): the manager's ban list and moderation log, and which of its
+    # servers this is (a ban can hold on some of them only).
+    ap.add_argument('--bans-file', default='', help="the server manager's ban list (bans.json): read again when it changes")
+    ap.add_argument('--moderation-log', default='', help="the server manager's moderation log (moderation_log.jsonl)")
+    ap.add_argument('--server-number', type=int, default=0, help="this server's number in the manager (1 and on)")
     ap.add_argument('--log', default='')
     asyncio.run(serve(ap.parse_args()))
 

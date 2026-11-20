@@ -81,7 +81,8 @@ const Clock::time_point kStart = Clock::now();
 
 constexpr char kMagic[8] = {'B', 'F', '4', '3', 'C', 'O', 'M', 'M'};
 enum : uint8_t { kHello = 1, kWelcome, kState, kChatRelay, kChat, kRoster, kVoice, kVoiceRelay, kBye, kRefused,
-                 kBroadcast };  // kBroadcast (11, v0.4.0): the host's message to every player on the server
+                 kBroadcast,  // kBroadcast (11, v0.4.0): the host's message to every player on the server
+                 kKicked };   // kKicked (12, v0.4.8): this player taken off the server (moderation), with its title and words
 constexpr uint8_t kProtocol = 1;
 constexpr int kRate = 16000, kFrame = 320;  // 20 ms
 constexpr uint8_t kCodecAdpcm = 1;
@@ -284,6 +285,12 @@ struct BroadcastNow {
   double at = -1000, seconds = 10;
 } g_broadcast;
 std::atomic<int> g_chime{0};  // a broadcast arrived: the mix plays its two notes (counted up, the mixer takes it)
+// The server took this player off it (kKicked): its words for the menu's pop-up (TakeRemoved), once.
+struct Removed {
+  std::string title, message;
+  bool pending = false;
+  double at = -1000;
+} g_removed;
 std::once_flag g_started;
 
 double NowS() { return std::chrono::duration<double>(Clock::now() - kStart).count(); }
@@ -720,6 +727,19 @@ class Engine {
                       kind == 1 ? "game update" : kind == 2 ? "restart" : kind == 3 ? "maintenance" : "message", shown);
           break;
         }
+        case kKicked: {
+          // Moderation (server/gmhost.py GameHost.remove): sent three times; the menu leaves the match and shows the
+          // words (game_menu.cpp). The host drops the link a few seconds later in any case.
+          const std::string title = r.text8(), message = r.text8();
+          if (!r.ok || title.empty()) break;
+          {
+            std::lock_guard lock(g_mutex);
+            if (now - g_removed.at < 30) break;
+            g_removed = {title, message, true, now};
+          }
+          REXLOG_INFO("BF comms: removed from the server: {}: {}", title, message);
+          break;
+        }
         case kVoiceRelay: {
           const uint16_t from = r.u16(), seq = r.u16();
           const float x = r.f32(), y = r.f32(), z = r.f32();
@@ -1153,6 +1173,14 @@ bool CurrentBroadcast(std::string* text, int* kind, double* age, double* seconds
 std::vector<std::string> Speaking() {
   std::lock_guard lock(g_mutex);
   return g_speaking;
+}
+bool TakeRemoved(std::string* title, std::string* message) {
+  std::lock_guard lock(g_mutex);
+  if (!g_removed.pending) return false;
+  g_removed.pending = false;
+  if (title) *title = g_removed.title;
+  if (message) *message = g_removed.message;
+  return true;
 }
 void SetUserDir(const std::filesystem::path& user_dir) {
   std::lock_guard lock(g_mute_mutex);

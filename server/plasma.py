@@ -31,6 +31,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I leaves the script's folder out
+import bans  # noqa: E402
 import gmhost  # noqa: E402
 import player_stats  # noqa: E402
 import stats  # noqa: E402
@@ -494,7 +495,7 @@ def forget_old():
         del ARRIVED[address]
     # A login's key: kept 10 minutes after its FESL connection closed (Theater reads it when the game links).
     for lkey in [k for k, at in Client.closed.items() if now - at > 600]:
-        for table in (Client.sessions, Client.user_ids, Client.xuids, Client.closed):
+        for table in (Client.sessions, Client.user_ids, Client.xuids, Client.addresses, Client.closed):
             table.pop(lkey, None)
 
 
@@ -944,6 +945,7 @@ class Client:
     sessions = {}  # lkey -> persona name, for Theater's USER
     user_ids = {}  # lkey -> user id
     xuids = {}  # lkey -> the console's XUID (decimal, from NuXBL360Login)
+    addresses = {}  # lkey -> the address it logged in from (moderation: a "reserve" names no player)
     closed = {}  # lkey -> when its FESL connection closed (forget_old drops its entries 10 minutes later)
     online = set()  # the personas of the FESL connections open now (a name is free again when its player leaves)
     name_grace = 60  # seconds a player's name stays theirs after their connection closes (a reconnect keeps it)
@@ -1098,6 +1100,9 @@ class Client:
             Client.sessions[lkey] = self.persona
             Client.user_ids[lkey] = self.user_id
             Client.xuids[lkey] = f.get('xuid', '0')
+            Client.addresses[lkey] = address
+            seen(self.persona, player_id_of(f.get('xuid', '0')), address,
+                 account_of(player_id_of(f.get('xuid', '0')), address))
             await self.send(kind, RESPONSE, packet_id, {
                 'TXN': txn, 'lkey': lkey, 'userId': self.user_id, 'personaName': self.persona,
             })
@@ -1249,6 +1254,21 @@ class TheaterClient(Client):
             await self.send('EGAM', 0, 0, {'TID': tid, 'LID': f.get('LID', ''), 'GID': f.get('GID', '')})
             if not g:
                 return
+            # Moderation (join_refusal): a banned player gets no address. Our menus asked at "reserve" first and showed
+            # the pop-up; this is for a game that did not.
+            address = self.peer.split(':')[0]
+            pid = player_id_of(self.xuid)
+            account = account_of(pid, address) if pid else ''
+            refused = join_refusal(g, [(self.name, pid, account)], address)
+            if refused:
+                self.note('EGAM refused: %s (%s) is %s' % (self.name, pid or 'no id', 'banned on the Reborn network' if
+                                                          refused[3] else 'in game %s\'s ban list (%s)' % (
+                                                              g['GID'], refused[4].get('id', ''))))
+                tell_refused(g, refused[2], refused[3], refused[4])
+                return
+            if pid:
+                JOINS.setdefault(g['GID'], {})[pid] = (self.name, address, account, time.time())
+                seen(self.name, pid, address, account, g.get('N', ''))
             STATS.joined(self.xuid)  # the website's player counts (server/stats.py)
             ARRIVED[self.peer.split(':')[0]] = (g['GID'], time.time())  # in the host's count soon (server_full)
             self.xnaddr = f.get('R-XNADDR', '')
@@ -1277,7 +1297,7 @@ class TheaterClient(Client):
                 # GameManager host for a --dedicated server learns the player first; the client's hello names
                 # the ticket.
                 if g.get('gmhost'):
-                    g['gmhost'].expect(ticket, pid, self.name, self.xuid, self.xnaddr)
+                    g['gmhost'].expect(ticket, pid, self.name, self.xuid, self.xnaddr, account)
                 await self.send_egeg(g, pid, ticket)
         elif kind in ('PENT', 'PLVT'):
             # Player entered (or left) the host's game; the host looks the player up by the PID in the reply
@@ -1317,9 +1337,11 @@ class RemoteHost:
     def __init__(self, writer):
         self.writer = writer
 
-    def expect(self, ticket, pid, name, xuid, xnaddr_b64):
-        self.writer.write((json.dumps({'op': 'join', 'ticket': ticket, 'pid': int(pid), 'name': name,
-                                       'xuid': str(xuid), 'xnaddr': xnaddr_b64}) + '\n').encode())
+    def expect(self, ticket, pid, name, xuid, xnaddr_b64, account=''):
+        m = {'op': 'join', 'ticket': ticket, 'pid': int(pid), 'name': name, 'xuid': str(xuid), 'xnaddr': xnaddr_b64}
+        if account:
+            m['account'] = account  # the player's Protect your name key (public): its host's ban list matches it too
+        self.writer.write((json.dumps(m) + '\n').encode())
 
 
 def signed_host_key(m, name, digest):
@@ -1985,6 +2007,12 @@ class Registry:
                         self.note('%s game %s: its server\'s %d waiting players wait on for it' % (peer, gid, len(moved)))
                     asyncio.get_running_loop().create_task(self.probe(writer, host, int(port), local))
                     self.refresh_promoted()
+                elif op == 'server_bans' and gid in GAMES:
+                    # Moderation: this server's own ban list (gmhost.py bans_summary), for this server only.
+                    GAMES[gid]['bans'] = clean_server_bans(m)
+                    self.note('game %s: its ban list has %d entr%s' % (
+                        gid, len((GAMES[gid]['bans'] or {}).get('rows', [])),
+                        'y' if len((GAMES[gid]['bans'] or {}).get('rows', [])) == 1 else 'ies'))
                 elif op == 'status' and gid in GAMES:
                     GAMES[gid]['AP'] = int(m.get('players', 0))
                     GAMES[gid]['status_at'] = time.time()  # the players whose game got its address since are in it
@@ -2092,7 +2120,12 @@ class Registry:
                     # The official manager's questions (gmhost.sign_admin): the community servers' host keys, so
                     # TekRantGaming can pick one to promote. Signed: the rows hold the hosts' addresses.
                     why, what = self.admin.admin(m)
-                    if why or what != 'hosts':
+                    if not why and (what == 'players' or str(what).startswith('lookup:')):
+                        # Moderation: the official manager's player lookup (who is online, names seen this week).
+                        rows = admin_players(what)
+                        self.note('%s admin question: %s (%d rows)' % (peer, what[:40], len(rows)))
+                        writer.write((json.dumps({'op': 'admin', 'ok': True, 'players': rows}) + '\n').encode())
+                    elif why or what != 'hosts':
                         self.note('%s admin question refused: %s' % (peer, why or 'unknown'))
                         writer.write((json.dumps({'op': 'admin', 'ok': False, 'why': why or 'unknown'}) +
                                       '\n').encode())
@@ -2143,6 +2176,22 @@ class Registry:
                     writer.write((json.dumps({'op': 'closed', 'kind': notice['kind'], 'title': notice['title'],
                                               'message': notice['text']}) + '\n').encode())
                     self.note('%s refused game %s: maintenance (%s)' % (peer, str(m.get('gid', ''))[:16], notice['kind']))
+                elif op == 'reserve' and m.get('gid') in GAMES and \
+                        join_refusal(GAMES[m['gid']], sessions_at(address), address):
+                    # Moderation (join_refusal): the pop-up, with the reason and when it ends. (Never the word
+                    # "reserved" in it: bans.reason_problem.)
+                    title, message, who, network, entry = join_refusal(GAMES[m['gid']], sessions_at(address), address)
+                    RESERVATIONS.pop(address, None)
+                    mine = queue_entry(address)
+                    if mine:
+                        QUEUE.remove(mine)
+                    writer.write((json.dumps({'op': 'banned', 'gid': m['gid'], 'network': network, 'title': title,
+                                              'message': message}) + '\n').encode())
+                    self.note('%s refused game %s: %s%s' % (peer, m['gid'], who[0] or 'a player', ' is banned on the '
+                                                            'Reborn network (%s)' % entry.get('id') if network else
+                                                            ' is in the server\'s ban list (%s %s)' % (
+                                                                entry.get('kind'), entry.get('id'))))
+                    tell_refused(GAMES[m['gid']], who, network, entry)
                 elif op == 'reserve' and m.get('gid') in GAMES:
                     yours, platform = str(m.get('version', ''))[:24], str(m.get('platform', ''))[:16]
                     if outdated(yours, platform):
@@ -2231,7 +2280,14 @@ class Registry:
                         line = queue_line(mine['gid'])
                         full, players, arriving, most = server_full(mine['gid'], address, line.index(mine)) \
                             if mine['gid'] in GAMES else (True, 0, 0, 0)
-                        if not full:
+                        refused = join_refusal(GAMES.get(mine['gid']), sessions_at(address), address) \
+                            if mine['gid'] in GAMES else None
+                        if refused:
+                            QUEUE.remove(mine)
+                            writer.write((json.dumps({'op': 'banned', 'gid': mine['gid'], 'network': refused[3],
+                                                      'title': refused[0], 'message': refused[1]}) + '\n').encode())
+                            self.note('%s left the queue of game %s: banned' % (peer, mine['gid']))
+                        elif not full:
                             QUEUE.remove(mine)
                             let_in(mine['gid'], address, players, ADMIT_WINDOW)
                             writer.write((json.dumps({'op': 'reserved', 'gid': mine['gid']}) + '\n').encode())
@@ -2304,6 +2360,207 @@ class Registry:
                 MATCH_SCORES.pop(gid, None)
                 self.note('game %s gone (server disconnected)' % gid)
             writer.close()
+
+
+# ---- Moderation (TekRantGaming, 20 Nov 2026; server/bans.py, docs/MODERATION.md). Two kinds of list, enforced here
+# before a join and again by each host (gmhost.py), so a modified game cannot walk past either:
+#   - the Reborn network's list (--network-bans: the official manager's network_bans.json on this machine only): a player
+#     in it joins no server registered here, official or community, Direct connect to their addresses included. A server
+#     on its own backend (LAN only) never asks here, so it stays open to them.
+#   - each server's own list (its manager's bans.json): its host tells this backend a salted, hashed copy over its own
+#     registry link ("server_bans"), so the player gets the pop-up before joining, and it holds on that server only.
+# A refusal is checked at "reserve" (every join from our menus: the pop-up, {"op": "banned", "title", "message"}), at a
+# queued player's turn, and at Theater's EGAM (the step that gives the server's address: a game that skipped "reserve"
+# gets no address). A player is matched by its player id (the XUID's low word), its account (Protect your name) and its
+# address. A player on a server when a network ban is made is removed: its host gets {"op": "remove", "player_id"}.
+NETWORK_BANS = [None]   # the BanList, with --network-bans
+JOINS = {}   # GID -> {player id: (name, address, account, when)}: who joined each server (EGAM), for "remove"
+SEEN = {}    # a name, lower case -> {'name', 'id', 'ip', 'account', 'at', 'server'}: the official manager's lookup;
+             # in memory only, a week at most
+SEEN_DAYS = 7
+
+
+def player_id_of(xuid):
+    return bans.id_of_xuid(xuid)
+
+
+def account_of(pid_hex, address):
+    """The account key a player signed in for (Protect your name), by its player id and address, or ''."""
+    now = time.time()
+    for key, (pid, at, until) in list(VERIFIED.items()):
+        if until > now and '%08X' % (int(pid) & 0xFFFFFFFF) == pid_hex and at == address:
+            return key
+    return ''
+
+
+def sessions_at(address):
+    """The players logged in from this address: [(name, player id, account)] (a "reserve" names no player)."""
+    out = []
+    for lkey, name in list(Client.sessions.items()):
+        if Client.addresses.get(lkey) == address:
+            pid = player_id_of(Client.xuids.get(lkey, '0'))
+            out.append((name, pid, account_of(pid, address) if pid else ''))
+    return out
+
+
+def seen(name, pid, address, account, server=''):
+    if not name:
+        return
+    now = int(time.time())
+    SEEN[name.lower()] = {'name': name, 'id': pid, 'ip': address, 'account': account, 'at': now,
+                          'server': server or SEEN.get(name.lower(), {}).get('server', '')}
+    if len(SEEN) > 20000:
+        for k in sorted(SEEN, key=lambda k: SEEN[k]['at'])[:2000]:
+            del SEEN[k]
+
+
+def network_bans():
+    nb = NETWORK_BANS[0]
+    if nb:
+        nb.reload()
+    return nb
+
+
+def server_ban(g, pid, account, address, now=None):
+    """The entry of the server's own list (its host's server_bans) that holds against this player, or None."""
+    now = time.time() if now is None else now
+    table = g.get('bans') if g else None
+    if not table:
+        return None
+    salt = table['salt']
+    hp, ha, hi = bans.hashed(salt, pid), bans.hashed(salt, account), bans.hashed(salt, bans.clean_ip(address))
+    for row in table['rows']:
+        if row['until'] and row['until'] <= now:
+            continue
+        if (hp and hp in row['ids']) or (ha and ha in row['accounts']) or \
+                (hi and hi in row['ips'] and (not row['ip_until'] or row['ip_until'] > now)):
+            return row
+    return None
+
+
+def join_refusal(g, players, address):
+    """Why this join is refused, or None: (title, message, the player (name, id), network: bool, the entry). players:
+    [(name, player id, account)], the ones the join may be (one, or at "reserve" every login from the address)."""
+    nb = network_bans()
+    for name, pid, account in (players or [('', '', '')]):
+        e = nb.match(pid, account, address) if nb else None
+        if e:
+            title, message = bans.refusal(e, True)
+            return title, message, (name, pid), True, e
+        row = server_ban(g, pid, account, address)
+        if row:
+            if row.get('kind') == 'kick':  # its minutes counted from now (the host made the text when it sent it)
+                minutes = max(1, int(round((row['until'] - time.time()) / 60.0)))
+                message = row['message'].split(' You can join again in ')[0] + ' You can join again in %d minute%s.' % (
+                    minutes, '' if minutes == 1 else 's')
+                return row['title'], message, (name, pid), False, row
+            return row['title'], row['message'], (name, pid), False, row
+    return None
+
+
+def tell_refused(g, who, network, entry):
+    """The server's host is told a join was refused (its moderation log: only "the network's" for a network ban)."""
+    host = g.get('gmhost') if g else None
+    if not isinstance(host, RemoteHost):
+        return
+    m = {'op': 'refused_join', 'name': who[0], 'player_id': who[1], 'network': bool(network)}
+    if not network:
+        m.update(kind=entry.get('kind', ''), ban=entry.get('id', ''))
+    try:
+        host.writer.write((json.dumps(m) + '\n').encode())
+    except (ConnectionError, RuntimeError, OSError):
+        pass
+
+
+def clean_server_bans(m):
+    """A host's server_bans, as kept: hex digests only, a reason's text as the host made it (checked as a notice)."""
+    salt = str(m.get('salt', ''))[:32]
+    rows = []
+    for r in (m.get('bans') or [])[:2000]:
+        if not isinstance(r, dict) or r.get('kind') not in ('ban', 'kick'):
+            continue
+        hexes = lambda k: [str(x)[:32] for x in (r.get(k) or [])[:16] if all(c in '0123456789abcdef' for c in str(x))]
+        try:
+            until, ip_until = int(r.get('until') or 0), int(r.get('ip_until') or 0)
+        except (TypeError, ValueError):
+            continue
+        title = ' '.join(str(r.get('title', '')).split())[:60]
+        message = ' '.join(str(r.get('message', '')).split())[:400]
+        if not title or not message or 'reserved' in (title + message).lower() or any(c in title + message for c in '"\\{}'):
+            continue
+        rows.append({'id': str(r.get('id', ''))[:16], 'kind': r['kind'], 'ids': hexes('ids'),
+                     'accounts': hexes('accounts'), 'ips': hexes('ips'), 'until': until, 'ip_until': ip_until,
+                     'title': title, 'message': message})
+    return {'salt': salt, 'rows': rows} if salt else None
+
+
+async def watch_network_bans(note):
+    """A new network ban takes its player off the server they are on: every host whose joins (JOINS) match is told
+    to remove them, by player id only."""
+    told = {}  # (gid, player id) -> the ban's id it was told for
+    while True:
+        await asyncio.sleep(2)
+        try:
+            nb = network_bans()
+            if not nb:
+                continue
+            now = time.time()
+            for gid, joined in list(JOINS.items()):
+                g = GAMES.get(gid)
+                if not g:
+                    JOINS.pop(gid, None)
+                    continue
+                names = {n.lower() for n in g.get('names', [])}
+                for pid, (name, address, account, at) in list(joined.items()):
+                    if now - at > 6 * 3600 and name.lower() not in names:
+                        del joined[pid]
+                        continue
+                    e = nb.match(pid, account, address)
+                    if not e or told.get((gid, pid)) == e['id'] or name.lower() not in names:
+                        continue
+                    told[(gid, pid)] = e['id']
+                    title, message = bans.refusal(e, True)
+                    host = g.get('gmhost')
+                    if isinstance(host, RemoteHost):
+                        host.writer.write((json.dumps({'op': 'remove', 'player_id': pid, 'title': title,
+                                                       'message': message}) + '\n').encode())
+                    elif host is not None and hasattr(host, 'network_out'):  # a --dedicated host in this process
+                        host.network_out[pid] = {'kind': 'network', 'title': title, 'message': message,
+                                                 'until': now + 600}
+                        host.enforce()
+                    note('network ban %s: %s (%s) taken off game %s "%s"' % (e['id'], name, pid, gid, g.get('N', '')))
+            for k in [k for k in told if k[0] not in GAMES]:
+                del told[k]
+            for k in [k for k, v in SEEN.items() if now - v['at'] > SEEN_DAYS * 86400]:
+                del SEEN[k]
+        except Exception as e:  # never stop watching for one bad turn
+            note('network bans: %s: %s' % (type(e).__name__, e))
+
+
+def admin_players(what):
+    """The official manager's moderation questions (signed, Registry admin): "players" (everyone logged in now and
+    where they play) or "lookup:<text>" (names seen in the last week holding the text, or that player id)."""
+    where = {}
+    for g in GAMES.values():
+        for n in g.get('names', []):
+            where[n.lower()] = g
+    if what == 'players':
+        rows = []
+        for lkey, name in list(Client.sessions.items()):
+            if lkey in Client.closed:
+                continue
+            address = Client.addresses.get(lkey, '')
+            pid = player_id_of(Client.xuids.get(lkey, '0'))
+            g = where.get(name.lower())
+            rows.append({'name': name, 'id': pid, 'ip': address, 'account': account_of(pid, address),
+                         'server': g.get('N', '') if g else '', 'gid': g['GID'] if g else '',
+                         'official': bool(g.get('official')) if g else False})
+        return sorted(rows, key=lambda r: r['name'].lower())[:500]
+    text = what.split(':', 1)[1].strip().lower()[:32] if ':' in what else ''
+    if not text:
+        return []
+    rows = [dict(v, online=k in where) for k, v in SEEN.items() if text in k or text.upper() == v.get('id')]
+    return sorted(rows, key=lambda r: -r['at'])[:100]
 
 
 def own_address(writer, public):
@@ -2554,6 +2811,9 @@ async def main():
     ap.add_argument('--maintenance-file', default='',
                     help='maintenance mode: a file the server manager writes (manager.py maintenance); while it is on, '
                          'new joins are refused with its text (maintenance_now)')
+    ap.add_argument('--network-bans', default='',
+                    help="the Reborn network's ban list (the official manager's network_bans.json; server/bans.py): "
+                         'read again when it changes')
     ap.add_argument('--log', default='runs/plasma.log')
     ap.add_argument('--leaderboard', default='', help="a file keeping the players' totals (our Leaderboards)")
     ap.add_argument('--player-stats', default='',
@@ -2646,6 +2906,11 @@ async def main():
         if args.maintenance_file:
             MAINTENANCE.update(file=args.maintenance_file, note={'said': None, 'say': gate_note})
             maintenance_now()
+        bans_task = None
+        if args.network_bans:
+            NETWORK_BANS[0] = bans.BanList(args.network_bans, gate_note, network=True)
+            gate_note('network bans: %d entries (%s)' % (len(NETWORK_BANS[0].entries), args.network_bans))
+            bans_task = asyncio.ensure_future(watch_network_bans(gate_note))
         accounts_task = asyncio.ensure_future(keep_accounts_saved(max(0.5, args.accounts_save_every)))
         stats_task = asyncio.ensure_future(keep_stats_saved(max(0.5, args.stats_save_every)))
         async def keep_player_stats_saved():  # each player's stats (player_stats.py), when something changed
@@ -2676,6 +2941,8 @@ async def main():
             await asyncio.gather(*(srv.serve_forever() for srv in servers))
         if feed_task:
             feed_task.cancel()
+        if bans_task:
+            bans_task.cancel()
         accounts_task.cancel()
         stats_task.cancel()
         player_stats_task.cancel()

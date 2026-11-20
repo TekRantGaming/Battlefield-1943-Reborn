@@ -4631,6 +4631,8 @@
   // server, any refusal of a join with a message. Over the page that asked to join, one OK.
   bool notice_popup_ = false;
   ServerNotice notice_shown_;
+  ServerNotice removed_notice_;   // moderation: the server's words when it took this player off it (comms kKicked)
+  bool removed_pending_ = false;  // shown once the menus are back after the match
   void ShowNotice(const ServerNotice& n, const std::string& asked) {
     notice_popup_ = true, notice_shown_ = n, popup_row_ = 0;
     if (notice_shown_.title.empty()) notice_shown_.title = n.kind == "full" ? "SERVER FULL" : "COULD NOT JOIN";
@@ -4641,9 +4643,12 @@
     const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
     d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 190));
-    // A refusal of this one join (a full server, one gone while its queue waited) or maintenance mode's (any other kind).
-    const bool full = notice_shown_.kind == "full" || notice_shown_.kind == "gone";
-    const std::string eyebrow = full ? "THE SERVER LIST \xC2\xB7 COULD NOT JOIN" : "THE SERVER LIST \xC2\xB7 SERVERS CLOSED";
+    // A refusal of this one join (a full server, one gone while its queue waited), moderation's (a ban or kick:
+    // "banned", docs/MODERATION.md) or maintenance mode's (any other kind).
+    const bool banned = notice_shown_.kind == "banned";
+    const bool full = notice_shown_.kind == "full" || notice_shown_.kind == "gone" || banned;
+    const std::string eyebrow = banned ? "MODERATION \xC2\xB7 COULD NOT JOIN"
+                                : full ? "THE SERVER LIST \xC2\xB7 COULD NOT JOIN" : "THE SERVER LIST \xC2\xB7 SERVERS CLOSED";
     const std::string foot = full ? "" : "New joins are closed for now. Players already in a match play on.";
     const float w = st(560);
     const float text_h = kit::WrappedHeight(f.ui, st(18), notice_shown_.text, w);

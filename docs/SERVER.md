@@ -77,6 +77,21 @@ A dedicated server takes the same as `--bf_match_tickets=<n>`, `--bf_match_time_
 `--bf_world_dynamic_storm=true` on its command line; the server package's own host (`gmhost.py`) does not pass them
 yet.
 
+## Moderation
+
+The manager's Moderation page lists the players on your servers, with Kick, Ban and Mute:
+
+- **Kick** removes a player now. They can join again in 5 minutes.
+- **Ban** keeps a player out, for 1 hour, 1 day, 7 days, 30 days or for good. It holds their player id, their account
+  if they have one and, for up to 30 days, their address.
+- **Mute** keeps a player in the match, but their voice and text chat reach nobody.
+
+Your reason is shown to the player. Your bans hold on your servers only, all of them or the one you pick. Find a
+player lets you ban someone who has already left. The page keeps a moderation log for 90 days. From the command line:
+`manager.py players`, `kick`, `ban`, `mute`, `unban`, `bans`, `modlog` and `lookup`. Players banned on the Reborn
+network are refused by the main backend before they reach your servers; your log shows that, and nothing more. More in
+[MODERATION.md](MODERATION.md).
+
 ## Updates
 
 Players' games are always on the newest release (the main backend lets no older one in), so keep your servers on it

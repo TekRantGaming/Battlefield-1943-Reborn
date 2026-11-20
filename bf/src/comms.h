@@ -37,6 +37,9 @@ void SendChat(Channel channel, const std::string& text);
 // update, 2 a server restart; `age` seconds since it arrived, `seconds` how long it stays.
 bool CurrentBroadcast(std::string* text, int* kind, double* age, double* seconds);
 std::vector<std::string> Speaking();  // the players heard now
+// Moderation (server/gmhost.py C_KICKED, docs/MODERATION.md): the server took this player off it (a kick, a ban of
+// that server or of the Reborn network). Its title and message once, then false until it happens again.
+bool TakeRemoved(std::string* title, std::string* message);
 // Per player voice mute (TekRantGaming, 17 Nov 2026: "allows users to mute individual users so that their comms dont
 // come across on voice chat anymore"). On this game only: a muted player's voice is dropped as it arrives, before it
 // is decoded or mixed; nothing is sent, the server and the muted player are not told. Keyed on the player's name

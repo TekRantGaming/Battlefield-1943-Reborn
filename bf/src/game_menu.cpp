@@ -1082,6 +1082,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         REXLOG_INFO("BF pause: no change of team to team {} (now {}): no suicide", team_wanted_, comms::Team());
       }
     }
+    // Moderation (docs/MODERATION.md): the server took this player off it (comms kKicked: a kick, a ban). Out of the
+    // match at once; its words in the notice pop-up once the menus are back.
+    if (std::string title, message; comms::TakeRemoved(&title, &message)) {
+      removed_notice_ = {"banned", title, message}, removed_pending_ = true;
+      REXLOG_INFO("BF moderation: removed from the server ({}): leaving the match", title);
+      if (InMatch() && page_ != Page::kLeaving) open_ = true, Leave();
+    }
+    if (removed_pending_ && open_ && !InMatch() && !notice_popup_ &&
+        (page_ == Page::kMain || page_ == Page::kHome || page_ == Page::kServers)) {
+      removed_pending_ = false;
+      ShowNotice(removed_notice_, "the match");
+    }
     if (!open_) {
       was_open_ = false;
       return;

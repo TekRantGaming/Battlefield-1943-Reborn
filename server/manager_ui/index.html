@@ -97,6 +97,14 @@
   #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); background: var(--paper); color: var(--ink); padding: 12px 20px; border-left: 6px solid var(--green); box-shadow: 4px 5px 0 rgba(0,0,0,.4); display: none; z-index: 30; max-width: 80vw; }
   #toast.bad { border-left-color: var(--red); }
   .muted { color: var(--faint); } .right { margin-left: auto; }
+  /* Moderation: the game's notice pop-up as the refused player sees it. */
+  .refusal { background: var(--paper); color: var(--ink); border: 1px solid #c9bf9f; padding: 14px 18px; max-width: 560px; box-shadow: 4px 5px 0 rgba(0,0,0,.18); transform: rotate(-0.3deg); }
+  .refusal small { display: block; font: 600 11px Consolas, monospace; letter-spacing: .14em; color: var(--red); margin-bottom: 6px; }
+  .refusal b { display: block; font: 600 24px/1.15 var(--head); letter-spacing: .04em; text-transform: uppercase; margin-bottom: 8px; }
+  .refusal p { margin: 0; color: #4d4838; font-size: 14.5px; }
+  .kind { font: 600 10.5px var(--body); letter-spacing: .1em; text-transform: uppercase; padding: 3px 7px; border-radius: 2px; color: #fff; background: #6b6450; white-space: nowrap; }
+  .kind.ban { background: var(--red); } .kind.kick { background: var(--amber); color: #201a08; } .kind.mute { background: var(--blue); } .kind.network { background: #222; }
+  td .row { gap: 6px; flex-wrap: nowrap; } td.small { font-size: 12.5px; color: #6b6450; }
   @media (max-width: 860px) { .layout { flex-direction: column; } nav { width: auto; display: flex; overflow: auto; padding: 0; } nav button { width: auto; white-space: nowrap; border-left: 0; border-bottom: 4px solid transparent; } nav button.on { border-bottom-color: var(--red); } nav .foot { display: none; } .grid2, .choice, .server { grid-template-columns: 1fr; } main { padding: 18px 14px 50px; } }
 </style>
 </head>
@@ -114,6 +122,7 @@
     <button data-tab="servers" class="on">Servers</button>
     <button data-tab="network">Network</button>
     <button data-tab="messages">Messages</button>
+    <button data-tab="moderation">Moderation</button>
     <button data-tab="updates">Updates</button>
     <button data-tab="game">Game files</button>
     <button data-tab="logs">Logs</button>
@@ -177,6 +186,38 @@
       </div>
       <div class="paper" id="countdown-box" style="display:none"><h3>Counting down</h3><div id="countdowns"></div></div>
       <div class="paper"><h3>Sent</h3><div id="sent" class="hint"></div></div>
+    </section>
+
+    <section id="moderation">
+      <h2>Moderation</h2>
+      <p class="lead" id="mod-lead">Kick, ban and mute players on your servers. Your bans hold on your servers only. A player banned on the Reborn network is refused by the main backend before they reach you; your log says so, nothing more.</p>
+      <div class="paper">
+        <h3>Players on now</h3>
+        <div id="mod-players" class="hint"></div>
+      </div>
+      <div class="paper">
+        <h3>Find a player</h3>
+        <p class="hint">Players your servers had in the last week, by any part of their name or their player id (a player sees theirs with F9 in a match).</p>
+        <div class="row"><input type="text" id="mod-find" maxlength="32" placeholder="A name or a player id" style="max-width:320px"><button class="btn" id="mod-find-go">Search</button>
+          <label class="check" id="mod-find-net-box" style="margin:0;display:none"><input type="checkbox" id="mod-find-net"><span>Search the Reborn network (everyone online, names seen this week)</span></label></div>
+        <div id="mod-found" class="hint" style="margin-top:12px"></div>
+        <p class="hint" style="margin:14px 0 6px">Someone not seen here? Ban them by their player id or address:</p>
+        <div class="row"><input type="text" id="mod-manual" maxlength="45" placeholder="A player id (8 characters) or an address" style="max-width:320px"><button class="btn" id="mod-manual-go">Ban...</button></div>
+      </div>
+      <div class="paper">
+        <h3>Bans, kicks and mutes on your servers</h3>
+        <div id="mod-bans" class="hint"></div>
+      </div>
+      <div class="paper" id="mod-network-box" style="display:none">
+        <h3>Reborn network bans</h3>
+        <p class="hint">Held by the main backend: these players join no official server and no community server registered with it, Direct connect included. A server on its own backend (LAN only) is not covered. Community admins never see this list.</p>
+        <div id="mod-network" class="hint"></div>
+      </div>
+      <div class="paper">
+        <h3>Moderation log</h3>
+        <p class="hint">Who did what, kept 90 days. No addresses are written here.</p>
+        <div id="mod-log" class="hint"></div>
+      </div>
     </section>
 
     <section id="updates">
@@ -293,6 +334,26 @@
   <div class="row" style="margin-top:14px"><button class="btn stop" id="auto-off-yes">Turn them off</button><button class="btn go" id="auto-off-no">Keep them on</button></div>
 </div></div>
 
+<div class="modal" id="mod-modal"><div class="paper">
+  <h3 id="mod-title">Ban</h3>
+  <p class="hint" id="mod-who"></p>
+  <div class="choice" id="mod-list-choice" style="display:none">
+    <label><input type="radio" name="mod-list" value="server" checked><b>My servers</b><p>Held on this manager's servers only.</p></label>
+    <label><input type="radio" name="mod-list" value="network"><b>Reborn network</b><p>Every official server and every community server on the main backend.</p></label>
+  </div>
+  <div class="grid2">
+    <label class="field" id="mod-length-box"><span>How long</span><select id="mod-length">
+      <option value="1h">1 hour</option><option value="1d">1 day</option><option value="7d" selected>7 days</option><option value="30d">30 days</option><option value="permanent">Permanent</option></select></label>
+    <label class="field" id="mod-servers-box"><span>On</span><select id="mod-servers"></select></label>
+  </div>
+  <label class="field"><span>Reason, shown to the player <small id="mod-count" style="float:right"></small></span><input type="text" id="mod-reason" maxlength="120" placeholder="Team killing"></label>
+  <label class="check" id="mod-ip-box"><input type="checkbox" id="mod-ip" checked><span>Also hold their address (30 days at most)<br><small>Catches a new player id from the same home. Leave it off for an address many players share, like a LAN party.</small></span></label>
+  <label class="field" style="max-width:300px"><span>Your name, for the log</span><input type="text" id="mod-by" maxlength="32" placeholder="Admin"></label>
+  <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:6px" id="mod-preview-label">The player will see</span>
+    <div class="refusal" id="mod-preview"><small>MODERATION · COULD NOT JOIN</small><b></b><p></p></div></div>
+  <div class="row" style="margin-top:14px"><button class="btn stop" id="mod-go">Ban</button><button class="btn" id="mod-cancel">Cancel</button></div>
+</div></div>
+
 <div class="modal" id="login-modal"><div class="paper" style="width:420px">
   <h3>Sign in</h3>
   <label class="field"><span>Password</span><input type="password" id="login-password" autocomplete="current-password"></label>
@@ -363,6 +424,7 @@ $('nav').addEventListener('click', e => {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b === e.target));
   document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === tab));
   if (tab === 'logs') loadLog();
+  if (tab === 'moderation') loadModeration();
 });
 function goTab(tab) { document.querySelector('nav button[data-tab="' + tab + '"]').click(); }
 
@@ -701,6 +763,131 @@ $('quit').onclick = async () => {
   if (await act('/api/quit', {})) { clearInterval(tick.timer); document.body.replaceChildren(h('div', { style: 'padding:60px 30px;font:600 24px var(--head);letter-spacing:.06em' }, 'THE MANAGER HAS SHUT DOWN. START IT AGAIN TO OPEN THIS PAGE.')); }
 };
 
+// ---- moderation (server/bans.py, docs/MODERATION.md)
+let mod = null, modTarget = null, modAction = 'ban';
+const KIND_WORDS = { ban: 'Ban', kick: 'Kick', mute: 'Mute' };
+async function loadModeration() {
+  try { mod = await api('/api/moderation'); renderModeration(); } catch (e) {}
+}
+function when(t) { return new Date(t * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); }
+function playerWords(e) { return (e.names.join(', ') || 'no name') + (e.ids.length ? '  (' + e.ids.join(', ') + ')' : ''); }
+function playerRow(r, extra) {
+  return h('tr', {}, extra, h('td', { text: r.name || '?' }), h('td', { class: 'mono', text: r.id || '-' }),
+    h('td', { class: 'small', text: r.online === false ? 'seen ' + ago(mod.now - r.at) + ' ago' + (r.server ? ' on ' + r.server : '') : r.since ? 'on for ' + ago(mod.now - r.since) : r.server || '' }),
+    h('td', {}, h('div', { class: 'row' },
+      r.online !== false && r.server_name ? h('button', { class: 'btn small', onclick: () => openMod('kick', r) }, 'Kick') : null,
+      h('button', { class: 'btn small stop', onclick: () => openMod('ban', r) }, 'Ban'),
+      h('button', { class: 'btn small', onclick: () => openMod('mute', r) }, 'Mute'))));
+}
+function banTable(rows, network) {
+  if (!rows.length) return 'None.';
+  return h('table', {}, h('tr', {}, ['', 'Player', 'Reason', 'By', 'Since', 'Ends', network ? '' : 'On', ''].map(t => h('th', { text: t }))),
+    rows.map(e => h('tr', {}, h('td', {}, h('span', { class: 'kind ' + (network ? 'network' : e.kind), text: network ? 'Network' : KIND_WORDS[e.kind] })),
+      h('td', {}, playerWords(e), h('div', { class: 'small', text: [e.accounts.length ? 'account' : '', e.ips.length ? 'address' : ''].filter(Boolean).join(' + ') ? 'also by ' + [e.accounts.length ? 'account' : '', e.ips.length ? 'address' : ''].filter(Boolean).join(' and ') : '' })),
+      h('td', { text: e.reason || '-' }), h('td', { class: 'small', text: e.by }), h('td', { class: 'small', text: when(e.at) }),
+      h('td', { class: 'small', text: e.until ? e.ends : 'Permanent' }),
+      network ? h('td', {}) : h('td', { class: 'small', text: e.servers.length ? e.servers.map(n => '#' + n).join(', ') : 'All' }),
+      h('td', {}, h('button', { class: 'btn small', onclick: () => unban(e, network) }, e.kind === 'mute' ? 'Unmute' : e.kind === 'kick' ? 'Let back' : 'Unban')))));
+}
+function renderModeration() {
+  const m = mod;
+  $('mod-network-box').style.display = m.network_admin ? '' : 'none';
+  $('mod-find-net-box').style.display = m.network_admin ? '' : 'none';
+  $('mod-list-choice').style.display = m.network_admin ? '' : 'none';
+  if (m.network_admin) $('mod-lead').textContent = 'Kick, ban and mute players on your servers, and keep the Reborn network\'s ban list: a network ban holds on every official server and every community server registered with this backend.';
+  sync($('mod-players'), [m.players.map(r => [r.server, r.name, r.id])], () => m.players.length ?
+    h('table', {}, h('tr', {}, ['Server', 'Name', 'Player id', '', ''].map(t => h('th', { text: t }))),
+      m.players.map(r => playerRow(r, h('td', { class: 'small', text: '#' + r.server + ' ' + r.server_name })))) : 'Nobody is on your servers now.');
+  sync($('mod-bans'), m.bans.map(e => [e.id, e.until]), () => banTable(m.bans, false));
+  sync($('mod-network'), m.network.map(e => [e.id, e.until]), () => banTable(m.network, true));
+  sync($('mod-log'), m.log.map(l => [l.at, l.action, l.ban]), () => m.log.length ? h('table', {}, h('tr', {}, ['When', 'What', 'Player', 'Reason', 'By'].map(t => h('th', { text: t }))),
+    m.log.slice(0, 120).map(l => h('tr', {}, h('td', { class: 'small', text: when(l.at) }),
+      h('td', {}, logWords(l)), h('td', { text: (l.names || [l.name]).filter(Boolean).join(', ') + (l.ids ? '  (' + l.ids.join(', ') + ')' : l.id ? '  (' + l.id + ')' : '') }),
+      h('td', { text: l.network && (l.action === 'refused' || l.action === 'removed') ? 'Banned on the Reborn network' : l.reason || (l.action === 'refused' && l.ban ? 'Your ' + (l.kind || 'ban') + ' ' + l.ban : '') }), h('td', { class: 'small', text: l.by || (l.action === 'refused' || l.action === 'removed' ? 'server ' + (l.server || '') : '') })))) : 'Nothing yet.');
+}
+function logWords(l) {
+  const net = l.list === 'network' ? ' (network)' : '';
+  const until = l.until ? ', until ' + when(l.until) : l.action === 'ban' || l.action === 'mute' ? ', permanent' : '';
+  return { ban: 'Banned' + net + until, kick: 'Kicked (5 minutes)', mute: 'Muted' + until, unban: 'Removed ' + (l.kind || 'ban') + net,
+           refused: 'Refused a join' + (l.where === 'backend' ? ' (main backend)' : ''), removed: 'Taken off the server' }[l.action] || l.action;
+}
+function reasonText(r) { r = (r || '').trim().replace(/\s+/g, ' ') || 'no reason given'; return /[.!?]$/.test(r) ? r : r + '.'; }
+function endsText(seconds) {
+  if (!seconds) return '';
+  const d = new Date(Date.now() + seconds * 1000), mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
+  return d.getUTCDate() + ' ' + mon + ' ' + d.getUTCFullYear() + ' ' + String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0') + ' UTC';
+}
+const LENGTH_SECONDS = { '1h': 3600, '1d': 86400, '7d': 604800, '30d': 2592000, permanent: 0 };
+function previewMod() {
+  // As server/bans.py refusal() and mute_text() make them.
+  const network = document.querySelector('input[name=mod-list]:checked').value === 'network' && mod && mod.network_admin;
+  const reason = reasonText($('mod-reason').value), secs = LENGTH_SECONDS[$('mod-length').value];
+  const ends = secs ? 'Ends: ' + endsText(secs) + '.' : 'This ban is permanent.';
+  let title, text;
+  if (modAction === 'kick') { title = 'Kicked from this server'; text = 'You were kicked from this server: ' + reason + ' You can join again in 5 minutes.'; }
+  else if (modAction === 'mute') { title = 'In the match, at the top of the screen'; text = 'You are muted on this server: ' + reason + ' Your voice and text chat reach nobody.' + (secs ? ' Ends: ' + endsText(secs) + '.' : ''); }
+  else if (network) { title = 'Banned from the Reborn network'; text = 'You are banned from the Reborn servers and the community servers on the Reborn list. Reason: ' + reason + ' ' + ends + ' Appeal on the Reborn Discord.'; }
+  else { title = 'Banned from this server'; text = 'You are banned from this server. Reason: ' + reason + ' ' + ends + ' To appeal, contact this server\'s admin.'; }
+  const p = $('mod-preview');
+  p.querySelector('small').textContent = modAction === 'mute' ? 'SERVER MESSAGE' : 'MODERATION · COULD NOT JOIN';
+  p.querySelector('b').textContent = modAction === 'mute' ? '' : title; p.querySelector('b').style.display = modAction === 'mute' ? 'none' : '';
+  p.querySelector('p').textContent = text;
+  $('mod-count').textContent = $('mod-reason').value.length + ' / ' + ((mod && mod.reason_max) || 120);
+  $('mod-length-box').style.display = modAction === 'kick' ? 'none' : '';
+  $('mod-servers-box').style.display = network ? 'none' : '';
+  $('mod-ip-box').style.display = target_has_ip() ? '' : 'none';
+  $('mod-go').textContent = modAction === 'kick' ? 'Kick' : modAction === 'mute' ? 'Mute' : network ? 'Ban from the network' : 'Ban';
+  document.querySelectorAll('#mod-list-choice label').forEach(l => l.classList.toggle('on', l.querySelector('input').checked));
+}
+function target_has_ip() { return modTarget && !!modTarget.ip && !modTarget.ip_only; }
+function openMod(action, r) {
+  modAction = action; modTarget = r;
+  $('mod-title').textContent = KIND_WORDS[action] + ' ' + (r.name || r.id || r.ip);
+  $('mod-who').textContent = [r.name && 'Name ' + r.name, r.id && 'player id ' + r.id, r.account && 'an account (Protect your name)', r.ip && 'address ' + r.ip].filter(Boolean).join(', ') + '.';
+  $('mod-list-choice').style.display = mod.network_admin && action === 'ban' ? '' : 'none';
+  document.querySelector('input[name=mod-list][value=server]').checked = true;
+  sync($('mod-servers'), mod.servers.map(x => [x.n, x.name]), () => [h('option', { value: '0', text: 'All my servers' }), ...mod.servers.map(x => h('option', { value: x.n, text: '#' + x.n + ' ' + x.name }))]);
+  $('mod-servers').value = action === 'kick' && r.server ? String(r.server) : '0';
+  $('mod-reason').value = ''; $('mod-ip').checked = true;
+  try { $('mod-by').value = localStorage.getItem('bf-mod-by') || ''; } catch (e) {}
+  previewMod();
+  $('mod-modal').classList.add('on'); $('mod-reason').focus();
+}
+['mod-reason', 'mod-length'].forEach(id => $(id).addEventListener('input', previewMod));
+document.querySelectorAll('input[name=mod-list]').forEach(x => x.addEventListener('change', previewMod));
+$('mod-cancel').onclick = () => $('mod-modal').classList.remove('on');
+$('mod-go').onclick = async () => {
+  const network = document.querySelector('input[name=mod-list]:checked').value === 'network' && mod.network_admin && modAction === 'ban';
+  const by = $('mod-by').value.trim();
+  try { localStorage.setItem('bf-mod-by', by); } catch (e) {}
+  const t = modTarget, servers = Number($('mod-servers').value);
+  const data = { action: modAction, list: network ? 'network' : 'server', reason: $('mod-reason').value, length: $('mod-length').value,
+                 servers: servers && !network ? [servers] : [], by: by, match_ip: $('mod-ip').checked,
+                 player: t.ip_only ? {} : { name: t.name, id: t.id, ip: t.ip, account: t.account }, ips: t.ip_only ? [t.ip] : [] };
+  if (network && !confirm('Ban ' + (t.name || t.id || t.ip) + ' from every Reborn server and every community server on the main backend?')) return;
+  const r = await act('/api/moderation/action', data, KIND_WORDS[modAction] + ': done');
+  if (r) { mod = r.moderation; renderModeration(); $('mod-modal').classList.remove('on'); }
+};
+async function unban(e, network) {
+  if (!confirm((e.kind === 'mute' ? 'Unmute ' : 'Lift the ' + (network ? 'network ' : '') + e.kind + ' of ') + playerWords(e) + '?')) return;
+  let by = ''; try { by = localStorage.getItem('bf-mod-by') || ''; } catch (x) {}
+  const r = await act('/api/moderation/action', { action: 'unban', ban: e.id, list: network ? 'network' : 'server', by: by }, 'Removed');
+  if (r) { mod = r.moderation; renderModeration(); }
+}
+$('mod-find-go').onclick = async () => {
+  const r = await act('/api/moderation/lookup', { text: $('mod-find').value, network: $('mod-find-net').checked });
+  if (!r) return;
+  sync($('mod-found'), [Date.now()], () => r.players.length ? h('table', {}, h('tr', {}, ['Name', 'Player id', '', ''].map(t => h('th', { text: t }))),
+    r.players.map(p => playerRow(p))) : 'Nobody found.');
+};
+$('mod-find').addEventListener('keydown', e => { if (e.key === 'Enter') $('mod-find-go').click(); });
+$('mod-manual-go').onclick = () => {
+  const v = $('mod-manual').value.trim();
+  if (/^[0-9a-fA-F]{8}$/.test(v)) openMod('ban', { id: v.toUpperCase() });
+  else if (/^[0-9a-fA-F:.]{3,45}$/.test(v) && (v.includes('.') || v.includes(':'))) openMod('ban', { ip: v, ip_only: true });
+  else toast('Type a player id (8 characters, 0 to 9 and A to F) or an address.', true);
+};
+
 // ---- signing in (only when a password is set)
 $('login-go').onclick = async () => {
   try { await api('/api/login', { password: $('login-password').value }); $('login-modal').classList.remove('on'); $('login-password').value = ''; tick(); }
@@ -713,6 +900,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') document.que
 async function tick() {
   try { state = await api('/api/state'); render(); } catch (e) { $('mode').textContent = 'No answer'; $('mode').className = 'pill red'; }
   if ($('logs').classList.contains('on') && $('log-auto').checked) loadLog();
+  if ($('moderation').classList.contains('on') && !$('mod-modal').classList.contains('on')) loadModeration();
 }
 tick(); tick.timer = setInterval(tick, 2000);
 </script>

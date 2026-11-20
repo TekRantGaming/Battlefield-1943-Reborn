@@ -102,6 +102,8 @@ BACKEND_PORTS = (18241, 18246, 18250)  # a backend of our own (LAN only, officia
 # (BF_SERVER_BACKEND_BIND; every address without it).
 LOOPBACK_BASE = int(os.environ.get('BF_SERVER_LOOPBACK_BASE') or 10)
 BACKEND_BIND = os.environ.get('BF_SERVER_BACKEND_BIND') or ''
+# Tests only: the registry port the manager's own questions go to (signed lookups, broadcasts); 18250 otherwise.
+REGISTRY_PORT = int(os.environ.get('BF_SERVER_REGISTRY_PORT') or 18250)
 MAIN_BACKEND = '127.0.0.1'
 FEED = 'https://api.github.com/repos/TekRantGaming/Battlefield-1943-Reborn/releases/latest'
 # The messages an admin can send from a list (TekRantGaming, 13 Nov 2026), {time} the time left as words.
@@ -175,6 +177,14 @@ MAINTENANCE_FILE = os.path.join(DATA, 'maintenance.json')
 # Promoted community servers (TekRantGaming, 16 Nov 2026): their host keys, read by our own main backend
 # (plasma.py --promoted-file, Promoted) within seconds of a change. manager.py promote, demote, promoted.
 PROMOTED_FILE = os.path.join(DATA, 'promoted_servers.json')
+# Moderation (server/bans.py, docs/MODERATION.md): this manager's own ban list (its servers only), the Reborn network's
+# list (only on the machine that runs the main backend: the official manager), the moderation log, and the players its
+# servers had in the last week (the page's lookup; addresses in it kept SEEN_DAYS at most).
+BANS_FILE = os.path.join(DATA, 'bans.json')
+NETWORK_BANS_FILE = os.path.join(DATA, 'network_bans.json')
+MODERATION_LOG = os.path.join(DATA, 'moderation_log.jsonl')
+SEEN_FILE = os.path.join(DATA, 'players_seen.json')
+SEEN_DAYS = 7
 
 
 def read_text(path, default=''):
@@ -258,6 +268,14 @@ def set_maintenance(on, kind='', text='', minutes=0.0, allow=()):
     return maintenance_words(raw)
 
 
+def bans_module():
+    """server/bans.py: the ban lists and the moderation log."""
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import bans
+    return bans
+
+
 def host_module():
     """gmhost.py, for the network broadcast's signing (sign_network, sign_admin)."""
     if HERE not in sys.path:
@@ -275,8 +293,8 @@ def backend_registry():
     flags = package_flags()
     if flags['official'] and not flags['main_backend']:
         cfg = load_config()
-        return (cfg.get('backend') or MAIN_BACKEND, 18250)
-    return (BACKEND_BIND or '127.0.0.1', 18250)
+        return (cfg.get('backend') or MAIN_BACKEND, REGISTRY_PORT)
+    return (BACKEND_BIND or '127.0.0.1', REGISTRY_PORT)
 
 
 def ask_backend(obj, timeout=10):
@@ -805,6 +823,18 @@ class Manager:
         self.quit = threading.Event()
         self.restart_after_quit = False
         os.makedirs(LOGS, exist_ok=True)
+        # Moderation: the lists (read again when they change), the log, the players seen (moderation methods below).
+        bans = bans_module()
+        self.bans = bans.BanList(BANS_FILE, self.note)
+        self.netbans = bans.BanList(NETWORK_BANS_FILE, self.note, network=True)
+        self.modlog = bans.ModerationLog(MODERATION_LOG)
+        self.seen = {}
+        self.seen_saved = 0.0
+        try:
+            raw = json.loads(read_text(SEEN_FILE, '') or '{}')
+            self.seen = {k: v for k, v in raw.items() if isinstance(v, dict)} if isinstance(raw, dict) else {}
+        except ValueError:
+            self.seen = {}
 
     # ---- notes
     def note(self, text):
@@ -881,7 +911,9 @@ class Manager:
                 args += ['--check-servers', os.path.join(DATA, 'attest'),
                          '--blocked-file', os.path.join(DATA, 'blocked_servers.json'),
                          # Promoted community servers (manager.py promote): the Reborn tab, Trusted Community Servers.
-                         '--promoted-file', PROMOTED_FILE]
+                         '--promoted-file', PROMOTED_FILE,
+                         # The Reborn network's ban list (the Moderation page's network list, manager.py ban --network)
+                         '--network-bans', NETWORK_BANS_FILE]
             self.backend = spawn(args, output=os.path.join(LOGS, 'backend.out'))
             self.backend_mode = mode
             self.note('the %s started (PID %d)' % ('main backend' if mode == 'official' else 'LAN backend', self.backend.pid))
@@ -925,7 +957,9 @@ class Manager:
                 '--max-players', str(s['max_players']), '--tick', str(tick),
                 '--broadcast-file', os.path.join(directory, 'broadcast.json'),
                 '--balance-file', os.path.join(directory, 'balance.txt'), '--host-key-file', self.host_key(),
-                '--stats-file', os.path.join(directory, 'stats.txt')]
+                '--stats-file', os.path.join(directory, 'stats.txt'),
+                # Moderation: the ban list and log this manager keeps for all its servers, and which one this is.
+                '--bans-file', BANS_FILE, '--moderation-log', MODERATION_LOG, '--server-number', str(n)]
         if self.cfg['region']:
             host += ['--region', self.cfg['region']]
         if s['description']:
@@ -1132,6 +1166,12 @@ class Manager:
                 out[key] = status[key]
         if isinstance(status.get('names'), list):
             out['names'] = [str(x)[:32] for x in status['names']][:64]
+        if isinstance(status.get('roster'), list):  # moderation: each player's id, address and account (gmhost.py)
+            bans = bans_module()
+            out['roster'] = [{'name': bans.clean_name(r.get('name')), 'id': bans.clean_id(r.get('id')),
+                              'ip': bans.clean_ip(r.get('ip')), 'account': bans.clean_account(r.get('account')),
+                              'since': int(r.get('since') or 0)}
+                             for r in status['roster'][:64] if isinstance(r, dict)]
         return out
 
     def watch(self):
@@ -1169,6 +1209,8 @@ class Manager:
                     with contextlib.suppress(RuntimeError):
                         self.ensure_backend()
                 self.tick_countdowns()
+                with contextlib.suppress(Exception):
+                    self.note_seen()
                 # The router's forwards are leased (Upnp.LEASE): asked for again before they end.
                 if self.cfg['upnp'] and any(self.upnp.mapped.values()) and time.time() - self.ports_at > Upnp.RENEW:
                     self.ports_at = time.time()
@@ -1509,6 +1551,126 @@ class Manager:
                 if self.check_update():
                     self.update_now()
 
+    # ---- moderation (server/bans.py, docs/MODERATION.md)
+    def network_admin(self):
+        """True on the machine that runs the main backend: its manager keeps the Reborn network's ban list."""
+        return self.own_backend() == 'official'
+
+    def roster(self):
+        out = []
+        for n in range(1, len(self.cfg['servers']) + 1):
+            st = self.server_status(n)
+            for r in st.get('roster', []):
+                out.append(dict(r, server=n, server_name=st['name']))
+        return out
+
+    def note_seen(self):
+        """The players on the servers now, into the week's list (the page's lookup)."""
+        now = int(time.time())
+        changed = False
+        for r in self.roster():
+            if not r['name']:
+                continue
+            key = '%s|%s' % (r['name'].lower(), r['id'])
+            old = self.seen.get(key)
+            if not old or now - old.get('at', 0) > 60 or old.get('ip') != r['ip']:
+                changed = True
+            self.seen[key] = {'name': r['name'], 'id': r['id'], 'ip': r['ip'], 'account': r['account'],
+                              'server': r['server_name'], 'at': now}
+        for key in [k for k, v in self.seen.items() if now - int(v.get('at', 0)) > SEEN_DAYS * 86400]:
+            del self.seen[key]
+            changed = True
+        if len(self.seen) > 5000:
+            for key in sorted(self.seen, key=lambda k: self.seen[k].get('at', 0))[:500]:
+                del self.seen[key]
+        if changed and time.time() - self.seen_saved > 30:
+            self.seen_saved = time.time()
+            with contextlib.suppress(OSError):
+                write_atomic(SEEN_FILE, json.dumps(self.seen))
+
+    def moderation(self):
+        """What the Moderation page shows."""
+        bans = bans_module()
+        self.bans.reload(force=True)
+        self.netbans.reload(force=True)
+        now = time.time()
+        return {'players': self.roster(),
+                'bans': [self.bans.public(e) for e in self.bans.active(now)],
+                'network_admin': self.network_admin(),
+                'network': [self.netbans.public(e) for e in self.netbans.active(now)] if self.network_admin() else [],
+                'log': self.modlog.read(200), 'servers': [{'n': n, 'name': x['name']} for n, x in
+                                                         enumerate(self.cfg['servers'], 1)],
+                'kick_minutes': bans.KICK_SECONDS // 60, 'ip_days': bans.IP_DAYS, 'reason_max': bans.REASON_MAX,
+                'now': int(now)}
+
+    def lookup(self, text, network=False):
+        """Players by name (any part) or player id: this manager's week (its servers), or with network the main
+        backend's (who is online, names seen this week), asked with a signed question."""
+        bans = bans_module()
+        text = str(text or '').strip()[:32]
+        if network:
+            if not self.network_admin():
+                raise RuntimeError('The Reborn network\'s list is kept on the machine that runs the main backend.')
+            key = official_key_or_fail('The network lookup')
+            reply = ask_backend(host_module().sign_admin(key, 'lookup:' + text if text else 'players'))
+            if not reply.get('ok'):
+                raise RuntimeError('The main backend refused the question: %s.' % (reply.get('why') or 'no reason'))
+            return [{'name': bans.clean_name(r.get('name')), 'id': bans.clean_id(r.get('id')),
+                     'ip': bans.clean_ip(r.get('ip')), 'account': bans.clean_account(r.get('account')),
+                     'server': str(r.get('server', ''))[:48], 'at': int(r.get('at') or 0),
+                     'online': bool(r.get('online', True))} for r in reply.get('players') or []][:200]
+        self.note_seen()
+        low = text.lower()
+        rows = [dict(v) for v in self.seen.values()
+                if not low or low in v['name'].lower() or bans.clean_id(text) == v.get('id')]
+        online = {(r['name'].lower(), r['id']) for r in self.roster()}
+        for r in rows:
+            r['online'] = (r['name'].lower(), r['id']) in online
+        return sorted(rows, key=lambda r: -r.get('at', 0))[:200]
+
+    def moderate(self, data, by_default='manager'):
+        """A kick, ban, mute or unban, from the page or the command line. Returns the entry."""
+        bans = bans_module()
+        action = str(data.get('action', ''))
+        network = data.get('list') == 'network'
+        if network and not self.network_admin():
+            raise RuntimeError('The Reborn network\'s ban list is kept on the machine that runs the main backend '
+                               '(the official manager).')
+        target = self.netbans if network else self.bans
+        by = bans.clean_reason(data.get('by'))[:32] or by_default
+        try:
+            if action == 'unban':
+                e = target.remove(str(data.get('ban', ''))[:16])
+                self.modlog.write(action='unban', list='network' if network else 'server', ban=e['id'], kind=e['kind'],
+                                  names=e['names'], ids=e['ids'], by=by)
+                self.note('moderation: %s removed %s %s (%s)' % (by, e['kind'], e['id'], ', '.join(e['names']) or
+                                                                 ', '.join(e['ids'])))
+                return e
+            if action not in ('kick', 'ban', 'mute'):
+                raise ValueError('the action is kick, ban, mute or unban')
+            if network and action != 'ban':
+                raise ValueError('the network list holds bans only: kick and mute are for this manager\'s servers')
+            p = data.get('player') if isinstance(data.get('player'), dict) else {}
+            ids = [p.get('id')] + list(data.get('ids') or [])
+            accounts = [p.get('account')] + list(data.get('accounts') or [])
+            ips = [p.get('ip')] + list(data.get('ips') or []) if data.get('match_ip', True) else []
+            seconds = 0 if action == 'kick' else bans.length_seconds(data.get('length') or 'permanent')
+            servers = [] if network else [int(x) for x in (data.get('servers') or []) if str(x).isdigit()]
+            e = target.add(action, ids, accounts, ips, [p.get('name')] + list(data.get('names') or []),
+                           data.get('reason', ''), by, seconds, servers)
+        except ValueError as err:
+            raise RuntimeError(str(err).capitalize() + '.')
+        self.modlog.write(action=action, list='network' if network else 'server', ban=e['id'], names=e['names'],
+                          ids=e['ids'], account=bool(e['accounts']) or None, ip=bool(e['ips']) or None,
+                          reason=e['reason'], until=e['until'] or None, servers=e['servers'] or None, by=by)
+        self.note('moderation: %s %s %s (%s) %s: %s' % (
+            by, {'kick': 'kicked', 'ban': 'banned', 'mute': 'muted'}[action],
+            ', '.join(e['names']) or ', '.join(e['ids']) or 'an address', e['id'],
+            'on the Reborn network' if network else 'on server%s %s' % ('s' if len(e['servers']) != 1 else '',
+                                                                          ', '.join(map(str, e['servers'])) or 'all'),
+            e['reason'] or 'no reason'))
+        return e
+
     # ---- what the page shows
     def state(self):
         with self.lock:
@@ -1765,6 +1927,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, {'file': path_, 'text': tail_text(path_, 300)})
         if path == '/api/browse':
             return self.send(200, browse((params.get('path') or [''])[0]))
+        if path == '/api/moderation':
+            return self.send(200, m.moderation())
         return self.send(404, {'error': 'not found'})
 
     def do_POST(self):
@@ -1821,6 +1985,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             numbers = [n] if n else m.running_servers()
             for number in numbers:
                 m.start_server(number, 'restarted')
+        elif path == '/api/moderation/action':
+            e = m.moderate(data, 'command line' if self.headers.get('X-BF-Token') else 'manager page')
+            return {'entry': m.bans.public(e), 'moderation': m.moderation()}
+        elif path == '/api/moderation/lookup':
+            return {'players': m.lookup(data.get('text', ''), bool(data.get('network')))}
         elif path == '/api/broadcast':
             servers = [int(x) for x in data.get('servers') or []]
             ident = m.broadcast(str(data.get('kind', 'custom')), int(data.get('seconds') or 0), str(data.get('text', '')),
@@ -2087,6 +2256,25 @@ def run(args):
     return 0
 
 
+def moderation_target(who, network=False):
+    """The player the command line names: one on the servers now (by name or player id), one seen this week, or else
+    a player id typed in full."""
+    bans = bans_module()
+    rows = ask('/api/moderation')['players']
+    want = who.strip().lower()
+    hit = [r for r in rows if r['name'].lower() == want or (bans.clean_id(who) and r['id'] == bans.clean_id(who))]
+    if not hit:
+        hit = [r for r in ask('/api/moderation/lookup', {'text': who, 'network': network})['players']
+               if r['name'].lower() == want or (bans.clean_id(who) and r['id'] == bans.clean_id(who))]
+    if hit:
+        r = hit[0]
+        return {'name': r['name'], 'id': r['id'], 'ip': r['ip'], 'account': r.get('account', '')}
+    if bans.clean_id(who) and len(who.strip()) == 8:
+        return {'id': bans.clean_id(who)}
+    raise RuntimeError('No player %s is on the servers or was seen this week. Give their 8 digit player id, or an '
+                       'address with --ip.' % who)
+
+
 def main():
     ap = argparse.ArgumentParser(description='Battlefield 1943 Reborn server manager')
     sub = ap.add_subparsers(dest='command')
@@ -2124,6 +2312,33 @@ def main():
     mt.add_argument('--text', default='', help='a custom message, at most 200 characters')
     mt.add_argument('--minutes', type=float, default=0, help='switches itself off after this long (0: never)')
     mt.add_argument('--allow', action='append', default=[], help='a player address let in anyway (an admin)')
+    # Moderation (docs/MODERATION.md)
+    sub.add_parser('players', help='the players on this manager\'s servers now, with their player ids')
+    for name, words in (('kick', 'removes a player now; they can join again in 5 minutes'),
+                        ('ban', 'keeps a player out of this manager\'s servers (or, --network, the whole Reborn network)'),
+                        ('mute', 'stops a player\'s voice and text chat reaching anyone on this manager\'s servers')):
+        mp = sub.add_parser(name, help=words)
+        mp.add_argument('who', help='a player on the servers now (name or player id), a player id, or with --ip an address')
+        mp.add_argument('--reason', default='', help='shown to the player (120 characters at most)')
+        if name != 'kick':
+            mp.add_argument('--length', default='permanent', help='1h, 1d, 7d, 30d, permanent, or e.g. 12h (default: permanent)')
+            mp.add_argument('--no-ip', action='store_true', help='do not hold the player\'s address (a shared one)')
+        mp.add_argument('--ip', action='store_true', help='who is an address')
+        mp.add_argument('--server', type=int, action='append', default=[], help='only this server (default: all of them)')
+        mp.add_argument('--by', default='', help='your name in the moderation log')
+        if name == 'ban':
+            mp.add_argument('--network', action='store_true',
+                            help='official manager on the main backend\'s machine only: the Reborn network\'s list')
+    ub = sub.add_parser('unban', help='removes a ban, kick or mute by its id (manager.py bans lists them)')
+    ub.add_argument('ban')
+    ub.add_argument('--network', action='store_true')
+    ub.add_argument('--by', default='')
+    bl = sub.add_parser('bans', help='the bans, kicks and mutes that hold now')
+    bl.add_argument('--network', action='store_true')
+    sub.add_parser('modlog', help='the moderation log, newest first')
+    lk = sub.add_parser('lookup', help='players seen in the last week by name or player id')
+    lk.add_argument('text', nargs='?', default='')
+    lk.add_argument('--network', action='store_true', help='official: everyone online, or names seen on the network')
     sub.add_parser('update', help='look for a new release now, and install it')
     i = sub.add_parser('install', help='the game\'s files from your own copy of the game')
     i.add_argument('path')
@@ -2219,6 +2434,52 @@ def main():
                 print(ask('/api/maintenance', fields)['maintenance'])
             else:  # no manager: the file itself (the backend, when it starts, reads it)
                 print(set_maintenance(fields['on'], fields['kind'], fields['text'], fields['minutes'], fields['allow']))
+            return 0
+        if command == 'players':
+            rows = ask('/api/moderation')['players']
+            if not rows:
+                print('Nobody is on these servers now.')
+            for r in rows:
+                print('  server %-2d %-16s id %-8s %s' % (r['server'], r['name'], r['id'] or '?', r['ip']))
+            return 0
+        if command in ('kick', 'ban', 'mute'):
+            data = {'action': command, 'reason': args.reason, 'servers': args.server, 'by': args.by,
+                    'list': 'network' if getattr(args, 'network', False) else 'server',
+                    'length': getattr(args, 'length', ''), 'match_ip': not getattr(args, 'no_ip', False)}
+            if args.ip:
+                data['ips'] = [args.who]
+            else:
+                found = moderation_target(args.who, getattr(args, 'network', False))
+                data['player'] = found
+            reply = ask('/api/moderation/action', data)
+            e = reply['entry']
+            print('%s %s: %s (%s), %s' % (command, e['id'], ', '.join(e['names']) or ', '.join(e['ids']) or 'an address',
+                                         'ends ' + e['ends'] if e['until'] else 'permanent', e['reason'] or 'no reason'))
+            return 0
+        if command == 'unban':
+            e = ask('/api/moderation/action', {'action': 'unban', 'ban': args.ban, 'by': args.by,
+                                                'list': 'network' if args.network else 'server'})['entry']
+            print('removed %s %s (%s)' % (e['kind'], e['id'], ', '.join(e['names']) or ', '.join(e['ids'])))
+            return 0
+        if command == 'bans':
+            mod = ask('/api/moderation')
+            rows = mod['network'] if args.network else mod['bans']
+            if not rows:
+                print('None.')
+            for e in rows:
+                print('%s  %-4s %-24s ids %-18s %s%s  %s  ends %s  by %s' % (
+                    e['id'], e['kind'], ', '.join(e['names'])[:24], ','.join(e['ids'])[:18], ' +account' if e['accounts'] else '',
+                    ' +ip' if e['ips'] else '', e['reason'] or '-', e['ends'], e['by']))
+            return 0
+        if command == 'modlog':
+            for line in ask('/api/moderation')['log'][:100]:
+                print('%s  %s' % (time.strftime('%Y-%m-%d %H:%M', time.gmtime(line.get('at', 0))),
+                                  ' '.join('%s=%s' % (k, v) for k, v in line.items() if k != 'at')))
+            return 0
+        if command == 'lookup':
+            for r in ask('/api/moderation/lookup', {'text': args.text, 'network': args.network})['players']:
+                print('  %-16s id %-8s %-15s %s %s' % (r['name'], r['id'] or '?', r['ip'], r.get('server', ''),
+                                                       'online' if r.get('online') else ''))
             return 0
         if command == 'update':
             reply = ask('/api/update/apply', {}, timeout=600)
