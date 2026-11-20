@@ -93,12 +93,33 @@ average after (0.82 at the most, run `perf_tilesL_ab`, no effects). With effects
 further 1.2 ms a frame. The frame stays GPU bound: the sky (2.9 ms) and his SSGI and GTAO (2.6 ms) are now the largest
 passes.
 
+## The whole frame after (confirmed)
+
+The same scene (no bots, full storm, his settings with VSync on): the frame interval 14.6 ms before (68 FPS; runs
+perf_nightA_old) and 11.3 to 11.8 ms after (85 to 89 FPS; runs perf_utilP, perf_skyQ), GPU 9.8 to 10.3 ms a frame.
+nvidia-smi during the run (new in perf_night.ps1): the GPU 83 to 90% busy at 2.3 to 2.7 GHz. The rest is VSync: his
+settings have it on, and a frame that misses a refresh waits for the next, so frames of about 10 ms of GPU work come
+out at 11 to 12 ms. Under about 8.3 ms of GPU work (120 Hz) the frame would hold the refresh rate.
+
+The sky's 2.9 ms by part (new sub-timers, sky.cpp): the clouds' march 2.43 ms, their blend over frames 0.14, the sky
+drawn 0.34. The march's work is the cloud that is seen (up to 144 steps a ray, each with five samples toward the
+moon and one more for the billows' facing); its density already skips the detail noise where the coarse shape is
+empty.
+
 ## Looked at, not changed
 
 - **The sky's cloud march** (about 2.9 ms in a full storm, half size, temporal): the remaining cost is the march over
   visible cloud (48 to 144 steps, five light samples a step). Fewer steps or a quarter size march would change the
   look; left for TekRantGaming to choose.
-- **SSGI and GTAO** (1.65 and 0.92 ms): his Ultra settings, the same by day.
+- **The clouds' march, amortised over frames** (marching half the cloud texels each frame, the blend already keeping
+  90% of the last frames): would take about 1.2 ms off a Night Ops frame, enough with the rest to come near 120 FPS,
+  but newly seen sky and fast turns would show the clouds a little softer for a frame or two. A change of look:
+  **his call**, not done unattended.
+- **SSGI and GTAO** (1.8 and 0.95 ms): his Ultra settings (GI quality 3: full resolution, 4 slices of 10 steps), the
+  same by day. Both build the view's raw depth and normals from the same depth with the same code (gtao_shaders.h and
+  ssgi_shaders.h differ only in comments there); the GI could take the AO's, about 0.1 to 0.2 ms (**estimated**). Their
+  depth mips are weighted by each one's own radius, so those differ and cannot be shared. Not done: small, and the two
+  can run at different resolutions.
 - **The game's side** (bf/src): the per frame memory walks found were one time scans or test tools; the team icons'
   per frame cost was fixed earlier the same day (squad_colors.cpp). The renderer's own CPU time is about 2 ms a frame
   and the frame is GPU bound.

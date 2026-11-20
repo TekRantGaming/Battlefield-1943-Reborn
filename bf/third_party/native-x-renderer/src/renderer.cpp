@@ -944,10 +944,11 @@ class FrameTimer {
 // spent on (the Night Ops performance pass, 20 Nov 2026).
 class SectionTimers {
  public:
-  enum Id { kSky, kCloudsOver, kFog, kLens, kWet, kGrass, kGtao, kSsgi, kAa, kUpscale, kMotionBlur, kDof, kCount };
+  enum Id { kSky, kCloudsOver, kFog, kLens, kWet, kGrass, kGtao, kSsgi, kAa, kUpscale, kMotionBlur, kDof,
+            kSkyMarch, kSkyResolve, kSkyDraw, kCount };
   static constexpr const char* kNames[kCount] = {"sky",  "clouds over", "fog and rain", "lens", "wet copies", "grass",
                                                  "GTAO", "SSGI",        "AA",           "upscaler", "motion blur",
-                                                 "DOF"};
+                                                 "DOF",  "(sky: the clouds' march", "the clouds' blend", "the sky drawn)"};
   void Begin(IRenderDevice* device, IDeviceContext* context, Id id) {
     if (!REXCVAR_GET(native_x_renderer_gpu_sections) || !device || !context) return;
     Section& sec = sections_[id];
@@ -1006,6 +1007,16 @@ class SectionTimers {
   };
   Section sections_[kCount];
 } g_sections;
+// The sky's own parts, timed from sky.cpp (SkySectionBegin / End: 0 the clouds' march, 1 their blend, 2 the sky drawn).
+}  // namespace
+void SkySectionBegin(int part) {
+  if (g_device && part >= 0 && part < 3)
+    g_sections.Begin(g_device->device(), g_device->context(), SectionTimers::Id(SectionTimers::kSkyMarch + part));
+}
+void SkySectionEnd(int part) {
+  if (g_device && part >= 0 && part < 3) g_sections.End(g_device->context(), SectionTimers::Id(SectionTimers::kSkyMarch + part));
+}
+namespace {
 // A GPU section around `work` (a call returning what it returns).
 template <typename F>
 auto Timed(SectionTimers::Id id, F&& work) {

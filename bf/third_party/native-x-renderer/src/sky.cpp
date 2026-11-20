@@ -20,6 +20,10 @@
 #include <native_x_renderer/native_x_renderer.h>  // LightningStrike
 
 namespace native_x_renderer {
+namespace renderer {
+void SkySectionBegin(int part);  // renderer.cpp: the sky's parts' GPU times
+void SkySectionEnd(int part);
+}  // namespace renderer
 
 using namespace Diligent;
 
@@ -3247,8 +3251,10 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
     set(cloud_srb_, "detailTex", detail_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
     set(cloud_srb_, "weatherTex", weather_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
     set(cloud_srb_, "cloudDepthTex", in.depth_srv);
+    renderer::SkySectionBegin(0);
     draw2(clouds_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), where_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), cw, ch,
           cloud_pso_, cloud_srb_);
+    renderer::SkySectionEnd(0);
     // Blended with the frames before, into the other of the two kept textures.
     history_now_ ^= 1;
     set(resolve_srb_, "SkyConstants", constants_);
@@ -3256,8 +3262,10 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
     set(resolve_srb_, "historyTex", history_[history_now_ ^ 1]->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
     set(resolve_srb_, "whereTex", where_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
     set(resolve_srb_, "whereHistoryTex", where_history_[history_now_ ^ 1]->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
+    renderer::SkySectionBegin(1);
     draw2(history_[history_now_]->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET),
           where_history_[history_now_]->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), cw, ch, resolve_pso_, resolve_srb_);
+    renderer::SkySectionEnd(1);
     history_valid_ = true;
     clouds_fresh_ = in.debug == 0;
     std::memcpy(last_forward_, in.forward, sizeof(last_forward_));
@@ -3272,7 +3280,9 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
   set(sky_srb_, "shapeDebugTex", shape_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
   set(sky_srb_, "detailDebugTex", detail_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
   // The view's part of the colour only (its texture may be larger).
+  renderer::SkySectionBegin(2);
   draw(target, in.width, in.height, sky_pso_, sky_srb_);
+  renderer::SkySectionEnd(2);
   context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
   return true;
 }
