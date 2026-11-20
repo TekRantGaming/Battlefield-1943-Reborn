@@ -20,6 +20,14 @@
 // joined player whose ID is in the host's list (bf_world_admins; a dedicated server's --admins).
 //
 // The panel (F9, for an admin only): the same settings as sliders, sent as they are changed.
+//
+// Players' pings (20 Nov 2026, the scoreboards' ping, world_sync.h OwnPing and PingOf): every second this game sends
+// "BF43PING", "PNG1" and a u32 count on the same socket; every host answers BF43PONG with the same bytes at once (the
+// server browser's ping), and the time it took is a sample. The ping is the median of the last five. An ask without a
+// change sets flag 4 and puts the ping after the key (u16 ms, 0xFFFF unknown): an older host reads neither. A host
+// that keeps them answers such an ask with a second datagram, "BF43PNGL": version 1, a count, then for each player a
+// u16 ms, and a name (a length byte and text). Only an ask with flag 4 gets it, so an older game (its 128 byte buffer)
+// never sees one.
 
 #include "world_sync.h"
 
@@ -37,12 +45,14 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -60,6 +70,7 @@
 #include <rex/logging.h>
 #include <rex/ui/imgui_dialog.h>
 
+#include "comms.h"
 #include "launcher_kit.h"
 
 namespace bf1943 {
@@ -96,6 +107,17 @@ Settings g_request;
 int g_request_sends = 0;
 std::atomic<bool> g_started{false};
 
+// The pings (g_mutex): this game's own, and the host's list of every player's (names lower case, without a clan tag).
+std::atomic<int> g_own_ping{-1};
+std::vector<std::pair<std::string, int>> g_board;
+double g_board_at = -100;
+
+std::string BoardKey(const std::string& name) {
+  std::string s = comms::PlainName(name);
+  for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return s;
+}
+
 void PutF32(std::string& b, float v) {
   uint32_t bits;
   std::memcpy(&bits, &v, 4);
@@ -130,8 +152,23 @@ void Run() {
   std::string target;
   double next_ask = 0, last_answer = -100;
   bool valid = false;
+  // The pings: the ones out (count, sent at), the last five round trips, and when the next goes.
+  std::vector<std::pair<uint32_t, double>> pings_out;
+  std::vector<int> samples;
+  uint32_t ping_count = 0;
+  double next_ping = 0, last_pong = -100;
+  bool said_ping = false;
   for (;;) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // Waits for the socket (at most 50 ms), so a ping's answer is timed as it comes, not on a 50 ms step.
+    if (sock != kNoSocket) {
+      fd_set read;
+      FD_ZERO(&read);
+      FD_SET(sock, &read);
+      timeval wait{0, 50000};
+      select(int(sock) + 1, &read, nullptr, nullptr, &wait);
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     std::string joined, key;
     Settings request;
     bool have_request = false;
@@ -145,6 +182,12 @@ void Run() {
       target = joined;
       if (sock != kNoSocket) CloseSocket(sock), sock = kNoSocket;
       last_answer = -100, next_ask = 0;
+      pings_out.clear(), samples.clear(), next_ping = 0, last_pong = -100, said_ping = false;
+      g_own_ping = -1;
+      {
+        std::lock_guard lock(g_mutex);
+        g_board.clear(), g_board_at = -100;
+      }
       if (!target.empty()) {
         const size_t colon = target.rfind(':');
         addrinfo hints{}, *found = nullptr;
@@ -155,6 +198,15 @@ void Run() {
           freeaddrinfo(found);
           sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
           if (sock != kNoSocket) {
+            // Test runs on one PC (BF_LOOPBACK_ONLY): from this client's own loopback address (BF_LOOPBACK_ADDR), as
+            // its game's and its comms' sockets, so the host knows the asker for a joined player (its ping, an admin).
+            if (const char* lo = std::getenv("BF_LOOPBACK_ONLY"); lo && *lo == '1') {
+              sockaddr_in me{};
+              me.sin_family = AF_INET;
+              const char* a = std::getenv("BF_LOOPBACK_ADDR");
+              inet_pton(AF_INET, a && *a ? a : "127.0.0.1", &me.sin_addr);
+              bind(sock, reinterpret_cast<const sockaddr*>(&me), sizeof(me));
+            }
 #if defined(_WIN32)
             u_long on = 1;
             ioctlsocket(sock, FIONBIO, &on);
@@ -174,14 +226,31 @@ void Run() {
       REXLOG_INFO("BF world: the match's host no longer answers: the player's own sky settings again");
     }
     if (sock == kNoSocket) continue;
+    // No answer to a ping for eight seconds: unknown again.
+    if (now - last_pong > 8.0 && g_own_ping.load() >= 0) g_own_ping = -1, samples.clear();
+    if (now >= next_ping && !have_request) {
+      next_ping = now + 1.0;
+      std::string ping = "BF43PINGPNG1";
+      const uint32_t id = ++ping_count;
+      for (int s = 24; s >= 0; s -= 8) ping += char((id >> s) & 0xFF);
+      sendto(sock, ping.data(), int(ping.size()), 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+      pings_out.emplace_back(id, Now());
+      if (pings_out.size() > 8) pings_out.erase(pings_out.begin());
+    }
     if (now >= next_ask || have_request) {
       next_ask = now + (have_request ? 0.3 : 2.0);
       std::string ask = "BF43WRLD";
       ask += char(1);
-      ask += char(have_request ? 1 : 0);
+      ask += char(have_request ? 1 : 4);  // 4: the ping follows the key
       PutText(ask, PlayerName());
       PutText(ask, key);
+      if (!have_request) {
+        const int own = g_own_ping.load();
+        const uint32_t ms = own < 0 ? 0xFFFF : uint32_t(std::min(own, 0xFFFE));
+        ask += char(ms >> 8), ask += char(ms & 0xFF);
+      }
       if (have_request) {
+        pings_out.clear();  // the wait below would add to their times
         ask += char(request.day_night ? 1 : 0);
         for (float v : {request.hour, request.day_minutes, request.cloud_cover, request.cloud_rate, request.weather,
                         request.fog, request.ground_fog, request.wind})
@@ -195,7 +264,7 @@ void Run() {
       if (have_request) std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
     for (;;) {
-      uint8_t buf[128];
+      uint8_t buf[2048];
       sockaddr_in from{};
 #if defined(_WIN32)
       int from_size = sizeof(from);
@@ -205,6 +274,49 @@ void Run() {
       const int n = int(recvfrom(sock, reinterpret_cast<char*>(buf), sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &from_size));
       if (n <= 0) break;
       if (from.sin_addr.s_addr != to.sin_addr.s_addr || from.sin_port != to.sin_port) continue;
+      const double got_at = Now();
+      // A ping's answer: its round trip, and the ping now (the median of the last five).
+      if (n >= 16 && std::memcmp(buf, "BF43PONGPNG1", 12) == 0) {
+        const uint32_t id = uint32_t(buf[12]) << 24 | uint32_t(buf[13]) << 16 | uint32_t(buf[14]) << 8 | buf[15];
+        for (size_t i = 0; i < pings_out.size(); ++i) {
+          if (pings_out[i].first != id) continue;
+          samples.push_back(int(std::lround((got_at - pings_out[i].second) * 1000.0)));
+          if (samples.size() > 5) samples.erase(samples.begin());
+          pings_out.erase(pings_out.begin(), pings_out.begin() + std::ptrdiff_t(i) + 1);
+          std::vector<int> sorted = samples;
+          std::sort(sorted.begin(), sorted.end());
+          g_own_ping = sorted[sorted.size() / 2];
+          last_pong = got_at;
+          if (!said_ping && samples.size() >= 3) {
+            said_ping = true;
+            REXLOG_INFO("BF ping: {} ms to the match's host {}", g_own_ping.load(), target);
+          }
+          break;
+        }
+        continue;
+      }
+      // The host's list of every player's ping (an answer to an ask with flag 4).
+      if (n >= 10 && std::memcmp(buf, "BF43PNGL", 8) == 0 && buf[8] == 1) {
+        std::vector<std::pair<std::string, int>> board;
+        const int count = buf[9];
+        int at = 10;
+        for (int i = 0; i < count && at + 3 <= n; ++i) {
+          const int ms = int(buf[at]) << 8 | buf[at + 1], len = buf[at + 2];
+          at += 3;
+          if (at + len > n) break;
+          const std::string name(reinterpret_cast<const char*>(buf + at), size_t(len));
+          at += len;
+          if (ms != 0xFFFF && !name.empty()) board.emplace_back(BoardKey(name), ms);
+        }
+        static bool said_board = false;
+        if (!said_board) {
+          said_board = true;
+          REXLOG_INFO("BF ping: the match's host keeps players' pings ({} now)", board.size());
+        }
+        std::lock_guard lock(g_mutex);
+        g_board = std::move(board), g_board_at = got_at;
+        continue;
+      }
       if (n < 8 + 2 + 32 + 16 || std::memcmp(buf, "BF43WRLR", 8) != 0 || buf[8] != 1) continue;
       Status s;
       s.answered = true;
@@ -567,6 +679,18 @@ void Request(const Settings& settings) {
 }
 
 bool AdminPanelOpen() { return g_panel && g_panel->open.load(); }
+
+int OwnPing() { return g_own_ping.load(); }
+
+int PingOf(const std::string& name) {
+  if (comms::IsMe(name)) return OwnPing();
+  const std::string key = BoardKey(name);
+  std::lock_guard lock(g_mutex);
+  if (Now() - g_board_at > 10.0) return -1;
+  for (const auto& [n, ms] : g_board)
+    if (n == key) return ms;
+  return -1;
+}
 
 }  // namespace bf1943::world
 

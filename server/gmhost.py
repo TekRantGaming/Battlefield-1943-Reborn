@@ -53,18 +53,41 @@ def dev_net_delay():
 DEV_DELAY, DEV_JITTER = dev_net_delay()
 
 
-class Held:
-    """One direction's datagrams held DEV_DELAY plus up to DEV_JITTER, sent in the order they came."""
+def dev_net_delay_for():
+    """Tests only: BF_DEV_NET_DELAY_FOR=<ip>=<ms>[;<ip>=<ms>...] holds one client's game datagrams (by its address)
+    that long each way instead of BF_DEV_NET_DELAY's: players at different distances in one test (the scoreboards'
+    ping, 20 Nov 2026)."""
+    out = {}
+    for part in os.environ.get('BF_DEV_NET_DELAY_FOR', '').split(';'):
+        ip, _, ms = part.partition('=')
+        try:
+            out[ip.strip()] = (float(ms) / 1000.0, 0.0)
+        except ValueError:
+            pass
+    return out
 
-    def __init__(self):
+
+DEV_DELAY_FOR = dev_net_delay_for()
+
+
+def dev_delay(ip):
+    """The test delay each way (and jitter) for a client at that address: (0, 0) unless a test sets one."""
+    return DEV_DELAY_FOR.get(ip, (DEV_DELAY, DEV_JITTER))
+
+
+class Held:
+    """One direction's datagrams held a test's delay plus up to its jitter (dev_delay), sent in the order they came."""
+
+    def __init__(self, delay=None):
         self.last = 0.0
+        self.delay, self.jitter = delay if delay is not None else (DEV_DELAY, DEV_JITTER)
 
     def send(self, fn, *args):
-        if not DEV_DELAY and not DEV_JITTER:
+        if not self.delay and not self.jitter:
             fn(*args)
             return
         loop = asyncio.get_running_loop()
-        self.last = max(loop.time() + DEV_DELAY + random.random() * DEV_JITTER, self.last)
+        self.last = max(loop.time() + self.delay + random.random() * self.jitter, self.last)
         loop.call_at(self.last, fn, *args)
 
 
@@ -957,7 +980,7 @@ class ServerSide(asyncio.DatagramProtocol):
 
     def __init__(self, peer):
         self.peer, self.transport, self.pending = peer, None, []
-        self.up, self.down = Held(), Held()  # BF_DEV_NET_DELAY (tests)
+        self.up, self.down = Held(dev_delay(peer.addr[0])), Held(dev_delay(peer.addr[0]))  # BF_DEV_NET_DELAY (tests)
 
     def connection_made(self, transport):
         self.transport = transport
@@ -1008,6 +1031,7 @@ class World:
         self.night_ops = False
         self.round, self.progress, self.stage = None, 0.0, -1  # Night Ops: the round's build (match)
         self.ramp_from = time.monotonic()
+        self.pings = {}  # a joined player's name -> (their ping in ms, when they said it): the scoreboards' ping
 
     # Night Ops (16 Nov 2026, TekRantGaming: the night maps gone, "we would just start the match to always be at a set
     # time the full time so could have night ops maps"): a Night Ops server's world is the day and night cycle held at
@@ -1138,6 +1162,23 @@ class World:
         return any(p.state == 'joined' and p.player and p.player.name == name and p.addr[0] == addr[0] and
                    '%08X' % (p.player.xuid & 0xFFFFFFFF) in self.admins for p in self.host.peers.values())
 
+    def ping_list(self):
+        """BF43PNGL: version 1, a count, then each joined player's ping (u16 ms) and name (a length byte and text),
+        for the players' scoreboards (bf/src/world_sync.cpp). Players heard from in the last 10 s, at most 64, and the
+        datagram kept under 1200 bytes."""
+        now = time.monotonic()
+        for name in [n for n, (_, at) in self.pings.items() if now - at > 10]:
+            del self.pings[name]
+        body, count = b'', 0
+        for name, (ms, _) in list(self.pings.items())[:64]:
+            raw = name.encode('utf-8')[:64]
+            entry = struct.pack('>HB', min(ms, 0xFFFE), len(raw)) + raw
+            if len(body) + len(entry) > 1180:
+                break
+            body += entry
+            count += 1
+        return b'BF43PNGL' + bytes([1, count]) + body
+
     def receive(self, data, addr):
         try:
             version, flags = data[0], data[1]
@@ -1170,10 +1211,23 @@ class World:
                         self.cloud_height = max(100.0, min(1500.0, height))
                 if self.said() != before:
                     self.host.note('world: %s set %s' % (name or 'an admin', self.said()))
+            # The asker's ping (flag 4, an ask without a change; a game from before 20 Nov 2026 sends none): kept for
+            # a joined player, by the name it plays under.
+            if flags & 4 and not flags & 1 and len(data) >= at + 2:
+                ms = struct.unpack_from('>H', data, at)[0]
+                if self.host.comms.joined_player(name, addr):
+                    if ms != 0xFFFF:
+                        if name not in self.pings:
+                            self.host.note('ping: %s at %d ms' % (name, ms))
+                        self.pings[name] = (ms, time.monotonic())
+                    else:
+                        self.pings.pop(name, None)
             reply = b'BF43WRLR' + bytes([1, (1 if self.day_night else 0) | (2 if admin else 0)]) + struct.pack(
                 '>8f2d', self.hour, self.day_minutes, self.cover, self.rate, self.weather, self.fog, self.ground_fog,
                 self.wind, self.seconds, self.evolve) + struct.pack('>f', self.cloud_height)
             self.host.transport.sendto(reply, addr)
+            if flags & 4:
+                self.host.transport.sendto(self.ping_list(), addr)
         except (IndexError, struct.error):
             pass
 
@@ -1243,6 +1297,8 @@ class GameHost(asyncio.DatagramProtocol):
         if DEV_DELAY or DEV_JITTER:
             self.note('test delay: game datagrams held %.0f ms each way, plus up to %.0f ms' % (
                 DEV_DELAY * 1000, DEV_JITTER * 1000))
+        for ip, (delay, _) in DEV_DELAY_FOR.items():
+            self.note('test delay: %s\'s game datagrams held %.0f ms each way' % (ip, delay * 1000))
         self.tick_task = asyncio.get_running_loop().create_task(self.tick())
 
     def datagram_received(self, data, addr):
@@ -1267,7 +1323,14 @@ class GameHost(asyncio.DatagramProtocol):
         # The server browser's ping and the backend's reachability probe (SERVERS-PLAN.md sections 5 and 6): answered
         # at once, never a game packet (those start with a flag byte, 0 or 1).
         if data[:8] in (PING, PROBE):
-            self.transport.sendto(PONG + data[8:40], addr)
+            delay, jitter = dev_delay(addr[0])
+            if delay or jitter:
+                # Tests (BF_DEV_NET_DELAY): the answer waits as a game datagram's round trip does (held each way), so
+                # the browser's ping and the players' pings show the far server the test pretends to be.
+                asyncio.get_running_loop().call_later(2 * delay + random.random() * jitter,
+                                                      self.transport.sendto, PONG + data[8:40], addr)
+            else:
+                self.transport.sendto(PONG + data[8:40], addr)
             return
         # The match's clock and weather (World): asked for from a socket of the game's own.
         if data[:8] == b'BF43WRLD' and len(data) > 12:

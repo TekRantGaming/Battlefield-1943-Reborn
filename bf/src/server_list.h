@@ -398,7 +398,58 @@ class ServerList {
     const size_t at = reply.find("{\"gid\"");
     if (at == std::string::npos) return false;
     out = Parse(reply.substr(at, JsonEnd(reply, at) - at + 1));
-    return !out.gid.empty() && !out.retired_mode;
+    if (out.gid.empty() || out.retired_mode) return false;
+    // Its ping, as the list's (the far server warning, game_menu.cpp FarServerWarned, asks it of Direct connect too).
+    out.ping_ms = PingOne(out.address);
+    return true;
+  }
+
+  // One server's ping: two UDP pings to its host (one may be lost), the first answer within 1 s; -1 none.
+  static int PingOne(const std::string& a) {
+    const size_t colon = a.rfind(':');
+    if (colon == std::string::npos) return -1;
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(uint16_t(std::atoi(a.c_str() + colon + 1)));
+    if (inet_pton(AF_INET, a.substr(0, colon).c_str(), &to.sin_addr) != 1) return -1;
+    auto s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+#if defined(_WIN32)
+    if (s == INVALID_SOCKET) return -1;
+#else
+    if (s < 0) return -1;
+#endif
+    double sent[2] = {0, 0};
+    for (uint32_t i = 0; i < 2; ++i) {
+      char packet[16] = {'B', 'F', '4', '3', 'P', 'I', 'N', 'G'};
+      const uint32_t id[2] = {0xD1EC7u, i};
+      std::memcpy(packet + 8, id, 8);
+      sent[i] = Now();
+      sendto(s, packet, 16, 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
+    }
+    int best = -1;
+    const double until = Now() + 1.0;
+    while (Now() < until) {
+      fd_set read;
+      FD_ZERO(&read);
+      FD_SET(s, &read);
+      timeval wait{0, long(std::max(0.0, until - Now()) * 1e6)};
+      if (select(int(s) + 1, &read, nullptr, nullptr, &wait) <= 0) break;
+      char reply[64];
+      const int n = recvfrom(s, reply, sizeof(reply), 0, nullptr, nullptr);
+      if (n < 16 || std::memcmp(reply, "BF43PONG", 8) != 0) continue;
+      uint32_t id[2];
+      std::memcpy(id, reply + 8, 8);
+      if (id[0] != 0xD1EC7u || id[1] > 1) continue;
+      const int ms = int(std::lround((Now() - sent[id[1]]) * 1000.0));
+      best = ms;  // the first answer is enough
+      break;
+    }
+#if defined(_WIN32)
+    closesocket(s);
+#else
+    close(s);
+#endif
+    return best;
   }
 
   // The servers the backend at `host` lists (its registry on port 18250), for Direct connect to a server that runs

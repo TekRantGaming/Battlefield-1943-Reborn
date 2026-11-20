@@ -382,6 +382,8 @@ class Host {
   std::map<std::string, Player> players;  // ticket -> player, from the backend's join notices
   // A match with a password: the names that showed it (lower case, until when), and how many joins that makes.
   std::map<std::string, Clock::time_point> knocked;
+  // The players' pings (world_sync.cpp, the scoreboards' ping): a joined player's name -> its ms and when it said it.
+  std::map<std::string, std::pair<int, Clock::time_point>> pings;
   int knocks = 0;
   bool LetIn(const std::string& name) {
     if (REXCVAR_GET(bf_gm_password).empty()) return true;
@@ -574,6 +576,21 @@ class Host {
     if (at == Bytes::npos || version != 1) return;
     WorldAdvance();
     const bool admin = WorldAdmin(name, key, from);
+    // The asker's ping (flag 4, an ask without a change; a game from before 20 Nov 2026 sends none): kept for a joined
+    // player, by the name it plays under.
+    if ((flags & 4) && !(flags & 1) && at + 2 <= data.size()) {
+      const int ms = int(Get16(data, at));
+      bool joined = false;
+      for (const auto& p : peers)
+        joined = joined || (p->state == Peer::State::kJoined && p->player && p->player->name == name &&
+                            p->addr.sin_addr.s_addr == from.sin_addr.s_addr);
+      if (joined && ms != 0xFFFF) {
+        if (!pings.count(name)) Note(fmt::format("ping: {} at {} ms", name, ms));
+        pings[name] = {ms, Clock::now()};
+      } else if (joined) {
+        pings.erase(name);
+      }
+    }
     if ((flags & 1) && admin) {
       const int day_night = u8();
       const double hour = f32(), minutes = f32(), cover = f32(), rate = f32(), weather = f32(), fog = f32(),
@@ -648,6 +665,29 @@ class Host {
       Put32(reply, bits);
     }
     sendto(sock, reply.data(), int(reply.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
+    if (flags & 4) {
+      // BF43PNGL: version 1, a count, then each joined player's ping (u16 ms) and name (a length byte and text), the
+      // ones heard from in the last 10 s, at most 64, under 1200 bytes (server/gmhost.py's ping_list).
+      const auto now = Clock::now();
+      for (auto it = pings.begin(); it != pings.end();)
+        it = now - it->second.second > std::chrono::seconds(10) ? pings.erase(it) : std::next(it);
+      Bytes body;
+      int count = 0;
+      for (const auto& [n, v] : pings) {
+        if (count >= 64) break;
+        const std::string raw = n.substr(0, 64);
+        if (body.size() + 3 + raw.size() > 1180) break;
+        Put16(body, uint32_t(std::min(v.first, 0xFFFE)));
+        body += char(raw.size());
+        body += raw;
+        ++count;
+      }
+      Bytes list = "BF43PNGL";
+      list += char(1);
+      list += char(count);
+      list += body;
+      sendto(sock, list.data(), int(list.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
+    }
   }
 
   void Datagram(const Bytes& data, const sockaddr_in& from) {

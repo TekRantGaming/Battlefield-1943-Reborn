@@ -44,6 +44,14 @@ void Request(const Settings& settings);
 // Seconds on world_sync's clock (Status::answered_at's).
 double Now();
 
+// Players' pings (TekRantGaming, 20 Nov 2026: "your active ping reported in the scoreboard ... how Call of Duty Black
+// Ops 1 would show everyone's connection and ping, and World at War would even show you the number"). This game times
+// its own round trip to the joined server's host (BF43PING, answered at once by every host), tells the host in its
+// world ask, and a host that keeps them answers with every player's (world_sync.cpp). In milliseconds; -1 unknown (no
+// match, an older host, a player whose game is older, or a bot).
+int OwnPing();
+int PingOf(const std::string& name);  // "[TAG]Name" or "Name"; the player's own name gives OwnPing()
+
 // The in-game admin panel (F9) is open: the mouse and the keys are its own.
 bool AdminPanelOpen();
 

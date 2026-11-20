@@ -32,11 +32,16 @@
 #include <rex/logging.h>
 
 #include "comms.h"
+#include "launcher_kit.h"
+#include "scoreboard_ping.h"
+#include "world_sync.h"
 
 REXCVAR_DECLARE(bool, server);
 REXCVAR_DEFINE_BOOL(bf_scoreboard_mute, true, "BF1943/Voice",
                     "The game's scoreboards show each player's voice (a speaker, struck through once muted), and their Y "
                     "mutes or unmutes the player picked");
+REXCVAR_DEFINE_BOOL(bf_scoreboard_ping, true, "BF1943/Voice",
+                    "The game's scoreboards and the pause's Scoreboard show each player's ping (bars and ms; BOT for a bot)");
 
 namespace bf1943 {
 bool InMatch();  // auto_join.cpp
@@ -142,7 +147,9 @@ Voice VoiceOf(const std::string& name) {
 
 void NoteGameText(const uint8_t* base, uint32_t renderer, uint32_t lines) {
   g_pending.active = false;
-  if (REXCVAR_GET(server) || !REXCVAR_GET(bf_scoreboard_mute) || !Plausible(renderer) || !Plausible(lines)) return;
+  if (REXCVAR_GET(server) || !(REXCVAR_GET(bf_scoreboard_mute) || REXCVAR_GET(bf_scoreboard_ping)) || !Plausible(renderer) ||
+      !Plausible(lines))
+    return;
   std::string text;
   if (!RunText(base, lines, text, 64)) return;
   // Only what can be a heading or a row: a "V", a name heading, or a name with its dot leaders.
@@ -205,7 +212,8 @@ void RestoreGameText(uint8_t* base) {
 }
 
 void DrawOverGame(ImGuiIO& io) {
-  if (!REXCVAR_GET(bf_scoreboard_mute) || !InMatch()) return;
+  const bool show_mute = REXCVAR_GET(bf_scoreboard_mute), show_ping = REXCVAR_GET(bf_scoreboard_ping);
+  if (!(show_mute || show_ping) || !InMatch()) return;
   // Only the game's latest frame of the scoreboard: the runs drawn around its last "V" heading, and only while the
   // game is still drawing it (its last heading no older than about one and a half of its frames). With a fixed 0.12 s
   // the speakers stayed a few frames over the match after the scoreboard closed (Ally run lnx1, shot 58).
@@ -280,6 +288,35 @@ void DrawOverGame(ImGuiIO& io) {
       if (!dup) rows.push_back({name, p, t});
     }
   }
+  // The ping column (scoreboard_ping.h): a cell in each row on the name's dot leaders, right before the kills (the
+  // name heading's pen to the kills' last digit is about 335 stage units, run probe1's screenshots; the longest name
+  // with its clan tag, about 20 letters, ends near 185), and "Ping" over it on the headings' line.
+  if (show_ping) {
+    const kit::Fonts& f = kit::GetFonts();
+    for (size_t ti = 0; ti < tables.size(); ++ti) {
+      const Table& t = tables[ti];
+      const float u = t.unit, h = 17.0f * u, right = t.name.x + 292.0f * u;
+      bool any = false;
+      for (const Row& row : rows) {
+        if (row.table != ti) continue;
+        const bool bot = ping::IsBot(row.name);
+        const int ms = bot ? -1 : world::PingOf(row.name);
+        any = ping::DrawCell(d, f.ui_bold, right, row.pen.y + 10.0f * u, h, ms, bot, true, 0) > 0 || any;
+      }
+      if (!any) continue;  // nobody's ping known here (an older server): no heading either
+      const char* word = "Ping";
+      const float cap = 11.0f * u, cx = right - ping::CellWidth(h) * 0.5f;
+      const ImU32 ink = IM_COL32(30, 28, 22, 255);
+      if (kit::GameFontReady(kit::GameFont::kListHeader)) {
+        const float w = kit::GameTextWidth(kit::GameFont::kListHeader, cap, word);
+        kit::GameText(d, kit::GameFont::kListHeader, cap, ImVec2(cx - w * 0.5f, t.name.y + 2.0f * u), ink, word);
+      } else {
+        const ImVec2 w = f.ui->CalcTextSizeA(16.0f * u, 1e9f, 0, word);
+        d->AddText(f.ui, 16.0f * u, ImVec2(cx - w.x * 0.5f, t.name.y + 1.0f * u), ink, word);
+      }
+    }
+  }
+  if (!show_mute) return;
   for (const Row& row : rows) {
     const Table& t = tables[row.table];
     const float u = t.unit;

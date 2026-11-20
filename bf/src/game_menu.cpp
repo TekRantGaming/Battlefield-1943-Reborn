@@ -64,6 +64,7 @@
 #include "steam_shortcut.h"
 #include "comms.h"
 #include "voice_mute.h"  // the scoreboard's voice mute
+#include "scoreboard_ping.h"  // the scoreboards' ping (bars and ms), and the far server warning's limit
 #include "discord_presence.h"
 #include "world_sync.h"
 #include "player_name.h"
@@ -134,6 +135,7 @@ REXCVAR_DEFINE_STRING(bf_upscaler_mode, "quality", "BF1943",
 REXCVAR_DECLARE(bool, bf_unlock_fps);  // frame_rate.cpp
 REXCVAR_DECLARE(bool, bf_flag_letters);  // capture_points.cpp: letters in the capture point flags (Enhancements)
 REXCVAR_DECLARE(bool, server);         // server_mode.cpp: a dedicated server has no menu
+REXCVAR_DECLARE(bool, bf_scoreboard_ping);  // voice_mute.cpp: the scoreboards show players' pings
 REXCVAR_DECLARE(std::string, cache_root);  // the runtime's: the shader cache's folder (empty: user\cache)
 REXCVAR_DECLARE(double, bf_max_fps);
 REXCVAR_DECLARE(bool, native_x_renderer);  // NativeXRenderer: its own shader storage is made before the first draw
@@ -1249,7 +1251,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (tutorial_open_ && page_ != Page::kSetup) CloseTutorial("the game files page left");
     const bool over_popup =
         !shader_page && (update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ ||
-                         new_version_popup_ || notice_popup_ || news_open_ || queue_popup_ || tutorial_open_);
+                         ping_popup_ || new_version_popup_ || notice_popup_ || news_open_ || queue_popup_ || tutorial_open_);
     const Input popup_in = in;
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
@@ -1300,17 +1302,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       else if (new_version_popup_) NewVersionPopup(d, io, popup_in);
       else if (own_popup_) OwnBackendPopup(d, io, popup_in);
       else if (exp_popup_) ExperimentalPopup(d, io, popup_in);
+      else if (ping_popup_) FarServerPopup(d, io, popup_in);
       else if (tick_popup_) TickPopup(d, io, popup_in);
       else if (pw_popup_) PasswordPopup(d, io, popup_in);
       else if (whats_new_open_) WhatsNewPopup(d, io, popup_in);
       else if (news_open_) NewsPopup(d, io, popup_in);
       else if (tutorial_open_) TutorialPopup(d, io, popup_in);
       // The news' video is a window of its own over ours: hidden while another pop-up is in front of the news.
-      if (news_open_ && (update_popup_ || notice_popup_ || new_version_popup_ || own_popup_ || exp_popup_ || tick_popup_ ||
-                         pw_popup_ || whats_new_open_))
+      if (news_open_ && (update_popup_ || notice_popup_ || new_version_popup_ || own_popup_ || exp_popup_ || ping_popup_ ||
+                         tick_popup_ || pw_popup_ || whats_new_open_))
         news::VideoHide();
-      if (tutorial_open_ && (update_popup_ || notice_popup_ || new_version_popup_ || own_popup_ || exp_popup_ || tick_popup_ ||
-                             pw_popup_ || whats_new_open_ || news_open_ || queue_popup_))
+      if (tutorial_open_ && (update_popup_ || notice_popup_ || new_version_popup_ || own_popup_ || exp_popup_ || ping_popup_ ||
+                             tick_popup_ || pw_popup_ || whats_new_open_ || news_open_ || queue_popup_))
         news::VideoHide();  // the tutorial's video too
     }
     MenuSounds(sound_before, popup_in, popup_down, popup_delta);
@@ -1363,7 +1366,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     HashIn(h, pause_focus_panel_);
     l.selection = h;
     h = 0xCBF29CE484222325ull;
-    for (bool b : {update_popup_, whats_new_open_, whats_new_all_, own_popup_, tick_popup_, pw_popup_, exp_popup_,
+    for (bool b : {update_popup_, whats_new_open_, whats_new_all_, own_popup_, tick_popup_, pw_popup_, exp_popup_, ping_popup_,
                    new_version_popup_, notice_popup_, news_open_, tutorial_open_, queue_popup_, quit_popup_, skip_popup_, files_help_, browsing_,
                    browser_typing_, browser_has_players_, browser_not_full_, browser_night_, quick_waiting_ > 0,
                    direct_keys_, direct_letters_, name_keys_})
@@ -2409,8 +2412,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const ServerInfo* best = nullptr;
     for (const auto& sv : servers)
       if (QuickBetter(sv, best)) best = &sv;
-    if (best) Join(*best);
-    return best != nullptr;
+    if (!best) return false;
+    ServerInfo sv = *best;
+    // Its ping, when the list has none (the browser pings only while it is open): the far server warning needs it.
+    // At most a second, usually one round trip.
+    if (sv.ping_ms < 0) sv.ping_ms = ServerList::PingOne(sv.address);
+    Join(sv);
+    return true;
   }
   // Quick Play's choice: never an experimental tick rate (75, 100: TekRantGaming, 0.4.1: "quick play will never put
   // you into one of these experimental" servers); 30 and 60 both, a server at this game's own rate first (60 since 14
@@ -2474,6 +2482,87 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     else if (exp_promo_) REXLOG_INFO("BF join: {} is a promoted community server: introduced before joining", sv.name);
     else REXLOG_INFO("BF join: {} runs at an experimental {} Hz: warned before joining", sv.name, sv.Tick());
     return false;
+  }
+  // A far server (TekRantGaming, 20 Nov 2026: "if you're joining a server that has over 90 milliseconds of latency, you
+  // get a pop-up warning advising you of this and recommending to play on a server closer to a region that you're
+  // located in for a better performance, as you may experience rubber banding or overall poorer network
+  // performance"). The ping is the server browser's (server_list.h; Direct connect pings what it finds). Not for joins
+  // nobody chose on a list: this PC's own Custom Match or a LAN match, a friend's server from the Friends page (the
+  // point is to play with them), the join again after a restart, and test runs' auto join.
+  bool ping_popup_ = false;
+  ServerInfo ping_popup_server_;
+  std::string ping_accepted_address_;  // the far server the player chose to join anyway (not asked again this run)
+  bool FarServerWarned(const ServerInfo& sv) {
+    if (sv.ping_ms <= ping::kFarMs || ping_accepted_address_ == sv.address) return true;
+    if (sv.player_hosted || pm_hosting_ || !own_backend_.empty()) return true;
+#if defined(BF_DEV_TOOLS)
+    // Test joins: nobody to read it (BF_DEV_JOIN_WARNINGS=1: shown anyway, for the pop-up's own tests).
+    if (std::getenv("BF_AUTO_JOIN") && !std::getenv("BF_DEV_JOIN_WARNINGS")) return true;
+#endif
+    ping_popup_ = true, ping_popup_server_ = sv, popup_row_ = 0;  // starts on Back to the list
+    REXLOG_INFO("BF join: {} is far away ({} ms, over {} ms): warned before joining", sv.name, sv.ping_ms, ping::kFarMs);
+    return false;
+  }
+  void FarServerPopup(ImDrawList* d, ImGuiIO& io, Input in) {
+    const Stage st = StageOf(io);
+    const kit::Fonts& f = kit::GetFonts();
+    const ServerInfo& sv = ping_popup_server_;
+    d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 190));
+    const ImVec2 a = st.P(330, 180), b = st.P(950, 450);
+    const std::string region = sv.region.empty() ? std::string() : " \xC2\xB7 " + Upper(sv.region);
+    const char* paragraphs[] = {
+        "This server is far away from you. You may experience rubber-banding or overall poorer network performance.",
+        "For a better game, we recommend playing on a server in a region closer to where you are located."};
+    {
+      kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.3f);
+      kit::Paper(d, a, b, st.u);
+      kit::Tape(d, ImVec2((a.x + b.x) * 0.5f, a.y), st(110), st(26), -3);
+      kit::Heading(d, st(36), ImVec2(a.x + st(30), a.y + st(26)), kit::kInk, "HIGH PING", st(1.5f), st(560));
+      // The server, and its ping as the browser shows it (bars and ms).
+      const float y0 = a.y + st(72);
+      const float tw = kit::Spaced(d, f.typed, st(11), ImVec2(a.x + st(32), y0), kit::kStamp, Upper(sv.name) + region, st(1.5f));
+      const float bx = a.x + st(32) + tw + st(14);
+      const float bw = ping::DrawBars(d, bx, y0 + st(12), st(13), sv.ping_ms, IM_COL32(34, 36, 27, 45));
+      kit::Spaced(d, f.typed, st(11), ImVec2(bx + bw + st(8), y0), ping::Colour(sv.ping_ms), fmt::format("{} MS", sv.ping_ms),
+                  st(1.5f));
+      float y = a.y + st(100);
+      for (const char* para : paragraphs) {
+        kit::Wrapped(d, f.ui, st(17), ImVec2(a.x + st(30), y), kit::kInkSoft, para, st(560));
+        y += kit::WrappedHeight(f.ui, st(17), para, st(560)) + st(12);
+      }
+    }
+    if (in.left || in.right || in.up || in.down) popup_row_ = 1 - popup_row_;
+    int clicked = -1;
+    float x = a.x + st(30);
+    for (int i = 0; i < 2; ++i) {
+      const char* label = i == 0 ? "Back to the list" : "Join anyway";
+      const ImVec2 c0(x, b.y - st(70)), c1(x + st(250), b.y - st(26));
+      const bool hover = ImGui::IsMouseHoveringRect(c0, c1);
+      if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) popup_row_ = i;
+      const bool sel = popup_row_ == i;
+      if (sel) d->AddRectFilled(ImVec2(c0.x, c0.y + st(4)), ImVec2(c1.x, c1.y + st(4)), kit::kGreenShadow);
+      d->AddRectFilled(c0, c1, sel ? kit::kGreen : kit::kPaperCard);
+      if (!sel) d->AddRect(c0, c1, kit::kBorder, 0, 0, st(2));
+      const float lw = kit::TextWidth(f.ui_bold, st(20), label);
+      d->AddText(f.ui_bold, st(20), ImVec2((c0.x + c1.x - lw) * 0.5f, c0.y + st(8)),
+                 sel ? IM_COL32(255, 255, 255, 255) : kit::kInk, label);
+      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
+      x += st(270);
+    }
+    if (in.accept) clicked = popup_row_;
+    if (in.back) clicked = 0;
+    if (clicked < 0) return;
+    ping_popup_ = false;
+    if (clicked == 0) {
+      REXLOG_INFO("BF join: the far server {} not joined (back to the list)", sv.name);
+      // Back to the list to pick a closer one: the browser itself when the join came from elsewhere (Quick Play).
+      if (page_ != Page::kServers && !InMatch()) OpenBrowser();
+      return;
+    }
+    REXLOG_INFO("BF join: {} joined anyway ({} ms, far away)", sv.name, sv.ping_ms);
+    ping_accepted_address_ = sv.address;
+    const ServerInfo join = sv;
+    Join(join);
   }
   void ExperimentalPopup(ImDrawList* d, ImGuiIO& io, Input in) {
     const Stage st = StageOf(io);
@@ -2659,6 +2748,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       return;
     }
     if (!ExperimentalWarned(sv)) return;
+    if (!FarServerWarned(sv)) return;
     pw_passed_.clear();
     if (!own_backend_.empty()) own_match_joined_ = true;
     if (sv.Tick() != TickRate() && !SetTickRate(sv.Tick())) {
@@ -3092,6 +3182,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       REXLOG_INFO("BF join: joining {} as asked before the restart ({} Hz)", sv.name, sv.Tick());
       tick_join_address_.clear();
       exp_accepted_address_ = sv.address;  // warned before the restart
+      ping_accepted_address_ = sv.address;  // and of its distance, if it is far
       Join(sv);
       return;
     }
