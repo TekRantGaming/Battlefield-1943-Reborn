@@ -1427,6 +1427,17 @@ bool MakeBot(PPCContext& outer, uint8_t* base, uint32_t manager, int index, int 
     call.r3.u64 = bot.player + 0x18, call.r4.u64 = name + 16;
     sub_821D51C8(call, base);
   }
+  // Its own user id: the online user at +0x18 (the name, then at +0x28 a 64 bit id; a connection's player gets its
+  // signed in user, sub_8236F550, the test player's id was 11 in run endnames6). The end of round results find each
+  // score record's player by that id (sub_823754B8 compares +0x28, sub_823C1648), so with every bot at 0 each bot's
+  // row took the first bot's name ("[BOT]Joe Mitchell" for all eight, run endnames7; the user, 20 Nov 2026: "All the
+  // bots on the end screen scoreboard had the same names"). Ids of their own before the score record is made below,
+  // 0x00B07000 in the high word, which no account has (the backend's ids are small numbers).
+  {
+    static uint32_t next_id = 0;
+    Store32(base, bot.player + 0x28, 0x00B07000u);
+    Store32(base, bot.player + 0x2C, ++next_id);
+  }
   // Its own input, as a connection gives its player one.
   bot.input = Alloc(360 + 16);
   bot.state = Alloc(176 + 16);
