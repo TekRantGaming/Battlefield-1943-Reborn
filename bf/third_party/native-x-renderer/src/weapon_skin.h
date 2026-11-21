@@ -13,6 +13,9 @@
 // a subtle blue bloom round the arcs over the picture (WeaponSkinBloom). Measured on an RTX 4070 Ti at 3840 x 2160
 // (native_x_renderer_gpu_sections): the copies 0.03 to 0.05 ms a frame for the Thompson, 0.07 to 0.08 for the Type 100;
 // the bloom 0.05.
+//
+// Still to test (docs/WEAPON-SKINS.md): a true glow for the arcs, lit after the game's shading, so they stay bright in
+// the dark and on a wet gun (capped at white when wet, they only just show on the Type 100 in the late Night Ops storm).
 
 #pragma once
 
