@@ -2046,6 +2046,29 @@ void Ride(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t vehicle, Clock::t
 // The game's team pick (sub_82399AE8(player, team, find a squad, keep the cap)): a bot stays on its own side. The
 // round's start re-picks every player's team (run bots_step0: two Japanese bots on the US carrier), and a bot's name
 // and kit are its side's.
+// A team's cap (sub_82375918, read only by the team pick): the level's TeamData says 12, the game's own 24 a side. On a
+// bigger server (server sizes, docs/SERVER-SIZES.md) it is half the size and 2 more, so both sides fill (run sbstudy8:
+// on a 32 player server six bots got no team, and the scoreboards listed 12 a side). The pick still puts each player
+// on the side with fewer.
+REX_EXTERN(__imp__sub_82375918);
+REX_HOOK_RAW(sub_82375918) {
+  __imp__sub_82375918(ctx, base);
+  if (REXCVAR_GET(server)) {
+    const int size = std::clamp(int(REXCVAR_GET(bf_gm_max_players)), 2, bf1943::kMaxServerSize);
+    if (size > bf1943::kDefaultServerSize) {
+      const uint32_t want = uint32_t((size + 1) / 2 + 2);
+      if (ctx.r3.u32 < want) {
+        static bool told = false;
+        if (!told) {
+          told = true;
+          REXLOG_INFO("BF server size: a team's cap {} -> {}", ctx.r3.u32, want);
+        }
+        ctx.r3.u64 = want;
+      }
+    }
+  }
+}
+
 REX_EXTERN(__imp__sub_82399AE8);
 REX_HOOK_RAW(sub_82399AE8) {
   if (REXCVAR_GET(server)) {

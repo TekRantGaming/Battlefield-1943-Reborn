@@ -20,11 +20,11 @@ we will still allow 24 as (original) to be an option"):
 | `Network.MaxClientCount` | 24 | game settings, read by the server's network setup (sub_823BD870 keeps it at +828; sub_823B59E0 refuses a connection past it) | Human players, since each one is a connection. Bots take none, which is why 24 humans plus bots already reached 26. **Raised** on a 32 or 64 server to its size + 4. |
 | `Game.MaxPlayerCount` | 64 | game settings, on every machine; the player manager is sized from it (server sub_8237B540, client sub_82272E18) | The player manager makes no player past it (sub_82387EF0). It also sets how many bits a player id takes on the wire (`bits(N - 1)`: 6 for 64). **Left at 64.** |
 | Player id bits | 6 (from 64) | written by sub_8234DDF8, read by sub_82257BD0 and sub_823EC128, each machine using its own count | A server and its players must agree. A server raised to 68 sent 7-bit ids to games that read 6, and the first game to join a 63-player match died on an object id it never had (run `size64a`). |
-| Per-team cap | a TeamData word (+24 of a team's data) | sub_82375918, used only by the team pick sub_82399AE8 | It steers which side a player gets; the auto-team tries every side without it, so it never blocks a join. Not tied to `Game.MaxPlayerCount`. |
+| Per-team cap | 12 (a TeamData word, +24 of a team's data) | sub_82375918, read only by the team pick sub_82399AE8 | A player's own join tries every side without it, but a pick made with the check on (our bots, a Change Team) is refused at 12: on a 32 server 6 of 30 bots had **no team** (team 0, run `sbstudy8`). **Raised** on a 32 or 64 server to half the size + 2 (18, 34). |
 | Squads | 4 a squad (+28, MaxPlayersPerSquad); squads 0 to 23 for each team; 24 means none | sub_82392718, sub_82392828 | 24 x 4 = 96 a side: enough for 32 a side. |
 | `Network.MaxGhostCount` | 8192 (13-bit object ids) | game settings, both sides | At 63 players the client's ghost table held about 100 objects when it joined. Not near the limit. |
 | `Server.OutgoingFrequency` | 15 | game settings | How often the server sends updates; part of why traffic stays low (section 4). |
-| The game's scoreboard (Flash) | 12 rows a side | the HUD's scoreboard movie, fed from `friendlyTeamScores` / `enemyTeamScores` | **Still a limit:** on a 32 or 64 server only the top 12 of each side show, and the cursor stops at row 12 (run `size64e`, shot 104). See section 6. |
+| The game's scoreboard (Flash) | 12 rows shown, scrolls | the HUD's scoreboard movie, fed from `friendlyTeamScores` / `enemyTeamScores` (built by sub_824627C8 and sub_82462EE0 from the side's players) | **Not a limit.** The lists held 12 only because nobody past 12 had a team. With the team cap raised, the list holds the whole side and the movie scrolls under its cursor: rows 4 to 15 of 15 shown in run `size32b`, our BOT and ping cells following. |
 
 Our own code had lists cut at 64 players. They now use `bf/src/player_limits.h`: `kPlayerListLimit` (128) for lists
 read from the game, and `kMaxServerSize` (64). The files changed are bots, team balance, minimap players and clan
@@ -41,25 +41,24 @@ bots filling the rest (bots cost about what a player costs: memory `bots-perform
 server's own "BF server ticks" lines. The CPU column is the server process's share of one core, sampled every 10 s.
 Traffic is the host's new line, "traffic over 60 s".
 
-| Run | Map | Players | Tick work, average (longest) | Server CPU | Client FPS | Traffic to a player |
-|---|---|---|---|---|---|---|
-| size24a | Wake | 1 + 22 bots | 0.47 to 1.29 ms (3.0) | about 12% of a core | 60 (the limit), 13.6 ms a frame to spare | 1.7 to 2.2 kB/s |
-| size32a | Wake | 1 + 30 bots | 0.62 to 1.34 ms (2.8) | 13 to 17% | 60, 13.8 ms to spare | not measured (older host) |
-| size64b | Wake | 1 + 61 bots | 0.56 to 1.24 ms (2.9) | 9 to 14% | 60, 13.8 ms to spare | 1.8 to 2.2 kB/s |
-| size64g | Guadalcanal | 1 + 61 bots | 0.46 to 0.57 ms (1.7); the bots 2.3 to 3.0 ms on top (0.5 of it mapping the unmapped level) | 17 to 22% | 60, 12.5 ms to spare | 2.6 kB/s |
+| Run | Map | Players | Tick work, average (longest) | Bots' cost on top | Server CPU | Client FPS | Traffic to a player |
+|---|---|---|---|---|---|---|---|
+| size24a | Wake | 1 + 22 bots, 12 a side | 0.47 to 1.29 ms (3.0) | 0.7 to 1.3 ms | about 12% of a core | 60 (the limit), 13.6 ms a frame to spare | 1.7 to 2.2 kB/s |
+| size32c | Wake | 1 + 29 bots, 15 a side, none without a team | 0.61 to 1.12 ms (2.7) | 0.8 to 1.5 ms | 11 to 17% | 60, 13.8 ms to spare | 2.1 to 2.6 kB/s |
+| size64h | Wake | 1 + 61 bots | waiting: TekRantGaming's own game was running (test runs wait for it to close) | | | | |
+| size64i | Guadalcanal | 1 + 61 bots | waiting, as above | | | | |
 
-On Wake many bots wait on the carrier for a landing boat, so they do not all walk at once. The 64-player Wake figures are a light case, and Guadalcanal (both
-sides start on land) is the fair one.
+The tick work column is the game's own tick ("BF server ticks"); the bots' cost ("BF bots: cost over 30 s") comes on
+top of it. Every run had 0 ticks of 25 ms or more. Flags taken in 4 minutes: 6 at 24, 8 at 32.
 
-The tick work column is the game's own tick; the bots' cost ("BF bots: cost over 30 s") comes on top of it. On Wake that was 0.9 to 1.3 ms with 21 bots and 0.7 to 1.3 ms with 61. On Guadalcanal it was 2.3 to 3.0 ms with 61. Every run had 0 ticks of 25 ms or more.
+The 64 runs of 20 Nov (`size64b`, `size64c`, `size64g`) are not used: past 12 a side their bots had no team
+(section 1), so they measured about 24 players. They did show that 63 players in one match do not break the
+game: no crash, the joining player at 60 FPS, the ghost table far from full.
 
-**What a 64-player server costs to run:** the game's own tick stays small. Bots' soldiers cost the same as players'
-soldiers (the soldier input step, about 0.05 ms each a tick). Traffic to each player stays near 2 kB/s because the
-game sends at 15 Hz and only what is near. 64 players is therefore about 64 x 2 kB/s = 130 kB/s (about 1 Mbit/s) out
-of the server, and about the same in. On this PC the busiest 64 server (Guadalcanal) took about a fifth of a core. US Central's 4-core VPS can
-carry a 64 server; plan on a core per 64 server for real players (their connections and replication cost more than
-bots'). The players' games ran at their 60 frame limit with most of each frame to spare, at 63 players on screen in the
-same match.
+**What a server costs to run:** the game's own tick stays small. Bots' soldiers cost the same as players' soldiers
+(the soldier input step, about 0.05 ms each a tick). Traffic to each player stays near 2 to 3 kB/s because the game sends at
+15 Hz and only what is near: 32 players is about 80 kB/s out of the server, 64 about 170 kB/s (1.4 Mbit/s), and about
+the same in.
 
 ## 3. 128 players: what it would take (not built)
 
@@ -70,7 +69,7 @@ same match.
   (sub_8226E1C0 does not check).
 - **Squads:** 96 a side holds 64 a side, so squads are fine.
 - **Ghosts:** 8192 objects; probably enough, but not measured at 128.
-- **Scoreboard:** 12 rows a side (section 6), so 52 of each side would not show.
+- **Scoreboard:** scrolls; 64 rows a side not tried.
 - **Host lists:** the comms roster (2048-byte client buffer) and the ping list (64 names, 1400 bytes) would need
   splitting.
 - **Cost:** about 2 cores, and 260 kB/s out, per 128 server.
@@ -84,8 +83,9 @@ TekRantGaming, 20 Nov 2026: "Drop 128 for now".
   `bots` field (0 to the size) is how many bots play; they keep 2 places free and leave as players join. The edit form
   has Players (adding 32 and 64) and Bots (No bots, Up to 8 / 16 / 22 / 30 / 46, Fill the server). The manager passes
   `--bf_gm_max_players=<size>` to the game, and `--bf_bots=<n>` when there are bots.
-- **Game server** (`frame_rate.cpp`, the settings hook): on a 32 or 64 server, `Network.MaxClientCount` becomes the
-  size + 4. `Game.MaxPlayerCount` is never raised. Bots fill to the size given (`bf_bots` is no longer clamped to 24).
+- **Game server:** on a 32 or 64 server `Network.MaxClientCount` becomes the size + 4 (`frame_rate.cpp`, the
+  settings hook) and a team's cap half the size + 2 (`bots.cpp`, a hook on sub_82375918). `Game.MaxPlayerCount` is
+  never raised. Bots fill to the size given (`bf_bots` is no longer clamped to 24).
 - **Host (`gmhost.py`):** lists of players run to 128. A new line each minute gives each player's traffic.
 - **Backend (`plasma.py`):** a server registers as 2 to 64. Its name, score and id lists run to 128.
 - **Players' game:** the server browser has a SIZE chip, shown once any listed server is bigger than 24. It goes
@@ -104,11 +104,8 @@ TekRantGaming, 20 Nov 2026: "Drop 128 for now".
 
 ## 6. Open
 
-- **The game's scoreboard shows 12 a side.** On a 32 or 64 server, a player ranked 13th or lower on their side does not
-  see their own row. With 32 as the default, this hits every default server: 4 players a side are missing. Possible fixes:
-  - page the Flash list: find where the game fills `friendlyTeamScores` / `enemyTeamScores` and show 12 at a time
-    from the cursor;
-  - draw our own full scoreboard on bigger servers.
+- Fixed 21 Nov: what looked like a 12-row scoreboard was the per-team cap of 12 (section 1). Runs before the fix
+  (`size32a`, `size64b` to `size64g`) had bots beyond 12 a side sitting with no team; their numbers were replaced.
 - **Backfill at exactly 64:** the player manager stops at 64 players in all. Bots leave at their next death, so when
   the 63rd and 64th players arrive while a bot is still alive and leaving, the newest player may not get in until that
   bot dies. 32 has room to spare (the game's cap is 64).
