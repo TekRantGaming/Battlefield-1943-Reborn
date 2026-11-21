@@ -257,6 +257,7 @@ struct Bot {
   Clock::time_point died{}, next_log{};
   uint32_t last_soldier = 0;
   int spawn_tries = 0;
+  bool kit_warned = false;  // "no live kit" logged (once until it has one again)
   float yaw = 0, pitch = 0;
   uint32_t tick = 0;
   // The brain (Think, 4 times a second) and what it asks of the next ticks (Drive).
@@ -325,6 +326,7 @@ struct Flag {
 struct State {
   std::mutex mutex;  // the spawn points are noted while the level loads; the rest is the server thread's
   std::set<uint32_t> spawns;
+  std::set<uint32_t> team_data;  // the live TeamData objects (their constructors and destructor), for the bots' kits
   std::vector<Bot> bots;
   Clock::time_point level_at{};
   bool level_seen = false;
@@ -342,6 +344,7 @@ struct State {
   int searches_left = 0;     // path searches this tick may still make (kSearchesPerTick)
   uint8_t* base = nullptr;   // guest memory (BotsTick), for BotsLevelChange
   int humans = 0;            // human players on the server
+  uint32_t soldier_data_vtable = 0;  // the kits' soldier data's class (LiveKit), from the first level's kits
   uint64_t rays = 0;         // ray tests made, and the time they took (logged every 10 s)
   double ray_ms = 0;
 } g;
@@ -1390,13 +1393,68 @@ std::vector<std::array<float, 3>> FindPath(PPCContext& ctx, uint8_t* base, uint3
   return path;
 }
 
-// The bot's kit for its team now (a bot the round's start moved to the other team gets that team's).
-void ChooseKit(uint8_t* base, Bot& bot) {
+// A kit a bot may spawn with: a live Kit object whose soldier data (+0x3C, what a player's +500 holds) is still that
+// kind of object. US Central, 21 Nov 2026 (0.4.8-test13): after an hour, four restarts of Wake on the empty server
+// (PreRound, "not enough players") and many players dropped, the US bots' spawns failed while the game built their
+// soldier from that data (sub_8236B688 -> sub_82360E28 -> the soldier data's vtable +8, which was zero: the server's
+// calls to 0 at 0x82354150); every game that joined then died at the load (a null call after sub_8220BA08) until the
+// server restarted. Which object freed that data is not known yet; a bot no longer spawns from it (and the refusal
+// logs say what it held). The soldier data's vtable is learnt from the level's kits at its start (g.soldier_data_vtable).
+bool LiveKit(const uint8_t* base, uint32_t kit) {
+  if (!kit || !Readable(kit, 0x40) || Load32(base, kit) != kKitVtable) return false;
+  const uint32_t soldier = Load32(base, kit + 0x3C);
+  if (!soldier || !Readable(soldier, 0x10)) return false;
+  const uint32_t vtable = Load32(base, soldier);
+  return g.soldier_data_vtable ? vtable == g.soldier_data_vtable : InImage(vtable);
+}
+
+// Each kit, its soldier data and that data's vtable (the level's start, a refused spawn).
+std::string KitsText(const uint8_t* base, const std::map<uint32_t, std::vector<uint32_t>>& team_kits) {
+  std::string s;
+  for (const auto& [team, kits] : team_kits) {
+    s += fmt::format(" team {}:", team);
+    for (uint32_t k : kits) {
+      const uint32_t data = Readable(k, 0x40) ? Load32(base, k + 0x3C) : 0;
+      s += fmt::format(" {:08X}->{:08X}({:08X})", k, data, Readable(data, 4) ? Load32(base, data) : 0);
+    }
+  }
+  return s;
+}
+
+// The kits of the live TeamData objects (their constructors' hooks below fill g.team_data, the destructor's empties
+// it), by team: kits that are there for certain, where the scan of guest memory can also find a TeamData left in
+// freed memory.
+std::map<uint32_t, std::vector<uint32_t>> LiveTeamKits(const uint8_t* base, std::string* where) {
+  std::vector<uint32_t> teams;
+  {
+    std::lock_guard lock(g.mutex);
+    teams.assign(g.team_data.begin(), g.team_data.end());
+  }
+  std::map<uint32_t, std::vector<uint32_t>> kits;
+  for (uint32_t a : teams) {
+    if (!Readable(a, 0x38) || Load32(base, a) != kTeamDataVtable) continue;
+    const uint32_t team = Load32(base, a + 0x34);
+    if (team < 1 || team > 2) continue;
+    const uint32_t list = Load32(base, a + 0x30);
+    std::vector<uint32_t> found;
+    for (int k = 0; k < 3 && Readable(list, 12); ++k)
+      if (const uint32_t kit = Load32(base, list + 4 * k); LiveKit(base, kit)) found.push_back(kit);
+    if (where) *where += fmt::format(" team {} {:08X}", team, a);
+    if (!found.empty()) kits[team] = found;
+  }
+  return kits;
+}
+
+// The bot's kit for its team now (a bot the round's start moved to the other team gets that team's). False when the
+// team has no live kit: nothing is written, and the bot does not spawn yet.
+bool ChooseKit(uint8_t* base, Bot& bot) {
   const auto it = g.team_kits.find(Load32(base, bot.player + 48));
-  if (it == g.team_kits.end() || it->second.empty()) return;
+  if (it == g.team_kits.end() || it->second.empty()) return false;
   if (bot.kit_choice < 0) bot.kit_choice = StyleKit();
   const uint32_t kit = it->second[size_t(bot.kit_choice) % it->second.size()];
+  if (!LiveKit(base, kit)) return false;
   Store32(base, bot.player + 500, Load32(base, kit + 0x3C));
+  return true;
 }
 
 bool MakeBot(PPCContext& outer, uint8_t* base, uint32_t manager, int index, int team,
@@ -2163,6 +2221,34 @@ REX_HOOK_RAW(sub_82362A40) {
   g.spawns.insert(self);
 }
 
+// The level's TeamData objects (vtable 0x82062498), for the bots' kits (LiveTeamKits): made by sub_82A72598 (this, as
+// a new one: cap 12 at +24, squad size 4 at +28) or sub_82A72600 (a copy: the object is r4), gone with sub_827796E0.
+REX_EXTERN(__imp__sub_82A72598);
+REX_HOOK_RAW(sub_82A72598) {
+  const uint32_t self = ctx.r3.u32;
+  __imp__sub_82A72598(ctx, base);
+  if (!REXCVAR_GET(server)) return;
+  std::lock_guard lock(g.mutex);
+  g.team_data.insert(self);
+}
+REX_EXTERN(__imp__sub_82A72600);
+REX_HOOK_RAW(sub_82A72600) {
+  const uint32_t self = ctx.r4.u32;
+  __imp__sub_82A72600(ctx, base);
+  if (!REXCVAR_GET(server) || !self) return;
+  std::lock_guard lock(g.mutex);
+  g.team_data.insert(self);
+}
+REX_EXTERN(__imp__sub_827796E0);
+REX_HOOK_RAW(sub_827796E0) {
+  const uint32_t self = ctx.r3.u32;
+  if (REXCVAR_GET(server)) {
+    std::lock_guard lock(g.mutex);
+    g.team_data.erase(self);
+  }
+  __imp__sub_827796E0(ctx, base);
+}
+
 namespace bf1943 {
 
 // A kill (server_stats.cpp's hook on the game's kill handling, before it): where the killer stood and where the victim
@@ -2227,6 +2313,8 @@ void BotsLevelChange() {
   learn.map.clear();
   std::lock_guard lock(g.mutex);
   g.spawns.clear();
+  // (g.team_data stays: the game's restart of a level keeps its TeamData, run kitcyc on US Central, 21 Nov 2026: no
+  // constructor ran at three restarts of Wake; their constructors and destructor keep it.)
   g.vehicle_spawns.clear();
   // The bots stay: the game keeps its players through a level change, so a bot forgotten here stayed in its player
   // list undriven and was counted as a human (US Central, 0.4.8-test3, 20 Nov 2026: "room for 0 beside 22 human
@@ -2361,6 +2449,39 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     g.team_kits = scan->kits;
     g.flags = scan->flags;
     scan.reset();
+    // The kits of the live TeamData (LiveTeamKits above) in place of the scan's, which can find one left in freed
+    // memory; the scan's only when no constructor was seen. Both logged, to tell them apart.
+    {
+      std::string where;
+      const auto live = LiveTeamKits(base, &where);
+      auto list = [](const std::map<uint32_t, std::vector<uint32_t>>& m) {
+        std::string s;
+        for (const auto& [team, kits] : m) {
+          s += fmt::format(" team {}:", team);
+          for (uint32_t k : kits) s += fmt::format(" {:08X}", k);
+        }
+        return s;
+      };
+      if (live.empty()) {
+        REXLOG_WARN("BF bots: no live TeamData seen ({}): the scan's kits{}", where.empty() ? "none" : where,
+                    list(g.team_kits));
+      } else {
+        REXLOG_INFO("BF bots: kits of the live TeamData ({}):{}; the scan's{}{}", where, list(live), list(g.team_kits),
+                    live == g.team_kits ? " (the same)" : ": the scan's not taken");
+        g.team_kits = live;
+      }
+      // The soldier data's vtable, when every kit's agrees (the first level's, kept: the class does not change).
+      if (!g.soldier_data_vtable) {
+        std::set<uint32_t> vtables;
+        for (const auto& [team, kits] : g.team_kits)
+          for (uint32_t k : kits)
+            if (const uint32_t data = Readable(k, 0x40) ? Load32(base, k + 0x3C) : 0; Readable(data, 4))
+              vtables.insert(Load32(base, data));
+        if (vtables.size() == 1 && InImage(*vtables.begin())) g.soldier_data_vtable = *vtables.begin();
+      }
+      REXLOG_INFO("BF bots: the level's kits and their soldier data:{} (the soldier data's vtable {:08X})",
+                  KitsText(base, g.team_kits), g.soldier_data_vtable);
+    }
     g.scanned_manager = manager;
     // What earlier matches learned here: by the map's title (the rotation's), else its first flag's name.
     std::string map = CurrentMapTitle();
@@ -2811,7 +2932,18 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     if (!soldier) {
       if (bot.leaving) continue;  // backfill: it leaves (above) instead of spawning again
       if (now - bot.died < std::chrono::seconds(5) || bot.spawn_tries > 20) continue;
-      ChooseKit(base, bot);
+      if (!ChooseKit(base, bot)) {
+        // No live kit for its team (freed with a level the scan saw): the level's kits found again, no spawn now.
+        if (!bot.kit_warned) {
+          bot.kit_warned = true;
+          REXLOG_WARN("BF bots: {} has no live kit of team {}: not spawned; the level's kits found again", bot.name,
+                      Load32(base, bot.player + 48));
+        }
+        bot.died = now;
+        g.scanned_manager = 0;
+        continue;
+      }
+      bot.kit_warned = false;
       if (!Load32(base, bot.player + 500)) continue;  // no kit: the spawn would read the null page
       const uint32_t at = SpawnFor(base, int(Load32(base, bot.player + 48)), bot.spawn_tries);
       ++bot.spawn_tries;
@@ -2838,9 +2970,14 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
         REXLOG_INFO("BF bots: spawn point {:08X} seats its soldier in {:08X} (vtable {:08X}); data +80..:{}", at, controls,
                     Readable(controls, 4) ? Load32(base, controls) : 0, w);
       }
-      if (REXCVAR_GET(bf_bots_log_detail) || !spawned)
-        REXLOG_INFO("BF bots: {} spawns at {:.1f} {:.1f} {:.1f}: {}", bot.name, p[0], p[1], p[2],
-                  !spawned ? "refused" : seated ? "in a vehicle" : "on foot");
+      if (REXCVAR_GET(bf_bots_log_detail) || !spawned) {
+        const uint32_t kit = Load32(base, bot.player + 500);
+        REXLOG_INFO("BF bots: {} spawns at {:.1f} {:.1f} {:.1f}: {} (soldier data {:08X}, vtable {:08X})", bot.name, p[0],
+                    p[1], p[2], !spawned ? "refused" : seated ? "in a vehicle" : "on foot", kit,
+                    Readable(kit, 4) ? Load32(base, kit) : 0);
+        static int told_refused = 0;
+        if (!spawned && told_refused++ < 20) REXLOG_INFO("BF bots: the kits at that refusal:{}", KitsText(base, g.team_kits));
+      }
       if (spawned) bot.spawn_tries = 0;
       continue;
     }
