@@ -2046,10 +2046,10 @@ void Ride(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t vehicle, Clock::t
 // The game's team pick (sub_82399AE8(player, team, find a squad, keep the cap)): a bot stays on its own side. The
 // round's start re-picks every player's team (run bots_step0: two Japanese bots on the US carrier), and a bot's name
 // and kit are its side's.
-// A team's cap (sub_82375918, read only by the team pick): the level's TeamData says 12, the game's own 24 a side. On a
-// bigger server (server sizes, docs/SERVER-SIZES.md) it is half the size and 2 more, so both sides fill (run sbstudy8:
-// on a 32 player server six bots got no team, and the scoreboards listed 12 a side). The pick still puts each player
-// on the side with fewer.
+// A team's cap (sub_82375918, read only by the team pick): the level's TeamData says 12 (the game's own 24, 12 a
+// side). On a bigger server (server sizes, docs/SERVER-SIZES.md) it is half the size and 2 more, so both sides fill
+// (run sbstudy8: on a 32 player server six bots got no team, and the scoreboards listed 12 a side). The pick still
+// puts each player on the side with fewer.
 REX_EXTERN(__imp__sub_82375918);
 REX_HOOK_RAW(sub_82375918) {
   __imp__sub_82375918(ctx, base);

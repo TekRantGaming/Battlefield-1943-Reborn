@@ -511,6 +511,66 @@ std::string Stats() {
 #endif
 }  // namespace jobwake
 
+// The job scheduler's slots (from the map editor branch, bca78cb of 18 Nov 2026). sub_82380B18 makes its pool with 256
+// (sub_82608F00(owner, 256): li r4,256 before the call returning to 82380BD4; each slot 656 bytes, the count kept at the
+// pool's +16, which its allocator sub_82608AF8 and reclaimer sub_82608050 read). The job graph walk sub_82607CA8 takes
+// one slot a node and frees none until it ends; in play it holds 163 to 169 of the 256 and at a level change up to 223.
+// A walk that needs more never ends: the client spins in sub_82608AF8 for good (a hang report, the server plays on).
+// It froze a custom level rebuilt three times in a match (editor fuzz run me134), and a player joining a 64 player
+// match on Wake (server sizes, docs/SERVER-SIZES.md: run size64h, its hang dump read 21 Nov 2026). bf_job_slots: the
+// pool's size (256: the game's own; 512 by default, 168 KB more of the game's heap). At the 60 FPS limit on Wake the
+// frame's own work was 3.0 ms with 256, 3.1 with 512, 3.5 with 1024 (the reclaim pass reads every slot).
+REXCVAR_DEFINE_INT32(bf_job_slots, 512, "BF1943",
+                     "Job slots in the game's scheduler (256 the game's own; a full pool froze a busy level change)");
+REX_EXTERN(__imp__sub_82608F00);
+REX_HOOK_RAW(sub_82608F00) {
+  if (uint32_t(ctx.lr) == 0x82380BD4u && ctx.r4.u32 == 256) {
+    const int32_t n = std::clamp(REXCVAR_GET(bf_job_slots), 256, 4096);
+    if (n != 256) REXLOG_INFO("BF jobs: the scheduler's pool made with {} job slots (the game's own 256)", n);
+    ctx.r4.u64 = uint32_t(n);
+  }
+  __imp__sub_82608F00(ctx, base);
+}
+
+#if defined(BF_DEV_TOOLS)
+// Developer aid (BF_DEV_JOBGRAPH=1): each job graph walk's slot count; the largest every 10 s, and any walk over 200.
+namespace bf1943::jobgraph {
+thread_local int t_in_walk = 0, t_count = 0;
+std::atomic<int> g_most{0};
+bool On() {
+  static const bool on = [] {
+    const char* e = std::getenv("BF_DEV_JOBGRAPH");
+    return e && *e == '1';
+  }();
+  return on;
+}
+}  // namespace bf1943::jobgraph
+REX_EXTERN(__imp__sub_82607CA8);
+REX_HOOK_RAW(sub_82607CA8) {
+  namespace jg = bf1943::jobgraph;
+  if (!jg::On()) return __imp__sub_82607CA8(ctx, base);
+  const int outer = jg::t_count;
+  ++jg::t_in_walk, jg::t_count = 0;
+  __imp__sub_82607CA8(ctx, base);
+  const int n = jg::t_count;
+  --jg::t_in_walk, jg::t_count = outer;
+  int most = jg::g_most.load();
+  while (n > most && !jg::g_most.compare_exchange_weak(most, n)) {
+  }
+  static std::atomic<int64_t> last{0};
+  const int64_t now =
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (int64_t l = last.load(); now - l >= 10 && last.compare_exchange_strong(l, now))
+    REXLOG_INFO("BF job graph: the largest walk took {} job slots (last 10 s)", jg::g_most.exchange(0));
+}
+REX_EXTERN(__imp__sub_82608AF8);
+REX_HOOK_RAW(sub_82608AF8) {
+  namespace jg = bf1943::jobgraph;
+  if (jg::t_in_walk && ++jg::t_count == 200) REXLOG_WARN("BF job graph: a walk holds 200 job slots");
+  __imp__sub_82608AF8(ctx, base);
+}
+#endif
+
 REX_EXTERN(__imp__sub_82609000);
 REX_HOOK_RAW(sub_82609000) {
   const uint32_t caller = uint32_t(ctx.lr);
