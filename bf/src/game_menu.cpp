@@ -1215,7 +1215,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (!typing) {
         key.prev_tab |= ImGui::IsKeyPressed(ImGuiKey_Q);
         key.next_tab |= ImGui::IsKeyPressed(ImGuiKey_E);
-        if (LauncherPage(page_) || page_ == Page::kMain || page_ == Page::kServers || page_ == Page::kSettings) {  // the new look's pages too
+        if (LauncherPage(page_) || page_ == Page::kMain || page_ == Page::kServers || page_ == Page::kSettings ||
+            page_ == Page::kPrivateMatch) {  // the new look's pages too (Custom Match's own page: 21 Nov 2026)
           key.x |= ImGui::IsKeyPressed(ImGuiKey_F, false);
           key.y |= ImGui::IsKeyPressed(ImGuiKey_R, false);
           key.start |= ImGui::IsKeyPressed(ImGuiKey_P, false);
@@ -1235,7 +1236,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       ClosePause("Start");
       return;
     }
-    if (!LauncherPage(page_)) in.accept |= in.start;  // BF's own pages: Start is A, as before
+    // BF's own pages: Start is A, as before. Not on Custom Match's page (21 Nov 2026), where Start hosts the match.
+    if (!LauncherPage(page_) && page_ != Page::kPrivateMatch) in.accept |= in.start;
 
     const float s = io.DisplaySize.y / 1080.0f;
     io_scale_ = s;
