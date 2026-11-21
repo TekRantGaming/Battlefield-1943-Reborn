@@ -32,10 +32,10 @@
 
 #include "capture_points.h"
 #include "comms.h"
+#include "player_limits.h"
 
 #if defined(BF_DEV_TOOLS)
 #include "dev_guest_memory.h"
-#include "player_limits.h"
 #endif
 
 namespace bf1943 {
