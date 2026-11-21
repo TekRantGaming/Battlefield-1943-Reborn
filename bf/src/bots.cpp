@@ -2230,10 +2230,44 @@ void BotsLevelChange() {
   nav.scan_min[0] = nav.scan_min[1] = 1e9f, nav.scan_max[0] = nav.scan_max[1] = -1e9f;
 }
 
+// The bots on the server now, for the server browser's PLAYERS column (TekRantGaming, 21 Nov 2026: "(4)0/24", the
+// bots in brackets before the players): every bot on the scoreboard, those waiting on an empty server and one that is
+// leaving for a joining player included (it plays until it next dies). The in-game host (gm_host.cpp) reads it here;
+// a dedicated server's host (server/gmhost.py) from <user data>/bots.txt, "<count>", written at once when it changes
+// and again every 10 s so the host can tell a live count from one a stopped server left (it takes one older than
+// 30 s for none). Written from the server's first tick, 0 on a server without bots.
+static std::atomic<int> g_bots_playing{0};
+int BotsPlaying() { return g_bots_playing.load(); }
+static void NoteBotsPlaying() {
+  static Clock::time_point next{}, rewrite{};
+  static int written = -1;
+  const auto now = Clock::now();
+  if (now < next) return;
+  next = now + std::chrono::seconds(1);
+  const int n = WantedBots() > 0 ? int(g.bots.size()) : 0;
+  g_bots_playing.store(n);
+  if (n == written && now < rewrite) return;
+  const std::filesystem::path dir = REXCVAR_GET(user_data_root);
+  if (dir.empty()) return;
+  const std::filesystem::path file = dir / "bots.txt", tmp = dir / "bots.txt.new";
+  {
+    std::ofstream f(tmp, std::ios::trunc);
+    if (!f) return;
+    f << n << "\n";
+  }
+  std::error_code ec;
+  std::filesystem::rename(tmp, file, ec);
+  if (ec) return;
+  if (n != written) REXLOG_INFO("BF bots: {} bot(s) on the server (bots.txt, for the server browser)", n);
+  written = n, rewrite = now + std::chrono::seconds(10);
+}
+
 // Every server tick (server_rotation.cpp, after the game's own tick).
 static void BotsTickImpl(PPCContext& ctx, uint8_t* base);
 void BotsTick(PPCContext& ctx, uint8_t* base) {
-  if (!REXCVAR_GET(server) || WantedBots() <= 0) return;
+  if (!REXCVAR_GET(server)) return;
+  NoteBotsPlaying();
+  if (WantedBots() <= 0) return;
   const auto t0 = Clock::now();
   BotsTickImpl(ctx, base);
   const auto t1 = Clock::now();

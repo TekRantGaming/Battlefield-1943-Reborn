@@ -78,6 +78,10 @@ struct ServerInfo {
   // and never found, since v0.4.0's game plays the original everywhere and would be pulled about on it.
   bool retired_mode = false;
   int players = 0, max_players = 0;
+  // Its bots now (a backend and host from 21 Nov 2026; 0 from older ones): shown before the players, "(4) 0 / 24"
+  // (TekRantGaming). Not players: they leave a slot to a joining player (bots.cpp's backfill keeps two free and gives
+  // up one for each player who joins), so they never make a server full, and HAS PLAYERS means people.
+  int bots = 0;
   // Players waiting in its queue (0.4.7.4, server/plasma.py QUEUE); -1: a backend without the queue (a full server
   // there is refused, and the browser does not offer it).
   int queue = -1;
@@ -579,6 +583,7 @@ class ServerList {
     s.retired_mode = JsonField(obj, "mode") == "modern";
     s.players = std::atoi(JsonField(obj, "players").c_str());
     s.max_players = std::atoi(JsonField(obj, "max_players").c_str());
+    s.bots = std::max(0, std::atoi(JsonField(obj, "bots").c_str()));
     if (const std::string q = JsonField(obj, "queue"); !q.empty()) s.queue = std::atoi(q.c_str());
     s.description = JsonField(obj, "description");
     TakeDescriptionTags(s);

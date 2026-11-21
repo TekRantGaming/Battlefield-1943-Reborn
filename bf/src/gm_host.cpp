@@ -104,6 +104,7 @@ const char* BfVersion();  // pipeline_upload.cpp
 int TickRate();           // tick_rate.cpp: the simulation rate this server runs at (bf_tick_rate)
 std::vector<std::string> RotationTitles();  // server_rotation.cpp: the maps in turn, by title
 std::string CurrentMapTitle();              // server_rotation.cpp: the one running now
+int BotsPlaying();                          // bots.cpp: the bots on this server now (the browser's "(4) 0 / 24")
 struct MatchClock {  // match_rules.cpp: the match's rules and the round's clock
   int tickets = 0;
   int time_limit = 0;
@@ -1323,8 +1324,9 @@ void Serve() {
         std::string names;
         for (const auto& n : host.PlayerNames()) names += (names.empty() ? "" : ", ") + JsonQuote(n);
         st.players = host.PlayerCount();
-        if (!link.Send(fmt::format("{{\"op\": \"status\", \"players\": {}, \"map\": {}, \"next_map\": {}, \"names\": [{}]}}",
-                                   st.players, JsonQuote(current), JsonQuote(upcoming), names))) {
+        if (!link.Send(fmt::format("{{\"op\": \"status\", \"players\": {}, \"bots\": {}, \"map\": {}, \"next_map\": {}, "
+                                   "\"names\": [{}]}}",
+                                   st.players, bf1943::BotsPlaying(), JsonQuote(current), JsonQuote(upcoming), names))) {
           host.Note("backend link lost (status)");
           alive = false;
         }

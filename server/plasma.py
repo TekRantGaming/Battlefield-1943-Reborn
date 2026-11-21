@@ -1556,7 +1556,7 @@ class Registry:
                this backend's own machine ("local"), ok is null when it answers: a probe from here never passes
                the machine's incoming firewall, so whether players outside reach it cannot be told from here
       backend: {"op": "refused", "why"}                     an official code that does not check
-      server:  {"op": "status", "players", "map", "next_map"}   every few seconds
+      server:  {"op": "status", "players", "bots", "map", "next_map"}   every few seconds (bots: 21 Nov 2026)
       backend: {"op": "join", "ticket", "pid", "name", "xuid", "xnaddr"}   before the joiner gets EGEG
       anyone:  {"op": "list"} -> {"op": "servers", "servers": [...]}   for a server browser (listed servers only)
                with the version gate (VERSION_GATE): "required_version" too, and for a game that says no "version"
@@ -1711,8 +1711,8 @@ class Registry:
                 continue
             rows.append({'gid': g['GID'], 'name': g.get('N', ''), 'host_key': g.get('host_key', ''),
                          'from': g.get('from', ''), 'port': g.get('P', 0), 'version': g.get('server_version', ''),
-                         'players': g.get('AP', 0), 'max_players': g.get('MAX-PLAYERS', 0),
-                         'listed': bool(g.get('listed', True)), 'hidden': g.get('hidden', ''),
+                         'players': g.get('AP', 0), 'bots': g.get('bots', 0),
+                         'max_players': g.get('MAX-PLAYERS', 0), 'listed': bool(g.get('listed', True)), 'hidden': g.get('hidden', ''),
                          'promoted': bool(g.get('promoted')),
                          'promoted_key': bool(self.promoted and self.promoted.has(g.get('host_key', ''))),
                          'region': g.get('region', '')})
@@ -2017,6 +2017,12 @@ class Registry:
                         'y' if len((GAMES[gid]['bans'] or {}).get('rows', [])) == 1 else 'ies'))
                 elif op == 'status' and gid in GAMES:
                     GAMES[gid]['AP'] = int(m.get('players', 0))
+                    # Its bots (a host from 21 Nov 2026; none from an older one): the browser shows "(4) 0 / 24".
+                    # They are not players: AP, the full check and the website's hours count the people only.
+                    try:
+                        GAMES[gid]['bots'] = max(0, min(BIGGEST_SERVER, int(m.get('bots') or 0)))
+                    except (TypeError, ValueError):
+                        GAMES[gid]['bots'] = 0
                     GAMES[gid]['status_at'] = time.time()  # the players whose game got its address since are in it
                     STATS.status(gid, GAMES[gid]['AP'])  # the website's hours played (server/stats.py)
                     GAMES[gid]['map'] = m.get('map', GAMES[gid]['map'])
@@ -2720,7 +2726,8 @@ def tick_of(value):
 def listing(g):
     """A game as the server browser gets it."""
     return {'gid': g['GID'], 'name': g['N'], 'address': [g['I'], g['P']], 'map': g.get('map', ''),
-            'players': g['AP'], 'max_players': g['MAX-PLAYERS'], 'mode': g.get('mode', 'classic'),
+            'players': g['AP'], 'bots': g.get('bots', 0), 'max_players': g['MAX-PLAYERS'],
+            'mode': g.get('mode', 'classic'),
             'description': g.get('description', ''), 'official': bool(g.get('official') or g.get('promoted')),
             'promoted': bool(g.get('promoted') and not g.get('official')),  # Promoted: on the Reborn tab, marked
             'next_map': g.get('next_map', ''), 'maps': g.get('maps', []), 'night': bool(g.get('night')),
@@ -2733,7 +2740,7 @@ def public(g):
     return {k: v for k, v in g.items()
             if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night', 'region', 'tick',
                          'server_version', 'local', 'hidden', 'from', 'host_key', 'build_digest', 'promoted',
-                         'status_at')}
+                         'status_at', 'bots')}
 
 
 async def http_client(reader, writer, log):

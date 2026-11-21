@@ -60,6 +60,7 @@
           sv.gid = JsonField(line, "gid"), sv.name = JsonField(line, "name"), sv.map = JsonField(line, "map");
           sv.players = std::atoi(JsonField(line, "players").c_str());
           sv.max_players = std::atoi(JsonField(line, "max_players").c_str());
+          sv.bots = std::max(0, std::atoi(JsonField(line, "bots").c_str()));
           sv.tick_hz = std::atoi(JsonField(line, "tick").c_str());
           sv.next_map = JsonField(line, "next_map");
           sv.description = JsonField(line, "description"), sv.player_hosted = true;
@@ -182,7 +183,9 @@
         const int a = p.ping_ms < 0 ? 1 << 20 : p.ping_ms, b = q.ping_ms < 0 ? 1 << 20 : q.ping_ms;
         if (a != b) return a < b;
       }
-      return p.players > q.players;
+      // People first; among servers with as many, the one with more bots (a match going on beats an empty map).
+      if (p.players != q.players) return p.players > q.players;
+      return p.bots > q.bots;
     });
     return out;
   }
@@ -436,7 +439,8 @@
     const float head = st(30), rh = banners ? st(44) : st(36);
     kit::PaperArt(d, ta, tb);
     // (The region with its flag and the tick rate: TekRantGaming, 13 Nov 2026.)
-    const float colx[6] = {st(14), st(296), st(432), st(566), st(676), st(736)};
+    // (TICK at 686 since the bots' bracket before the players, 21 Nov 2026: "(24) 64 / 64" fits the PLAYERS column.)
+    const float colx[6] = {st(14), st(296), st(432), st(566), st(686), st(736)};
     static const char* kHeads[6] = {"SERVER", "MAP", "REGION", "PLAYERS", "TICK", "PING"};
     for (int c = 0; c < 6; ++c)
       kit::GameText(d, kit::GameFont::kListHeader, st(10), ImVec2(ta.x + colx[c], ta.y + (head - st(10)) * 0.5f), kit::kInkFaint,
@@ -524,16 +528,24 @@
         }
         d->PopClipRect();
       }
-      {  // the players: a bar and the count
-        const float x = ta.x + colx[3], bw = st(42);
+      {  // the players: a bar and the count, the bots in brackets before it in a fainter ink, "(4) 0 / 24"
+        // (TekRantGaming, 21 Nov 2026). The bar is the people only: bots give their slots up to joining players.
+        const float x = ta.x + colx[3], bw = st(36);
         const ImVec2 b0(x, y + rh * 0.5f - st(2)), b1(x + bw, y + rh * 0.5f + st(2));
         d->AddRectFilled(b0, b1, sel ? IM_COL32(255, 255, 255, 70) : IM_COL32(34, 36, 27, 30));
         const float fill = sv.max_players > 0 ? std::clamp(float(sv.players) / float(sv.max_players), 0.0f, 1.0f) : 0.0f;
         if (fill > 0) d->AddRectFilled(b0, ImVec2(b0.x + bw * fill, b1.y), sel ? kit::kCream : kit::kGreen);
         const std::string count = fmt::format("{} / {}", sv.players, sv.max_players);
-        kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(x + bw + st(10), y + (rh - st(11)) * 0.5f), ink, count);
+        float cx = x + bw + st(8);
+        if (sv.bots > 0) {
+          const std::string bots = fmt::format("({})", sv.bots);
+          kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(cx, y + (rh - st(11)) * 0.5f),
+                        sel ? IM_COL32(241, 234, 211, 150) : IM_COL32(90, 84, 64, 170), bots);
+          cx += kit::GameTextWidth(kit::GameFont::kText, st(11), bots) + st(4);
+        }
+        kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(cx, y + (rh - st(11)) * 0.5f), ink, count);
         if (sv.queue > 0) {  // the players waiting in its queue (the join queue, 0.4.7.4): "+3", in the stamp's red
-          const float qx = x + bw + st(10) + kit::GameTextWidth(kit::GameFont::kText, st(11), count) + st(5);
+          const float qx = cx + kit::GameTextWidth(kit::GameFont::kText, st(11), count) + st(5);
           d->PushClipRect(ImVec2(qx, std::max(y, top)), ImVec2(ta.x + colx[4] - st(4), std::min(y + rh, tb.y)), true);
           kit::GameText(d, kit::GameFont::kText, st(10), ImVec2(qx, y + (rh - st(10)) * 0.5f), sel ? kit::kCream : kit::kStamp,
                         fmt::format("+{}", sv.queue));
@@ -621,6 +633,7 @@
       kit::GameText(d, kit::GameFont::kText, st(13), ImVec2(pa.x + st(18), y), kit::kInk, sv->name);
       y += st(13) + st(10);
       std::string line = fmt::format("{} / {} PLAYERS", sv->players, sv->max_players);
+      if (sv->bots > 0) line += fmt::format(" \xC2\xB7 {} BOT{}", sv->bots, sv->bots == 1 ? "" : "S");
       if (sv->queue > 0) line += fmt::format(" \xC2\xB7 {} IN QUEUE", sv->queue);
       if (sv->ping_ms >= 0) line += fmt::format(" \xC2\xB7 {} MS", sv->ping_ms);
       if (full) line += " \xC2\xB7 FULL";

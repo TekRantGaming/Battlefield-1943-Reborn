@@ -1820,9 +1820,10 @@ async def serve(args):
                     reported[0] = current
                 rotation = [m for m in args.maps.split(',') if m]
                 upcoming = rotation[(rotation.index(current) + 1) % len(rotation)] if current in rotation else ''
-                send({'op': 'status', 'players': host.player_count(), 'map': current, 'next_map': upcoming,
-                      'names': host.player_names()})
-                write_status(args, dict(state, players=host.player_count(), map=current, next_map=upcoming,
+                bots = bots_playing(args)
+                send({'op': 'status', 'players': host.player_count(), 'bots': bots, 'map': current,
+                      'next_map': upcoming, 'names': host.player_names()})
+                write_status(args, dict(state, players=host.player_count(), bots=bots, map=current, next_map=upcoming,
                                         names=host.player_names(), roster=host.roster(),
                                         pings={n: v[0] for n, v in host.world.pings.items()}))  # the dashboard
                 for m in stats_lines():  # each player's stats since the last beat (player_stats.py)
@@ -1898,6 +1899,23 @@ async def serve(args):
         await asyncio.sleep(2)  # the host keeps its players; the next registration asks to keep its ids
 
 
+def bots_playing(args):
+    """The bots on the server now (bots.cpp writes <user data>/bots.txt, "<count>", on a change and every 10 s), for
+    the server browser's PLAYERS column: "(4) 0 / 24" (TekRantGaming, 21 Nov 2026). The file is in the game's user
+    data folder, beside the map rotation's current_map.txt (--map-file), unless --bots-file says where. 0 when there
+    is none, or it is older than 30 s (a server that stopped, or a build from before 21 Nov 2026)."""
+    path = args.bots_file or (os.path.join(os.path.dirname(args.map_file), 'bots.txt') if args.map_file else '')
+    if not path:
+        return 0
+    try:
+        if time.time() - os.path.getmtime(path) > 30:
+            return 0
+        with open(path, encoding='utf-8') as f:
+            return max(0, min(MOST_PLAYERS, int(f.read().strip() or 0)))
+    except (OSError, ValueError):
+        return 0
+
+
 def write_status(args, state):
     """The server package's window reads each server's state from here (--status-file)."""
     if not args.status_file:
@@ -1968,6 +1986,8 @@ def main():
     ap.add_argument('--region', default='', help="the server's region code, e.g. gb, de, us-east (shown in the browser)")
     ap.add_argument('--tick', type=int, default=60, help="the server's tick rate in Hz (shown in the browser; 60 by default since 14 Nov 2026)")
     ap.add_argument('--map-file', default='', help="the server's current_map.txt (its map rotation)")
+    ap.add_argument('--bots-file', default='',
+                    help="the server's bots.txt (bots.cpp: its bots now, for the browser); empty: beside --map-file")
     ap.add_argument('--match-file', default='',
                     help="the server's match.txt (match_rules.cpp): the round and its tickets left, for Night Ops' storm")
     ap.add_argument('--maps', default='', help='the rotation, map titles separated by commas (for the next map)')
