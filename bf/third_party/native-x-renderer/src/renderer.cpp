@@ -5174,9 +5174,49 @@ void EndViewGeometry() { Capture capture(Command::Type::kEndViewGeometry); }
 
 namespace {
 
+// A lost device (TekRantGaming, 21 Nov 2026: "it froze my game when i loaded into the server"; NVIDIA's driver reset
+// the GPU, nvlddmkm event 153). DiligentCore ignores Vulkan's VK_ERROR_DEVICE_LOST in release builds: its waits return
+// at once, so frames look complete and the game runs on, while nothing new is drawn (a frozen picture) and the command
+// queue's fence stops. Checked every 30 frames: the queue's completed fence has not moved for 3 s while 60 or more
+// frames were presented and more than 64 submissions wait. The game reads DeviceLost() and tells the player.
+// NXR_TEST_DEVICE_LOST=<s>: taken as lost that many seconds after the renderer's first frame (tests).
+std::atomic<bool> g_device_lost{false};
+
+void WatchDeviceLoss() {
+  using Clock = std::chrono::steady_clock;
+  static const Clock::time_point start = Clock::now();
+  static const double test_after = [] {
+    const char* v = std::getenv("NXR_TEST_DEVICE_LOST");
+    return v && *v ? std::atof(v) : -1.0;
+  }();
+  if (g_device_lost.load(std::memory_order_relaxed) || !g_device) return;
+  const Clock::time_point now = Clock::now();
+  if (test_after >= 0 && std::chrono::duration<double>(now - start).count() >= test_after) {
+    REXLOG_ERROR("[native_x_renderer] the Vulkan device taken as lost (NXR_TEST_DEVICE_LOST={:.0f})", test_after);
+    g_device_lost.store(true, std::memory_order_relaxed);
+    return;
+  }
+  static uint64_t last_completed = 0, presented_then = 0;
+  static Clock::time_point moved_at = now;
+  const Device::FenceState fences = g_device->GetFenceState();
+  if (fences.queue_completed != last_completed) {
+    last_completed = fences.queue_completed, presented_then = fences.frames_presented, moved_at = now;
+    return;
+  }
+  const double still = std::chrono::duration<double>(now - moved_at).count();
+  if (still >= 3.0 && fences.frames_presented >= presented_then + 60 && fences.queue_next > fences.queue_completed + 64) {
+    REXLOG_ERROR("[native_x_renderer] the Vulkan device is lost: the command queue's fence has stood at {} for {:.1f} s "
+                 "({} submissions waiting) while {} frames were presented (the graphics driver reset the GPU?)",
+                 fences.queue_completed, still, fences.queue_next - fences.queue_completed,
+                 fences.frames_presented - presented_then);
+    g_device_lost.store(true, std::memory_order_relaxed);
+  }
+}
+
 void ExecuteFrameEnd(const Command& c) {
   uint32_t frame = c.frame;
   ++g_frames_presented;
+  if (frame % 30 == 0) WatchDeviceLoss();
   g_timer.SetFrame(frame, REXCVAR_GET(native_x_renderer_hitch_ms));
   {
     // NXR_TEX_LOADS=1: how many frames the game has ended that this thread has not (each 600 frames: average, most).
@@ -5598,4 +5638,5 @@ namespace native_x_renderer {
 Diligent::ITextureView* HostMsaaDrawView(HostTarget* target, bool multisampled, bool writes) {
   return renderer::MsaaDrawView(target, multisampled, writes);
 }
+bool DeviceLost() { return renderer::g_device_lost.load(std::memory_order_relaxed); }
 }  // namespace native_x_renderer

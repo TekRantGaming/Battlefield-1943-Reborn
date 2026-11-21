@@ -79,6 +79,7 @@ void CreateGameMenu(rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& u
                     std::function<void(bool)> fullscreen, std::function<void()> quit,
                     std::function<rex::ui::Window*()> window,
                     std::function<std::filesystem::path()> game_dir);  // game_menu.cpp
+void WatchGpuDeviceLoss(std::function<void(std::function<void()>)> in_ui, std::function<void()> close);  // gpu_lost.cpp
 #if defined(BF_DEV_TOOLS)
 std::unique_ptr<rex::system::IInputSystem> CreateInputSystem(bool tool_mode);  // dev_pad.cpp
 void StartStackSampler();  // dev_stacks.cpp
@@ -363,6 +364,15 @@ class Bf1943App : public rex::ReXApp {
           });
         },
         [this] { return window(); }, [this] { return paths_.game_data_root; });
+    // A graphics driver reset (gpu_lost.cpp): the player told, and the game closed as the close button does, instead of
+    // a frozen picture.
+    if (!REXCVAR_GET(server))
+      bf1943::WatchGpuDeviceLoss(
+          [this](std::function<void()> job) { app_context().CallInUIThreadDeferred(std::move(job)); },
+          [this] {
+            if (window()) window()->RequestClose();
+            else app_context().QuitFromUIThread();
+          });
     if (!AbOff("overlay")) bf1943::CreatePerfOverlay(drawer);  // Settings > Gameplay > Performance metrics, F2
     if (!REXCVAR_GET(server)) bf1943::CreateCommsOverlay(drawer);  // text chat top left, voice chat (comms_ui.cpp)
     if (!REXCVAR_GET(server)) bf1943::CreateWorldAdminPanel(drawer);  // F9, a match's admin (world_sync.cpp)

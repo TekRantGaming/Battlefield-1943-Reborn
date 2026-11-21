@@ -248,6 +248,10 @@ void Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
 // EDRAM tiles).
 bool Renders();
 
+// Whether the GPU device was lost (the graphics driver reset the GPU): nothing more can be drawn, though the game runs
+// on. Checked every 30 frames (renderer.cpp WatchDeviceLoss); once true, it stays true.
+bool DeviceLost();
+
 // The pipelines stored by earlier runs (or a game's setup, D134), made before play: how many, how many are compiled,
 // whether the storage was read (at the first draw), and whether all are done (also when there is nothing to make or
 // NativeXRenderer does not draw). For a setup screen over the game's first frames; callable from any thread.
