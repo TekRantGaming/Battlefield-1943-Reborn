@@ -141,6 +141,7 @@ add_library(native_x_renderer STATIC
     src/dof.cpp
     src/shadows.cpp
     src/sky.cpp
+    src/weapon_skin.cpp
     src/motion_blur.cpp
     src/taa.cpp
     src/xess.cpp

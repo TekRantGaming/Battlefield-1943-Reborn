@@ -141,7 +141,8 @@ class Sky {
     if (sea_known_) *sea = sea_;
     return sea_known_;
   }
-  // A wet copy of a texture of the first person weapon's (DrawPath::WetRequest), into `to` (RGBA8, the same size):
+  // A wet copy of a texture of the first person weapon's (DrawPath::WetRequest), into `to` (RGBA8, the same size; RGBA16F
+  // over the player's weapon skin, weapon_skin.h):
   // darker, with beads of water, `count` of them showing by `show`; tint: drawn red instead (a developer's check).
   bool WetCopy(Diligent::IDeviceContext* context, Diligent::ITextureView* from, Diligent::ITexture* to, float count,
                float show, bool tint, double seconds, bool skin, bool vehicle = false, bool relief_only = false);
@@ -201,6 +202,8 @@ class Sky {
   Diligent::RefCntAutoPtr<Diligent::IShader> wet_ps_;
   Diligent::RefCntAutoPtr<Diligent::IPipelineState> wet_pso_;
   Diligent::RefCntAutoPtr<Diligent::IShaderResourceBinding> wet_srb_;
+  Diligent::RefCntAutoPtr<Diligent::IPipelineState> wet_hdr_pso_;  // a float copy's (the weapon skin's under the wetness)
+  Diligent::RefCntAutoPtr<Diligent::IShaderResourceBinding> wet_hdr_srb_;
   float last_eye_[3] = {};
   bool last_eye_valid_ = false;
   double lens_seconds_ = 0.0;

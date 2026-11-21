@@ -18,6 +18,7 @@
 #include "storage.h"
 #include "targets.h"
 #include "textures.h"
+#include "weapon_skin.h"
 
 #include <rex/bit.h>
 #include <rex/types.h>
@@ -1834,6 +1835,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           view = textures_->View(binding.fetch_constant, regs.GetTextureFetch(binding.fetch_constant),
                                  binding.dimension, binding.is_signed);
           NoteShadowMap(stage, binding.fetch_constant, view);
+        view = SkinView(stage, binding.fetch_constant, view, *shader, regs);
         view = WetView(stage, binding.fetch_constant, view, *shader, regs);
         view = SeaSkyView(stage, binding.fetch_constant, view, *shader);
         {  // NXR_WEAPON_LOG=2 (research): 95 s in, each pixel shader's textures with the draw's depth range, once
@@ -1881,6 +1883,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         IDeviceObject* view = textures_->View(binding.fetch_constant, regs.GetTextureFetch(binding.fetch_constant),
                                               binding.dimension, binding.is_signed);
         NoteShadowMap(stage, binding.fetch_constant, view);
+        view = SkinView(stage, binding.fetch_constant, view, *shader, regs);
         view = WetView(stage, binding.fetch_constant, view, *shader, regs);
         view = SeaSkyView(stage, binding.fetch_constant, view, *shader);
         {  // NXR_WEAPON_LOG=2 (research): 95 s in, each pixel shader's textures with the draw's depth range, once
@@ -3557,7 +3560,7 @@ void DrawPath::ApplyOutdoorLight(uint64_t shader_hash, uint32_t stage, const uin
 // range; a draw of the nearest range whose own differs from it by 2% or more is the weapon's.
 void DrawPath::ClassifyWeapon(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, float z_min, float z_max) {
   weapon_draw_ = false;
-  if (wet_tint_ < 0 && wet_count_ * wet_show_ < 0.01f && WeaponDumpAt() < 0.0) return;  // nothing to be wet
+  if (wet_tint_ < 0 && wet_count_ * wet_show_ < 0.01f && WeaponDumpAt() < 0.0 && !WeaponSkinNow()) return;  // nothing to be wet or skinned
   const bool nearest = z_min > 0.99f && z_max > 0.005f && z_max < 0.05f;
   const uint64_t frame = device_->frames_presented();
   const bool farther = !nearest && z_max < z_min && z_min < 0.05f && world_py_frame_ != frame;
@@ -4284,6 +4287,42 @@ IDeviceObject* DrawPath::SeaSkyView(uint32_t stage, uint32_t fetch_constant, IDe
   return sea_sky_cube_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
 }
 
+// The player's own weapon skin (weapon_skin.h): in a first person weapon's draw (not a vehicle's, not the hands'),
+// its colour texture drawn with the skinned copy. The hands' material is told as WetView tells it.
+IDeviceObject* DrawPath::SkinView(uint32_t stage, uint32_t fetch_constant, IDeviceObject* view,
+                                  const rg::SpirvShader& shader, const rg::RegisterFile& regs) {
+  if (stage != 1 || !weapon_draw_ || vehicle_draw_ || !view || !WeaponSkinNow()) return view;
+  uint32_t squares = 0;
+  bool hands = false;
+  // Its colour texture: the largest DXT1 one (the guns' shaders also have a DXT5 map as large, their surface's relief
+  // and shine, which skinned turned the Type 100 red and patchy: run skinB2), the highest numbered of equals.
+  int colour = -1;
+  uint32_t colour_width = 0;
+  for (const auto& b : shader.GetTextureBindingsAfterTranslation()) {
+    const auto f = regs.GetTextureFetch(b.fetch_constant);
+    if (f.size_2d.width + 1 == 512 && f.size_2d.height + 1 == 256) hands = true;
+    if (f.format == xenos::TextureFormat::k_DXT1 && f.size_2d.width + 1 == 512 && f.size_2d.height + 1 == 512) ++squares;
+    if (f.format == xenos::TextureFormat::k_DXT1 && f.size_2d.width + 1 >= 256 &&
+        (f.size_2d.width + 1 > colour_width || (f.size_2d.width + 1 == colour_width && int(b.fetch_constant) > colour))) {
+      colour = int(b.fetch_constant), colour_width = f.size_2d.width + 1;
+    }
+  }
+  {  // each pixel shader of the weapon's draws once: its textures, and whether it was taken for the hands'
+    static std::set<uint64_t> said;
+    if (said.size() < 24 && said.insert(shader.ucode_data_hash()).second) {
+      std::string list;
+      for (const auto& b : shader.GetTextureBindingsAfterTranslation()) {
+        const auto f = regs.GetTextureFetch(b.fetch_constant);
+        list += fmt::format(" {}:{}x{}/{}", b.fetch_constant, f.size_2d.width + 1, f.size_2d.height + 1, int(f.format));
+      }
+      REXLOG_INFO("[native_x_renderer] weapon skin: a weapon draw's pixel shader {:016X} ({} vertex constants{}), textures{}",
+                  shader.ucode_data_hash(), weapon_constants_, hands || squares >= 3 ? ", the hands'" : "", list);
+    }
+  }
+  if (int(fetch_constant) != colour) return view;
+  return WeaponSkinView(view, hands || squares >= 3, device_->frames_presented());
+}
+
 IDeviceObject* DrawPath::WetView(uint32_t stage, uint32_t fetch_constant, IDeviceObject* view,
                                  const rg::SpirvShader& shader, const rg::RegisterFile& regs) {
   if (stage != 1 || !(weapon_draw_ || vehicle_draw_) || !view || !seen_camera_valid_) return view;  // (D217: vehicles too)
@@ -4305,8 +4344,15 @@ IDeviceObject* DrawPath::WetView(uint32_t stage, uint32_t fetch_constant, IDevic
   }
   if ((d.Type != RESOURCE_DIM_TEX_2D && !(d.Type == RESOURCE_DIM_TEX_2D_ARRAY && d.ArraySize == 1)) ||
       d.Width < (by_number ? 32u : 256u) || d.Height < (by_number ? 32u : 256u) ||
-      (d.Format != TEX_FORMAT_BC1_UNORM && d.Format != TEX_FORMAT_BC3_UNORM)) {
+      (d.Format != TEX_FORMAT_BC1_UNORM && d.Format != TEX_FORMAT_BC3_UNORM && !IsWeaponSkinCopy(view))) {
     return view;
+  }
+  if (d.Format == TEX_FORMAT_RGBA16_FLOAT) {  // the player's weapon skin's copy: the wetness drawn over it
+    static bool said_skin = false;
+    if (!said_skin) {
+      said_skin = true;
+      REXLOG_INFO("[native_x_renderer] wetness: over the weapon skin's copy (texture {}, {}x{})", fetch_constant, d.Width, d.Height);
+    }
   }
   // The hands' draws, whose texture gets no drops: their material has a 512 x 256 texture among its others, the
   // weapons' have none (runs wet1 and wlog2). (Not by the shader: a hosted match draws them with others, run mrg3.)

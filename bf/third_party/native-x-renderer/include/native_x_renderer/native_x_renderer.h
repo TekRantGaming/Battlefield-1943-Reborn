@@ -486,6 +486,9 @@ void HideCrosshair();
 // How far the player's aim down the sights is in, 0 to 1 (the game's own zoom blend), for the renderer's depth of field
 // (dof.h, native_x_renderer_ads_dof). From the game's thread, each frame a first person weapon is held.
 void SetAdsBlend(float blend);
+// The skin the player's own held weapon wears (weapon_skin.h): 0 none, 1 electric. Only this game's first person
+// weapon is drawn with it; nothing is sent. Held for a quarter second: from the game's thread, each frame it applies.
+void SetWeaponSkin(int skin);
 // The motion blur leaves out the objects' own motion (native_x_renderer_motion_blur_objects) for the next quarter second
 // (Battlefield 1943: while the player's free look turns a vehicle's outside view round it, the vehicle is not blurred).
 // The upscalers' motion vectors keep it. From the game's thread, each frame it applies.

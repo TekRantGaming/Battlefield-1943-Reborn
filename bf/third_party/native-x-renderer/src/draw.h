@@ -673,6 +673,8 @@ class DrawPath {
   Diligent::RefCntAutoPtr<Diligent::ITexture> sea_sky_cube_;
   float sea_sky_[2][3] = {};
   bool sea_sky_dirty_ = true;
+  Diligent::IDeviceObject* SkinView(uint32_t stage, uint32_t fetch_constant, Diligent::IDeviceObject* view,
+                                   const rex::graphics::SpirvShader& pixel_shader, const rex::graphics::RegisterFile& regs);
   Diligent::IDeviceObject* WetView(uint32_t stage, uint32_t fetch_constant, Diligent::IDeviceObject* view,
                                    const rex::graphics::SpirvShader& pixel_shader, const rex::graphics::RegisterFile& regs);
   // This draw is the first person weapon's or hands' (ClassifyWeapon): in the nearest depth range, with another

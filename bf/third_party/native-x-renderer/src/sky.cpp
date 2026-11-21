@@ -1816,7 +1816,9 @@ void main() {
   vec3 surface = c.rgb * darker * (1.0 - 0.18 * shadow);
   surface = mix(surface, c.rgb * mix(darker, 1.0, 0.35) + vec3(0.06), trail * 0.7);
   vec3 wet = mix(surface, drop, m);
-  out_color = vec4(mix(c.rgb, wet, show), c.a);
+  // (No brighter than the texture's own brightest channel here, or white: over the player's weapon skin, whose float
+  // copy is above white, a drop's glint brightened its arcs past what the game's colour target holds.)
+  out_color = vec4(min(mix(c.rgb, wet, show), vec3(max(max(c.r, c.g), max(c.b, 1.0)))), c.a);
 }
 )";
 
@@ -1886,7 +1888,12 @@ bool Sky::WetCopy(IDeviceContext* context, ITextureView* from, ITexture* to, flo
                   double seconds, bool skin, bool vehicle, bool relief_only) {
   if (!from || !to || !Ready()) return false;
   const TextureDesc& desc = to->GetDesc();
-  if (!wet_pso_) {
+  // A float copy: the wetness over the player's weapon skin (weapon_skin.h), whose arcs are brighter than white; its
+  // own pipeline, so the skin keeps its glow under the drops.
+  const bool hdr = desc.Format == TEX_FORMAT_RGBA16_FLOAT;
+  RefCntAutoPtr<IPipelineState>& pso = hdr ? wet_hdr_pso_ : wet_pso_;
+  RefCntAutoPtr<IShaderResourceBinding>& srb = hdr ? wet_hdr_srb_ : wet_srb_;
+  if (!pso) {
     SamplerDesc linear;
     linear.MinFilter = linear.MagFilter = linear.MipFilter = FILTER_TYPE_LINEAR;
     linear.AddressU = linear.AddressV = linear.AddressW = TEXTURE_ADDRESS_CLAMP;
@@ -1895,7 +1902,7 @@ bool Sky::WetCopy(IDeviceContext* context, ITextureView* from, ITexture* to, flo
     info.PSODesc.Name = "NativeXRenderer sky wet copy";
     info.PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
     info.GraphicsPipeline.NumRenderTargets = 1;
-    info.GraphicsPipeline.RTVFormats[0] = TEX_FORMAT_RGBA8_UNORM;
+    info.GraphicsPipeline.RTVFormats[0] = hdr ? TEX_FORMAT_RGBA16_FLOAT : TEX_FORMAT_RGBA8_UNORM;
     info.GraphicsPipeline.DSVFormat = TEX_FORMAT_UNKNOWN;
     info.GraphicsPipeline.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     info.GraphicsPipeline.RasterizerDesc.CullMode = CULL_MODE_NONE;
@@ -1905,11 +1912,11 @@ bool Sky::WetCopy(IDeviceContext* context, ITextureView* from, ITexture* to, flo
     info.PSODesc.ResourceLayout.DefaultVariableType = SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC;
     info.PSODesc.ResourceLayout.ImmutableSamplers = samplers;
     info.PSODesc.ResourceLayout.NumImmutableSamplers = 1;
-    device_->CreateGraphicsPipelineState(info, &wet_pso_);
-    if (wet_pso_) wet_pso_->CreateShaderResourceBinding(&wet_srb_, true);
-    if (!wet_srb_) return false;
+    device_->CreateGraphicsPipelineState(info, &pso);
+    if (pso) pso->CreateShaderResourceBinding(&srb, true);
+    if (!srb) return false;
   }
-  if (!wet_srb_ || desc.Format != TEX_FORMAT_RGBA8_UNORM) return false;
+  if (!srb || (desc.Format != TEX_FORMAT_RGBA8_UNORM && !hdr)) return false;
   TextureViewDesc first;
   first.ViewType = TEXTURE_VIEW_RENDER_TARGET;
   first.TextureDim = desc.Type;  // (the game's textures are arrays of one layer: the copy is as they are)
@@ -1943,8 +1950,8 @@ bool Sky::WetCopy(IDeviceContext* context, ITextureView* from, ITexture* to, flo
     std::memcpy(data, &k, sizeof(k));
     context->UnmapBuffer(constants_, MAP_WRITE);
   }
-  if (auto* v = wet_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "SkyConstants")) v->Set(constants_);
-  if (auto* v = wet_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "srcTex")) v->Set(from);
+  if (auto* v = srb->GetVariableByName(SHADER_TYPE_PIXEL, "SkyConstants")) v->Set(constants_);
+  if (auto* v = srb->GetVariableByName(SHADER_TYPE_PIXEL, "srcTex")) v->Set(from);
   ITextureView* rtv = target;
   context->SetRenderTargets(1, &rtv, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
   Viewport viewport;
@@ -1952,8 +1959,8 @@ bool Sky::WetCopy(IDeviceContext* context, ITextureView* from, ITexture* to, flo
   viewport.Height = float(desc.Height);
   viewport.MaxDepth = 1.0f;
   context->SetViewports(1, &viewport, 0, 0);
-  context->SetPipelineState(wet_pso_);
-  context->CommitShaderResources(wet_srb_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  context->SetPipelineState(pso);
+  context->CommitShaderResources(srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
   DrawAttribs attribs;
   attribs.NumVertices = 3;
   context->Draw(attribs);

@@ -26,6 +26,7 @@
 #include "ssgi.h"
 #include "dof.h"
 #include "sky.h"
+#include "weapon_skin.h"
 #include "motion_blur.h"
 #include "upscaler.h"
 #include "fsr.h"
@@ -1023,14 +1024,15 @@ class FrameTimer {
 class SectionTimers {
  public:
   enum Id { kSky, kCloudsOver, kFog, kLens, kWet, kGrass, kGtao, kSsgi, kAa, kUpscale, kMotionBlur, kDof,
-            kSkyMarch, kSkyResolve, kSkyDraw, kGiDepth, kAoDepth, kGiGather, kGiBlur, kAoMain, kGiCopy, kGiComposite, kAoRest, kCount };
+            kSkyMarch, kSkyResolve, kSkyDraw, kGiDepth, kAoDepth, kGiGather, kGiBlur, kAoMain, kGiCopy, kGiComposite, kAoRest, kSkin, kSkinBloom, kCount };
   static constexpr const char* kNames[kCount] = {"sky",  "clouds over", "fog and rain", "lens", "wet copies", "grass",
                                                  "GTAO", "SSGI",        "AA",           "upscaler", "motion blur",
                                                  "DOF",  "(sky: the clouds' march", "the clouds' blend", "the sky drawn)",
                                                  "(SSGI's depth and normals)", "(GTAO's depth and normals)",
                                                  "(SSGI's light and gather)", "(SSGI's history and blur)",
                                                  "(GTAO's occlusion and blur)", "(SSGI's colour copy)",
-                                                 "(SSGI's composite)", "(GTAO's history and apply)"};
+                                                 "(SSGI's composite)", "(GTAO's history and apply)",
+                                                 "weapon skin", "weapon skin bloom"};
   void Begin(IRenderDevice* device, IDeviceContext* context, Id id) {
     if (!REXCVAR_GET(native_x_renderer_gpu_sections) || !device || !context) return;
     Section& sec = sections_[id];
@@ -1587,7 +1589,8 @@ void ExecuteDraw(const Command& c) {
         if (!copy) {
           TextureDesc d = w.original->GetTexture()->GetDesc();
           d.Name = "NativeXRenderer wet copy";
-          d.Format = TEX_FORMAT_RGBA8_UNORM;
+          // (Over the player's weapon skin, a float copy as the skin's is: its arcs keep their glow under the drops.)
+          d.Format = d.Format == TEX_FORMAT_RGBA16_FLOAT ? TEX_FORMAT_RGBA16_FLOAT : TEX_FORMAT_RGBA8_UNORM;
           if (w.vehicle) d.Width *= 2, d.Height *= 2;  // D217: raindrop-sized drops on a vehicle's texture
           d.MipLevels = 0;  // all of them
           d.Usage = USAGE_DEFAULT;
@@ -1627,6 +1630,19 @@ void ExecuteDraw(const Command& c) {
       }
       g_draw->TargetsChanged();
     }
+  }
+  // The player's own weapon skin (weapon_skin.h): its copies made between draws, as the wet copies are.
+  // (Once a frame, at its first draw: the gun's draws that frame use the copies made then.)
+  static uint64_t skin_frame = ~0ull;
+  if (skin_frame != g_device->frames_presented() && WeaponSkinNow()) {
+    skin_frame = g_device->frames_presented();
+    bool drew = false;
+    Timed(SectionTimers::kSkin, [&] {
+      drew = WeaponSkinMake(g_device->device(), g_device->context(), g_device->frames_presented(),
+                            g_draw->wet_count() * g_draw->wet_show());
+      return drew;
+    });
+    if (drew) g_draw->TargetsChanged();
   }
   // The fog, before the first draw that follows the game's sky dome's (Battlefield 1943: 8ABF56776060E64C, six draws
   // after the water's; with a sky of the renderer's own they are not drawn, but they still come by here).
@@ -3634,6 +3650,23 @@ void UpscaleScene() {
       in.blend = ads;
       in.taps = quality == "low" ? 24 : quality == "high" ? 80 : 48;
       if (Timed(SectionTimers::kDof, [&] { return g_dof.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
+    }
+  }
+  // The player's weapon skin's subtle blue bloom round its arcs (weapon_skin.h), after the depth of field.
+  if (WeaponSkinNow() && g_scene_color && g_scene_depth && g_scene_depth->srv && !(g_queries_on && g_queries.open())) {
+    HostTarget* soft = upscaled && g_scene_color->reduced ? g_targets.Get(g_scene_color_surface) : g_scene_color;
+    if (soft && soft->texture) {
+      MsaaWrite(soft);
+      MsaaRead(g_scene_depth);
+      WeaponSkinBloomInputs in;
+      in.color = soft->texture;
+      in.depth_srv = g_scene_depth->srv;
+      in.width = soft->scale.HostWidth(g_profile->output_width);
+      in.height = soft->scale.HostHeight(g_profile->output_height);
+      in.depth_width = g_scene_depth->scale.HostWidth(g_profile->output_width);
+      in.depth_height = g_scene_depth->scale.HostHeight(g_profile->output_height);
+      if (Timed(SectionTimers::kSkinBloom, [&] { return WeaponSkinBloom(g_device->device(), g_device->context(), in); }))
+        g_draw->TargetsChanged();
     }
   }
   PromoteReduced(upscaled ? g_scene_color : nullptr);

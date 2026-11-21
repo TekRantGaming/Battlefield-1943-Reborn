@@ -300,6 +300,9 @@ REXCVAR_DEFINE_STRING(bf_smg_sight_us, "-0.0707,0.0193,0.0813,-0.09,0.05,-3.37",
 REXCVAR_DEFINE_STRING(bf_smg_sight_jp, "-0.0774,0.0155,-0.1342,0.57,-0.05,-3.99", "BF1943", "Iron Sight: the Type 100's move, x,y,z,yaw,pitch,roll");
 REXCVAR_DEFINE_BOOL(bf_smg_sights_no_crosshair, true, "BF1943",
                     "Iron Sight: no crosshair while aiming down an SMG's sights, as with the rifles and pistols");
+REXCVAR_DEFINE_BOOL(bf_skin_electric, false, "BF1943",
+                    "Weapon skins: the electric skin on your own Thompson and Type 100 (only you see it). Off until "
+                    "unlocked (UnlockElectricSkin); on to test it");
 REXCVAR_DEFINE_BOOL(bf_smg_sight_tune, false, "BF1943", "Iron Sight: line the SMG's sights up with the keyboard while aiming (arrows, Page Up/Down, number pad)");
 namespace {
 std::mutex g_tune_mutex;
@@ -344,6 +347,17 @@ std::string SmgSightTuneText() {
   std::lock_guard lock(g_tune_mutex);
   if (std::chrono::steady_clock::now() - g_tune_text_at > std::chrono::milliseconds(300)) return "";
   return g_tune_text;
+}
+// Reborn's weapon skins (the renderer's weapon_skin.h). The electric skin, the first unlockable (TekRantGaming, 21 Nov
+// 2026), worn by the player's own Thompson and Type 100: only this game draws it, on its first person weapon; nothing
+// is sent to the server, so no other player sees it. To be unlocked by being struck by lightning in Night Ops' storm;
+// until then bf_skin_electric is the switch (off).
+void UnlockElectricSkin() {
+  if (REXCVAR_GET(bf_skin_electric)) return;
+  rex::cvar::SetFlagByName("bf_skin_electric", "true");
+  REXLOG_INFO("BF weapon skins: the electric skin unlocked");
+  std::lock_guard lock(g_tune_mutex);  // saved with the menu's settings (SmgSightTakeSave)
+  g_tune_save_name = "bf_skin_electric", g_tune_save_value = "true";
 }
 bool SmgSightTakeSave(std::string& name, std::string& value) {
   std::lock_guard lock(g_tune_mutex);
@@ -436,6 +450,22 @@ void AdsDepthOfField(uint8_t* base, uint32_t data, double blend) {
   }
   if (launcher && blend > 0.3) native_x_renderer::HideCrosshair();
   native_x_renderer::SetAdsBlend(float(blend));
+}
+// The skin the held weapon wears, told to the renderer each frame (it holds it a quarter second): the electric one
+// on the Thompson ("thompson") and the Type 100 ("nambu100") while bf_skin_electric is on.
+void WeaponSkin(uint8_t* base, uint32_t data) {
+  static uint32_t last_data = 0;
+  static bool skinnable = false;
+  if (data != last_data) {
+    last_data = data;
+    std::string lower = WeaponName(base, data);
+    for (char& ch : lower) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+    skinnable = lower == "thompson" || lower == "nambu100";
+    if (REXCVAR_GET(bf_skin_electric))
+      REXLOG_INFO("BF weapon skins: holding {} ({})", lower.empty() ? "a weapon without a name" : lower,
+                  skinnable ? "the electric skin" : "no skin");
+  }
+  if (skinnable && REXCVAR_GET(bf_skin_electric)) native_x_renderer::SetWeaponSkin(1);
 }
 void SmgSights(uint8_t* base, uint32_t data, double blend, double fov_degrees) {
   if (!REXCVAR_GET(bf_smg_sights)) return;
@@ -687,6 +717,7 @@ REX_HOOK_RAW(sub_821FAAF0) {
     if (held) {
       AdsDepthOfField(base, data, blend);
       SmgSights(base, data, blend, answer);
+      WeaponSkin(base, data);
     }
     ctx.f1.f64 = answer;
   }
