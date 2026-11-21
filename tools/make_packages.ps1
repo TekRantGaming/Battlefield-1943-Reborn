@@ -190,8 +190,8 @@ function New-ServerPackage([string]$sname, [bool]$official) {
     Copy-Licences $s
     $sv = Join-Path $s "server"
     New-Item -ItemType Directory -Force (Join-Path $sv "manager_ui") | Out-Null
-    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\ed25519.py"), (Join-Path $root "server\stats.py"), (Join-Path $root "server\player_stats.py"), (Join-Path $root "server\text_filter.py"), (Join-Path $root "server\gmhost.py"), (Join-Path $root "server\manager.py") $sv
-    Copy-Item (Join-Path $root "server\manager_ui\index.html") (Join-Path $sv "manager_ui")
+    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\ed25519.py"), (Join-Path $root "server\stats.py"), (Join-Path $root "server\player_stats.py"), (Join-Path $root "server\text_filter.py"), (Join-Path $root "server\gmhost.py"), (Join-Path $root "server\manager.py"), (Join-Path $root "server\bans.py"), (Join-Path $root "server\dashboard.py") $sv
+    Copy-Item (Join-Path $root "server\manager_ui\index.html"), (Join-Path $root "server\manager_ui\dash.js"), (Join-Path $root "server\manager_ui\public.html") (Join-Path $sv "manager_ui")
     Copy-Item (Join-Path $root "tools\server_package\open_firewall.ps1") $s
     # The package's own Python (tools\server_package\make_python_runtime.py): a host installs nothing. python.org's
     # files, signed by the Python Software Foundation; their licence goes with the others.

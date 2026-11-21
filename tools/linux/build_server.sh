@@ -37,8 +37,8 @@ stage() {
   # Every module plasma.py imports (16 Nov 2026: player_stats.py was missing, so the package's own backend, LAN only
   # mode and the manager's commands that load plasma.py, stopped at the start); as tools/make_packages.ps1 copies.
   cp "$WT/server/manager.py" "$WT/server/gmhost.py" "$WT/server/plasma.py" "$WT/server/ed25519.py" "$WT/server/stats.py" \
-    "$WT/server/player_stats.py" "$WT/server/text_filter.py" "$T/server/"
-  cp "$WT/server/manager_ui/index.html" "$T/server/manager_ui/"
+    "$WT/server/player_stats.py" "$WT/server/text_filter.py" "$WT/server/bans.py" "$WT/server/dashboard.py" "$T/server/"
+  cp "$WT/server/manager_ui/index.html" "$WT/server/manager_ui/dash.js" "$WT/server/manager_ui/public.html" "$T/server/manager_ui/"
   cp "$WT/tools/linux/server/bf1943-server" "$T/bf1943-server"
   chmod +x "$T/bf1943-server" "$T/bin/bf1943"
   echo "$VERSION" > "$T/version.txt"
