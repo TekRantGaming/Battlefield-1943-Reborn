@@ -5,6 +5,7 @@ Run your own Battlefield 1943 servers. You need your own Battlefield 1943 (Xbox 
   ./bf1943-server                   starts the server manager and opens its page (http://127.0.0.1:18280/)
   ./bf1943-server run --no-browser  on a machine without a desktop; reach the page through an SSH tunnel:
                                     ssh -L 18280:127.0.0.1:18280 you@server, then open http://127.0.0.1:18280/
+                                    (with no password set, sign in there with what ./bf1943-server code prints)
   ./bf1943-server install <file>    the game files from your package (or use Game files on the page)
   ./bf1943-server status            what runs
 

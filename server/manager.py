@@ -30,6 +30,8 @@ updates, the game's files, the logs.
                                                  are refused with the text; players in a match play on
     manager.py update                            look for a new release now, and install it
     manager.py install <package or folder>       the game's files, from the host's own copy of the game
+    manager.py code                              the code that signs in to the page while no password is set, for a
+                                                 browser that reaches it through an SSH tunnel
     manager.py quit [--keep-servers]             stops the manager (and, without the option, its servers)
 
 Where things are: the program (bin, server, python on Windows) in the package's folder; server.json, logs and game in
@@ -257,10 +259,12 @@ def read_text(path, default=''):
         return default
 
 
-def write_atomic(path, text):
+def write_atomic(path, text, mode=None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = '%s.tmp%d' % (path, os.getpid())
     with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+        if mode is not None:
+            os.chmod(tmp, mode)
         f.write(text)
     os.replace(tmp, path)
 
@@ -941,6 +945,68 @@ def time_words(seconds):
     return '%d %s%s' % (n, unit, '' if n == 1 else 's')
 
 
+# ---------------------------------------------------------------------------------------------------------- signing in
+
+class SignInLimit:
+    """Password checks: one at a time for an address, a pause after a wrong one, two at a time in all."""
+    MOST_WAITING = 5
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.busy = threading.BoundedSemaphore(2)
+        self.peers = {}
+
+    def check(self, peer, test):
+        """test()'s answer, or None when too many are waiting."""
+        now = time.monotonic()
+        with self.lock:
+            for key in [k for k, e in self.peers.items() if not e['waiting'] and now - e['at'] > 300]:
+                del self.peers[key]
+            entry = self.peers.setdefault(peer, {'lock': threading.Lock(), 'waiting': 0, 'failed': 0, 'at': now})
+            if entry['waiting'] >= self.MOST_WAITING:
+                return None
+            entry['waiting'] += 1
+        try:
+            with entry['lock']:
+                with self.busy:
+                    ok = bool(test())
+                entry['failed'] = 0 if ok else entry['failed'] + 1
+                entry['at'] = time.monotonic()
+                if not ok:
+                    time.sleep(min(3.0, 1.0 + entry['failed'] // 5))
+                return ok
+        finally:
+            with self.lock:
+                entry['waiting'] -= 1
+
+
+class LocalCodeHandler(http.server.BaseHTTPRequestHandler):
+    """Signs this machine's browser in while no password is set: a single use code, for the manager's page only."""
+    timeout = 5
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_GET(self):
+        local = self.server
+        origin = self.headers.get('Origin') or ''
+        if (self.path != '/code' or self.headers.get('Host') != '%s:%d' % local.server_address[:2]
+                or origin not in local.origins):
+            self.send_response(403)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        data = json.dumps({'code': local.manager.new_local_code()}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Access-Control-Allow-Origin', origin)
+        self.send_header('Vary', 'Origin')
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(data)
+
+
 # ---------------------------------------------------------------------------------------------------------- the manager
 
 class Manager:
@@ -951,6 +1017,10 @@ class Manager:
         self.version = package_version()
         self.token = secrets.token_urlsafe(24)       # this machine's command line tools (STATE)
         self.sessions = {}                           # a signed in browser: cookie -> expiry
+        self.code = secrets.token_hex(10)            # signs in while no password is set (manager.py code)
+        self.local_codes = {}                        # this machine's browser: single use code -> expiry
+        self.local_page = None                       # where that browser gets one (LocalCodeHandler)
+        self.sign_ins = SignInLimit()
         self.lines = []                              # the manager's own last notes
         self.run = {}                                # server number -> its processes and state
         self.backend = None                          # our own backend (LAN only, official)
@@ -994,6 +1064,55 @@ class Manager:
         with contextlib.suppress(OSError):
             with open(os.path.join(LOGS, 'manager.log'), 'a', encoding='utf-8') as f:
                 f.write(line + '\n')
+
+    # ---- signing in
+    def local_url(self, port):
+        """Where the page at `port` gets its code: loopback, an address and a port of their own for each run."""
+        with self.lock:
+            if not self.local_page:
+                own = '127.%d.%d.%d' % (secrets.randbelow(250) + 2, secrets.randbelow(256), secrets.randbelow(250) + 2)
+                for address in (own, '127.0.0.1'):  # 127.0.0.1 where a system has only that one
+                    with contextlib.suppress(OSError):
+                        page = http.server.ThreadingHTTPServer((address, 0), LocalCodeHandler)
+                        page.daemon_threads = True
+                        page.manager = self
+                        page.origins = ('http://127.0.0.1:%d' % port, 'http://localhost:%d' % port)
+                        threading.Thread(target=page.serve_forever, daemon=True).start()
+                        self.local_page = page
+                        break
+                else:
+                    return ''
+            return 'http://%s:%d/code' % self.local_page.server_address[:2]
+
+    def close_local_page(self):
+        with self.lock:
+            page, self.local_page = self.local_page, None
+        if page:
+            page.shutdown()
+            page.server_close()
+
+    def new_local_code(self):
+        code, now = secrets.token_urlsafe(24), time.time()
+        with self.lock:
+            self.local_codes = dict([(k, v) for k, v in self.local_codes.items() if v > now][-63:])
+            self.local_codes[code] = now + 30
+        return code
+
+    def take_local_code(self, code):
+        with self.lock:
+            return self.local_codes.pop(code, 0) > time.time()
+
+    def new_session(self, record):
+        """A session for who proved `record` (the password's, or None); '' when it has changed meanwhile."""
+        with self.lock:
+            if record != self.cfg['web_password']:
+                return ''
+            now = time.time()
+            for key in [k for k, expiry in self.sessions.items() if expiry <= now]:
+                del self.sessions[key]
+            session = secrets.token_urlsafe(24)
+            self.sessions[session] = now + 12 * 3600
+            return session
 
     # ---- the servers
     def server_dir(self, n):
@@ -2224,6 +2343,7 @@ def set_autostart(on):
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = 'BF1943RebornServer'
     manager = None
+    timeout = 30
 
     def log_message(self, fmt, *args):  # quiet: the manager's own notes are the log
         pass
@@ -2232,28 +2352,59 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def local(self):
         return self.client_address[0] in ('127.0.0.1', '::1', '::ffff:127.0.0.1')
 
+    def cookie_name(self):
+        """One name with a password; without, one for each port (two managers on one machine)."""
+        return 'bfsession' if self.manager.cfg['web_password'] else 'bfsession%d' % self.server.server_address[1]
+
     def cookie(self):
+        wanted = self.cookie_name()
         for part in (self.headers.get('Cookie') or '').split(';'):
             name, _, value = part.strip().partition('=')
-            if name == 'bfsession':
+            if name == wanted:
                 return value
         return ''
 
+    def session_header(self, session):
+        return ('Set-Cookie', '%s=%s; HttpOnly; SameSite=Strict; Path=/' % (self.cookie_name(), session))
+
+    def token_ok(self):
+        given = (self.headers.get('X-BF-Token') or '').encode('utf-8')
+        return self.local() and hmac.compare_digest(given, self.manager.token.encode('utf-8'))
+
     def allowed(self):
-        """This machine's own tools by their token; a browser on this machine when no password is set; anyone who
-        signed in with the password."""
+        """This machine's own tools by their token; a browser by the session it signed in for: with the password, or
+        on this machine with a code while no password is set."""
         m = self.manager
-        if self.local() and hmac.compare_digest(self.headers.get('X-BF-Token') or '', m.token):
+        if self.token_ok():
             return True
-        if not m.cfg['web_password']:
-            return self.local()
-        expiry = m.sessions.get(self.cookie(), 0)
-        return expiry > time.time()
+        if not m.cfg['web_password'] and not self.local():
+            return False
+        return m.sessions.get(self.cookie(), 0) > time.time()
+
+    def sign_in(self, given):
+        m, record = self.manager, self.manager.cfg['web_password']
+        if record:
+            ok = m.sign_ins.check(self.client_address[0], lambda: password_ok(record, given))
+        elif not self.local():
+            ok = False
+        elif m.take_local_code(given):
+            ok = True
+        else:
+            ok = m.sign_ins.check(self.client_address[0],
+                                  lambda: hmac.compare_digest(given.strip().encode('utf-8'), m.code.encode('utf-8')))
+        if ok is None:
+            return self.send(429, {'error': 'Too many tries at once. Wait a moment and try again.'})
+        session = m.new_session(record) if ok else ''
+        if session:
+            return self.send(200, {'ok': True}, headers=[self.session_header(session)])
+        return self.send(401, {'error': 'That is not the password.' if record else
+                               'No password is set. Reload this page. Through an SSH tunnel, type the code that '
+                               '"manager.py code" (Linux: "bf1943-server code") prints on the server\'s machine.'})
 
     def host_ok(self):
         """The page is asked for by this machine's own name or address (a web page elsewhere cannot point a browser
         here under another name), or, opened to other machines, by any."""
-        if self.manager.cfg['web_remote']:
+        if self.manager.cfg['web_remote'] and self.manager.cfg['web_password']:
             return True
         host = (self.headers.get('Host') or '').rsplit(':', 1)[0].strip('[]').lower()
         return host in ('127.0.0.1', 'localhost', '::1')
@@ -2273,7 +2424,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def body(self):
         length = int(self.headers.get('Content-Length') or 0)
-        if length > 1 << 20:
+        if not 0 <= length <= 1 << 20:
             raise ValueError('too large')
         raw = self.rfile.read(length) if length else b'{}'
         value = json.loads(raw.decode('utf-8') or '{}')
@@ -2287,6 +2438,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(403, {'error': 'Open the manager by this machine\'s own address.'})
         path, _, query = self.path.partition('?')
         params = urllib.parse.parse_qs(query)
+        if (path.startswith(('/api/', '/preview'))
+                and (self.headers.get('Sec-Fetch-Site') or 'none') not in ('same-origin', 'none')):
+            return self.send(403, {'error': 'not from the manager\'s page'})
         if path in ('/', '/index.html'):
             page = read_text(os.path.join(UI, 'index.html'))
             if not page:
@@ -2309,7 +2463,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             logo, kind = m.logo_file()
             return self.send(200, open(logo, 'rb').read(), kind) if logo else self.send(404, {'error': 'no logo'})
         if path == '/api/session':
-            return self.send(200, {'signed_in': self.allowed(), 'password': bool(m.cfg['web_password'])})
+            reply = {'signed_in': self.allowed(), 'password': bool(m.cfg['web_password'])}
+            if not reply['signed_in'] and not reply['password'] and self.local():
+                reply['local'] = m.local_url(self.server.server_address[1])
+            return self.send(200, reply)
+        if path == '/api/code':  # manager.py code
+            if not self.token_ok():
+                return self.send(401, {'error': 'Sign in first.'})
+            return self.send(200, {'code': '' if m.cfg['web_password'] else m.code})
         if not path.startswith('/api/'):
             return self.send(404, {'error': 'not found'})
         if not self.allowed():
@@ -2349,12 +2510,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(400, {'error': 'The request could not be read.'})
         path = self.path.partition('?')[0]
         if path == '/api/login':
-            if m.cfg['web_password'] and password_ok(m.cfg['web_password'], str(data.get('password', ''))):
-                session = secrets.token_urlsafe(24)
-                m.sessions[session] = time.time() + 12 * 3600
-                return self.send(200, {'ok': True}, headers=[('Set-Cookie', 'bfsession=%s; HttpOnly; SameSite=Strict; Path=/' % session)])
-            time.sleep(1.0)
-            return self.send(401, {'error': 'That is not the password.'})
+            return self.sign_in(str(data.get('password', '')))
         if not self.allowed():
             return self.send(401, {'error': 'Sign in first.'})
         try:
@@ -2364,10 +2520,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as e:  # said to the page, and noted
             m.note('%s failed: %s: %s' % (path, type(e).__name__, e))
             return self.send(500, {'error': '%s: %s' % (type(e).__name__, e)})
+        headers = []
+        if path == '/api/password':  # every other session has ended: the page that changed it gets a new one
+            session = m.new_session(m.cfg['web_password'])
+            headers = [self.session_header(session)]
         reply = {'ok': True, 'state': m.state()}
         if isinstance(result, dict):
             reply.update(result)
-        return self.send(200, reply)
+        return self.send(200, reply, headers=headers)
 
     def act(self, path, data):
         m = self.manager
@@ -2422,12 +2582,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             m.install_game(str(data.get('path', '')))
         elif path == '/api/password':
             new = str(data.get('password', ''))
-            if m.cfg['web_password'] and not password_ok(m.cfg['web_password'], str(data.get('current', ''))):
-                raise RuntimeError('The current password is not right.')
+            was = m.cfg['web_password']
+            if was:
+                ok = m.sign_ins.check(self.client_address[0], lambda: password_ok(was, str(data.get('current', ''))))
+                if ok is None:
+                    raise RuntimeError('Too many tries at once. Wait a moment and try again.')
+                if not ok:
+                    raise RuntimeError('The current password is not right.')
             if new and len(new) < 8:
                 raise RuntimeError('A password needs 8 characters or more.')
             with m.lock:
+                if was != m.cfg['web_password']:
+                    raise RuntimeError('The password has changed meanwhile. Sign in again.')
                 m.cfg['web_password'] = password_record(new) if new else None
+                m.sessions.clear()
+                m.local_codes.clear()
                 if not new:
                     m.cfg['web_remote'] = False
                 save_config(m.cfg)
@@ -2737,7 +2906,7 @@ def run(args):
     except OSError as e:
         print('The manager\'s page could not be opened on port %d (%s). Another program may use it: pass --port.' % (port, e))
         return 1
-    write_atomic(STATE, json.dumps({'pid': os.getpid(), 'port': port, 'token': m.token}))
+    write_atomic(STATE, json.dumps({'pid': os.getpid(), 'port': port, 'token': m.token}), mode=0o600)
     m.note('manager %s started: http://127.0.0.1:%d/ (data in %s)' % (m.version, port, DATA))
     m.clear_leftovers()
     remove_update_leftovers()
@@ -2784,6 +2953,7 @@ def run(args):
     else:
         m.close_ports('an update restarts the manager' if restart else 'the manager closed')
     server.shutdown()
+    m.close_local_page()
     with contextlib.suppress(OSError):
         os.remove(STATE)
     if restart:  # after an update: the new manager.py, from where it was installed
@@ -2889,6 +3059,7 @@ def main():
     q = sub.add_parser('quit', help='stops the manager and its servers')
     q.add_argument('--keep-servers', action='store_true')
     sub.add_parser('where', help='the data folder (server.json, game, logs)')
+    sub.add_parser('code', help='the code that signs in to the page while no password is set (SSH tunnels)')
     sub.add_parser('broadcast-key', help='official package: the public key community servers check network '
                                          'broadcasts with (for gmhost.py OFFICIAL_BROADCAST_KEYS)')
     sub.add_parser('open', help='the page in a browser; starts the manager in the background when it is not running')
@@ -2909,6 +3080,10 @@ def main():
             port = running_manager()[0]
             print('Battlefield 1943 Reborn server manager: http://127.0.0.1:%d/' % port)
             open_browser(port)
+            return 0
+        if command == 'code':
+            code = ask('/api/code')['code']
+            print(code or 'A password is set: sign in to the page with it.')
             return 0
         if command == 'status':
             state = ask('/api/state')
