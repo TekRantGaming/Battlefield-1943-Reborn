@@ -464,12 +464,29 @@ function sync(el, key, build) {
   return true;
 }
 
-async function api(path, data) {
+// With no password this machine's browser signs itself in, with a code it gets on loopback.
+let signingIn = null;
+function signInHere() {
+  if (!signingIn) signingIn = (async () => {
+    try {
+      const s = await (await fetch('/api/session')).json();
+      if (s.signed_in) return true;
+      if (!s.password) $('login-note').textContent = 'No password is set: type the code that "manager.py code" (Linux: "bf1943-server code") prints on the server\'s machine.';
+      if (!s.local) return false;
+      const { code } = await (await fetch(s.local, { cache: 'no-store', credentials: 'omit' })).json();
+      const done = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'bf1943' }, body: JSON.stringify({ password: code }) });
+      return done.ok;
+    } catch (e) { return false; }
+  })().finally(() => { signingIn = null; });
+  return signingIn;
+}
+async function api(path, data, again) {
   const options = data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'bf1943' }, body: JSON.stringify(data) };
   let reply;
   try { reply = await fetch(path, options); } catch (e) { throw new Error('The manager does not answer. Is it still running?'); }
   let body = {};
   try { body = await reply.json(); } catch (e) {}
+  if (reply.status === 401 && path !== '/api/login' && !again && await signInHere()) { $('login-modal').classList.remove('on'); return api(path, data, true); }
   if (reply.status === 401 && path !== '/api/login') { $('login-modal').classList.add('on'); $('login-password').focus(); throw new Error('Sign in first.'); }
   if (!reply.ok) throw new Error(body.error || ('The manager said ' + reply.status));
   if (body.state) { state = body.state; render(); }

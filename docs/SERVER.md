@@ -36,7 +36,8 @@ The Reborn team can also show a community server on the **Reborn** tab, marked T
 The manager keeps running in the background, with no window, and starts a server again if it stops. **Stop
 servers.bat** ends everything. **Start servers (no window).bat** starts them with the saved settings, for a PC that
 starts its servers by itself. The page answers only on the PC itself, unless you set a password for it and allow
-other machines.
+other machines. On the PC itself it opens as it is. Through an SSH tunnel with no password set, sign in with the code
+that `manager.py code` (Linux: `bf1943-server code`) prints on the server.
 
 ## Time of day and weather
 
