@@ -78,7 +78,13 @@ has its own manager, data folder and list, so one community admin's list never r
    `{"op": "banned", "gid", "network", "title", "message"}`. Any game since v0.4.0 shows a refusal with a message in
    its notice pop-up. v0.4.8 gives it its own heading, "MODERATION · COULD NOT JOIN", with no maintenance footnote.
    The text never holds the word "reserved", which a game from before the version gate reads as a yes
-   (`bans.reason_problem`).
+   (`bans.reason_problem`). `reserve` knows a player's id and account only once the game has signed in, so a join
+   picked before that (from Home, the first after a start) asks again when it has (`game_menu.cpp ReserveSignedIn`).
+   It checks the one player asking, never everyone who signed in from that address (a household, a LAN party): the
+   game says its player id, matched with that id's own sign in from the same address (`plasma.py asker`). A game that
+   says none (from before this) is checked by its address here, and as signed in at `EGAM`. A refusal
+   gives up that player's own reservation and place in a queue, nobody else's: those go by address and player id
+   (`plasma.py` RESERVATIONS), with a limit to what one address can hold (ADDRESS_PICKS, ADDRESS_QUEUED).
 2. **The join queue:** a queued player whose turn comes is checked again.
 3. **Theater's `EGAM`**, the step that gives a game the server's address. A game that skipped `reserve` (the game's
    own Quick Match, or a modified game) gets no address, so it cannot reach the server.

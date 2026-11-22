@@ -1861,7 +1861,9 @@ class Manager:
     def dashboard(self, public=False):
         view = self.dash.view(public=public, names=not public or self.cfg['public_page']['names'])
         view['title'] = self.cfg['public_page']['title'] or (self.cfg['servers'][0]['name'] if self.cfg['servers'] else '')
-        view['public_page'] = dict(self.cfg['public_page'])
+        # The public view gets the one setting its script reads, the names' switch (dash.js); the rest is in "page".
+        page = self.cfg['public_page']
+        view['public_page'] = {'names': page['names']} if public else dict(page)
         view['page'] = self.community_page()
         if not public:
             view['alerts'] = self.alerts(view)
@@ -2487,10 +2489,10 @@ Three addresses always work on your page, whatever is in this folder:
   heatmap                   7 weekdays (Monday first) x 24 hours (UTC): average players, null without data
   leaderboard               [{name, seconds, sessions, kills, deaths, kd, captures, map, last}] (90 days)
   events                    [{t, kind (join, leave, map, restart, server_up, server_down), name, server, map, played}]
-  machine                   {cpu, mem, mem_total}
   network                   the Reborn server list: {players, online, servers [{name, players, max, map, region,
                             tick, official, promoted, description}]}
-Names are left out (empty) when "Show player names" is off. Player ids and players' addresses are never in it.
+Names are left out (empty) when "Show player names" is off. Player ids and players' addresses are never in it,
+nor this machine's CPU or memory.
 
 docs/DASHBOARD.md in the project has the rest.
 """

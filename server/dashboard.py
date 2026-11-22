@@ -493,12 +493,13 @@ class Dashboard:
             'heatmap': self.heatmap(30, now),
             'leaderboard': board if names else [],
             'events': [e for e in events if names or e['kind'] not in ('join', 'leave')][:60],
-            'machine': {'cpu': self.machine.get('cpu'), 'mem': self.machine.get('mem'),
-                        'mem_total': self.machine.get('mem_total')},
-            'health': self.health_series(24, now),
             'network': self.network,
         }
         if public:
             for e in out['events']:
                 e.pop('why', None)
+        else:  # the machine's own CPU and memory are its owner's alone: not on the public page, not in /stats.json
+            out['machine'] = {'cpu': self.machine.get('cpu'), 'mem': self.machine.get('mem'),
+                              'mem_total': self.machine.get('mem_total')}
+            out['health'] = self.health_series(24, now)
         return out

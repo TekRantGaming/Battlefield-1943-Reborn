@@ -17,7 +17,7 @@ asked for something like it, but expanded.
 
 **Cards:** players now (out of the slots of the servers up), the 24-hour peak, player-hours and sessions in the last
 24 hours, players tracked over 90 days, the MVP of the day (most playtime today), the top gun over 7 days (most
-kills), this machine's CPU and memory, and how many play on the whole Reborn network now.
+kills), this machine's CPU and memory (in the manager only), and how many play on the whole Reborn network now.
 
 **Each server, live:**
 - the map and the next one, players out of its size, the average ping, uptime;
@@ -128,7 +128,8 @@ can code it themselves and then it'll display". Two levels, both on the Communit
 - Everything the owner or a player wrote is put on the page as text (`textContent`), never as markup: a description
   holding `<img onerror=...>` shows those characters and runs nothing (checked in the browser). Links open with
   `rel="noopener nofollow"`.
-- `/stats.json` is the dashboard's public view (`Dashboard.view(public=True)`): no processes, no alerts, no restart
+- `/stats.json` is the dashboard's public view (`Dashboard.view(public=True)`): nothing of the machine (its CPU,
+  memory or their history), none of the page's settings beyond what it shows, no processes, no alerts, no restart
   reasons, never player ids or players' addresses, and no names when the owner turns them off. It is made at most
   once every 5 seconds.
 - At most 120 requests a minute from one address, a strict content security policy (scripts and pictures only from

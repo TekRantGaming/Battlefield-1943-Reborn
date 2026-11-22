@@ -3029,7 +3029,8 @@
                "ticket bars. Off, a round ends only when a team has no tickets left.";
       case kPmBots:
         return "Computer players who fill the match, half on each side: they take flags and fight like players and keep out of "
-               "everybody's stats. Early days: they fight on foot only, so Guadalcanal suits them best.";
+               "everybody's stats. Early days: they fight on foot only, so Guadalcanal suits them best and they sit out "
+               "Coral Sea.";
       case kPmTick:
         return "How many times a second the match is simulated. 60 is the default; 30 is the original game's and asks less of your "
                "PC and of every player's connection. A player's game takes the match's rate when it joins.";

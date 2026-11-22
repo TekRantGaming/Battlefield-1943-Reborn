@@ -370,6 +370,7 @@ header { background: url(logo) right center / contain no-repeat, #111; }
     <label class="field"><span>Pause between rounds</span><select id="e-delay"></select></label>
     <label class="field"><span>Tick rate</span><select id="e-tick"></select></label>
   </div>
+  <p class="hint" id="e-bots-note">Bots sit out Coral Sea, because they can't fly. They come back on the next map.</p>
   <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Maps, in the order they are played</span><div class="maps" id="e-maps"></div></div>
   <label class="check"><input type="checkbox" id="e-listed"><span>Listed in the server browser<br><small>Off: players join only with Direct connect, by the address you give them.</small></span></label>
   <label class="check" id="e-night-box"><input type="checkbox" id="e-night"><span>Night Ops: players see the maps at night</span></label>
@@ -700,6 +701,7 @@ function openEdit(n) {
     $('e-bots').replaceChildren(...counts.map(b => h('option', { value: b, text: b === 0 ? 'No bots' : b === size ? 'Fill the server (' + (size - 2) + ', they leave as players join)' : 'Up to ' + b })));
     if (!counts.includes(bots)) $('e-bots').append(h('option', { value: bots, text: 'Up to ' + bots }));
     $('e-bots').value = String(bots);
+    botsNote();
   };
   drawBots(sv.max_players, sv.bots ?? 0);
   $('e-max').onchange = () => { const was = Number($('e-bots').value), size = Number($('e-max').value); drawBots(size, was >= Number($('e-max').dataset.size || 0) && was > 0 ? size : Math.min(was, size)); $('e-max').dataset.size = size; };
@@ -723,9 +725,17 @@ function openEdit(n) {
   $('e-save-restart').style.display = fresh ? 'none' : '';
   const order = sv.maps.concat(state.maps.map(m => m.key).filter(k => !sv.maps.includes(k)));
   drawMaps(order.map(k => ({ key: k, on: sv.maps.includes(k) })));
+  botsNote();
   $('e-note').textContent = fresh ? '' : 'A running server takes its new settings when it is restarted.';
   $('edit-modal').classList.add('on'); $('e-name').focus();
 }
+// Said only where it matters: a server with bots and Coral Sea among its maps (bots.cpp SitsOut).
+function botsNote() {
+  const coral = readMaps().some(r => r.key === 'coral' && r.on);
+  $('e-bots-note').style.display = coral && Number($('e-bots').value) ? '' : 'none';
+}
+$('e-bots').addEventListener('change', botsNote);
+$('e-maps').addEventListener('change', botsNote);
 function drawMaps(rows) {
   const box = $('e-maps'); box.replaceChildren();
   rows.forEach((row, i) => {
@@ -904,7 +914,8 @@ async function cpSite(r) {
   const s = r.site;
   $('cp-site').replaceChildren('Folder: ', h('span', { class: 'mono', text: s.folder }), ' · ',
     s.ready ? s.files.length + ' file' + (s.files.length === 1 ? '' : 's') + ', index.html there' : 'no index.html yet (Make a starter, or copy your site in)',
-    s.files.length ? h('div', { class: 'mono', style: 'margin-top:4px;font-size:12px', text: s.files.slice(0, 12).join('   ') + (s.files.length > 12 ? '   ...' : '') }) : null);
+    // (replaceChildren writes a null out as "null": with no files nothing is passed.)
+    ...(s.files.length ? [h('div', { class: 'mono', style: 'margin-top:4px;font-size:12px', text: s.files.slice(0, 12).join('   ') + (s.files.length > 12 ? '   ...' : '') })] : []));
   $('cp-own').disabled = !s.ready && !$('cp-own').checked;
 }
 ['cp-desc', 'cp-rules', 'cp-css'].forEach(id => $(id).addEventListener('input', cpCounts));

@@ -127,8 +127,17 @@ class Player:
         t.close()
         return got
 
-    def reserve(self, gid, host=HOST, port=REG):
-        return ask(dict(CLIENT, op='reserve', gid=gid), self.source, host, port)
+    def reserve(self, gid, host=HOST, port=REG, **more):
+        return ask(dict(CLIENT, op='reserve', gid=gid, id=self.pid, **more), self.source, host, port)
+
+    def quick_match(self):
+        """The games pnow's Quick Match sends this player to (one, with a reservation of its address)."""
+        self.fesl.sendall(plasma.build('pnow', plasma.REQUEST, 7, {'TXN': 'Start',
+                                                                  'partition.partition': '/xenon/BEACH'}))
+        for kind, f in packets(self.fesl):
+            if kind == 'pnow' and f.get('TXN') == 'Status':
+                return [v for k, v in f.items() if k.startswith('props.{games}.') and k.endswith('.gid')]
+        return []
 
     def close(self):
         self.fesl.close()
@@ -195,6 +204,105 @@ def unit():
     log.trim()
     check('the moderation log keeps 90 days', [x.get('names') for x in log.read()] == [['New']], log.read())
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+def shared_address(cbans, nbans, g_com, g_off, g_oth, players, backend_log):
+    """A household, a LAN party: one address, several players. A ban that does not hold the address is that player's
+    alone: nobody else there is refused, loses a reservation or loses a place in a queue by it."""
+    home = '127.0.0.35'
+    sent = lambda: read(backend_log).count('its ban list has')
+
+    def change(make):
+        before = sent()
+        out = make()
+        wait_for(lambda: sent() > before, 5)
+        return out
+
+    ban = change(lambda: cbans.add('ban', ids=['F0000006'], names=['Banned'], reason='Team killing'))
+    banned = Player('Banned', 'F0000006', home)
+    players.append(banned)
+    r = banned.reserve(g_com)
+    check('shared address: the banned player is refused by their id', r.get('op') == 'banned', r)
+    r = ask(dict(CLIENT, op='reserve', gid=g_com, id='E0000005'), home)
+    check('shared address: a housemate not signed in yet is not refused for them', r.get('op') == 'reserved', r)
+    r = ask(dict(CLIENT, op='reserve', gid=g_com), home)
+    check('shared address: nor is a game that says no id', r.get('op') == 'reserved', r)
+    mate = Player('Housemate', 'E0000005', home)
+    players.append(mate)
+    r = mate.reserve(g_com)
+    check('shared address: nor a housemate signed in', r.get('op') == 'reserved', r)
+    check('shared address: and the housemate gets the server at EGAM', mate.egam(g_com) is not None)
+    check('shared address: the housemate reserves', mate.reserve(g_com).get('op') == 'reserved')
+    r = banned.reserve(g_com)
+    check('shared address: the banned player still refused after that', r.get('op') == 'banned', r)
+    got = mate.quick_match()
+    check('shared address: that refusal leaves the housemate\x27s reservation', got == [str(g_com)], got)
+    check('shared address: and the banned player still gets no server at EGAM', banned.egam(g_com) is None)
+    check('shared address: the banned player reserves another server', banned.reserve(g_oth).get('op') == 'reserved')
+    check('shared address: a refusal clears the player\x27s own reservation',
+          banned.reserve(g_com).get('op') == 'banned' and banned.quick_match() != [str(g_oth)])
+    r = ask(dict(CLIENT, op='reserve', gid=g_com, id='F0000006'), '127.0.0.36')
+    check('an id is matched with its sign in at the same address', r.get('op') == 'reserved', r)
+    banned.close()
+    time.sleep(1)
+    r = ask(dict(CLIENT, op='reserve', gid=g_com, id='E0000005'), home)
+    check('shared address: not refused either once the banned player has gone', r.get('op') == 'reserved', r)
+
+    # The Reborn network's list, by id alone.
+    net = nbans.add('ban', ids=['F0000006'], names=['Banned'], reason='Cheating', by='TekRantGaming', seconds=3600)
+    time.sleep(1.5)
+    r = mate.reserve(g_off)
+    check('shared address: a network ban by id is not the housemate\x27s', r.get('op') == 'reserved', r)
+    again = Player('Banned', 'F0000006', home)
+    players.append(again)
+    r = again.reserve(g_off)
+    check('shared address: and still refuses the banned player', r.get('op') == 'banned' and r.get('network') is True, r)
+    nbans.remove(net['id'])
+    time.sleep(1.5)
+
+    # A queue: a full server with its own list, as its host registers.
+    full = socket.create_connection((HOST, REG), timeout=5)
+    full.sendall((json.dumps({'op': 'register', 'name': 'Test full host', 'port': 18786, 'map': 'Wake Island',
+                              'max_players': 2, 'address': ['127.0.0.77', 18786]}) + '\x0a').encode())
+    g_full = json.loads(full.makefile().readline())['gid']
+    full.sendall((json.dumps({'op': 'status', 'players': 2, 'map': 'Wake Island', 'names': ['One', 'Two']}) +
+                  '\x0a').encode())
+    time.sleep(0.5)
+    place = mate.reserve(g_full, queue=1)
+    check('shared address: the housemate waits in a full server\x27s queue', place.get('op') == 'queued', place)
+    salt = 'test5a17'
+    full.sendall((json.dumps({'op': 'server_bans', 'salt': salt, 'bans': [{
+        'id': 'b-test', 'ids': [bans.hashed(salt, 'F0000006')], 'accounts': [], 'ips': [], 'until': 0, 'ip_until': 0,
+        'kind': 'ban', 'title': 'BANNED FROM THIS SERVER', 'message': 'You are banned from this server.'}]}) +
+                  '\x0a').encode())
+    time.sleep(0.5)
+    waiting = dict(CLIENT, op='queue', gid=g_full, token=place.get('token', ''), id='E0000005')
+    r = ask(waiting, home)
+    check('shared address: the housemate is not put out of the queue for them', r.get('op') == 'queued', r)
+    r = again.reserve(g_full)
+    check('shared address: the banned player is refused at the full server', r.get('op') == 'banned', r)
+    r = ask(waiting, home)
+    check('shared address: that refusal leaves the housemate\x27s place', r.get('op') == 'queued', r)
+    r = ask(dict(waiting, id='F0000006'), home)
+    check('shared address: refused at the queue as well', r.get('op') == 'banned', r)
+    r = ask(waiting, home)
+    check('shared address: which leaves the place to the housemate who holds it', r.get('op') == 'queued', r)
+    ask({'op': 'queue_leave', 'token': place.get('token', '')}, home)
+    own = again.reserve(g_oth)
+    check('shared address: the banned player can play elsewhere', own.get('op') == 'reserved', own)
+    full.close()
+
+    # With the address held, the whole address is refused: what that tick is for.
+    change(lambda: cbans.remove(ban['id']))
+    held = change(lambda: cbans.add('ban', ids=['F0000006'], ips=[home], names=['Banned'], reason='Team killing'))
+    r = mate.reserve(g_com)
+    check('address held: the housemate is refused too, signed in', r.get('op') == 'banned', r)
+    r = ask(dict(CLIENT, op='reserve', gid=g_com), home)
+    check('address held: and a game that says no id', r.get('op') == 'banned', r)
+    check('address held: no server at EGAM', mate.egam(g_com) is None)
+    check('address held: the refusal clears that address\x27s reservation',
+          mate.reserve(g_com).get('op') == 'banned' and mate.quick_match() != [str(g_com)])
+    change(lambda: cbans.remove(held['id']))
 
 
 def host_in_process():
@@ -394,14 +502,29 @@ def main():
             lambda: community_banned['id'] in read(community_log) and '"action":"refused"' in read(community_log), 5),
             read(community_log))
 
+        # ---- a ban by id alone and a join picked before the sign in (game_menu.cpp ReserveSignedIn asks again)
+        late = cbans.add('ban', ids=['D0000004'], names=['Latecomer'], reason='Spawn camping')
+        check('the host sends that ban', wait_for(lambda: 'its ban list has 2 entries' in read(backend_log), 5))
+        r = ask(dict(CLIENT, op='reserve', gid=g_com, id='D0000004'), '127.0.0.34')
+        check('before the sign in "reserve" does not know the player', r.get('op') == 'reserved', r)
+        p_late_in = Player('Latecomer', 'D0000004', '127.0.0.34')
+        players.append(p_late_in)
+        r = p_late_in.reserve(g_com)
+        check('asked again signed in: refused with its title and reason', r.get('op') == 'banned' and
+              r.get('title') == 'BANNED FROM THIS SERVER' and 'Spawn camping' in r.get('message', ''), r)
+        cbans.remove(late['id'])
+        check('that ban lifted again', wait_for(lambda: p_late_in.reserve(g_com).get('op') == 'reserved', 5))
+
         # ---- a kick on the community server: refused for its minutes, then the list is changed back
         cbans.add('kick', ids=['B0000002'], names=['Friendly'], reason='Language')
-        check('the host sends its new list at once', wait_for(lambda: 'its ban list has 2 entries' in read(backend_log), 5))
+        check('the host sends its new list at once', wait_for(lambda: read(backend_log).count('its ban list has 2 entries') >= 2, 5))
         r = p_ok.reserve(g_com)
         check('a kicked player is refused for 5 minutes on that server', r.get('op') == 'banned' and
               r.get('title') == 'KICKED FROM THIS SERVER' and '5 minutes' in r.get('message', ''), r)
         cbans.remove(cbans.match('B0000002')['id'])
         check('an unban is sent too', wait_for(lambda: p_ok.reserve(g_com).get('op') == 'reserved', 5))
+
+        shared_address(cbans, nbans, g_com, g_off, g_oth, players, backend_log)
 
         # ---- a network ban made while the player plays: the host is told to remove them
         fake = socket.create_connection((HOST, REG), timeout=5)

@@ -124,6 +124,10 @@ def unit(tmp):
     check('the public view has no machine processes or restart reasons', all('procs' not in s and 'reachable' not in s
                                                                            for s in pub['servers']) and
           not any('why' in e for e in pub['events']))
+    check('the public view says nothing of the machine: no CPU, no memory, none of their history',
+          'machine' not in pub and 'health' not in pub, [k for k in pub if k in ('machine', 'health')])
+    full = d.view(now=now)
+    check("the manager's own view keeps them",'machine' in full and 'health' in full, list(full))
     anon = d.view(now=now, public=True, names=False)
     text = json.dumps(anon)
     check('names off: no player name anywhere', not any(n in text for n in NAMES), [n for n in NAMES if n in text][:3])
@@ -207,6 +211,8 @@ def manager_part(tmp, serve=False):
           (code, body[:200]))
     check('no address, no player id, no process, no alert in them', '203.0.113' not in body and 'A0000' not in body and
           '"procs"' not in body and '"alerts"' not in body and '"ip"' not in body, body[:300])
+    check('nothing of the machine in /stats.json', 'machine' not in stats and 'health' not in stats,
+          [k for k in stats if k in ('machine', 'health')])
     check('a content security policy, no framing elsewhere', "default-src 'none'" in headers.get('Content-Security-Policy', ''))
     for path in ('/api/state', '/api/moderation', '/api/dashboard', '/index.html/../manager.py', '/../server.json'):
         code, body, _ = get(path)
@@ -293,9 +299,12 @@ def community_page(m, get, serve):
                                                           'play.example.com:18442'], pg.get('join'))
     check('the sections the owner turned off are off', pg['sections']['activity'] is False and pg['sections']['maps'])
     check("the logo's address, made new when it changes", pg.get('logo', '').startswith('logo?v='), pg.get('logo'))
-    m.set_config({'public_page': dict(page, connect={'address': False, 'custom_address': '', 'instructions': 'Ask in Discord'})})
+    m.set_config({'public_page': dict(page, connect={'address': False, 'custom_address': 'hidden.example.com',
+                                                     'instructions': 'Ask in Discord'})})
     time.sleep(5.5)
-    pg = json.loads(get('/stats.json')[1]).get('page', {})
+    body = get('/stats.json')[1]
+    check('/stats.json has only the settings the page reads', 'hidden.example.com' not in body)
+    pg = json.loads(body).get('page', {})
     check('the address left out when the owner turns it off', all(not j['address'] for j in pg.get('join', [])) and
           pg.get('instructions') == 'Ask in Discord', pg.get('join'))
     own_code(m, get, page)

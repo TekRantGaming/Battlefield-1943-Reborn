@@ -112,6 +112,8 @@ TekRantGaming, 20 Nov 2026: "Drop 128 for now".
   `bots` field (0 to the size) is how many bots play; they keep 2 places free and leave as players join. The edit form
   has Players (adding 32 and 64) and Bots (No bots, Up to 8 / 16 / 22 / 30 / 46, Fill the server). The manager passes
   `--bf_gm_max_players=<size>` to the game, and `--bf_bots=<n>` when there are bots.
+- **Air Superiority:** bots sit Coral Sea out, since they cannot fly, and come back on the next map (`bots.cpp`
+  SitsOut). The edit form says so on a server with bots and Coral Sea.
 - **Players' game:** the job scheduler's pool is 512 (`bf_job_slots`, `frame_rate.cpp`; section 2a).
 - **Game server:** on a 32 or 64 server `Network.MaxClientCount` becomes the size + 4 (`frame_rate.cpp`, the
   settings hook) and a team's cap half the size + 2 (`bots.cpp`, a hook on sub_82375918). `Game.MaxPlayerCount` is

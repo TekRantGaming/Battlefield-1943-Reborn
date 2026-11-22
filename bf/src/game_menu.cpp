@@ -1010,15 +1010,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     QueueTick();  // a place in a full server's queue: its answers, its turn
     if (page_ == Page::kJoining && !queue_popup_) {
       const int stage = MenuDriverStage();
-      if (!pending_.empty() && stage == 2) {  // the game is at its menu now
-        // The backend keeps a reservation for five minutes, and with its version gate gives a server only to a game
-        // that has one: a start that took long (the shaders of a first start) asks again.
-        if (ImGui::GetTime() - reserved_at_ > 120 && !joined_gid_.empty()) {
-          const bool again = list_.Reserve(joined_gid_) == ServerList::Reserved::kYes;
-          REXLOG_INFO("BF join: the reservation made again after {:.0f} s: {}", ImGui::GetTime() - reserved_at_, again ? "kept" : "refused");
-          reserved_at_ = ImGui::GetTime();
-        }
-        StartAutoJoin(pending_), pending_.clear();
+      if (!pending_.empty() && stage == 2) {  // the game is at its menu now, signed in
+        if (ReserveSignedIn()) StartAutoJoin(pending_);
+        pending_.clear();
       }
       if (tutorial_pending_ && stage == 2) {  // Help's tutorial picked before the game ran: it is at its menu now
         tutorial_pending_ = false;
@@ -2830,6 +2824,34 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       REXLOG_INFO("BF launcher: a server picked on Home: the game starts, the join follows its sign in");
       StartGameFromLauncher();
     }
+  }
+  // A join picked before the game had signed in (from Home, or while it started) asks the backend again once it has.
+  // The first "reserve" could name nobody: the backend knows a player's id and account by the game's sign in, so a ban
+  // or kick that held only those passed it, and the join was then refused at Theater's EGAM, which says nothing (the
+  // game stayed on "Joining game"; run banfix_red, 22 Nov 2026). Asked now it answers as for any refusal, and the join
+  // ends with its pop-up. It also renews the reservation a long start would lose (five minutes; the version gate gives
+  // a server only to a game that has one). False: the join is off. No answer leaves the first reservation standing.
+  bool ReserveSignedIn() {
+    if (joined_gid_.empty()) return true;
+    std::string needs;
+    ServerNotice refusal;
+    const ServerList::Reserved answer = list_.Reserve(joined_gid_, &needs, &refusal);
+    const bool refused = answer == ServerList::Reserved::kRefused || answer == ServerList::Reserved::kOutdated;
+    REXLOG_INFO("BF join: asked again signed in, {:.0f} s after the reservation: {}", ImGui::GetTime() - reserved_at_,
+                refused ? "refused" : answer == ServerList::Reserved::kYes ? "kept" : "no answer, going on");
+    if (!refused) {
+      if (answer == ServerList::Reserved::kYes) reserved_at_ = ImGui::GetTime();
+      return true;
+    }
+    const std::string server = joining_;
+    joined_gid_.clear();
+    comms::NoteJoined("");
+    world::NoteJoined("");
+    ach_join_ = AchJoin::kNone;
+    page_ = Page::kMain, row_ = 1;  // the game runs now: our main menu, the pop-up over it
+    if (answer == ServerList::Reserved::kOutdated) AskToUpdate(needs, server);
+    else ShowNotice(refusal, server);
+    return false;
   }
   // ---- The join queue (TekRantGaming, 18 Nov 2026: "a server que system with a popup showing you your position in the
   // que that updates there should also be a close button on this to"; server_list.h QueuePlace, server/plasma.py

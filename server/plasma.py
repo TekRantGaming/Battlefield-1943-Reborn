@@ -41,18 +41,24 @@ HEADER = 12
 MULTI_LIMIT = 8064   # packets larger than this go as multi part (the client says fragmentSize=8096)
 MULTI_CHUNK = 6000   # raw payload bytes per part
 MULTI = (0xB0000000, 0xF0000000)  # multi part response, request
-RESERVATIONS = {}  # player IP -> (GID, time): the server picked in our menu, for the next Quick Match
+# One address can be several players (a household, a LAN party), so a join's state goes by who: (address, the player id
+# the game says with "reserve"; '' for a game that says none, which shares that one). An address keeps its newest
+# ADDRESS_RESERVATIONS picks, ADDRESS_PICKS of them counted as on their way, and ADDRESS_QUEUED places waiting in queues.
+ADDRESS_RESERVATIONS = 64
+ADDRESS_PICKS = 4
+ADDRESS_QUEUED = 8
+RESERVATIONS = {}  # who -> (GID, time): the server picked in our menu, for the next Quick Match
 # A full server refuses new joins (TekRantGaming, 15 Nov 2026: players joining a full server; the game itself lets in up
 # to 64, and a join over the game's own cap crashed a test server). A server is full when the players its host last
 # reported (every 5 s) and the players who picked it in the last JOIN_WINDOW seconds and are still on their way reach
-# its MAX-PLAYERS. PICKS keeps each address's first pick of a server (a renewal of the same pick keeps its place).
-PICKS = {}  # player IP -> (GID, time of the first pick, the server's players then, seconds it counts as on the way)
+# its MAX-PLAYERS. PICKS keeps each player's first pick of a server (a renewal of the same pick keeps its place).
+PICKS = {}  # who -> (GID, time of the first pick, the server's players then, seconds it counts as on the way)
 JOIN_WINDOW = 30
 # A pick whose game got the server's address (Theater EGAM) is in the host's player count from the host's next status
 # on (its link is up within 2 s of the address: 424 joins on Hetzner, 17 Nov 2026). Until 0.4.7.4 it was counted as on
 # its way for the whole JOIN_WINDOW: when another player left meanwhile, the count did not rise and the slot stayed
 # held for nobody (99 of the 144 picks counted on their way in a "full" refusal there had their address already).
-ARRIVED = {}  # player IP -> (GID, time its game got the server's address)
+ARRIVED = {}  # who -> (GID, time its game got the server's address)
 ARRIVED_COUNTED = 3  # a host's status this long after the address counts the player
 # The join queue (TekRantGaming, 18 Nov 2026: "a server que system with a popup showing you your position in the que
 # that updates there should also be a close button"). A game that says "queue": 1 in its "reserve" gets a place in the
@@ -63,7 +69,7 @@ ARRIVED_COUNTED = 3  # a host's status this long after the address counts the pl
 # A place whose game stops asking for QUEUE_TIMEOUT seconds is given up, "queue_leave" gives it up at once (the pop-up's
 # Close), and a pick of another server leaves it. A queue outlives its server's lost link for SERVER_GONE_GRACE
 # seconds (the host registers again, as a new game: the queue follows it by the server's address).
-QUEUE = []  # the waiting players, oldest first: {'token', 'gid', 'address', 'server', 'since', 'seen'}
+QUEUE = []  # the waiting players, oldest first: {'token', 'gid', 'address', 'id', 'server', 'since', 'seen'}
 QUEUE_TIMEOUT = 15
 QUEUE_MOST = 64        # a server's queue holds at most this many
 MOST_PLAYERS = 128     # lists of a server's players are cut at this
@@ -417,7 +423,26 @@ def leaderboard_top(count=50):
     return rows[:count], len(rows)
 
 
-def server_full(gid, address, ahead=None):
+def who_asks(m, address):
+    """The key of the player asking with "reserve" or "queue" (RESERVATIONS and the rest)."""
+    return (address, bans.clean_id(m.get('id')))
+
+
+def who_signed_in(table, address, xuid):
+    """The key a signed in game's state is under: its player id's, else the one of a game that said no id."""
+    who = (address, player_id_of(xuid))
+    return who if who in table else (address, '')
+
+
+def keep(table, who, value, most):
+    """table[who] = value, with the newest `most` of that address kept."""
+    table.pop(who, None)
+    table[who] = value
+    for old in [w for w in table if w[0] == who[0]][:-most]:
+        del table[old]
+
+
+def server_full(gid, who, ahead=None):
     """(full, players, arriving, most): whether one more player would go over the server's MAX-PLAYERS. The players
     waiting in its queue take their places first: `ahead` is how many wait before this one (None: every one of them,
     as for a player not in the queue)."""
@@ -434,14 +459,14 @@ def server_full(gid, address, ahead=None):
     status_at = g.get('status_at', 0)
     pending = []
     for a, (pg, at, ap, window) in PICKS.items():
-        if pg != gid or a == address or now - at >= window:
+        if pg != gid or a == who or now - at >= window:
             continue
         got = ARRIVED.get(a)
         if got and got[0] == gid and got[1] >= at and status_at >= got[1] + ARRIVED_COUNTED:
             continue
         pending.append(ap)
     arriving = max(0, len(pending) - max(0, players - min(pending))) if pending else 0
-    waiting = len([e for e in queue_line(gid) if e['address'] != address]) if ahead is None else ahead
+    waiting = len([e for e in queue_line(gid) if (e['address'], e['id']) != who]) if ahead is None else ahead
     return players + arriving + waiting >= most, players, arriving, most
 
 
@@ -466,8 +491,8 @@ def queue_sweep(now=None):
     return out
 
 
-def queue_entry(address):
-    return next((e for e in QUEUE if e['address'] == address), None)
+def queue_entry(who):
+    return next((e for e in QUEUE if (e['address'], e['id']) == who), None)
 
 
 def queue_reply(e):
@@ -475,12 +500,20 @@ def queue_reply(e):
     return {'op': 'queued', 'gid': e['gid'], 'token': e['token'], 'position': line.index(e) + 1, 'total': len(line)}
 
 
-def let_in(gid, address, players, window=JOIN_WINDOW, renewal=False):
+def let_in(gid, who, players, window=JOIN_WINDOW, renewal=False):
     """A player's reservation of a server: its next Quick Match joins it (and counts on its way meanwhile)."""
     now = time.time()
     if not renewal:
-        PICKS[address] = (gid, now, players, window)
-    RESERVATIONS[address] = (gid, now)
+        keep(PICKS, who, (gid, now, players, window), ADDRESS_PICKS)
+    keep(RESERVATIONS, who, (gid, now), ADDRESS_RESERVATIONS)
+
+
+def give_up_own(who):
+    """A refused player's reservation and place in a queue. Only their own: others may share the address."""
+    RESERVATIONS.pop(who, None)
+    mine = queue_entry(who)
+    if mine:
+        QUEUE.remove(mine)
 
 
 def forget_old():
@@ -489,12 +522,12 @@ def forget_old():
     now = time.time()
     for name in [n for n, held in NAMES.items() if held[1] is not None and held[1] <= now]:
         del NAMES[name]
-    for address in [a for a, (_, at) in RESERVATIONS.items() if now - at > 300]:
-        del RESERVATIONS[address]
-    for address in [a for a, (_, at, _, _) in PICKS.items() if now - at > 300]:
-        del PICKS[address]
-    for address in [a for a, (_, at) in ARRIVED.items() if now - at > 300]:
-        del ARRIVED[address]
+    for who in [w for w, (_, at) in RESERVATIONS.items() if now - at > 300]:
+        del RESERVATIONS[who]
+    for who in [w for w, (_, at, _, _) in PICKS.items() if now - at > 300]:
+        del PICKS[who]
+    for who in [w for w, (_, at) in ARRIVED.items() if now - at > 300]:
+        del ARRIVED[who]
     # A login's key: kept 10 minutes after its FESL connection closed (Theater reads it when the game links).
     for lkey in [k for k, at in Client.closed.items() if now - at > 600]:
         for table in (Client.sessions, Client.user_ids, Client.xuids, Client.addresses, Client.closed):
@@ -947,7 +980,7 @@ class Client:
     sessions = {}  # lkey -> persona name, for Theater's USER
     user_ids = {}  # lkey -> user id
     xuids = {}  # lkey -> the console's XUID (decimal, from NuXBL360Login)
-    addresses = {}  # lkey -> the address it logged in from (moderation: a "reserve" names no player)
+    addresses = {}  # lkey -> the address it logged in from (moderation: asker checks a "reserve"'s id against it)
     closed = {}  # lkey -> when its FESL connection closed (forget_old drops its entries 10 minutes later)
     online = set()  # the personas of the FESL connections open now (a name is free again when its player leaves)
     name_grace = 60  # seconds a player's name stays theirs after their connection closes (a reconnect keeps it)
@@ -1144,10 +1177,12 @@ class Client:
             # pick in our menu (its reservation below still joins it).
             games = [g for g in GAMES.values()
                      if (g.get('TYPE') != 'P' or self.args.list_private) and g.get('listed', True)]
-            # A server picked in our menu's server browser (Registry "reserve", by the player's address).
-            reserved = RESERVATIONS.get(self.peer.split(':')[0])
+            # A server picked in our menu's server browser (Registry "reserve"): this player's own, by its sign in.
+            address = self.peer.split(':')[0]
+            xuid = Client.xuids.get(self.lkey, '0')
+            reserved = RESERVATIONS.get(who_signed_in(RESERVATIONS, address, xuid))
             gated = False
-            if maintenance_now(self.peer.split(':')[0]):
+            if maintenance_now(address):
                 # Maintenance mode: no server for a new connection, and no hosting either.
                 games, gated = [], True
                 self.note('Quick Match during maintenance: no server')
@@ -1161,13 +1196,14 @@ class Client:
                 self.note('Quick Match without a reservation: no server (players need v%s)' % VERSION_GATE['required'])
             else:
                 # No reservation and no gate (a LAN or community backend): the full servers are left out (see PICKS).
-                address = self.peer.split(':')[0]
-                full = [g for g in games if server_full(g['GID'], address)[0]]
+                who = (address, player_id_of(xuid))
+                full = [g for g in games if server_full(g['GID'], who)[0]]
                 if full:
                     games = [g for g in games if g not in full]
                     self.note('Quick Match: %d full server(s) left out' % len(full))
                 if games:
-                    PICKS[address] = (games[0]['GID'], time.time(), int(games[0].get('AP') or 0), JOIN_WINDOW)
+                    keep(PICKS, who, (games[0]['GID'], time.time(), int(games[0].get('AP') or 0), JOIN_WINDOW),
+                         ADDRESS_PICKS)
             if games:
                 status.update({'props.{}': 3, 'props.{resultType}': 'JOIN', 'props.{avgFit}': '1.0',
                                'props.{games}.[]': len(games)})
@@ -1272,7 +1308,8 @@ class TheaterClient(Client):
                 JOINS.setdefault(g['GID'], {})[pid] = (self.name, address, account, time.time())
                 seen(self.name, pid, address, account, g.get('N', ''))
             STATS.joined(self.xuid)  # the website's player counts (server/stats.py)
-            ARRIVED[self.peer.split(':')[0]] = (g['GID'], time.time())  # in the host's count soon (server_full)
+            # in the host's count soon (server_full)
+            keep(ARRIVED, who_signed_in(PICKS, address, self.xuid), (g['GID'], time.time()), ADDRESS_RESERVATIONS)
             self.xnaddr = f.get('R-XNADDR', '')
             pid = next(TheaterClient.pids)
             # One ticket per join: the joiner shows the one from EGEG to the host, which compares it with the one
@@ -1564,14 +1601,15 @@ class Registry:
       anyone:  {"op": "find", "address", "port"} -> {"op": "found", "server"|null}   Direct connect
       anyone:  {"op": "stats"} -> {"op": "stats", "players", "players_month", "month", "hours", "since"}   the
                website's totals (server/stats.py; its feed asks): counts only
-      player:  {"op": "reserve", "gid", "version"?, "platform"?} -> {"op": "reserved"}  the player's next Quick Match
-               joins that game; with the version gate a game older than the newest release (or one that says no
-               version) gets {"op": "outdated", "required", "yours"} and no reservation
+      player:  {"op": "reserve", "gid", "id"?, "version"?, "platform"?} -> {"op": "reserved"}  the player's next
+               Quick Match joins that game ("id": the player id, believed only where it signed in: asker)
+               with the version gate a game older than the newest release (or one that says no version) gets
+               {"op": "outdated", "required", "yours"} and no reservation
                a v0.4.0 or newer game says its "version" and "platform" ("windows", "linux") in list, find and reserve
                a full server (or one with players waiting): {"op": "full", "title", "message"}; with "queue": 1
                (v0.4.7.4) a place in its queue instead (QUEUE): {"op": "queued", "gid", "token", "position", "total"}
-      player:  {"op": "queue", "gid", "token"} -> {"op": "queued", ...} | {"op": "reserved", "gid"} (its turn: as after
-               reserve) | {"op": "queue_lost"} (no such place: reserve again) | {"op": "gone"|"closed", "title",
+      player:  {"op": "queue", "gid", "token", "id"?} -> {"op": "queued", ...} | {"op": "reserved", "gid"} (its turn:
+               as after reserve) | {"op": "queue_lost"} (no such place: reserve again) | {"op": "gone"|"closed", "title",
                "message"}   every few seconds while it waits; a place not asked for in QUEUE_TIMEOUT is given up
       player:  {"op": "queue_leave", "token"} -> {"op": "queue_left"}   the queue pop-up's Close
       player:  {"op": "tag", "name", "id", "tag"} -> {"op": "tag", "ok", "tag", "why"?, "text"?, "dev"?}  the
@@ -2180,19 +2218,16 @@ class Registry:
                 elif op == 'reserve' and maintenance_now(address):
                     # Maintenance mode (maintenance_now): every join refused with its text, whatever server was picked.
                     notice = maintenance_now(address)
-                    RESERVATIONS.pop(address, None)
+                    RESERVATIONS.pop(who_asks(m, address), None)
                     writer.write((json.dumps({'op': 'closed', 'kind': notice['kind'], 'title': notice['title'],
                                               'message': notice['text']}) + '\n').encode())
                     self.note('%s refused game %s: maintenance (%s)' % (peer, str(m.get('gid', ''))[:16], notice['kind']))
                 elif op == 'reserve' and m.get('gid') in GAMES and \
-                        join_refusal(GAMES[m['gid']], sessions_at(address), address):
+                        join_refusal(GAMES[m['gid']], asker(m, address), address):
                     # Moderation (join_refusal): the pop-up, with the reason and when it ends. (Never the word
                     # "reserved" in it: bans.reason_problem.)
-                    title, message, who, network, entry = join_refusal(GAMES[m['gid']], sessions_at(address), address)
-                    RESERVATIONS.pop(address, None)
-                    mine = queue_entry(address)
-                    if mine:
-                        QUEUE.remove(mine)
+                    title, message, who, network, entry = join_refusal(GAMES[m['gid']], asker(m, address), address)
+                    give_up_own(who_asks(m, address))
                     writer.write((json.dumps({'op': 'banned', 'gid': m['gid'], 'network': network, 'title': title,
                                               'message': message}) + '\n').encode())
                     self.note('%s refused game %s: %s%s' % (peer, m['gid'], who[0] or 'a player', ' is banned on the '
@@ -2205,41 +2240,43 @@ class Registry:
                     if outdated(yours, platform):
                         # (No word of the reply may hold "reserved": a game from before the gate looks for it.)
                         need = required_version(platform)
-                        RESERVATIONS.pop(peer.split(':')[0], None)
+                        RESERVATIONS.pop(who_asks(m, address), None)
                         writer.write((json.dumps({'op': 'outdated', 'required': need, 'yours': yours}) + '\n').encode())
                         self.note('%s refused game %s: its version %s, players need v%s' %
                                   (peer, m['gid'], 'v' + yours if yours else 'not said (before the gate)', need))
                     else:
-                        address = peer.split(':')[0]
+                        who = who_asks(m, address)
                         self.note_given_up(queue_sweep())
-                        renewal = RESERVATIONS.get(address, (None, 0))[0] == m['gid']
+                        renewal = RESERVATIONS.get(who, (None, 0))[0] == m['gid']
                         # A player waiting for another server who picks this one leaves that queue; one waiting for
                         # this one keeps its place.
-                        mine = queue_entry(address)
+                        mine = queue_entry(who)
                         if mine and mine['gid'] != m['gid']:
                             QUEUE.remove(mine)
                             self.note('%s left the queue of game %s: picked game %s' % (peer, mine['gid'], m['gid']))
                             mine = None
                         line = queue_line(m['gid'])
-                        full, players, arriving, most = server_full(m['gid'], address,
-                                                                    line.index(mine) if mine else None)
+                        full, players, arriving, most = server_full(m['gid'], who, line.index(mine) if mine else None)
                         waiting = len(line) - (1 if mine else 0)
-                        if full and not renewal and m.get('queue') == 1 and (mine or len(line) < QUEUE_MOST):
+                        may_wait = mine or (len(line) < QUEUE_MOST and
+                                            sum(e['address'] == address for e in QUEUE) < ADDRESS_QUEUED)
+                        if full and not renewal and m.get('queue') == 1 and may_wait:
                             # A game with the queue: a place in it (the same one when it asks again).
                             if not mine:
                                 mine = {'token': os.urandom(8).hex(), 'gid': m['gid'], 'address': address,
+                                        'id': who[1],
                                         'server': (GAMES[m['gid']]['I'], int(GAMES[m['gid']]['P'])),
                                         'since': time.time()}
                                 QUEUE.append(mine)
                             mine['seen'] = time.time()
-                            RESERVATIONS.pop(address, None)
+                            RESERVATIONS.pop(who, None)
                             reply = queue_reply(mine)
                             writer.write((json.dumps(reply) + '\n').encode())
                             self.note('%s queued for game %s: %d of %d (%d players, %d on their way, %d at most)' %
                                       (peer, m['gid'], reply['position'], reply['total'], players, arriving, most))
                         elif full and not renewal:
                             # (A game that does not know "full" says the list did not answer, and joins nothing.)
-                            RESERVATIONS.pop(address, None)
+                            RESERVATIONS.pop(who, None)
                             # (Never the server's name in "message": a name holding "reserved" would read as a yes.)
                             text = 'This server has %d of %d players. Pick another server, or try again in a moment.' % (
                                 min(players + arriving, most), most)
@@ -2256,7 +2293,7 @@ class Registry:
                         else:
                             if mine:
                                 QUEUE.remove(mine)
-                            let_in(m['gid'], address, players, renewal=renewal)
+                            let_in(m['gid'], who, players, renewal=renewal)
                             writer.write((json.dumps({'op': 'reserved', 'gid': m['gid']}) + '\n').encode())
                             self.note('%s picked game %s%s' % (peer, m['gid'], ' (v%s)' % yours if yours else ''))
                 elif op == 'queue':
@@ -2286,18 +2323,20 @@ class Registry:
                     else:
                         mine['seen'] = time.time()
                         line = queue_line(mine['gid'])
-                        full, players, arriving, most = server_full(mine['gid'], address, line.index(mine)) \
+                        waiter = (address, mine['id'])
+                        full, players, arriving, most = server_full(mine['gid'], waiter, line.index(mine)) \
                             if mine['gid'] in GAMES else (True, 0, 0, 0)
-                        refused = join_refusal(GAMES.get(mine['gid']), sessions_at(address), address) \
+                        refused = join_refusal(GAMES.get(mine['gid']), asker(m, address), address) \
                             if mine['gid'] in GAMES else None
                         if refused:
-                            QUEUE.remove(mine)
+                            if mine['id'] in ('', bans.clean_id(m.get('id'))):  # (as give_up_own: their own place)
+                                QUEUE.remove(mine)
                             writer.write((json.dumps({'op': 'banned', 'gid': mine['gid'], 'network': refused[3],
                                                       'title': refused[0], 'message': refused[1]}) + '\n').encode())
                             self.note('%s left the queue of game %s: banned' % (peer, mine['gid']))
                         elif not full:
                             QUEUE.remove(mine)
-                            let_in(mine['gid'], address, players, ADMIT_WINDOW)
+                            let_in(mine['gid'], waiter, players, ADMIT_WINDOW)
                             writer.write((json.dumps({'op': 'reserved', 'gid': mine['gid']}) + '\n').encode())
                             self.note('%s let in to game %s from its queue after %.0f s (%d players, %d on their way, '
                                       '%d at most; %d still waiting)' % (
@@ -2401,14 +2440,18 @@ def account_of(pid_hex, address):
     return ''
 
 
-def sessions_at(address):
-    """The players logged in from this address: [(name, player id, account)] (a "reserve" names no player)."""
-    out = []
-    for lkey, name in list(Client.sessions.items()):
-        if Client.addresses.get(lkey) == address:
-            pid = player_id_of(Client.xuids.get(lkey, '0'))
-            out.append((name, pid, account_of(pid, address) if pid else ''))
-    return out
+def asker(m, address):
+    """Who asks with a "reserve" or "queue": [(name, player id, account)], or [] when only the address is known. One
+    address can be a household's or a LAN party's, so a join is never checked as the others signed in from it. The
+    game says its id, matched with that id's own sign in from the same address. Without one (an older game, or before
+    the sign in) the address is what is known here; EGAM and the host check the player as signed in."""
+    said = bans.clean_id(m.get('id'))
+    if not said:
+        return []
+    for lkey, name in reversed(list(Client.sessions.items())):  # the newest sign in, for its name
+        if Client.addresses.get(lkey) == address and player_id_of(Client.xuids.get(lkey, '0')) == said:
+            return [(name, said, account_of(said, address))]
+    return []
 
 
 def seen(name, pid, address, account, server=''):
@@ -2448,7 +2491,7 @@ def server_ban(g, pid, account, address, now=None):
 
 def join_refusal(g, players, address):
     """Why this join is refused, or None: (title, message, the player (name, id), network: bool, the entry). players:
-    [(name, player id, account)], the ones the join may be (one, or at "reserve" every login from the address)."""
+    [(name, player id, account)], the one player joining (asker, or EGAM's own sign in), or [] for the address alone."""
     nb = network_bans()
     for name, pid, account in (players or [('', '', '')]):
         e = nb.match(pid, account, address) if nb else None

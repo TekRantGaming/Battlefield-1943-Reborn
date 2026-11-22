@@ -24,6 +24,8 @@
 #include <memory>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -57,6 +59,7 @@ REXCVAR_DECLARE(std::string, bf_online_host);
 namespace bf1943 {
 
 const char* BfVersion();  // pipeline_upload.cpp
+uint32_t OnlinePlayerId();  // live_layers.cpp
 
 // This game's version and platform, as the fields of a registry request.
 inline std::string ClientFields() {
@@ -66,6 +69,14 @@ inline std::string ClientFields() {
   const char* platform = "linux";
 #endif
   return std::string("\"version\": \"") + BfVersion() + "\", \"platform\": \"" + platform + "\", \"notice\": 1";
+}
+
+// A join's fields ("reserve", "queue"): those, and who asks. Others can share this address (a household, a LAN party),
+// so the backend checks bans as this player (server/plasma.py asker: believed only where this id signed in).
+inline std::string JoinFields() {
+  char id[9];
+  std::snprintf(id, sizeof(id), "%08X", OnlinePlayerId());
+  return std::string("\"id\": \"") + id + "\", " + ClientFields();
 }
 
 int TickRate();  // tick_rate.cpp: this game's simulation rate (bf_tick_rate: 30, or 60)
@@ -484,7 +495,7 @@ class ServerList {
   // kQueued (with `place`: the game waits in a full server's queue): `place` gets the place.
   enum class Reserved { kYes, kNo, kOutdated, kRefused, kQueued };
   static std::string ReserveRequest(const std::string& gid, bool queue) {
-    return "{\"op\": \"reserve\", \"gid\": \"" + gid + "\", " + (queue ? "\"queue\": 1, " : "") + ClientFields() + "}";
+    return "{\"op\": \"reserve\", \"gid\": \"" + gid + "\", " + (queue ? "\"queue\": 1, " : "") + JoinFields() + "}";
   }
   static QueuePlace ReadPlace(const std::string& reply, const std::string& gid) {
     QueuePlace p;
@@ -694,7 +705,7 @@ inline void QueueWatch::Run(std::shared_ptr<Shared> s) {
     }
     std::string reply;
     bool ok = RegistryRequest("{\"op\": \"queue\", \"gid\": \"" + place.gid + "\", \"token\": \"" + place.token + "\", " +
-                                  ClientFields() + "}",
+                                  JoinFields() + "}",
                               reply);
     std::string op = ok ? JsonField(reply, "op") : "";
     if (op == "queue_lost") {

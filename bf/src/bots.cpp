@@ -333,6 +333,7 @@ struct State {
   uint32_t manager = 0, scanned_manager = 0;
   std::map<uint32_t, std::vector<uint32_t>> team_kits;  // team (1 US, 2 Japan) -> its kit objects
   std::vector<Flag> flags;
+  bool sit_out = false;  // a level bots cannot play (SitsOut): none of them on it
   std::set<uint32_t> vehicle_spawns;  // spawn points that seat their soldier in a vehicle
   // The level's vehicles (ServerVehicleEntity, vtable 0x82013068: its constructor sub_8230A580 and destructor
   // sub_822FF5B0 hooked below). Every tank, jeep, boat, plane and fixed gun the game treats as a vehicle
@@ -348,6 +349,17 @@ struct State {
   uint64_t rays = 0;         // ray tests made, and the time they took (logged every 10 s)
   double ray_ms = 0;
 } g;
+
+// Air Superiority (Coral Sea) is fought in planes, and bots play on foot: they spawned on the carriers, found no way
+// and died there, at 3 ms a tick for 10 of them (run coral_red, 22 Nov 2026). They sit such a level out and come back
+// on the next. Told by the rotation's title; without a rotation by the mode's own flag (only then: the scan of guest
+// memory can still find the last level's).
+bool SitsOut(const std::string& title, const std::vector<Flag>& flags) {
+  if (!title.empty()) return title == "Coral Sea";
+  for (const Flag& f : flags)
+    if (f.name == "CQ_MP_AIRSUPERIORITY") return true;
+  return false;
+}
 
 int WantedBots() {
   static const int env = [] {
@@ -2485,6 +2497,10 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     g.scanned_manager = manager;
     // What earlier matches learned here: by the map's title (the rotation's), else its first flag's name.
     std::string map = CurrentMapTitle();
+    g.sit_out = SitsOut(map, g.flags);
+    if (g.sit_out)
+      REXLOG_INFO("BF bots: Air Superiority ({}): the bots sit this level out, they cannot fly",
+                  map.empty() ? "no rotation, by its flag" : map);
     if (map.empty() && !g.flags.empty()) map = g.flags.front().name;
     if (!map.empty() && map != learn.map) {
       if (learn.dirty) SaveLearned();
@@ -2504,7 +2520,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     } else if (it->leaving && !Load32(base, it->player + 288)) {
       // Backfill: out through the game's own removal, as a player who left; dead, so no soldier of its own is left
       // behind. Its input is ours (Alloc): taken off the player first and freed after.
-      REXLOG_INFO("BF bots: {} leaves to make room for a player", it->name);
+      REXLOG_INFO("BF bots: {} leaves ({})", it->name, g.sit_out ? "the bots sit this level out" : "room for a player");
       const uint32_t input = it->input, state = it->state;
       Store32(base, it->player + 280, 0);
       if (const uint32_t scoring = Load32(base, kGameContext + 68); Readable(scoring, 16)) {
@@ -2540,7 +2556,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     // a player leaves, a bot will fill their slot"): the bots take the room the humans leave but kBackfillSpare slots,
     // so a joining player always gets in and gets a team; past that, bots leave (the side with more players first).
     const int room = std::max(0, int(REXCVAR_GET(bf_gm_max_players)) - humans - kBackfillSpare);
-    const int target = std::min(wanted, room);
+    const int target = g.sit_out ? 0 : std::min(wanted, room);
     {
       int staying = 0;
       for (const Bot& b : g.bots) staying += b.leaving ? 0 : 1;
@@ -2563,8 +2579,9 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
         pick->leaving = true;
         --side[int(Load32(base, pick->player + 48)) == 2 ? 2 : 1];
         --staying;
-        REXLOG_INFO("BF bots: {} will leave for a player ({} humans, {} bots wanted, room for {})", pick->name, humans,
-                    wanted, target);
+        if (!g.sit_out)
+          REXLOG_INFO("BF bots: {} will leave for a player ({} humans, {} bots wanted, room for {})", pick->name, humans,
+                      wanted, target);
       }
       // A player left again: a bot that was leaving and is still here stays after all.
       for (Bot& b : g.bots)
@@ -2574,7 +2591,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
         }
     }
     static int told = -1;
-    if (target < wanted && told != target) {
+    if (!g.sit_out && target < wanted && told != target) {
       told = target;
       REXLOG_INFO("BF bots: {} wanted, room for {} beside {} human player(s) ({} at most)", wanted, target, humans,
                   REXCVAR_GET(bf_gm_max_players));
