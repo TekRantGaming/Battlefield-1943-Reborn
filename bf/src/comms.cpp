@@ -14,6 +14,7 @@
 // left or right of the listener's camera.
 
 #include "comms.h"
+#include "audio_devices.h"
 #include "text_filter.h"
 
 #if defined(_WIN32)
@@ -849,9 +850,9 @@ class Engine {
 #endif
     sdl_audio_ = true, real_mic_ = real_mic;  // the microphone opens when first wanted (OpenMic)
     if (real_out) {
-      playback_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &out, nullptr, nullptr);
-      if (playback_) SDL_ResumeAudioStreamDevice(playback_);
-      else REXLOG_WARN("BF comms: voices cannot play ({})", SDL_GetError());
+      // On the device Settings > Audio's Chat output names, kept there (audio_devices.h).
+      playback_ = audio_devices::OpenStream(audio_devices::Role::kChatOut, out, nullptr, nullptr, "the voice chat's voices");
+      if (!playback_) REXLOG_WARN("BF comms: voices cannot play ({})", SDL_GetError());
     }
     REXLOG_INFO("BF comms: voice on (playback {})", playback_ ? "open" : "none");
   }
@@ -861,9 +862,8 @@ class Engine {
   void OpenMic(bool wanted, double now) {
     if (capture_ || !sdl_audio_ || !real_mic_ || !wanted || now < mic_retry_at_) return;
     const SDL_AudioSpec in{SDL_AUDIO_S16, 1, kRate};
-    capture_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &in, nullptr, nullptr);
+    capture_ = audio_devices::OpenStream(audio_devices::Role::kChatIn, in, nullptr, nullptr, "the voice chat's microphone");
     if (capture_) {
-      SDL_ResumeAudioStreamDevice(capture_);
       REXLOG_INFO("BF comms: microphone open");
     } else {
       REXLOG_WARN("BF comms: no microphone ({}); trying again in 10 s", SDL_GetError());
@@ -874,8 +874,8 @@ class Engine {
     if (!audio_up_) return;
     audio_up_ = false;
     sdl_audio_ = false, mic_retry_at_ = 0;
-    if (capture_) SDL_DestroyAudioStream(capture_), capture_ = nullptr;
-    if (playback_) SDL_DestroyAudioStream(playback_), playback_ = nullptr;
+    if (capture_) audio_devices::CloseStream(capture_), capture_ = nullptr;
+    if (playback_) audio_devices::CloseStream(playback_), playback_ = nullptr;
     captured_.clear();
 #if defined(BF_DEV_TOOLS)
     delete dev_out_, dev_out_ = nullptr;

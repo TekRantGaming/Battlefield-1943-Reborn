@@ -1,6 +1,7 @@
 // The achievement popup and its chime (achievement_toast.h).
 
 #include "achievement_toast.h"
+#include "audio_devices.h"
 
 #include <algorithm>
 #include <atomic>
@@ -471,12 +472,12 @@ void PlayAchievementSound() {
   Uint8* pcm = nullptr;
   Uint32 pcm_len = 0;
   if (!SDL_LoadWAV_IO(SDL_IOFromConstMem(wav.data(), wav.size()), true, &spec, &pcm, &pcm_len)) return;
-  if (stream) SDL_DestroyAudioStream(stream);
-  stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+  if (stream) audio_devices::CloseStream(stream);
+  // On the Game sound output device (Settings > Audio, audio_devices.h).
+  stream = audio_devices::OpenStream(audio_devices::Role::kGame, spec, nullptr, nullptr, "the achievement chime");
   if (stream) {
     SDL_PutAudioStreamData(stream, pcm, int(pcm_len));
     SDL_FlushAudioStream(stream);
-    SDL_ResumeAudioStreamDevice(stream);
     REXLOG_INFO("BF achievements: the chime plays ({} ms, volume {}%)", 1000ull * pcm_len / std::max(1, spec.freq * spec.channels * 2), volume);
   } else {
     REXLOG_WARN("BF achievements: no sound device for the chime ({})", SDL_GetError());

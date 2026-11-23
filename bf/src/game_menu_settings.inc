@@ -302,7 +302,19 @@
                           : it.options.empty() ? it.value
                                                : it.options[size_t(std::clamp(it.index, 0, int(it.options.size()) - 1))];
       const bool changeable = !it.disabled && (it.choose || it.slider);
-      if (sel && changeable) shown = "<   " + shown + "   >";
+      // A value too long for the row (a sound device's name, audio_devices.h) is cut short with "...", clear of the
+      // row's name; the help card has it whole.
+      const float room = tx1 - tx0 - kit::TextWidth(f.ui, size, it.name) - st(24);
+      const std::string pre = sel && changeable ? "<   " : "", post = sel && changeable ? "   >" : "";
+      if (!it.slider && kit::TextWidth(f.ui_bold, size, pre + shown + post) > room) {
+        while (shown.size() > 1 && kit::TextWidth(f.ui_bold, size, pre + shown + "..." + post) > room) {
+          shown.pop_back();
+          while (!shown.empty() && (static_cast<unsigned char>(shown.back()) & 0xC0) == 0x80) shown.pop_back();  // whole UTF-8
+        }
+        while (!shown.empty() && shown.back() == ' ') shown.pop_back();
+        shown += "...";
+      }
+      shown = pre + shown + post;
       const float vw = kit::TextWidth(f.ui_bold, size, shown), vx = tx1 - vw;
       d->AddText(f.ui_bold, size, ImVec2(vx, ty), sel ? kit::kCream : changeable ? kit::kInk : kit::kInkFaint, shown.c_str());
       if (Pending(it)) {  // changed, taken at the next start

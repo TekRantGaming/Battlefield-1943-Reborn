@@ -48,6 +48,7 @@
 #include <native_x_renderer/native_x_renderer.h>
 
 #include "account_key.h"
+#include "audio_devices.h"
 #include "capture_points.h"
 #include "clan_tags.h"
 #include "display_modes.h"
@@ -3666,6 +3667,31 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (cvar == c) r.start_key = "cvar." + cvar;
     return r;
   }
+  // A sound device's row (audio_devices.h): System default first (it follows the system's default device), then the
+  // devices there now by name. A chosen device that is unplugged stays chosen, shown as not connected: its sound plays
+  // on the system default meanwhile and goes back to it when it returns. Listed again at most once a second.
+  SettingRow DeviceChoice(const std::string& section, const std::string& name, const std::string& help,
+                          audio_devices::Role role) {
+    const bool recording = role == audio_devices::Role::kChatIn;
+    const double now = ImGui::GetTime();
+    if (now - devices_listed_at_[recording] > 1.0 || now < devices_listed_at_[recording])
+      device_names_[recording] = audio_devices::Names(recording), devices_listed_at_[recording] = now;
+    SettingRow r{section, name, help};
+    const std::string cvar = audio_devices::CvarOf(role);
+    const std::string cur = Cvar(cvar);
+    std::vector<std::string> values{""};
+    r.options.push_back("System default");
+    for (const std::string& n : device_names_[recording]) r.options.push_back(n), values.push_back(n);
+    if (!cur.empty() && std::find(values.begin(), values.end(), cur) == values.end())
+      r.options.push_back(cur + " (not connected)"), values.push_back(cur);
+    for (size_t i = 0; i < values.size(); ++i)
+      if (values[i] == cur) r.index = int(i);
+    r.choose = [this, cvar, values](int i) { SetCvar(cvar, values[size_t(i)]); };
+    r.help += " Now: " + r.options[size_t(r.index)] + ".";  // whole, where the row may have to cut a long name short
+    return r;
+  }
+  std::vector<std::string> device_names_[2];  // playback, recording
+  double devices_listed_at_[2] = {-10, -10};
   SettingRow Toggle(const std::string& section, const std::string& name, const std::string& help,
                     const std::string& cvar, const std::string& off = "Off", const std::string& on = "On") {
     SettingRow r = Choice(section, name, help, cvar, {{off, "false"}, {on, "true"}});
@@ -4303,6 +4329,20 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
   std::vector<SettingRow> AudioRows() {
     std::vector<SettingRow> rows;
+    // Which device each sound uses (TekRantGaming, 23 Nov 2026: "so users can set what device they have to be output or
+    // input devices for both game sound and the game chat"), audio_devices.h.
+    rows.push_back(DeviceChoice("Devices", "Game sound output",
+                                "Where the game's sound plays: the battle, the music, the menus' sounds and the "
+                                "achievement chime. System default follows your system's default device. Applies at once.",
+                                audio_devices::Role::kGame));
+    rows.push_back(DeviceChoice("Devices", "Chat output",
+                                "Where other players' voices play, for example a headset while the game plays on "
+                                "speakers. System default follows your system's default device. Applies at once.",
+                                audio_devices::Role::kChatOut));
+    rows.push_back(DeviceChoice("Devices", "Chat input",
+                                "The microphone the voice chat records you from. System default follows your system's "
+                                "default microphone. Applies at once.",
+                                audio_devices::Role::kChatIn));
     rows.push_back(Slider("Game audio", "Master volume", "How loud all game audio is. Applies during play.",
                           "bf_master_volume", 0, 100, 1, Percent));
     rows.push_back(Slider("Game audio", "Music volume", "How loud the game's music is, in menus, loading and matches. Applies at once.", "bf_music_volume", 0,
@@ -4365,6 +4405,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       SetCvar("bf_voice_mode", "push");
       SetCvar("bf_voice_volume", "100");
       SetCvar("bf_voice_mic_sensitivity", "50");
+      for (auto role : {audio_devices::Role::kGame, audio_devices::Role::kChatOut, audio_devices::Role::kChatIn})
+        SetCvar(audio_devices::CvarOf(role), "");
     };
     rows.push_back(reset);
     return rows;

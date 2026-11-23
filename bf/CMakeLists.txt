@@ -83,6 +83,7 @@ set(BF1943_SOURCES
     src/ea_xma_kicks.cpp
     src/auto_join.cpp
     src/comms.cpp
+    src/audio_devices.cpp
     src/comms_ui.cpp
     src/world_sync.cpp
     src/voice_mute.cpp
