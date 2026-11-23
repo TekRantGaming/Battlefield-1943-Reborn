@@ -29,10 +29,12 @@
 #include <thread>
 #include <vector>
 
+#include <SDL3/SDL.h>  // the news window's storm: a sound stream of its own
 #include <native_x_renderer/native_x_renderer.h>
 #include <rex/cvar.h>
 
 #include "capture_points.h"
+#include "news_video.h"
 
 namespace bf1943 {
 extern std::atomic<float> g_sea_level;  // shader_prep.cpp: the level's water height (NaN: not known yet)
@@ -798,5 +800,223 @@ void WeatherAudioFrame(float* frame, int samples, float game_db) {
   if (!g_started.load(std::memory_order_relaxed)) return;
   MixInto(frame, samples, game_db);
 }
+
+
+// ---- The news window's storm (news_video.h StormSound; TekRantGaming, 23 Nov 2026): the medium rain and the hurricane's
+// wind on loop and the strikes' thunder, from the same recordings as a match's weather (Want: decoded once, shared
+// with it), on an SDL stream of their own (our menus mute the game, and the window also shows before the game runs).
+// Its level: full at the window's opening (the rain at its own level, the wind about 6 dB under it: the hurricane's
+// recording is 14 dB louder than the rain's), held 3 s, then faded out with a cosine to silence 15 s after the opening,
+// so the trailer's sound in the window soon has the room to itself.
+namespace news {
+namespace {
+constexpr double kStormHold = 3.0, kStormSilent = 15.0, kStormCloseFade = 0.5;
+constexpr float kStormRain = 0.85f, kStormWind = 0.12f;
+// The thunders: their gains, and their recordings' quiet start cut (s) or a wait (s) before them, so each one's first
+// sound comes as far after its flash as the strike is away: a close crack 0.12 s on, a distant strike 1.4 s on (480 m),
+// lightning in the clouds 1 s on. The recordings' first sound: 0.57 s, 1.94 s and 0.73 s in.
+constexpr float kThunderGain[3] = {0.55f, 0.45f, 0.47f};
+constexpr int kThunderSound[3] = {kStrikeClose, kStrikeDistant, kStrikeClouds};
+constexpr double kThunderSkip[3] = {0.45, 0.54, 0.0}, kThunderWait[3] = {0.0, 0.0, 0.27};
+
+struct StormVoice {
+  std::shared_ptr<const Wave> wave;
+  size_t at = 0;
+  int64_t wait = 0;
+  float gain = 1.0f;
+};
+struct Storm {
+  std::mutex mutex;
+  SDL_AudioStream* stream = nullptr;
+  bool no_device = false, open = false;
+  int64_t frame = 0;   // frames mixed since the opening
+  float close = 1.0f;  // the close's fade (1 while open)
+  float volume = 0.0f;
+  size_t rain_at = 0, wind_at = 0;
+  std::vector<StormVoice> thunder;
+  double last_log = -1.0;
+  float log_power = 0.0f;
+  int64_t log_frames = 0;
+#if defined(BF_DEV_TOOLS)
+  // BF_DEV_NEWS_STORM_OUT=<file.wav> (tests, run at volume 0): the storm as the speakers would have it at full volume.
+  std::string out_path;
+  std::vector<int16_t> out;
+#endif
+};
+Storm g_storm;
+
+float StormFade(double t) {
+  if (t < kStormHold) return 1.0f;
+  if (t >= kStormSilent) return 0.0f;
+  return float(0.5 + 0.5 * std::cos((t - kStormHold) / (kStormSilent - kStormHold) * 3.14159265));
+}
+
+// SDL's audio thread asks for more.
+void SDLCALL MixStorm(void*, SDL_AudioStream* stream, int additional, int) {
+  float buffer[512 * 2];
+  while (additional > 0) {
+    const int frames = std::min(512, additional / 8);
+    if (frames <= 0) break;
+    std::shared_ptr<const Wave> rain, wind;
+    {
+      std::lock_guard lock(g_mix.mutex);
+      rain = g_mix.waves[kRainMedium], wind = g_mix.waves[kWindHurricane];
+    }
+    {
+      std::lock_guard lock(g_storm.mutex);
+      for (int i = 0; i < frames; ++i) {
+        const double t = double(g_storm.frame + i) / kRate;
+        if (!g_storm.open) g_storm.close = std::max(0.0f, g_storm.close - float(1.0 / (kStormCloseFade * kRate)));
+        const float level = StormFade(t) * g_storm.close;
+        float l = 0.0f, r = 0.0f;
+        if (level > 0.0f) {
+          if (rain && rain->frames()) {
+            const size_t k = (g_storm.rain_at++ % rain->frames()) * 2;
+            l += rain->lr[k] * kStormRain, r += rain->lr[k + 1] * kStormRain;
+          }
+          if (wind && wind->frames()) {
+            const size_t k = (g_storm.wind_at++ % wind->frames()) * 2;
+            l += wind->lr[k] * kStormWind, r += wind->lr[k + 1] * kStormWind;
+          }
+          for (StormVoice& v : g_storm.thunder) {
+            if (v.wait > 0) {
+              --v.wait;
+              continue;
+            }
+            if (v.at >= v.wave->frames()) continue;
+            l += v.wave->lr[v.at * 2] * v.gain, r += v.wave->lr[v.at * 2 + 1] * v.gain;
+            ++v.at;
+          }
+          l *= level / 32768.0f, r *= level / 32768.0f;
+        }
+        g_storm.log_power += 0.5f * (l * l + r * r), ++g_storm.log_frames;
+#if defined(BF_DEV_TOOLS)
+        if (!g_storm.out_path.empty()) {
+          g_storm.out.push_back(int16_t(std::lround(std::clamp(l, -1.0f, 1.0f) * 32767.0f)));
+          g_storm.out.push_back(int16_t(std::lround(std::clamp(r, -1.0f, 1.0f) * 32767.0f)));
+        }
+#endif
+        buffer[i * 2] = std::clamp(l * g_storm.volume, -1.0f, 1.0f);
+        buffer[i * 2 + 1] = std::clamp(r * g_storm.volume, -1.0f, 1.0f);
+      }
+      g_storm.frame += frames;
+      g_storm.thunder.erase(std::remove_if(g_storm.thunder.begin(), g_storm.thunder.end(),
+                                           [](const StormVoice& v) { return v.wait <= 0 && v.at >= v.wave->frames(); }),
+                            g_storm.thunder.end());
+    }
+    SDL_PutAudioStreamData(stream, buffer, frames * 8);
+    additional -= frames * 8;
+  }
+}
+
+#if defined(BF_DEV_TOOLS)
+void WriteStormOut() {
+  if (g_storm.out_path.empty() || g_storm.out.empty()) return;
+  std::ofstream f(g_storm.out_path, std::ios::binary | std::ios::trunc);
+  auto u32 = [&](uint32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
+  auto u16 = [&](uint16_t v) { f.write(reinterpret_cast<const char*>(&v), 2); };
+  const uint32_t bytes = uint32_t(g_storm.out.size() * 2);
+  f.write("RIFF", 4), u32(36 + bytes), f.write("WAVEfmt ", 8), u32(16), u16(1), u16(2), u32(kRate), u32(kRate * 4),
+      u16(4), u16(16), f.write("data", 4), u32(bytes);
+  f.write(reinterpret_cast<const char*>(g_storm.out.data()), std::streamsize(bytes));
+}
+#endif
+
+void WantStormSounds() {
+  {
+    std::lock_guard lock(g_mix.mutex);
+    if (g_mix.dir.empty()) g_mix.dir = ExecutableDir() / "data" / "sounds" / "weather";
+  }
+  for (int s : {int(kRainMedium), int(kWindHurricane), int(kStrikeClose), int(kStrikeDistant), int(kStrikeClouds)}) Want(s);
+}
+}  // namespace
+
+void StormPrepare() { WantStormSounds(); }
+
+void StormSound(bool open) {
+  const double now = Now();
+  std::unique_lock lock(g_storm.mutex);
+  g_storm.volume = float(std::clamp(REXCVAR_GET(bf_master_volume), 0.0, 100.0) / 100.0 *
+                         std::clamp(REXCVAR_GET(bf_effects_volume), 0.0, 100.0) / 100.0 *
+                         std::clamp(REXCVAR_GET(bf_weather_volume), 0.0, 100.0) / 100.0);
+  if (open && !g_storm.open) {  // the window opened: the storm from its start
+    g_storm.open = true, g_storm.frame = 0, g_storm.close = 1.0f, g_storm.thunder.clear(), g_storm.last_log = now;
+    g_storm.log_power = 0.0f, g_storm.log_frames = 0;
+    lock.unlock();
+    WantStormSounds();
+    lock.lock();
+#if defined(BF_DEV_TOOLS)
+    if (const char* out = std::getenv("BF_DEV_NEWS_STORM_OUT"); out && *out) g_storm.out_path = out, g_storm.out.clear();
+#endif
+    REXLOG_INFO("BF news storm: the window opened: rain, wind and thunder, faded to silence over {:.0f} s (volume {:.2f})",
+                kStormSilent, g_storm.volume);
+    if (!g_storm.stream && !g_storm.no_device) {
+      if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        REXLOG_WARN("BF news storm: SDL's audio did not start ({}): silent", SDL_GetError());
+        g_storm.no_device = true;
+        return;
+      }
+      const SDL_AudioSpec spec{SDL_AUDIO_F32, 2, kRate};
+      lock.unlock();  // the callback takes the lock: never open the device holding it
+      SDL_AudioStream* stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, MixStorm, nullptr);
+      lock.lock();
+      if (!stream) {
+        REXLOG_WARN("BF news storm: no sound device ({}): silent", SDL_GetError());
+        g_storm.no_device = true;
+        return;
+      }
+      g_storm.stream = stream;
+      SDL_ResumeAudioStreamDevice(stream);
+    }
+    return;
+  }
+  if (!open && g_storm.open) {
+    g_storm.open = false;
+    REXLOG_INFO("BF news storm: the window closed {:.1f} s after it opened: faded out", double(g_storm.frame) / kRate);
+  }
+  // Once a second while it sounds: its level (the tests' evidence of the fade).
+  if (g_storm.stream && now - g_storm.last_log >= 1.0 && g_storm.log_frames > 0) {
+    const float db = 10.0f * std::log10(std::max(1e-10f, g_storm.log_power / float(g_storm.log_frames)));
+    REXLOG_INFO("BF news storm: {:.0f} s, {:.1f} dB (fade {:.0f}%)", double(g_storm.frame) / kRate, db,
+                100.0f * StormFade(double(g_storm.frame) / kRate) * g_storm.close);
+    g_storm.last_log = now, g_storm.log_power = 0.0f, g_storm.log_frames = 0;
+  }
+  // Silent (faded out, or closed and its fade done): the stream let go (outside the lock: it waits for its callback).
+  const double t = double(g_storm.frame) / kRate;
+  if (g_storm.stream && (t >= kStormSilent + 0.5 || (!g_storm.open && g_storm.close <= 0.0f))) {
+    SDL_AudioStream* stream = g_storm.stream;
+    g_storm.stream = nullptr;
+#if defined(BF_DEV_TOOLS)
+    WriteStormOut();
+#endif
+    REXLOG_INFO("BF news storm: silent after {:.1f} s: its sound stream closed", t);
+    lock.unlock();
+    SDL_DestroyAudioStream(stream);
+  }
+}
+
+void StormThunder(int kind) {
+  if (kind < 0 || kind > 2) return;
+  std::shared_ptr<const Wave> wave;
+  {
+    std::lock_guard lock(g_mix.mutex);
+    wave = g_mix.waves[kThunderSound[kind]];
+  }
+  std::lock_guard lock(g_storm.mutex);
+  const double t = double(g_storm.frame) / kRate;
+  if (!g_storm.stream || !g_storm.open || t >= kStormSilent) return;  // after the fade the flashes are silent
+  if (!wave) {
+    REXLOG_INFO("BF news storm: a strike's thunder not decoded yet: silent");
+    return;
+  }
+  StormVoice v;
+  v.wave = wave, v.gain = kThunderGain[kind];
+  v.at = std::min(wave->frames(), size_t(kThunderSkip[kind] * kRate));
+  v.wait = int64_t(kThunderWait[kind] * kRate);
+  g_storm.thunder.push_back(std::move(v));
+  REXLOG_INFO("BF news storm: thunder ({}) {:.1f} s after the opening", kind == 0 ? "close" : kind == 1 ? "distant" : "clouds", t);
+}
+
+}  // namespace news
 
 }  // namespace bf1943
