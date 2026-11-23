@@ -914,6 +914,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& io) override {
+    kit::MatchTextToDisplay(io);  // before any of our text this frame (the menus, the chat boxes, the overlays)
     PaceLauncher();
     FollowScreenRefresh();
     // The keyboard's Esc in a match with our menu closed opens the pause, as the controller's Start does (auto_join.cpp
@@ -1480,7 +1481,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       size_t n = 1;  // one UTF-8 character
       while (i + n < t.size() && (static_cast<unsigned char>(t[i + n]) & 0xC0) == 0x80) ++n;
       const std::string ch = t.substr(i, n);
-      d->AddText(f, size, ImVec2(x, at.y), col, ch.c_str());
+      kit::PixelText(d, f, size, ImVec2(x, at.y), col, ch.c_str());  // even spacing with display scaling
       x += Width(f, size, ch) + gap;
       i += n;
     }

@@ -69,6 +69,38 @@ void LoadFonts(ImFontAtlas* atlas, const fs::path& exe_dir, ImFont* ui, ImFont* 
   g_glyph_dir = exe_dir / "glyphs";
 }
 
+// ImGui 1.92 makes each font's glyphs at the size asked for, times that font's CurrentRasterizerDensity. ImGui sets
+// that density from the window's framebuffer scale only for the font it has current (PushFont, Begin); a font only
+// ever drawn through ImDrawList::AddText, as all of ours are, kept its ImFontConfig's 1.0. So with Windows display
+// scaling at S, every menu letter was made at 1/S of the pixels it covers and stretched (23 Nov 2026: TekRantGaming's
+// 3840 x 2160 display at 250%; a 1080p laptop at 150% the same, less so). At 100% nothing changes.
+void MatchTextToDisplay(ImGuiIO& io) {
+  float density = io.DisplayFramebufferScale.x > 0 ? io.DisplayFramebufferScale.x : 1.0f;
+#if defined(BF_DEV_TOOLS)
+  // Before and after pictures from one build on one display: BF_DEV_TEXT_DENSITY=old draws as before this fix;
+  // =<percent> draws as before on a display scaled that much (the raster 100/percent of the pixels covered).
+  static const float dev = [] {
+    const char* v = std::getenv("BF_DEV_TEXT_DENSITY");
+    if (!v || !*v) return 0.0f;
+    if (std::strcmp(v, "old") == 0) return -1.0f;
+    return float(std::atof(v));
+  }();
+  if (dev < 0) density = 1.0f;
+  else if (dev > 0) density = std::max(0.25f, density * 100.0f / dev);
+#endif
+  density = std::clamp(density, 0.25f, 4.0f);
+  for (ImFont* f : io.Fonts->Fonts)
+    if (f->CurrentRasterizerDensity != density) f->CurrentRasterizerDensity = density;
+#if defined(BF_DEV_TOOLS)
+  // The cost: glyphs made at the real size take more of the font texture (the log, when it grows).
+  static int atlas_w = 0, atlas_h = 0;
+  if (const ImTextureData* tex = io.Fonts->TexData; tex && (tex->Width != atlas_w || tex->Height != atlas_h)) {
+    atlas_w = tex->Width, atlas_h = tex->Height;
+    REXLOG_INFO("BF menu text: font texture {} x {} (glyphs made at {:.2f}x)", atlas_w, atlas_h, density);
+  }
+#endif
+}
+
 void SetGlyphDir(const fs::path& dir) { g_glyph_dir = dir; }
 
 bool WatermarkOn() { return REXCVAR_GET(bf_playtest_watermark); }
@@ -81,12 +113,27 @@ void ScaleX(ImDrawList* d, int start, float x0, float f) {
   if (f == 1) return;
   for (int i = start; i < d->VtxBuffer.Size; ++i) d->VtxBuffer[i].pos.x = x0 + (d->VtxBuffer[i].pos.x - x0) * f;
 }
+// ImDrawList::AddText starts its text at a whole pixel of the window's logical size (IM_TRUNC). With Windows display
+// scaling that is up to 2.5 real pixels at 250%, so letters drawn one at a time (letter spacing) landed unevenly
+// ("SC REEN"), which the stretched lettering used to blur away. The text's vertices are moved back to where it was
+// asked for, on the display's own pixel (the glyphs are made at that density: MatchTextToDisplay).
+void TextAt(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const char* t, float wrap = 0) {
+  const int start = d->VtxBuffer.Size;
+  d->AddText(f, size, at, col, t, nullptr, wrap);
+  const float dens = f && f->CurrentRasterizerDensity > 0 ? f->CurrentRasterizerDensity : 1.0f;
+  const float dx = std::round(at.x * dens) / dens - std::floor(at.x);
+  const float dy = std::round(at.y * dens) / dens - std::floor(at.y);
+  if (dx == 0 && dy == 0) return;
+  for (int i = start; i < d->VtxBuffer.Size; ++i) d->VtxBuffer[i].pos.x += dx, d->VtxBuffer[i].pos.y += dy;
+}
 size_t CharLen(const std::string& t, size_t i) {
   size_t n = 1;
   while (i + n < t.size() && (static_cast<unsigned char>(t[i + n]) & 0xC0) == 0x80) ++n;
   return n;
 }
 }  // namespace
+
+void PixelText(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const char* t) { TextAt(d, f, size, at, col, t); }
 
 float TextWidth(ImFont* f, float size, const std::string& t) {
   if (!f) return 0;
@@ -126,13 +173,13 @@ float Spaced(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const s
   const int start = d->VtxBuffer.Size;
   float x = at.x;
   if (track == 0) {
-    d->AddText(f, size, at, col, t.c_str());
+    TextAt(d, f, size, at, col, t.c_str());
     x += TextWidth(f, size, t);
   } else {
     for (size_t i = 0; i < t.size();) {
       const size_t n = CharLen(t, i);
       const std::string ch = t.substr(i, n);
-      d->AddText(f, size, ImVec2(x, at.y), col, ch.c_str());
+      TextAt(d, f, size, ImVec2(x, at.y), col, ch.c_str());
       x += TextWidth(f, size, ch) + track;
       i += n;
     }
@@ -172,7 +219,7 @@ float WrappedHeight(ImFont* f, float size, const std::string& t, float wrap) {
 float Wrapped(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const std::string& t, float wrap) {
   if (!f) return 0;
   const float k = TypedScale(f, size);
-  d->AddText(f, size * k, at, col, t.c_str(), nullptr, wrap);
+  TextAt(d, f, size * k, at, col, t.c_str(), wrap);
   return WrappedHeight(f, size, t, wrap);
 }
 
