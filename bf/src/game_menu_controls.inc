@@ -193,6 +193,246 @@
     rows.push_back(reset);
   }
 
+  // ---- Plane flight (TekRantGaming, 23 Nov 2026: "a option for keybinds for the plane for kbm remap of pitch yaw and
+  // roll to keboard and mouse"): the six ways a plane turns, each its own row on the keyboard and mouse page (and in
+  // the pause's Controls), with a box for the mouse's movement and the bindings' two keys and two mouse buttons. They
+  // are the settings that fly a plane already, only gathered and named by what they do: the keys are the Air vehicles
+  // set's right stick (pitch, roll) and left stick left and right (the rudder), vehicle_binds.cpp; the mouse's box is
+  // what bf_plane_mouse_x and _y fly with the two Invert flight settings (plane_mouse.cpp). So the defaults are today's
+  // (I and K pitch, J and L roll, A and D yaw, the mouse's left and right roll, its forward and back pitch) and
+  // nothing changes for anyone who leaves them. A key or mouse button that something else in a plane also uses is
+  // marked, and the help card says what with.
+  struct FlightAction {
+    const char* label;
+    const char* axis;  // what bf_plane_mouse_x and _y call it
+    int sign;          // its way in the game's concepts (plane_mouse.cpp): +1 roll right, yaw right, nose down
+    const char* bind;  // the infantry's name of its keys; the Air vehicles set's copy is the one used
+  };
+  static constexpr FlightAction kFlightActions[] = {
+      {"Pitch up (climb)", "pitch", -1, "keybind_rstick_up"},  {"Pitch down (dive)", "pitch", 1, "keybind_rstick_down"},
+      {"Yaw left (rudder)", "yaw", -1, "keybind_lstick_left"}, {"Yaw right (rudder)", "yaw", 1, "keybind_lstick_right"},
+      {"Roll left", "roll", -1, "keybind_rstick_left"},        {"Roll right", "roll", 1, "keybind_rstick_right"}};
+  static constexpr int kFlightCount = int(std::size(kFlightActions));
+  bool capture_flight_ = false;   // the key slot waiting is a Plane flight row's (the Bindings rows share its setting)
+  double flight_capture_at_ = 0;  // when a mouse box began to wait
+  bool flight_armed_ = false;     // the mouse's buttons let go since it began: its movement counts
+  float flight_dx_ = 0, flight_dy_ = 0;
+
+  // The keys of a flight action: the Air vehicles set's. The game turns a plane's pitch round with its own Invert
+  // flight (the controller's, GstInput Scheme3FlipY, native_input.cpp), and the keys' stick goes through it as a
+  // controller's does: with it Inverted the right stick's down key is the one that climbs.
+  std::string FlightKeyCvar(int i) {
+    std::string bind = kFlightActions[i].bind;
+    if (i < 2 && GameValue("GstInput", "Scheme3FlipY", "1") == "0")
+      bind = i == 0 ? "keybind_rstick_down" : "keybind_rstick_up";
+    return bf1943::BindCvar(bf1943::kBindAir, bind);
+  }
+  // The mouse's movement that does a flight action now: "Right", "Left", "Back" (towards you) or "Forward"; empty
+  // when the mouse flies none of it. The mouse's right adds to its axis's concept and its back takes away, each turned
+  // round by its Invert flight (plane_mouse.cpp).
+  std::string FlightMouseOf(int i) {
+    const FlightAction& a = kFlightActions[i];
+    if (!Truthy(Cvar("bf_plane_mouse_aim"))) return "";
+    if (Cvar("bf_plane_mouse_x") == a.axis)
+      return (a.sign > 0) != Truthy(Cvar("bf_mouse_invert_x_flight")) ? "Right" : "Left";
+    if (Cvar("bf_plane_mouse_y") == a.axis)
+      return (a.sign < 0) != Truthy(Cvar("bf_mouse_invert_y_flight")) ? "Back" : "Forward";
+    return "";
+  }
+  // The mouse moved `m` (+1 right or back, -1 left or forward) along x or y for a flight action: that axis flies it,
+  // the way round that makes this movement do it. The other axis, if it flew the same, takes what this one flew (so
+  // both never fly one, as the controller page's swap).
+  void SetFlightMouse(int i, bool x, int m) {
+    const FlightAction& a = kFlightActions[i];
+    const std::string mine = x ? "bf_plane_mouse_x" : "bf_plane_mouse_y", other = x ? "bf_plane_mouse_y" : "bf_plane_mouse_x";
+    const std::string had = Cvar(mine);
+    if (Cvar(other) == a.axis) SetCvar(other, had.empty() || had == a.axis ? "none" : had);
+    SetCvar(mine, a.axis);
+    if (x) SetCvar("bf_mouse_invert_x_flight", m != a.sign ? "true" : "false");
+    else SetCvar("bf_mouse_invert_y_flight", m == a.sign ? "true" : "false");
+    if (!Truthy(Cvar("bf_plane_mouse_aim"))) SetCvar("bf_plane_mouse_aim", "true");
+    REXLOG_INFO("BF settings: plane flight: {} on the mouse's {} {} (mouse x {}{}, y {}{})", a.label, x ? "x" : "y",
+                m > 0 ? (x ? "right" : "back") : (x ? "left" : "forward"), Cvar("bf_plane_mouse_x"),
+                Truthy(Cvar("bf_mouse_invert_x_flight")) ? " inverted" : "", Cvar("bf_plane_mouse_y"),
+                Truthy(Cvar("bf_mouse_invert_y_flight")) ? " inverted" : "");
+  }
+  // A mouse box waiting (capture_ "flight:<n>"): once the mouse's buttons are let go, the next clear movement goes to
+  // the action. Esc let go at once keeps what it has, Esc held takes the mouse off that axis; 8 s with nothing keeps it.
+  bool CaptureFlightAxis() {
+    const int i = std::clamp(std::atoi(capture_.c_str() + 7), 0, kFlightCount - 1);
+    const ImGuiIO& io = ImGui::GetIO();
+    if (ImGui::IsKeyDown(ImGuiKey_Escape)) {
+      if (esc_held_since_ < 0) esc_held_since_ = ImGui::GetTime();
+      if (ImGui::GetTime() - esc_held_since_ >= 0.6) {
+        for (const char* axis : {"bf_plane_mouse_x", "bf_plane_mouse_y"})
+          if (Cvar(axis) == kFlightActions[i].axis) SetCvar(axis, "none");
+        REXLOG_INFO("BF settings: plane flight: the mouse flies no {} now", kFlightActions[i].axis);
+        capture_.clear();
+        esc_held_since_ = -1;
+        esc_swallow_ = true;
+      }
+      return true;
+    }
+    if (esc_held_since_ >= 0) {
+      esc_held_since_ = -1;
+      capture_.clear();
+      return true;
+    }
+    if (ImGui::GetTime() - flight_capture_at_ > 8.0) {
+      REXLOG_INFO("BF settings: plane flight: {} kept (the mouse was not moved)", kFlightActions[i].label);
+      capture_.clear();
+      return true;
+    }
+    if (!flight_armed_) {
+      flight_armed_ = !ImGui::IsAnyMouseDown();
+      flight_dx_ = flight_dy_ = 0;
+      return true;
+    }
+    flight_dx_ += io.MouseDelta.x, flight_dy_ += io.MouseDelta.y;
+    const float need = std::max(24.0f, io.DisplaySize.y * 0.04f);
+    if (std::max(std::fabs(flight_dx_), std::fabs(flight_dy_)) < need) return true;
+    const bool x = std::fabs(flight_dx_) >= std::fabs(flight_dy_);
+    SetFlightMouse(i, x, (x ? flight_dx_ : flight_dy_) > 0 ? 1 : -1);
+    capture_.clear();
+    return true;
+  }
+  void StartFlightAxis(int i) {
+    capture_ = "flight:" + std::to_string(i), capture_flight_ = false;
+    flight_capture_at_ = ImGui::GetTime(), flight_armed_ = false, flight_dx_ = flight_dy_ = 0;
+  }
+  // A binding's keys, every one (BindSlots keeps two of each kind).
+  static std::vector<std::string> BindTokens(const std::string& value) {
+    std::vector<std::string> out;
+    for (size_t at = 0; at <= value.size();) {
+      size_t comma = value.find(',', at);
+      if (comma == std::string::npos) comma = value.size();
+      std::string k = value.substr(at, comma - at);
+      at = comma + 1;
+      while (!k.empty() && k.front() == ' ') k.erase(k.begin());
+      while (!k.empty() && k.back() == ' ') k.pop_back();
+      if (!k.empty()) out.push_back(k);
+    }
+    return out;
+  }
+  // Every key and mouse button read in a plane's seat, and what each does there: the Air vehicles set's own keys and
+  // the ones every seat shares (the game menu, chat, voice). The flight actions by their names here.
+  std::map<std::string, std::vector<std::pair<std::string, std::string>>> PlaneKeyUses() {
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>> uses;
+    std::string flight[kFlightCount];
+    for (int f = 0; f < kFlightCount; ++f) flight[f] = FlightKeyCvar(f);
+    for (const auto& [infantry, label] : kBindActions) {
+      const std::string cvar = bf1943::BindCvar(bf1943::kBindAir, infantry);
+      if (cvar.empty()) continue;
+      std::string what = bf1943::BindLabel(bf1943::kBindAir, infantry, label);
+      for (int f = 0; f < kFlightCount; ++f)
+        if (flight[f] == cvar) what = kFlightActions[f].label;
+      for (const std::string& k : BindTokens(Cvar(cvar))) uses[k].push_back({cvar, what});
+    }
+    return uses;
+  }
+
+  // The six rows, each: the mouse's box, then two keys and two mouse buttons (the five boxes of the combined list,
+  // its first column the mouse's movement in place of the controller's button). A click on a box, or A on the one
+  // left and right are on, waits: the mouse box for a movement, the others for a press. A clash is drawn red and named
+  // in the row's note. The clashes are listed in a row of their own after them.
+  void FlightRows(std::vector<SettingRow>& rows, const char* section) {
+    const auto uses = PlaneKeyUses();
+    const std::string mx = Cvar("bf_plane_mouse_x"), my = Cvar("bf_plane_mouse_y");
+    const bool both = Truthy(Cvar("bf_plane_mouse_aim")) && mx == my && (mx == "roll" || mx == "pitch" || mx == "yaw");
+    std::vector<std::string> all_clashes;
+    for (int i = 0; i < kFlightCount; ++i) {
+      const FlightAction& a = kFlightActions[i];
+      const std::string cvar = FlightKeyCvar(i);
+      SettingRow r{section, a.label,
+                   "What flies this in a plane, as the pilot: the mouse's movement (first box), two keys and two mouse "
+                   "buttons. Click a box (or A on it). The mouse's box then waits for the mouse to be moved the way "
+                   "that should do this: that way of the mouse flies it, and the opposite way the opposite action "
+                   "(the other mouse axis takes over what this one flew). The other boxes wait for a key or a mouse "
+                   "button. Esc keeps what a box has; hold Esc to clear it. Keys and the mouse fly together: an axis "
+                   "both fly takes the stronger. The names are the game's Normal plane controls."};
+      r.slots.push_back(FlightMouseOf(i));
+      const std::array<std::string, 4> keys = BindSlots(Cvar(cvar));
+      r.slots.insert(r.slots.end(), keys.begin(), keys.end());
+      r.slot_header = "MOUSE MOVE";
+      std::string clashes;
+      for (int k = 1; k < 5; ++k) {
+        const std::string& key = r.slots[size_t(k)];
+        const auto it = key.empty() ? uses.end() : uses.find(key);
+        if (it == uses.end()) continue;
+        std::string with;
+        for (const auto& [other, what] : it->second)
+          if (other != cvar) with += (with.empty() ? "" : ", ") + what;
+        if (with.empty()) continue;
+        r.slot_clash |= 1u << k;
+        clashes += (clashes.empty() ? "" : " ") + key + " also: " + with + ".";
+        all_clashes.push_back(key + " (" + a.label + ", " + with + ")");
+      }
+      if (both && mx == a.axis) {
+        r.slot_clash |= 1u;
+        clashes += std::string(clashes.empty() ? "" : " ") + "Both of the mouse's axes fly " + a.axis + ".";
+        if (a.sign < 0) all_clashes.push_back(std::string("the mouse's two axes (both ") + a.axis + ")");
+      }
+      if (!clashes.empty()) r.note = "CLASH: " + clashes + " Both work at once; change one if that is not meant.";
+      const bool chosen = int(rows.size()) == row_;
+      r.slot_cursor = chosen ? std::clamp(slot_cursor_, 0, 4) : -1;
+      r.slot_capture = capture_ == "flight:" + std::to_string(i) ? 0
+                       : capture_flight_ && capture_ == cvar   ? capture_slot_ + 1
+                                                                 : -1;
+      r.slot_click = [this, i, cvar](int slot) {
+        slot_cursor_ = std::clamp(slot, 0, 4);
+        if (slot_cursor_ == 0) StartFlightAxis(i);
+        else capture_ = cvar, capture_slot_ = slot_cursor_ - 1, capture_flight_ = true;
+      };
+      r.activate = [this, i, cvar] {
+        if (slot_cursor_ <= 0) StartFlightAxis(i);
+        else capture_ = cvar, capture_slot_ = std::clamp(slot_cursor_, 1, 4) - 1, capture_flight_ = true;
+      };
+      r.nudge = [this](int by) { slot_cursor_ = std::clamp(slot_cursor_ + by, 0, 4); };
+      // The pause's panel shows the boxes as text, the chosen one in brackets (KeyRows).
+      for (int s = 0; s < 5; ++s) {
+        std::string shown = r.slot_capture == s ? (s == 0 ? "MOVE" : "PRESS")
+                            : r.slots[size_t(s)].empty() ? "-"
+                            : s == 0                     ? "Mouse " + r.slots[0]
+                                                         : r.slots[size_t(s)];
+        if ((r.slot_clash >> s) & 1u) shown += "!";
+        if (chosen && r.slot_cursor == s) shown = "[" + shown + "]";
+        r.value += (s == 0 ? "" : s == 1 || s == 3 ? "   |   " : "  ") + shown;
+      }
+      rows.push_back(r);
+    }
+    SettingRow clash{section, "Clashes",
+                     "Keys, mouse buttons or mouse axes the flight rows share with something else in a plane: the "
+                     "Air vehicles bindings, Free-Look, the game menu, chat and voice. Each clash is marked red in its "
+                     "row. A clash is allowed (both happen at once), only shown."};
+    if (all_clashes.empty()) {
+      clash.value = "None";
+    } else {
+      clash.value = std::to_string(all_clashes.size()) + (all_clashes.size() == 1 ? " clash" : " clashes");
+      std::string list;
+      for (const std::string& c : all_clashes) list += (list.empty() ? "" : "; ") + c;
+      clash.note = "CLASH: " + list + ".";
+    }
+    rows.push_back(clash);
+  }
+  // The section's last row: the flight rows and the plane mouse's settings back to their defaults.
+  void FlightResetRow(std::vector<SettingRow>& rows, const char* section) {
+    SettingRow reset{section, "Reset plane flight",
+                     "Pitch, yaw and roll back to their defaults: I and K pitch, A and D yaw, J and L roll, the mouse's "
+                     "left and right roll and its forward and back pitch, not inverted (Free-Look in planes too), at "
+                     "sensitivity 1. The other "
+                     "Air vehicles bindings (throttle, fire, bombs...) keep theirs."};
+    reset.activate = [this] {
+      std::vector<std::string> names = {"bf_plane_mouse_aim",        "bf_plane_mouse_x",         "bf_plane_mouse_y",
+                                        "bf_mouse_invert_x_flight", "bf_mouse_invert_y_flight", "bf_plane_mouse_sensitivity",
+                                        "bf_mouse_invert_y_air_look"};
+      for (const FlightAction& a : kFlightActions) names.push_back(bf1943::BindCvar(bf1943::kBindAir, a.bind));
+      for (const std::string& n : names)
+        if (const auto* info = rex::cvar::GetFlagInfo(n)) SetCvar(n, info->default_value);
+      REXLOG_INFO("BF settings: plane flight back to its defaults");
+    };
+    rows.push_back(reset);
+  }
+
   // ---- the rows of each device's page
   // ControlsRows' rows (its Mapping rows are left out while the settings page draws, controls_buttons_), each given
   // the section it has on its device's page, or none when it belongs to the other device.
@@ -200,7 +440,11 @@
     const std::string& n = r.name;
     const bool invert = n.rfind("Invert", 0) == 0;
     if (r.section == "Input") return device == 1 && n == "Keyboard & mouse" ? "" : "Input";
-    if (r.section == "Keyboard & mouse") return device != 0 ? "" : invert ? "Invert" : "Mouse";
+    // The mouse's plane rows go with the flight rows (their own section: FlightRows makes the ones ControlsRows has).
+    const bool plane = n.find("in planes") != std::string::npos || n.find("flight") != std::string::npos ||
+                       n == "Plane mouse sensitivity";
+    if (r.section == "Plane flight") return "";
+    if (r.section == "Keyboard & mouse") return device != 0 ? "" : plane ? "Plane flight" : invert ? "Invert" : "Mouse";
     if (r.section == "Controller") {
       if (device != 1) return "";
       if (invert || n == "Left stick" || n == "Camera horizontal") return "Invert";
@@ -236,6 +480,11 @@
       for (const char* s : kKeyboardSections) sorted(s);
     else
       for (const char* s : kPadSections) sorted(s);
+    if (device == 0) {  // Plane flight: its six rows and their clashes, the mouse's plane rows, its reset
+      FlightRows(rows, "Plane flight");
+      sorted("Plane flight");
+      FlightResetRow(rows, "Plane flight");
+    }
     if (device == 0) KeyboardBindRows(rows);
     else PadButtonRows(rows);
     for (const SettingRow& r : all)  // the keys while playing (F2, the performance metrics) on both
@@ -262,12 +511,14 @@
       const std::array<std::string, 4> slots = BindSlots(Cvar(cvar));
       r.slots.assign(slots.begin(), slots.end());
       r.slot_cursor = chosen ? std::clamp(slot_cursor_, 0, 3) : -1;
-      r.slot_capture = capture_ == cvar ? capture_slot_ : -1;
+      r.slot_capture = capture_ == cvar && !capture_flight_ ? capture_slot_ : -1;
       r.slot_click = [this, name](int slot) {
         slot_cursor_ = std::clamp(slot, 0, 3);
-        capture_ = name, capture_slot_ = slot_cursor_;
+        capture_ = name, capture_slot_ = slot_cursor_, capture_flight_ = false;
       };
-      r.activate = [this, name] { capture_ = name, capture_slot_ = std::clamp(slot_cursor_, 0, 3); };
+      r.activate = [this, name] {
+        capture_ = name, capture_slot_ = std::clamp(slot_cursor_, 0, 3), capture_flight_ = false;
+      };
       r.nudge = [this](int by) { slot_cursor_ = std::clamp(slot_cursor_ + by, 0, 3); };
       rows.push_back(r);
     }
@@ -684,7 +935,9 @@
           const std::string& v = r.slots[k];
           if (v.empty()) continue;
           const bool cursor = int(k) == r.slot_cursor || int(k) == r.slot_capture;
-          if (MouseKeyName(v)) {
+          if (k == 0 && r.slots.size() == 5 && !r.slot_header.empty()) {  // a flight row's mouse movement
+            lit.mouse_all = true;
+          } else if (MouseKeyName(v)) {
             const std::string part = v == "LMB" ? "lmb" : v == "RMB" ? "rmb" : v == "MB4" || v == "Mouse4" ? "m4"
                                      : v == "MB5" || v == "Mouse5" ? "m5" : "wheel";
             if (cursor) lit.mouse_sel = part;
@@ -701,7 +954,7 @@
             }
           }
         }
-      } else if (r.section == "Mouse" || r.section == "Invert") {
+      } else if (r.section == "Mouse" || r.section == "Invert" || r.section == "Plane flight") {
         lit.mouse_all = true;
       }
       return lit;
@@ -762,8 +1015,8 @@
     static const std::pair<const char*, const char*> kList[2][4] = {
         {{"MOUSE", "Sensitivity, aiming, vehicles, hold or toggle aim"},
          {"INVERT", "On foot, vehicles, planes"},
-         {"BINDINGS", "28 actions \xC2\xB7 two keys, two mouse buttons"},
-         {"BOTH PAGES", "Button prompts, camera turning"}},
+         {"PLANE FLIGHT", "Pitch, yaw, roll on keys or the mouse"},
+         {"BINDINGS", "28 actions \xC2\xB7 two keys, two mouse buttons"}},
         {{"LOOK", "Sensitivity, response, dead zone, invert"},
          {"AIM", "Hold or toggle, aim assist and its strength"},
          {"FEEL", "Vibration, the game's own layouts"},

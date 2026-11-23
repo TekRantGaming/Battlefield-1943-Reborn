@@ -698,6 +698,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     settings_.path = std::move(settings_path);
     settings_.Load();
     MigrateInvert041();
+    MigrateAirLook048();
     RefreshGameFlipY();
     BfListShotSetDir(settings_.path.parent_path() / "cache" / "extracted");
     kit::SetMenuArtDir(settings_.path.parent_path() / "cache" / "extracted" / "menu");  // the game's own menu art
@@ -3497,6 +3498,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // for the Controller remap submenu so that the controller UI icons/glyphs are used in the box input fields"): its
     // slot is a controller part ("a", "lt", "up", ... or a stick axis "rx", "-ly"), drawn as the controller's glyph.
     bool pad_glyphs = false;
+    // Plane flight's rows (game_menu_controls.inc FlightRows): the boxes that clash with another action (bit per box,
+    // drawn red), and the first box's column name in place of CONTROLLER.
+    unsigned slot_clash = 0;
+    std::string slot_header;
     int slot_cursor = 0, slot_capture = -1;
     std::function<void(int)> slot_click;
     std::function<void(int)> nudge;
@@ -3774,6 +3779,22 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     settings_.Save();
     REXLOG_INFO("BF settings: 0.4.1's invert settings from 0.4.0's: the mouse in vehicles {}{}",
                 vehicles ? "inverted" : "normal", fold ? "; the controller's Camera vertical folded into the game's own" : "");
+  }
+  // 0.4.8's own invert for Free-Look in planes (bf_mouse_invert_y_air_look, plane_mouse.cpp; TekRantGaming, 23 Nov
+  // 2026: Invert Air "should never be tied to Invert Vehicle"). Before it, plane Free-Look went by Invert vehicle: a
+  // player who had that Inverted gets the new setting Inverted too, once, so nobody's Free-Look turns round with the
+  // update. From then on the two are separate settings.
+  void MigrateAirLook048() {
+    if (settings_.Get("settings_048_air_look", "") == "1") return;
+    const std::string vehicle = settings_.Get("cvar.bf_mouse_invert_y_vehicle", "");
+    if (Truthy(vehicle) && settings_.Get("cvar.bf_mouse_invert_y_air_look", "").empty()) {
+      settings_.values["cvar.bf_mouse_invert_y_air_look"] = "true";
+      rex::cvar::SetFlagByName("bf_mouse_invert_y_air_look", "true");
+    }
+    settings_.values["settings_048_air_look"] = "1";
+    settings_.Save();
+    REXLOG_INFO("BF settings: Free-Look in planes has its own invert now ({}, from Invert vehicle once)",
+                Truthy(vehicle) ? "inverted" : "normal");
   }
   void RefreshGameFlipY() {
     game_flip_y_.store(GameValue("GstInput", "Scheme2FlipY", "0") == "1", std::memory_order_relaxed);
@@ -4451,8 +4472,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (!mnk) zoom.disabled = true, zoom.note = mnk_note;
       rows.push_back(zoom);
       SettingRow veh = Slider("Keyboard & mouse", "Vehicle sensitivity",
-                              "How fast the mouse turns vehicles, their guns and planes. The mouse's own: the "
-                              "controller's camera sensitivity does not change it.",
+                              "How fast the mouse turns vehicles and their guns (planes have Plane mouse "
+                              "sensitivity). The mouse's own: the controller's camera sensitivity does not change it.",
                               "bf_mouse_vehicle_sensitivity", 0.1f, 5.0f, 0.05f, [](float v) {
                                 char b[32];
                                 std::snprintf(b, sizeof(b), "%.2f×", v);
@@ -4479,7 +4500,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       // Issue #3: vehicles' own, so the soldier and a tank can each be normal or inverted.
       SettingRow vinv = Toggle("Keyboard & mouse", "Invert vehicle",
                                "Inverts the mouse's up and down for a tank's gun, mounted machine guns, AA guns and "
-                               "looking around in a vehicle. Normal: up aims up, as on foot.",
+                               "looking around in a vehicle. Normal: up aims up, as on foot. Not planes: they have "
+                               "their own (Plane flight).",
                                "bf_mouse_invert_y_vehicle", "Normal", "Inverted");
       if (!mnk || !Truthy(Cvar("mnk_mouse"))) vinv.disabled = true, vinv.note = mnk_note;
       rows.push_back(vinv);
@@ -4507,10 +4529,27 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       SettingRow fxi = Toggle("Keyboard & mouse", "Invert flight left and right",
                               "Inverts the mouse's left and right in planes, for whatever it flies.",
                               "bf_mouse_invert_x_flight", "Normal", "Inverted");
-      for (SettingRow* r : {&fx, &fy, &fxi}) {
+      // 23 Nov 2026 (Plane flight): the planes' own mouse sensitivity (plane_mouse.cpp), a setting with no row before.
+      SettingRow fs = Slider("Keyboard & mouse", "Plane mouse sensitivity",
+                             "How far a plane's controls go as you move the mouse: at 1, about 50 counts is the stick "
+                             "all the way. The mouse's stick springs back to the centre when the mouse stops.",
+                             "bf_plane_mouse_sensitivity", 0.1f, 5.0f, 0.05f, [](float v) {
+                               char b[32];
+                               std::snprintf(b, sizeof(b), "%.2f\xC3\x97", v);
+                               return std::string(b);
+                             }, 1.0f);
+      // Free-Look's own up and down in a plane (plane_mouse.cpp), never Invert vehicle's (TekRantGaming, 23 Nov 2026).
+      SettingRow fli = Toggle("Keyboard & mouse", "Invert Free-Look in planes",
+                              "Inverts the mouse's up and down while Free-Look is held in a plane (the mouse turns the "
+                              "view). Normal: up looks up. Planes only: Invert vehicle never changes it.",
+                              "bf_mouse_invert_y_air_look", "Normal", "Inverted");
+      for (SettingRow* r : {&fx, &fy, &fxi, &fli, &fs}) {
         if (!mnk || !Truthy(Cvar("mnk_mouse"))) r->disabled = true, r->note = mnk_note;
         rows.push_back(*r);
       }
+      // The flight rows (game_menu_controls.inc) for the pause's list; the device page makes its own.
+      FlightRows(rows, "Plane flight");
+      FlightResetRow(rows, "Plane flight");
     }
     rows.push_back(Slider("Controller", "Camera sensitivity",
                           "How fast the right stick turns the camera and moves your aim.", "bf_camera_sensitivity", 25,
@@ -5105,6 +5144,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   bool CaptureBind() {
     if (capture_.empty()) return false;
     if (capture_.rfind("pad:", 0) == 0 || capture_.rfind("axis:", 0) == 0) return CapturePad();
+    if (capture_.rfind("flight:", 0) == 0) return CaptureFlightAxis();  // a Plane flight row's mouse movement
     const bool mouse = capture_slot_ >= 2;
     // A wheel notch only for the bindings that are a button (the wheel cannot hold a trigger or a direction).
     const bool wheel = capture_.find("trigger") == std::string::npos && capture_.find("stick_up") == std::string::npos &&

@@ -38,6 +38,7 @@
 #include <rex/ui/image_decode.h>
 
 #include "capture_points.h"
+#include "vehicle_binds.h"
 
 namespace bf1943 {
 
@@ -48,6 +49,7 @@ std::string PadFamily();                // game_menu.cpp: the controller in use 
 std::vector<std::string> ButtonsPressing(const std::string& game_button);
 std::vector<const char*> KeybindsPressing(const std::string& button, bool seated);
 std::string ActiveBind(std::string_view infantry_cvar);  // vehicle_binds.cpp: the keys of the seat's binding set
+unsigned PlaneMouseFlies();  // plane_mouse.cpp: what the mouse flies in a plane (1 roll, 2 pitch, 4 yaw)
 bool SquadBrightGreen();  // squad_colors.cpp: the squad's colour drawn green
 
 namespace {
@@ -143,7 +145,51 @@ std::string PictureName(std::string_view key) {
 // controller buttons the remapping turns into it (the button itself first), the keys bound to them where the player
 // is (on foot or in a vehicle), the first with a picture. A bind lists keys separated by commas ("Up,V": the first
 // with a picture); a key that needs a modifier ("Shift+W") has no picture of its own and is passed over.
+// A bind's first key with a picture, empty for none.
+std::string PicturedKey(const std::string& keys) {
+  for (size_t at = 0; at <= keys.size();) {
+    size_t comma = keys.find(',', at);
+    if (comma == std::string::npos) comma = keys.size();
+    std::string_view key(keys.data() + at, comma - at);
+    at = comma + 1;
+    while (!key.empty() && key.front() == ' ') key.remove_prefix(1);
+    while (!key.empty() && key.back() == ' ') key.remove_suffix(1);
+    if (key.empty() || key.find_first_of("+./\\") != std::string_view::npos) continue;  // a combination, no name
+    const std::string name = PictureName(key);
+    if (Load("keyboard", name)) return name;
+  }
+  return {};
+}
+
+// A plane's pilot (Plane flight, 23 Nov 2026): the sticks' pictures say what flies the plane now. The right stick is
+// its pitch (up and down) and roll (left and right), the left stick's left and right its rudder: the mouse while it
+// flies them (plane_mouse.cpp), else their keys (the Air vehicles set's). As they start, the same as anywhere else
+// (the mouse, WASD); the left stick's up and down stay the throttle's WASD. Empty: not a plane's stick.
+std::string PlaneStickKey(const std::string& button) {
+  const bool rs = button == "rs" || button == "rs_lr" || button == "rs_ud";
+  if (!rs && button != "ls_lr") return {};
+  const unsigned mouse = PlaneMouseFlies();
+  const unsigned want = button == "rs_lr" ? 1u : button == "rs_ud" ? 2u : button == "ls_lr" ? 4u : 3u;
+  if (mouse & want) return "Mouse_Simple";
+  if (!rs) {
+    const std::string left = ActiveBind("keybind_lstick_left"), right = ActiveBind("keybind_lstick_right");
+    if (left == "A" && right == "D") return "WASD";
+    std::string key = PicturedKey(left);
+    return key.empty() ? PicturedKey(right) : key;
+  }
+  const std::vector<const char*> binds =
+      button == "rs_lr" ? std::vector<const char*>{"keybind_rstick_left", "keybind_rstick_right"}
+      : button == "rs_ud" ? std::vector<const char*>{"keybind_rstick_up", "keybind_rstick_down"}
+                          : std::vector<const char*>{"keybind_rstick_up", "keybind_rstick_down", "keybind_rstick_left",
+                                                     "keybind_rstick_right"};
+  for (const char* bind : binds)
+    if (std::string key = PicturedKey(ActiveBind(bind)); !key.empty()) return key;
+  return "Mouse_Simple";  // nothing bound: the mouse's picture, as before
+}
+
 std::string KeyFor(const std::string& button, bool seated) {
+  if (seated && ActiveBindSet() == kBindAir)
+    if (std::string key = PlaneStickKey(button); !key.empty()) return key;
   if (button == "ls" || button == "ls_lr" || button == "ls_ud") return "WASD";
   if (button == "rs" || button == "rs_lr" || button == "rs_ud") return "Mouse_Simple";
   std::string game = button;  // the atlas's names as input_settings.cpp's
@@ -151,20 +197,9 @@ std::string KeyFor(const std::string& button, bool seated) {
   if (button == "ls_click") game = "ls";
   if (button == "rs_click") game = "rs";
   for (const std::string& pad : ButtonsPressing(game))
-    for (const char* bind : KeybindsPressing(pad, seated)) {
-      const std::string keys = ActiveBind(bind);  // the seat's binding set's (vehicle_binds.cpp)
-      for (size_t at = 0; at <= keys.size();) {
-        size_t comma = keys.find(',', at);
-        if (comma == std::string::npos) comma = keys.size();
-        std::string_view key(keys.data() + at, comma - at);
-        at = comma + 1;
-        while (!key.empty() && key.front() == ' ') key.remove_prefix(1);
-        while (!key.empty() && key.back() == ' ') key.remove_suffix(1);
-        if (key.empty() || key.find_first_of("+./\\") != std::string_view::npos) continue;  // a combination, no name
-        const std::string name = PictureName(key);
-        if (Load("keyboard", name)) return name;
-      }
-    }
+    for (const char* bind : KeybindsPressing(pad, seated))
+      if (std::string key = PicturedKey(ActiveBind(bind)); !key.empty())  // the seat's binding set's (vehicle_binds.cpp)
+        return key;
   return {};
 }
 
@@ -368,7 +403,7 @@ bool Patch(uint32_t width, uint32_t height, const uint8_t* guest, std::vector<ui
   } else {
     std::string keys;  // the keyboard's choices for the log: the HUD's hints are what the issue was about
     if (set == "keyboard")
-      for (const char* b : {"a", "b", "x", "y", "lb", "rb", "lt", "rt", "dpad_up"}) {
+      for (const char* b : {"a", "b", "x", "y", "lb", "rb", "lt", "rt", "dpad_up", "rs_ud", "rs_lr", "ls_lr"}) {
         Choice c;
         keys += std::string(" ") + b + "=" + (Choose(set, b, seated, c) ? c.name : "-");
       }

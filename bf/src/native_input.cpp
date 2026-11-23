@@ -50,6 +50,7 @@ bool PlaneMouseConcepts(float& roll6, float& pitch5, float& yaw4, unsigned& axes
 // vehicle_mouse.cpp: the axes the seat's gun has (the same bits), 0 in a seat without one.
 unsigned VehicleMouseAxes();
 double TickSeconds();  // tick_rate.cpp
+bool FlightMouseInverted();  // plane_mouse.cpp: Invert flight (the mouse's up and down in planes)
 }  // namespace bf1943
 
 REXCVAR_DECLARE(double, bf_mouse_vehicle_sensitivity);  // look.cpp
@@ -377,7 +378,12 @@ REX_HOOK_RAW(sub_822BDB90) {
         if (!(dt > 0.001f && dt < 0.5f)) dt = float(bf1943::TickSeconds());
         const double sens = REXCVAR_GET(bf_mouse_vehicle_sensitivity);
         const double scale = 1.35 * (std::isfinite(sens) ? std::clamp(sens, 0.05, 10.0) : 1.0);
-        const double iy = REXCVAR_GET(bf_mouse_invert_y_vehicle) ? -1.0 : 1.0;
+        // A plane's (plane mouse flying switched off): Invert flight, never Invert vehicle (TekRantGaming, 23 Nov
+        // 2026). Normal there pulls the nose up with the mouse back, as the plane mouse does.
+        bf1943::SeatInfo look_seat;
+        const bool air = bf1943::LocalSeat(look_seat) &&
+                         (look_seat.kind == bf1943::SeatKind::kPlane || look_seat.kind == bf1943::SeatKind::kBomber);
+        const double iy = (air ? bf1943::FlightMouseInverted() : REXCVAR_GET(bf_mouse_invert_y_vehicle)) ? -1.0 : 1.0;
         auto stronger = [&](int c, double v) {
           v = std::clamp(v, -1.0, 1.0);
           const float now = LoadF(base, state + 8 + 4 * c);
