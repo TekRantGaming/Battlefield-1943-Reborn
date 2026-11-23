@@ -56,9 +56,15 @@ struct Fonts {
 };
 const Fonts& GetFonts();
 void LoadFonts(ImFontAtlas* atlas, const std::filesystem::path& exe_dir, ImFont* ui, ImFont* ui_bold);
+// Every font in the atlas rasterized at the display's own pixel density (Windows display scaling), once a frame
+// before any of our text is drawn. Without it, text drawn straight into a draw list (all of our menus) was made at
+// the window's logical size and stretched by the scaling: at 250% a caption was a 10 pixel glyph drawn 25 high.
+void MatchTextToDisplay(ImGuiIO& io);
 
 // ---- drawing helpers
 float TextWidth(ImFont* f, float size, const std::string& t);
+// ImDrawList::AddText placed exactly at `at` on the display's own pixel (not at a whole pixel of the scaled size).
+void PixelText(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const char* t);
 // Text with letter spacing `track` (CSS letter-spacing), optionally squeezed for the stencil stand in.
 float Spaced(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const std::string& t, float track);
 float SpacedWidth(ImFont* f, float size, const std::string& t, float track);
