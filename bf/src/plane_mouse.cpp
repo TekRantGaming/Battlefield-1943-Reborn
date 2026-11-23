@@ -46,6 +46,10 @@ REXCVAR_DEFINE_STRING(bf_plane_mouse_y, "pitch", "BF1943/Controls",
                       "What the mouse's forward and back flies in planes: pitch, roll, yaw or none");
 REXCVAR_DEFINE_BOOL(bf_mouse_invert_x_flight, false, "BF1943/Controls",
                     "Mouse horizontal inverted in planes (false: mouse right rolls, yaws or pitches the positive way)");
+// 23 Nov 2026 (TekRantGaming: "Don't forget Invert Air. That should never be tied to Invert Vehicle"): Free-Look in a
+// plane (Shift held, the mouse turns the view, look.cpp) has its own up and down, no longer Invert vehicle's.
+REXCVAR_DEFINE_BOOL(bf_mouse_invert_y_air_look, false, "BF1943/Controls",
+                    "Mouse vertical inverted for Free-Look in planes (false: mouse up looks up)");
 REXCVAR_DECLARE(bool, bf_mouse_invert_y_vehicle);       // input_settings.cpp
 REXCVAR_DECLARE(double, bf_mouse_vehicle_sensitivity);  // look.cpp
 REXCVAR_DECLARE(bool, bf_debug_vehicle_mouse);          // vehicle_mouse.cpp
@@ -91,6 +95,18 @@ void Let_go() {
   g.updated = {}, g.steered_at = {}, g.gun_until = {}, g.plane_until = {};
 }
 }  // namespace
+
+// For the HUD's prompts (hud_glyphs.cpp): what the mouse flies in a plane now (1 roll, 2 pitch, 4 yaw), none while
+// it flies nothing.
+unsigned PlaneMouseFlies() {
+  if (!REXCVAR_GET(bf_plane_mouse_aim)) return 0;
+  return FlownBy(REXCVAR_GET(bf_plane_mouse_x)) | FlownBy(REXCVAR_GET(bf_plane_mouse_y));
+}
+
+// Air's own inverts, never Invert vehicle's: Free-Look's up and down in a plane (look.cpp), and the mouse's up and
+// down where it flies a plane (native_input.cpp's seat look, with plane mouse flying switched off).
+bool AirLookInverted() { return REXCVAR_GET(bf_mouse_invert_y_air_look); }
+bool FlightMouseInverted() { return REXCVAR_GET(bf_mouse_invert_y_flight); }
 
 void ResetPlaneMouse() {
   std::lock_guard lock(g.mutex);

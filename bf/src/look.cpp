@@ -457,6 +457,7 @@ void LookFrame() {
 bool MouseStickSeat();  // plane_mouse.cpp: a plane, or a seat whose gun the mouse's stick turns
 bool VehicleMouseTurretSeat();                                                           // vehicle_mouse.cpp
 bool VehicleMouseInverted();  // vehicle_mouse.cpp: Mouse vertical in vehicles (same as on foot, normal, inverted)
+bool AirLookInverted();       // plane_mouse.cpp: Free-Look's own up and down in a plane (never Invert vehicle's)
 bool GameVerticalLookInverted();  // game_menu.cpp: the game's own Vertical look (it negates the stick's y in vehicles)
 bool TickBlendVehicleView();                                                             // tick_blend.cpp
 void NoteSeatLook(double dx, double dy);                                                 // native_input.cpp
@@ -604,7 +605,11 @@ void LookPad(uint8_t* gamepad, bool seated) {
       return;
     }
     const double k = kRadiansPerCount * std::clamp(REXCVAR_GET(bf_mouse_vehicle_sensitivity), 0.05, 10.0) / d;
-    const double iy = VehicleMouseInverted() ? -1.0 : 1.0;  // Invert vehicle (vehicle_mouse.cpp)
+    // Invert vehicle (vehicle_mouse.cpp) in a tank's outside view; in a plane its own (TekRantGaming, 23 Nov 2026:
+    // Invert Air "should never be tied to Invert Vehicle").
+    SeatInfo look_seat;
+    const bool air = LocalSeat(look_seat) && (look_seat.kind == SeatKind::kPlane || look_seat.kind == SeatKind::kBomber);
+    const double iy = (air ? AirLookInverted() : VehicleMouseInverted()) ? -1.0 : 1.0;
     double yaw = g_free_yaw.load(), pitch = g_free_pitch.load();
     if (std::isfinite(pdx)) yaw = std::remainder(yaw + pdx * k, kTwoPi);
     if (std::isfinite(pdy)) pitch = std::clamp(pitch - pdy * k * iy, -kFreePitch, kFreePitch);

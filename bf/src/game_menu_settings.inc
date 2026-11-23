@@ -124,7 +124,8 @@
           const float bw = st(66), gap = st(6), pair = st(14);
           const float mouse_x = tx1 - 2 * bw - gap, keys_x = mouse_x - pair - 2 * bw - gap;
           if (first->slots.size() == 5)
-            kit::Spaced(d, f.typed, st(7), ImVec2(keys_x - 2 * pair - bw, y_row - sh + st(10)), kit::kInkSection, "CONTROLLER", st(1.2f));
+            kit::Spaced(d, f.typed, st(7), ImVec2(keys_x - 2 * pair - bw, y_row - sh + st(10)), kit::kInkSection,
+                        first->slot_header.empty() ? "CONTROLLER" : first->slot_header.c_str(), st(1.2f));
           kit::Spaced(d, f.typed, st(8), ImVec2(keys_x, y_row - sh + st(9)), kit::kInkSection, "KEYBOARD", st(2));
           kit::Spaced(d, f.typed, st(8), ImVec2(mouse_x, y_row - sh + st(9)), kit::kInkSection, "MOUSE", st(2));
         }
@@ -280,11 +281,17 @@
           if (it.pad_glyphs && !waiting && !it.slots[size_t(k)].empty() &&
               PadSlotGlyph(d, it.slots[size_t(k)], ImVec2((b0.x + b1.x) * 0.5f, (b0.y + b1.y) * 0.5f), (b1.y - b0.y) * 0.72f) > 0) {
           } else {
-            const std::string label = waiting ? (it.pad_glyphs && capture_.rfind("axis:", 0) == 0 ? "MOVE A STICK..." : "PRESS...")
+            const std::string label = waiting ? (it.pad_glyphs && capture_.rfind("axis:", 0) == 0 ? "MOVE A STICK..."
+                                                 : capture_.rfind("flight:", 0) == 0          ? "MOVE..."
+                                                                                              : "PRESS...")
                                       : it.slots[size_t(k)].empty() ? "-" : it.slots[size_t(k)];
+            const bool clash = !waiting && ((it.slot_clash >> k) & 1u);
             const float lw = kit::TextWidth(f.ui_bold, st(12), label);
             d->AddText(f.ui_bold, st(12), ImVec2((b0.x + b1.x - lw) * 0.5f, b0.y + (b1.y - b0.y - st(12) * 1.45f) * 0.5f),
-                       waiting ? kit::kCream : it.slots[size_t(k)].empty() ? kit::kInkFaint : kit::kInk, label.c_str());
+                       waiting ? kit::kCream : clash ? kit::kStamp : it.slots[size_t(k)].empty() ? kit::kInkFaint : kit::kInk,
+                       label.c_str());
+            // A clash (Plane flight): the box's corner cut red as well as its key.
+            if (clash) d->AddTriangleFilled(ImVec2(b1.x - st(13), b0.y), ImVec2(b1.x, b0.y), ImVec2(b1.x, b0.y + st(13)), kit::kStamp);
           }
           if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && it.slot_click && capture_.empty()) {
             row_ = i;
