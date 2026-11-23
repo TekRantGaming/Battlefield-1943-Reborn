@@ -38,7 +38,9 @@
 #include <windows.h>
 #include <mmsystem.h>
 #endif
-#include <SDL3/SDL.h>  // the menu sounds' mixer on both systems; on Linux the WAV player too
+#include <SDL3/SDL.h>  // the menu sounds' mixer and the WAV player
+
+#include "audio_devices.h"
 
 extern "C" {
 #include "libavcodec/avcodec.h"
@@ -169,11 +171,11 @@ bool EaAudioToWav(const std::vector<uint8_t>& wave_res, const std::vector<uint8_
   return !ec;
 }
 
-#if !defined(_WIN32)
 namespace {
-// Linux (GitHub issue 21, 14 Nov 2026: "users with the appimage having no menu music"): Windows plays these WAVs with
-// its own PlaySound; here SDL's audio (the runtime's, as the voice chat's, comms.cpp) plays them. One sound at a time,
-// as PlaySound: starting one stops the other.
+// SDL's audio (the runtime's, as the voice chat's, comms.cpp) plays these WAVs, one sound at a time: starting one stops
+// the other. Linux first (GitHub issue 21, 14 Nov 2026: "users with the appimage having no menu music"); Windows too
+// since 23 Nov 2026 (it had its own PlaySound, which plays on the system's default device only): so the menu music is
+// on the device Settings > Audio's Game sound output names (audio_devices.h).
 struct WavPlayer {
   SDL_AudioStream* stream = nullptr;
   Uint8* data = nullptr;
@@ -197,7 +199,7 @@ void SDLCALL FeedWav(void* user, SDL_AudioStream* stream, int additional, int) {
   }
 }
 void StopWav() {
-  if (g_player.stream) SDL_DestroyAudioStream(g_player.stream);  // its callback has stopped once this returns
+  if (g_player.stream) audio_devices::CloseStream(g_player.stream);  // its callback has stopped once this returns
   if (g_player.data) SDL_free(g_player.data);
   g_player = WavPlayer{};
 }
@@ -209,54 +211,28 @@ bool PlayWav(const fs::path& wav, bool loop) {
     return false;
   }
   SDL_AudioSpec spec{};
-  if (!SDL_LoadWAV(wav.string().c_str(), &spec, &g_player.data, &g_player.length)) {
+  const std::u8string path = wav.u8string();  // SDL's paths are UTF-8 (a user folder with accents, on Windows)
+  if (!SDL_LoadWAV(reinterpret_cast<const char*>(path.c_str()), &spec, &g_player.data, &g_player.length)) {
     REXLOG_WARN("BF music: {} could not be read ({})", wav.string(), SDL_GetError());
     return false;
   }
   g_player.loop = loop;
-  g_player.stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, FeedWav, &g_player);
+  g_player.stream = audio_devices::OpenStream(audio_devices::Role::kGame, spec, FeedWav, &g_player, "the menu music");
   if (!g_player.stream) {
     REXLOG_WARN("BF music: no sound device ({})", SDL_GetError());
     StopWav();
     return false;
   }
-  SDL_ResumeAudioStreamDevice(g_player.stream);
   return true;
 }
 }  // namespace
-#endif
 
 // A sound played once (the startup cards' logo music: game_menu.cpp IntroPage), and every sound stopped.
-void PlaySoundOnce(const fs::path& wav) {
-#if defined(_WIN32)
-  if (fs::exists(wav)) PlaySoundW(wav.wstring().c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
-#else
-  PlayWav(wav, false);
-#endif
-}
-void StopSounds() {
-#if defined(_WIN32)
-  PlaySoundW(nullptr, nullptr, 0);
-#else
-  StopWav();
-#endif
-}
+void PlaySoundOnce(const fs::path& wav) { PlayWav(wav, false); }
+void StopSounds() { StopWav(); }
 
-// The menu music on loop (Windows' own player, on its own thread), or stopped.
+// The menu music on loop (SDL's audio thread feeds it), or stopped.
 void PlayMenuMusic(const fs::path& wav, bool on) {
-#if defined(_WIN32)
-  static bool playing = false;
-  if (on == playing) return;
-  if (on) {
-    if (!fs::exists(wav)) return;
-    playing = PlaySoundW(wav.wstring().c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_LOOP | SND_NODEFAULT) != FALSE;
-    if (playing) REXLOG_INFO("BF music: the menu music plays on loop");
-  } else {
-    PlaySoundW(nullptr, nullptr, 0);
-    playing = false;
-    REXLOG_INFO("BF music: the menu music stopped");
-  }
-#else
   static bool playing = false;
   if (on == playing) return;
   if (on) {
@@ -267,7 +243,6 @@ void PlayMenuMusic(const fs::path& wav, bool on) {
     playing = false;
     REXLOG_INFO("BF music: the menu music stopped");
   }
-#endif
 }
 
 // ---- The original menus' sounds in ours (TekRantGaming, 16 Nov 2026: "the original menus sounds for moving and
@@ -281,7 +256,7 @@ void PlayMenuMusic(const fs::path& wav, bool on) {
 // and nothing for SND_NAV_NOGO (a move at a list's end) and the pop-ups (SND_POPUP_ERROR, _INFO). shader_prep.cpp
 // makes the four into 16 bit WAVs in the user's cache (from mainmenu-00.fbrb, never shipped); here they are read at
 // the first sound, kept in memory at 48 kHz stereo and mixed on SDL's audio (one stream, the runtime's SDL, as the
-// voice chat's), apart from the menu music (Windows' PlaySound), so a press never stops the music. A sound whose
+// voice chat's), apart from the menu music's own stream, so a press never stops the music. A sound whose
 // file is not there stays silent (looked for again every 5 s: the cache is made while the first page shows).
 //
 // While our menus show, the game's own copies of these four are kept quiet (the sub_826A8330 hook below): our pause
@@ -466,7 +441,8 @@ void PlayMenuSound(const fs::path& dir, int which, float gain, const char* why) 
     }
     const SDL_AudioSpec spec{SDL_AUDIO_F32, 2, kMixRate};
     lock.unlock();  // the callback takes the lock: never open the device holding it
-    SDL_AudioStream* stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, MixMenuSounds, nullptr);
+    SDL_AudioStream* stream =
+        audio_devices::OpenStream(audio_devices::Role::kGame, spec, MixMenuSounds, nullptr, "the menu sounds");
     lock.lock();
     if (!stream) {
       REXLOG_WARN("BF menu sounds: no sound device ({}): the menus are silent", SDL_GetError());
@@ -474,7 +450,6 @@ void PlayMenuSound(const fs::path& dir, int which, float gain, const char* why) 
       return;
     }
     g_mixer.stream = stream;
-    SDL_ResumeAudioStreamDevice(stream);
   }
   if (!g_mixer.stream) return;
   if (g_mixer.voices.size() >= 8) g_mixer.voices.erase(g_mixer.voices.begin());  // a held key: the oldest goes
