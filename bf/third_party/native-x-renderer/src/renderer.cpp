@@ -1017,7 +1017,9 @@ void StepStormClouds(IDeviceContext* context) {
     sc.sim.Seed(context, centre, 0.0f);
     sc.seeded = true, sc.reset = true, sc.owed = 1.0 / 30.0, sc.last = now, sc.flow_clock = 0.0;
   }
-  sc.owed = std::min(sc.owed + std::chrono::duration<double>(now - sc.last).count(), 0.25);
+  // At most three steps owed (as the ground fog's): after a hitch the storm drops the time rather than catching up
+  // with up to 15 steps in one frame and making the hitch longer.
+  sc.owed = std::min(sc.owed + std::chrono::duration<double>(now - sc.last).count(), 3.0 / 60.0);
   sc.last = now;
   const bool hurricane = s.type == storm::kHurricane;
   const float stage = storm::Smooth(0.25f, 1.0f, w.storm);

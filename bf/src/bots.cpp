@@ -2075,7 +2075,8 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
           if (by_flag >= 0) best = by_flag, best_d = Dist2D(pos, g.flags[size_t(by_flag)].pos);
           else following = true, std::copy(lp, lp + 3, follow);
         }
-      } else if (const auto order = g.orders.find({team, sq}); order != g.orders.end() && order->second.flag >= 0) {
+      } else if (const auto order = g.orders.find({team, sq}); order != g.orders.end() && order->second.flag >= 0 &&
+                                    size_t(order->second.flag) < g.flags.size()) {
         best = order->second.flag, best_d = Dist2D(pos, g.flags[size_t(best)].pos);
         if (leader != bot.player && alive && Dist2D(pos, lp) > 30.0f && Dist2D(lp, g.flags[size_t(best)].pos) + 10.0f < best_d)
           following = true, std::copy(lp, lp + 3, follow);
@@ -3161,6 +3162,8 @@ void BotsLevelChange() {
   }
   g.scanned_manager = 0;  // the new level's kits and flags found again
   g.flags.clear();
+  g.orders.clear();  // (their flags were the old level's)
+  g.leaders.clear();
   g.stranded.clear();
   g.level_seen = false;
   nav.cells.clear();
