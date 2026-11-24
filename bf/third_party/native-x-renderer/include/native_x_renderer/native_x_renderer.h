@@ -412,12 +412,25 @@ struct WorldState {
   float storm = 0.0f;         // D208: the match's own weather, the hurricane's stage (CurrentWorldState's; 0 elsewhere)
   float fog = 0.0f;           // the distance fog, 0 to 1
   float ground_fog = 0.0f;    // the ground fog, 0 to 1
+  float ground_fog_height = 0.5f;   // D231: the ground fog's depth, metres (the surface fog: shin high)
+  float ground_fog_sparse = 0.7f;   // D231: how sparse its patches are, 0 everywhere to 1 a few
   float wind = 0.3f;          // the wind, 0 calm to 1 a gale: how far the rain leans
   float cloud_height = 450.0f;  // the cloud base over the sea, metres: low enough, the planes fly through the clouds
+  int storm_type = 0;           // D224: the storm's type (storm.h StormType): 0 a thunderstorm, 1 a hurricane
   double cloud_seconds = 0.0; // the clouds' drift clock now, seconds
   double cloud_evolve = 0.0;  // the clouds' forming clock now (seconds times the rate, summed)
 };
 void SetWorldState(const WorldState& state);
+// D228: a storm's radar pattern, baked by tools/storm_bake.py from real radar (Hurricane Michael's, 10 Oct 2018):
+// `count` frames of width x height bytes (the rain's intensity, 0 to 255; row 0 the north, eye-centred), the eye's
+// radius in pixels, kilometres a pixel and minutes between frames. Copied. The storm's clouds are built on it (the
+// fluid weather plan's step 3).
+struct StormPattern {
+  const uint8_t* frames = nullptr;
+  uint32_t width = 0, height = 0, count = 0;
+  float eye_px = 0.0f, km_per_px = 0.0f, minutes = 0.0f;
+};
+void SetStormPattern(const StormPattern& pattern);
 // The storm's lightning strikes that start after `from` and by `to` on the world's clock (WorldState::cloud_seconds),
 // for their thunder (the game's weather sounds): when each starts, where it is from the middle of the 4 km square the
 // eye is in (metres; the sky's flash is lit there), its strokes and its strength (0 to 1). None while the player has
@@ -427,6 +440,7 @@ struct LightningStrike {
   float x = 0.0f, z = 0.0f;
   int strokes = 1;
   float strength = 1.0f;
+  bool bolt = false;  // D225: a bolt to the ground (else a flash inside the clouds)
 };
 uint32_t LightningStrikes(double from, double to, float weather, LightningStrike* out, uint32_t max);
 // What is drawn now: the server's (run on to this moment) or the player's own settings.
@@ -477,8 +491,23 @@ void NightVehicleSeated(bool seated);
 void SetMapArea(float x, float z, float reach);
 // D208: where the players are gathered (x, z pairs, at most 8): a share of the storm's strikes fall near them.
 void SetPlayerGroups(const float* xz, uint32_t count);
+// D231: what pushes the ground fog about (ground_fog.h). The game tells what moves near the camera after each of its
+// ticks (soldiers, vehicles, planes passing low: world metres and metres a second; at most 32 are kept, a list not
+// renewed for half a second is dropped), and a blast or a shot when one happens (`strength`: the air's speed there,
+// m/s). From any thread.
+struct FogMover {
+  float position[3] = {};
+  float velocity[3] = {};
+  float radius = 1.0f;  // metres
+};
+void SetFogMovers(const FogMover* movers, uint32_t count);
+void FogBlast(const float position[3], float radius, float strength);
+void FogShot(const float from[3], const float to[3], float strength);
 // D193: the player is on foot, not in a vehicle: a strong storm shakes the view only then (and only in the open).
 void SetEyeOnFoot(bool on_foot);
+// The view is the player's own, alive in the world (on foot or in a seat), not the camera of a death, the deploy
+// screen or a menu: only then can the sea splash on it (true until told otherwise).
+void SetEyeInWorld(bool in_world);
 
 // The game starts drawing a view: a camera's image (its 3D scene, a reflection, a shadow map, a 2D layer).
 // `scene_view_projection`: for a view of the 3D world, its view-projection matrix (16 floats, rows, as the
@@ -513,6 +542,15 @@ void SetAdsBlend(float blend);
 // The skin the player's own held weapon wears (weapon_skin.h): 0 none, 1 electric. Only this game's first person
 // weapon is drawn with it; nothing is sent. Held for a quarter second: from the game's thread, each frame it applies.
 void SetWeaponSkin(int skin);
+// Where the skinned weapon's magazine is, for the skin's lightning strike down it: 0 under the gun (the Thompson), 1
+// out to its left (the Type 100).
+void SetWeaponSkinMagazine(int where);
+// The name of the first person weapon the player holds now (the game's own, in lower case; when it changes). Only a
+// developer's build with the weapon export uses it (weapon_export.h); nothing otherwise.
+void NoteHeldWeapon(const char* name);
+// The player fired a shot of their own: a reactive skin answers it (the electric skin's storm is stirred up for a
+// few seconds: more lightning, sooner).
+void WeaponSkinShot();
 // The motion blur leaves out the objects' own motion (native_x_renderer_motion_blur_objects) for the next quarter second
 // (Battlefield 1943: while the player's free look turns a vehicle's outside view round it, the vehicle is not blurred).
 // The upscalers' motion vectors keep it. From the game's thread, each frame it applies.

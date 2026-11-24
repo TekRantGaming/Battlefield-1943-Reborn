@@ -313,8 +313,16 @@ void DrawOverGame(ImGuiIO& io) {
     else REXLOG_INFO("BF scoreboard: speakers hidden, {:.0f} ms after the game's last scoreboard frame", std::min(age, 9.999) * 1000);
   }
   if (!live || runs.empty()) return;
-  const ImVec2 size = io.DisplaySize;
-  auto screen = [&](float cx, float cy) { return ImVec2((cx + 1.0f) * 0.5f * size.x, (1.0f - cy) * 0.5f * size.y); };
+  // The game's clip space is its 1280 x 720 canvas, which the renderer keeps at 16:9 in the middle of a screen of
+  // another shape (an ultrawide, 16:10; with or without Fill screen): the speakers and the ping column go in that box,
+  // as flash_mouse.cpp maps the pointer. Against the whole width they slid left of the table on 21:9 and 32:9 (the
+  // user, 22 Nov 2026: "the new VoIP and Ping icons on scoreboard aren't staying in their 16:9 bound").
+  const float fit = std::min(io.DisplaySize.x / 1280.0f, io.DisplaySize.y / 720.0f);
+  const ImVec2 size(1280.0f * fit, 720.0f * fit);
+  const ImVec2 origin((io.DisplaySize.x - size.x) * 0.5f, (io.DisplaySize.y - size.y) * 0.5f);
+  auto screen = [&](float cx, float cy) {
+    return ImVec2(origin.x + (cx + 1.0f) * 0.5f * size.x, origin.y + (1.0f - cy) * 0.5f * size.y);
+  };
   // The tables: a "V" heading with a name heading on its line, to its right.
   struct Table {
     ImVec2 v, name;  // the headings' pens on the screen

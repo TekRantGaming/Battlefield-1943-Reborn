@@ -22,6 +22,10 @@ licence text in the place given here.
 The weather's sounds in `bf/data/sounds/weather` are this project's own, released under CC0 (no rights reserved):
 see `bf/data/sounds/weather/LICENSE.txt`.
 
+The storm pattern in `bf/data/weather/storms` is baked from Hurricane Michael's radar (10 Oct 2018): the US National
+Weather Service's NEXRAD composite reflectivity as archived by the Iowa Environmental Mesonet (Iowa State University).
+NWS data is a work of the US government and in the public domain: see `bf/data/weather/storms/README.md`.
+
 The SDK's prebuilt test tools (GNU binutils for PowerPC and Cygwin, GPL) are left out of `sdk/src-bf/tools`: only the
 SDK's own tests use them (`REXGLUE_BUILD_TESTS`), and this project builds without them. They are in the
 [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) repository.

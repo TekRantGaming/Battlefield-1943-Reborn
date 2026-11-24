@@ -112,7 +112,9 @@ void Recorder::Consume() {
       auto* header = reinterpret_cast<Header*>(read_block_->data + read_pos_);
       read_pos_ += header->size;
       if (!header->run) continue;
+      running_.store(true, std::memory_order_release);
       header->run(header + 1, context_);
+      running_.store(false, std::memory_order_release);
       executed_.store(++run_, std::memory_order_seq_cst);
       if (drain_waiting_.load(std::memory_order_seq_cst)) executed_.notify_all();
     }

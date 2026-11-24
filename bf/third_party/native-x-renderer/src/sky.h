@@ -92,8 +92,36 @@ class Sky {
     float match_weather = 0.0f;  // the match's own weather (the hurricane's stage): the lightning
     uint32_t world_snaps = 0;    // D221: counts the world's jumps to a new round (SnapWorld): each dries the last one's rain
     float storm_a[4] = {}, storm_b[4] = {};
+    // D229: the storm made of the sky's clouds by the fluid: x 1 while it is, y the flow map's phase a's share (b's
+    // the rest), z the fields' width in rain shields (round the storm's centre), w how open the eye is (0 to 1); the
+    // flow map (FluidSim::Clouds: two phases' offsets, the domain's units, a rain shield 1,000) and the convection
+    // (FluidSim::Convection, r; null: none).
+    float storm_c[4] = {};
+    Diligent::ITextureView* storm_cloud = nullptr;
+    // D232: the clouds' mass as particles (cloud_mass.h: how much cloud is where, as the weather map's cover; null:
+    // none) and its place: the world's x and z of its first cell's corner, and its size in metres.
+    Diligent::ITextureView* cloud_mass = nullptr;
+    float cloud_mass_origin[2] = {}, cloud_mass_size = 0.0f;
+    Diligent::ITextureView* storm_conv = nullptr;
+    // D234: the planes' wakes through the clouds: up to kWakeSegments pieces of their paths, each its two ends in the
+    // world (x, y, z) and how long ago the plane was at each (seconds): a, age a, b, age b.
+    static constexpr int kWakeSegments = 24;
+    float wake[kWakeSegments][8] = {};
+    int wake_count = 0;
     float fog = 0.0f;           // the distance fog, 0 to 1
     float ground_fog = 0.0f;    // the ground fog, 0 to 1
+    float ground_fog_height = 0.5f;  // D231: the surface fog's depth, metres
+    float ground_fog_sparse = 0.7f;  // D231: how sparse its patches are, 0 everywhere to 1 a few
+    float ground_fog_reach = 14.0f;  // D231: how high over the sea it reaches, metres (low ground only)
+    // D231: the level's terrain (grass.h's TerrainFrame: its heightmap, how the world lies on it, its size and how
+    // its texels are read), for the ground under what is seen; null: not known, no surface fog.
+    Diligent::ITextureView* terrain = nullptr;
+    float terrain_scale[4] = {}, terrain_offset[4] = {}, terrain_uv[4] = {};
+    float terrain_size = 0.0f, terrain_decode = 0.0f;
+    // D231: the ground fog pushed about (ground_fog.h's field: b how much of the fog is there, 1 at rest; null: none)
+    // and its place: the world's x and z of its first texel's corner, and its size in metres.
+    Diligent::ITextureView* ground = nullptr;
+    float ground_origin[2] = {}, ground_size = 0.0f;
     float wind = 0.3f;          // 0 calm to 1 a gale: how far the rain leans
     float depth_near = 0.1f;    // the view's stored depth is this over the distance along the view
     float cloud_height = 450.0f;  // the cloud base over the sea, metres (the layer as Beachhead has it: 1500)
@@ -140,6 +168,8 @@ class Sky {
   // under) soaks it, drying in 5.
   float lens_wet() const { return std::max(lens_wet_, splash_wet_); }
   float sway() const { return sway_; }
+  // D222: a close strike's shove on the view, from its thunder's arrival for about a second and a half.
+  bool shoving() const;
   // D190: the sky's zenith and horizon as the view shows them (exposure in), greyed by the clouds' cover, from the
   // last frame's constants; false before there are any.
   bool SeaSkyColours(float zenith[3], float horizon[3]) const;  // D189: a strong storm's sway now (0 to 1)
@@ -157,6 +187,11 @@ class Sky {
   // goes under the sea) and dries in thirty. How many beads (the most there were), and how strongly they show.
   float weapon_wet_count() const { return weapon_peak_; }
   float weapon_wet_show() const { return weapon_peak_ > 0.0f ? std::clamp(weapon_wet_ / weapon_peak_, 0.0f, 1.0f) : 0.0f; }
+  // D229: the clouds' weather map and where it was last drawn: its view, the sky's drift (its units) and the world's
+  // metres a unit of the sky's (the clouds' scale); false before the clouds have been drawn.
+  bool CloudMap(Diligent::ITextureView** weather, float drift[2], float* scale) const;
+  // D234: the clouds' shape volume (its view), their cover and forming clock as last drawn; false before then.
+  bool CloudShape(Diligent::ITextureView** shape, float* coverage, float* evolve) const;
   // Whether these inputs give the fog anything to draw.
   static bool FogWanted(const Inputs& in);
 
@@ -176,7 +211,18 @@ class Sky {
   float lens_wet_ = 0.0f, lens_rain_ = 0.0f, splash_wet_ = 0.0f, splash_dry_ = 3.0f;
   float sway_ = 0.0f;
   float edge_ = 0.0f;  // D194: the storm's blurred edges, apart from the shake
+  // D222: the close strike's shove: when it starts (the wall clock, seconds), how strong (0 to 1), which way across
+  // the view the eye is pushed (+1 right), and the strike it came from (its time on the clouds' clock).
+  double shove_start_ = -1e9, shove_strike_ = -1.0;
+  double cloud_flash_at_ = -1e9;  // D223: when lightning last lit the clouds (the clouds' clock)
+  float shove_amp_ = 0.0f, shove_side_ = 1.0f;
+  void WatchShove(const Inputs& in);
   Diligent::RefCntAutoPtr<Diligent::ITexture> fog_scene_, no_scene_;  // D190: the scene before the fog
+  Diligent::RefCntAutoPtr<Diligent::ITexture> no_storm_cloud_;  // D229: a texel of nothing while the fluid has none
+  Diligent::ITextureView* StormCloudView(const Inputs& in, bool conv = false);
+  float cloud_drift_[2] = {}, cloud_scale_ = 1.0f;  // D229: the clouds' drift and scale as last drawn
+  float cloud_coverage_ = 0.0f, cloud_evolve_ = 0.0f;  // D234: their cover and forming clock as last drawn
+  bool cloud_known_ = false;
   // BF_FOG_CHECK (tests): the picture before the fog, the two ways' results read back, and the passes counted.
   Diligent::RefCntAutoPtr<Diligent::ITexture> fog_before_, fog_staging_[2];
   // BF_CLOUD_CHECK (tests): the march's two outputs read back, this way and the old.
@@ -237,6 +283,12 @@ class Sky {
   Diligent::RefCntAutoPtr<Diligent::IShaderResourceBinding> over_srb_;
   Diligent::TEXTURE_FORMAT over_format_ = Diligent::TEX_FORMAT_UNKNOWN;
   bool clouds_fresh_ = false;  // marched in this frame's view, not yet laid over its depth
+  bool clouds_over_ = false;   // D221: laid over the view this frame (the fog keeps the clouds' shadows off them)
+  // D229: the frame (frames_) they were laid over in, and copies of the two textures laid, the fog's own (read straight
+  // from the clouds' targets in the fog pass, the AMD driver's device was lost to a page fault as a storm's level
+  // loaded, runs fstorm6f, bis_noback, bis_noread).
+  uint32_t clouds_over_frame_ = 0;
+  Diligent::RefCntAutoPtr<Diligent::ITexture> over_tex_[2];
   float cloud_eye_[3] = {};
   bool cloud_eye_valid_ = false;
   int history_now_ = 0;
@@ -278,6 +330,7 @@ SkyFlash SkyFlashAt(double seconds, float weather);
 // gathered (x, z pairs, at most 8).
 void SetStrikeWorld(const storm::Storm& storm, float square_x, float square_z);
 void SetStrikeGroups(const float* xz, uint32_t count);
+void SetStrikeByMass(bool on);  // D232: the strikes where a storm's gathered cloud is (cloud_mass.h)
 // The player's own choice: no lightning at all (the storm's other weather stays).
 void SetSkyLightning(bool on);
 void SetCloudShadows(bool on);  // D214: the clouds' shadows on the ground

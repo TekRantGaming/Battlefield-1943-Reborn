@@ -85,6 +85,7 @@ set(BF1943_SOURCES
     src/comms.cpp
     src/audio_devices.cpp
     src/comms_ui.cpp
+    src/storm_patterns.cpp
     src/world_sync.cpp
     src/voice_mute.cpp
     src/voice_mute_icon.cpp
@@ -128,6 +129,7 @@ set(BF1943_SOURCES
     src/team_balance.cpp
     src/match_rules.cpp
     src/bots.cpp
+    src/bot_chat.cpp
     src/squad_colors.cpp
     src/sharp_text.cpp
     src/server_tick_probe.cpp

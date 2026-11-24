@@ -93,6 +93,30 @@ offline or LAN play and for real servers.
 - **Fire:** bursts, then short pauses. Burst length, the use of the sights, fighting range, side steps and sprinting
   follow the human players' measured style, each bot with its own variety (0.75 to 1.25 of each trait).
 - **Range:** a bot closes in on an enemy further than its preferred range and backs off from one much nearer.
+- **Dynamic aggression (`bf_bots_dynamic_aggression`, on):** when the human players on the other side are well
+  ahead, a side's bots press harder. Every 2 seconds the server compares the humans' kills of that side's bots with
+  its bots' kills of humans (older kills fade, half gone in 2 minutes) and the flags each side holds. The side's
+  aggression, from 0 to 1, rises toward that over 90 seconds at most and falls back over 3 minutes. Level ground, or
+  humans only a little ahead, keeps it at 0.
+  - From 0.25: a bot that sees an enemy tells the bots of its side, which face that way as they go (for 5 seconds),
+    and bots attack more often than they defend.
+  - From 0.5: bot-led squads join each other's attacks on one flag and defend less, a squad leader waits 50 to 100 m
+    short of the flag it attacks for two of its squad (12 seconds at most), two bots in three come at a flag from the
+    side (a point 30 to 60 m off the straight way), and a third bot may take a tank. A bot squad leader calls the push
+    in Team chat.
+  - From 0.6: a bot goes after an enemy another bot saw within 45 m.
+  - All the way up: the bots fight closer (preferred range down to 70%), aim up to 30% better, settle their aim faster,
+    sprint more and pause less between bursts.
+  - Not yet seen in a match.
+- **Weapons (not yet seen in a match):** a bot reads its kit's weapons in slot order (the soldier data's weapon
+  list) and tells the anti-tank weapon, the rifle grenade and a thrown explosive apart by their names; the server log
+  lists each kit's weapons as the level starts. It picks a slot with the game's SelectWeapon1 to 4 (run weap1: the
+  server took them; the pad's Y swap is actions 9 and 19 together) and waits about a second before firing. The
+  anti-tank weapon goes at an enemy in a vehicle within 150 m (a plane only within 120 m and 40 m over the bot), the
+  rifle grenade at an enemy on foot 35 to 140 m off, a thrown explosive at one 8 to 25 m off just lost behind cover.
+  One shot at a time, aimed up for the distance, 5, 6 and 3 a life at most; back to its gun when the fight ends. A
+  bot's kills are logged with the weapon that made them. The names matched, the slot order and the arcs (shots at 70,
+  40 and 18 m/s) are guesses until a match's log shows them.
 - These numbers are fixed in the code for now. There is no difficulty setting yet.
 
 ### Getting around
@@ -129,11 +153,30 @@ offline or LAN play and for real servers.
   the gun at the nearest enemy soldier it can see within 150 m, a shot every 2.5 seconds.
 - **Planes (new, commit b28008c6):** one bot pilot a side at most, in a Corsair or a Zero within 40 m. It takes off,
   climbs to about 100 m over the flags, banks toward the nearest flag its side does not hold and the enemy soldiers
-  near it, dives on them, fires when lined up and pulls up about 75 m over the ground.
+  near it, dives on them, fires when lined up and pulls up about 75 m over the ground. On the Japanese airfield of
+  Guadalcanal the ground ray found nothing, so a Zero on the runway read as 400 m up, banked at 19 m/s and crashed at
+  every take-off (the player's match of 23 Nov 2026). Its height now counts from where it got in when the ray finds
+  nothing, and it is flying only over 30 m up and 25 m/s. Not yet seen in a match.
 - Tanks and planes were seen working only in developer runs (tank1, tank2, plane1 to plane3, night1). The player's
   report of 19 Nov 2026 that bots do not drive or fly was made before this, and the new code has not been confirmed
   in the player's own matches (see "Known issues").
-- Jeeps, boats, AA guns and other fixed guns are not driven or manned by bots. A bot leaves no vehicle while alive.
+- Tank drivers also fire at enemy vehicles in sight (aimed at the middle of the hull), whichever is nearest, a
+  vehicle or a soldier.
+- **Bailing out:** a bot in any seat watches its vehicle's health (the weakest of its health zones, read from the
+  vehicle's own health object) and how fast it falls. Below 12%, or falling fast enough to be gone within 3 seconds
+  (under 45%) or 6 seconds (under 30%), it gets out with the enter/exit button. It stays in if that does more for its
+  side, while above 6%: its tank is finishing an enemy vehicle weaker than its own and under 25%, or it sits in the
+  area of a flag its side has 75% or more taken. It also stays if getting out would not help: a plane 4 to 35 m up
+  (too low for the parachute, too high to jump), or open sea with no flag within 300 m. Out of a plane higher up, it
+  opens its parachute with A once it starts to fall (from 0.4 seconds out), and presses again 1.5 seconds later
+  while still falling faster than 12 m/s, three tries at most. Bots do not board a vehicle under 40% health (a ride
+  along: under 30%), nor one they bailed out of in the last minute.
+- Tested with `BF_BOT_BAILTEST=1` (developer builds: every driver's vehicle counted as doomed 25 seconds after it got
+  in), 23 Nov 2026. Run bail2: drivers of tanks and planes got out at once, and the bail lines came in Squad chat; the
+  pilots died in the fall (one RB press, no parachute). Run bail3: A opened the parachute (40 m/s down to a steady
+  8.7 m/s) and pilots who got out over 110 m up landed alive; RB did nothing, and a pilot out at 61 m died with the
+  A press too late. The bots now press A first. A real bail (a vehicle shot to pieces) has not been seen yet.
+- Jeeps, AA guns and other fixed guns are not driven or manned by bots.
 
 ### Chat: callouts and banter
 
@@ -196,10 +239,11 @@ c18846b4, ed504263, 22a68ecd). It is kept in the match server's user folder, und
 | Setting | Where | Default | What it does |
 |---|---|---|---|
 | Bots | Custom Match row; `--bf_bots` | 0 | How many bots (0 to 24). |
-| `bf_bots_squad_humans` | cvar | on | A human in no squad is put in a squad with its side's bots, as its leader. |
+| `bf_bots_squad_humans` | cvar | off | A human in no squad is put in a squad with its side's bots, as its leader. |
 | `bf_bot_chat` | cvar | on | Bots write in All, Team and Squad, and answer players. |
+| `bf_bots_dynamic_aggression` | cvar | on | Bots press harder when the human players are well ahead (see "Fighting"). |
 
-There is no difficulty or aggression setting yet, no Co-op mode (bots on one team only) and no bot settings in the
+There is no difficulty setting yet, no Co-op mode (bots on one team only) and no bot settings in the
 server manager. They were asked for (D198) and are not built.
 
 ## Custom Match options
@@ -221,6 +265,7 @@ LAN), Port and Host the match.
 | Match time | off (tickets only), 5, 10, 15, 20, 25, 30, 40, 45, 60, 90, 120 minutes | off |
 | Bots | 0 to 24, in steps of 1, shown as "8 - 4 A SIDE" | none |
 | Dynamic storm (in Weather and time) | on or off | off |
+| Storm type (in Weather and time, D224) | Storm (a thunderstorm), Hurricane | Storm |
 
 ### Game mode
 
@@ -287,8 +332,9 @@ A dedicated server takes the same things as command-line flags of the game (`bin
 | `--bf_match_tickets=<n>` | 0 | 0 to 9999 (0: the map's own) | Each team's tickets. |
 | `--bf_match_time_limit=<minutes>` | 0 | 0 to 600 (0: none) | A round's time limit. |
 | `--bf_world_dynamic_storm=true` | false | | The dynamic storm (run by the match's host, see below). |
-| `--bf_bots_squad_humans=false` | true | | Players are not put in squads with bots. |
+| `--bf_bots_squad_humans=true` | false | | Players in no squad are put in squads with bots. |
 | `--bf_bot_chat=false` | true | | Bots stay quiet. |
+| `--bf_bots_dynamic_aggression=false` | true | | Bots do not press harder when the players are ahead. |
 | `--bf_gm_max_players=<n>` | 24 | | The most players; bots fill only what humans leave of it. |
 
 What works where:
@@ -321,10 +367,13 @@ where the match's host is the game's own (Custom Match). The switch and the host
 
 ## Known gaps
 
-- No difficulty or aggression setting, no Co-op mode, no settings for bots in the server manager.
+- No difficulty setting, no Co-op mode, no settings for bots in the server manager. Aggression changes by itself
+  (`bf_bots_dynamic_aggression`); it has no level to pick.
 - Bots play Conquest flags only. Air Superiority with bots, and bots on Coral Sea, have not been tested.
-- No flanking or taking cover under fire yet (the fight has only side steps), and no use of AA guns, jeeps or boats as
-  a driver or gunner.
+- Bots flank only under pressure (dynamic aggression at 0.5 or more), and do not take cover under fire (the fight has
+  only side steps). They use no AA guns or jeeps.
+- The level's own bail settings for a vehicle's spawner (`BotBailWhenHealthBelow`, `BotBailOutDelay`) are not read;
+  the bots use the fixed thresholds above.
 - Bots do not follow a squad leader's orders.
 - The Bots row's help text still says that bots fight on foot only and cannot leave Wake Island's carrier or fly; it
   predates the tank and plane code.

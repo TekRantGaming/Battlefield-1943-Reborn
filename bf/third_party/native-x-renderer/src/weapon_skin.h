@@ -21,6 +21,9 @@
 
 #include <cstdint>
 
+#include "RefCntAutoPtr.hpp"
+#include "Shader.h"
+
 namespace Diligent {
 struct IDeviceObject;
 struct IRenderDevice;
@@ -57,7 +60,31 @@ struct WeaponSkinBloomInputs {
   Diligent::ITextureView* depth_srv = nullptr;
   uint32_t width = 0, height = 0;              // the view's part of the colour, in its pixels
   uint32_t depth_width = 0, depth_height = 0;  // and of the depth
+  float ads = 0.0f;   // how far the player aims down the sights (0 to 1): the little clouds leave
+  float dark = 0.0f;  // how dark it is (0 day, 1 night): the smoke's own shade
+  bool after_night = false;  // drawn over the picture after the night pass (the picture is at its shown brightness)
+  float px = 0.0f, py = 0.0f;  // the weapon's view's projection (clip x = px * view x, clip w = view z); 0: not known
 };
 bool WeaponSkinBloom(Diligent::IRenderDevice* device, Diligent::IDeviceContext* context, const WeaponSkinBloomInputs& in);
+Diligent::RefCntAutoPtr<Diligent::IShader> CreateWeaponSkinOverShader(Diligent::IRenderDevice* device);
+
+int TestWeaponSkinShaders();
+
+// The storm's light on the gun's own mesh (DrawPath::DrawSkinOver): the pixel shader the gun's draws are drawn again
+// with (its vertex shader the game's own, the texture's place from interpolator 7), its constants (two vec4, after
+// the motion pass's one, in the same buffer) for a copy of this size, and the skinned copy as a plain 2D texture.
+// The target those draws go into: the scene's depth's size (they are tested against it), made anew when it changes.
+Diligent::ITextureView* WeaponSkinOverTarget(Diligent::IRenderDevice* device, uint32_t width, uint32_t height);
+Diligent::ITextureView* WeaponSkinPlainView(Diligent::IDeviceObject* copy);
+void WeaponSkinOverConstants(float out[12], float width, float height);
+// The gun's place from its own bones, each frame it is drawn: the bone its body is on (WeaponSkinBodyBone), that
+// bone's three rows of four as the vertex shader has them, the weapon's view-projection's four rows, and its
+// projection's two scales (clip x = px * view x). The storm's cloud is fixed to the gun by it.
+// (And the magazine's bone and its rows: when it comes back to its place after being out, a new magazine went in,
+// and its charge runs over the gun.)
+int WeaponSkinBodyBone();
+int WeaponSkinMagazineBone();
+void WeaponSkinGunFrame(const float bone[12], const float magazine[12], const float view_projection[16], float px, float py,
+                        const double* view_move = nullptr);
 
 }  // namespace native_x_renderer

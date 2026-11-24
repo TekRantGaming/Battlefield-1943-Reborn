@@ -16,6 +16,7 @@
 // 19 Nov 2026, last in both: the dynamic storm (a byte, 1 on), and in the answer then the match's rules: tickets (16 bits,
 // 0 the level's own), the time limit in minutes (16 bits, 0 none) and the round's seconds left (a float, -1 none).
 // The cloud height came later and stands last in both: a host from before it sends and reads none (450 m then).
+// D224 (20 Nov 2026), last in both: the storm's type, a byte (0 a thunderstorm, 1 a hurricane); none: a thunderstorm.
 // Big endian. An admin is the game that shows the host's key (the game that started a private match has it), or a
 // joined player whose ID is in the host's list (bf_world_admins; a dedicated server's --admins).
 //
@@ -80,6 +81,8 @@ uint32_t OnlinePlayerId();        // live_layers.cpp: the player's ID as a match
 bool InMatch();                   // auto_join.cpp
 bool LauncherShowing();           // game_menu.cpp
 void StartWeatherAudio();         // weather_audio.cpp
+void LoadStormPatterns();         // storm_patterns.cpp (D228)
+void SkinMatchSample(int storm_type, float weather, int time_limit, float time_left);  // fov.cpp
 }  // namespace bf1943
 
 namespace bf1943::world {
@@ -259,6 +262,9 @@ void Run() {
           PutF32(ask, v);
         PutF32(ask, request.cloud_height);
         ask += char(request.dynamic_storm ? 1 : 0);  // 19 Nov 2026, last: a host from before it reads none
+        ask += char(std::clamp(request.storm_type, 0, 1));  // D224, last
+        PutF32(ask, request.ground_fog_height);  // 21 Nov 2026, last: a host from before it reads none
+        PutF32(ask, request.ground_fog_sparse);
         std::lock_guard lock(g_mutex);
         if (--g_request_sends <= 0) g_have_request = false;
       }
@@ -335,6 +341,11 @@ void Run() {
         s.time_limit = int(buf[65]) << 8 | buf[66];
         s.time_left = GetF32(buf + 67);
       }
+      if (n >= 72) s.now.storm_type = std::clamp(int(buf[71]), 0, 1);  // D224
+      if (n >= 80) {  // 21 Nov 2026: the surface fog's depth and how sparse it is
+        s.now.ground_fog_height = std::clamp(GetF32(buf + 72), 0.2f, 5.0f);
+        s.now.ground_fog_sparse = std::clamp(GetF32(buf + 76), 0.0f, 1.0f);
+      }
       s.answered_at = now;
       native_x_renderer::WorldState w;
       w.valid = true;
@@ -343,7 +354,9 @@ void Run() {
       w.hour = s.now.hour, w.day_minutes = s.now.day_minutes;
       w.cloud_cover = s.now.cloud_cover, w.cloud_rate = s.now.cloud_rate, w.weather = s.now.weather;
       w.fog = s.now.fog, w.ground_fog = s.now.ground_fog, w.wind = s.now.wind;
+      w.ground_fog_height = s.now.ground_fog_height, w.ground_fog_sparse = s.now.ground_fog_sparse;
       w.cloud_seconds = GetF64(buf + 42), w.cloud_evolve = GetF64(buf + 50);
+      w.storm_type = s.now.storm_type;
       native_x_renderer::SetWorldState(w);
       bool was_admin;
       {
@@ -351,6 +364,7 @@ void Run() {
         was_admin = g_status.admin;
         g_status = s;
       }
+      bf1943::SkinMatchSample(s.now.storm_type, s.now.weather, s.time_limit, s.time_left);  // fov.cpp: the skin's unlock
       if (!valid)
         REXLOG_INFO("BF world: the match's host keeps its world: day and night {}, {:.1f} h, a day in {:.0f} min, clouds "
                     "{:.0f}% at rate {:.0f}%, weather {:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m{}",
@@ -366,6 +380,7 @@ void Run() {
 
 void StartOnce() {
   if (g_started.exchange(true)) return;
+  LoadStormPatterns();  // storm_patterns.cpp (D228): the storms' radar patterns for the renderer
   std::thread(Run).detach();
   StartWeatherAudio();  // weather_audio.cpp: the rain, wind and thunder follow this world
 }
@@ -483,6 +498,7 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
     float passes = passed ? 1.0f : 0.0f;
     // The dynamic storm (19 Nov 2026): a switch, as the first row.
     float storm = edit_.dynamic_storm ? 1.0f : 0.0f;
+    float storm_type = float(edit_.storm_type);  // D224: a choice, last
     const Settings before = edit_;
     // Every slider moves in steps of one (18 Nov 2026: "stepped by 1pt each, with time stepped at 1pt for each
     // second"): a percent, a minute of a day's length, a metre of the cloud base, and a second of the time of day (the
@@ -497,14 +513,21 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
         {"Cloud change rate", &edit_.cloud_rate, 0, 1, 0.01f, "How fast the clouds form and dissolve."},
         {"Weather", &edit_.weather, 0, 1, 0.01f, "From fair to a storm: overcast, mist, rain, lightning."},
         {"Distance fog", &edit_.fog, 0, 1, 0.01f, "A haze that hides what is far."},
-        {"Ground fog", &edit_.ground_fog, 0, 1, 0.01f, "A low layer over the sea and the shore."},
+        {"Ground fog", &edit_.ground_fog, 0, 1, 0.01f,
+         "How thick the fog lying on the ground and the water is. What moves through it pushes it about."},
+        {"Ground fog sparseness", &edit_.ground_fog_sparse, 0, 1, 0.01f,
+         "From everywhere (0) to a few small drifting patches (100)."},
         {"Wind", &edit_.wind, 0, 1, 0.01f, "From calm to a gale: how far the rain leans. Follows the weather until set apart."},
         {"Cloud height", &edit_.cloud_height, 100, 1500, 1, "The cloud base over the sea. Low, the planes fly through the clouds."},
+        {"Ground fog height", &edit_.ground_fog_height, 0.2f, 5, 0.1f,
+         "How deep the ground fog is, metres: 0.5 is shin high."},
         {"Dynamic storm", &storm, 0, 1, 1,
          "On, the weather builds to a storm over the match and eases again (shown live above). Weather moved: off."},
+        {"Storm type", &storm_type, 0, 1, 1,
+         "What the weather builds: a thunderstorm, or a hurricane with its eye and spiral rain bands."},
     };
-    constexpr int kStormRow = 10;
-    auto is_switch = [&](int i) { return i == 0 || i == kStormRow; };
+    constexpr int kStormRow = 12, kTypeRow = 13;  // (10 and 11: the heights, in metres)
+    auto is_switch = [&](int i) { return i == 0 || i == kStormRow || i == kTypeRow; };
     // A value put on its row's steps: whole seconds, percents, minutes or metres.
     auto snap = [](const Row& r, float v) {
       if (r.step == kSecond) return std::min(std::round(v * 3600.0f) / 3600.0f, kLastHour);
@@ -556,7 +579,7 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
           Row& r = rows[typing_];
           if (typing_ == 1) v = std::clamp(v, 0.0f, kLastHour);
           else if (typing_ == 2) v = std::clamp(v, 0.0f, 1440.0f);
-          else if (typing_ == 9) v = std::clamp(v, r.lo, r.hi);
+          else if (typing_ == 10 || typing_ == 11) v = std::clamp(v, r.lo, r.hi);
           else v = std::clamp(v / 100.0f, 0.0f, 1.0f);
           v = snap(r, v);
           if (v != *r.value) *r.value = v, changed = true;
@@ -574,7 +597,9 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
       if (i == row_) d->AddRectFilled(a, b, IM_COL32(93, 138, 50, 80));
       d->AddText(f.ui, 15 * u, ImVec2(a.x + 10 * u, yy + 2 * u), kit::kCream, r.label);
       char value[32];
-      if (is_switch(i)) {
+      if (i == kTypeRow) {
+        std::snprintf(value, sizeof(value), "%s", *r.value > 0.5f ? "Hurricane" : "Storm");
+      } else if (is_switch(i)) {
         std::snprintf(value, sizeof(value), "%s", *r.value > 0.5f ? "On" : "Off");
       } else if (i == 1) {
         // The time to the second, as the slider steps it (rounded: a running clock's hour has fractions of one).
@@ -582,8 +607,8 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
         std::snprintf(value, sizeof(value), "%02ld:%02ld:%02ld", s / 3600, s / 60 % 60, s % 60);
       } else if (i == 2) {
         std::snprintf(value, sizeof(value), *r.value <= 0 ? "Stands still" : "%.0f min", *r.value);
-      } else if (i == 9) {
-        std::snprintf(value, sizeof(value), "%.0f m", *r.value);
+      } else if (i == 10 || i == 11) {
+        std::snprintf(value, sizeof(value), i == 11 ? "%.1f m" : "%.0f m", *r.value);
       } else {
         std::snprintf(value, sizeof(value), "%.0f%%", *r.value * 100.0f);
       }
@@ -626,6 +651,7 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
     }
     // The storm's switch; the weather moved by hand while the storm runs stops it (the storm would take it back).
     edit_.dynamic_storm = storm > 0.5f;
+    edit_.storm_type = storm_type > 0.5f ? 1 : 0;  // D224
     if (edit_.dynamic_storm && before.dynamic_storm && edit_.weather != before.weather) edit_.dynamic_storm = false;
     // The wind follows the weather while the two are the same (the user, 19 Nov 2026: "unless it's manually adjusted,
     // so 100% weather should result in 100% wind"): a wind set apart from the weather stays where it was put.

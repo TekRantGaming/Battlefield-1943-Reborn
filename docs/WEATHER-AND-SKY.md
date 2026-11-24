@@ -5,7 +5,7 @@ each part does, how to set it, and where it lives in the code. The reasons, meas
 step are in the decision log, `bf/third_party/native-x-renderer/docs/decisions.md` (D-numbers below).
 
 Most of it is the renderer's own (NativeXRenderer, `bf/third_party/native-x-renderer/src/`): `sky.cpp` and `sky.h`
-(the sky, clouds, fog, rain, lightning, lens and wetness passes), `storm.h` (the hurricane) and `renderer.cpp` (the
+(the sky, clouds, fog, rain, lightning, lens and wetness passes), `storm.h` (the storm: a thunderstorm or a hurricane) and `renderer.cpp` (the
 settings, and how the match's world reaches the passes). The game's side is in `bf/src/`: `weather_audio.cpp` (the
 weather's sound), `world_sync.cpp` (the match's world in each player's game, the F9 panel) and `gm_host.cpp` (the match
 host that keeps the world).
@@ -19,7 +19,7 @@ noise), brought over and rebuilt for this game.
 - [Who decides the weather](#who-decides-the-weather)
 - [The sky](#the-sky)
 - [The clouds](#the-clouds)
-- [The hurricane](#the-hurricane)
+- [The storm: a thunderstorm or a hurricane](#the-storm-a-thunderstorm-or-a-hurricane)
 - [Fog and the storm's mist](#fog-and-the-storms-mist)
 - [Rain](#rain)
 - [Lightning](#lightning)
@@ -59,10 +59,10 @@ sets"). They left the graphics settings.
   for it and draws the same sky (`bf/src/world_sync.cpp`). Lightning is timed by the world's clock alone, so every
   player sees the same flashes.
 - **Custom Match** sets it on its **Weather and time** page: Time passes, Time of day, A day lasts, Cloud cover,
-  Cloud change rate, Weather, Dynamic storm, Distance fog, Ground fog, Wind and Cloud height.
+  Cloud change rate, Weather, Storm type, Dynamic storm, Distance fog, Ground fog, Wind and Cloud height.
 - **The F9 panel** lets the match's admin change it while the match runs (the host's game in a Custom Match; on a
   server, the players in its admin list). Its rows: Time passes, Time of day, A day lasts, Cloud cover, Cloud change
-  rate, Weather, Distance fog, Ground fog, Wind, Cloud height and Dynamic storm. The mouse works on every slider, a
+  rate, Weather, Distance fog, Ground fog, Wind, Cloud height, Dynamic storm and Storm type. The mouse works on every slider, a
   value can be typed in and the arrows step it.
 - **Changes ease in** (D211): the weather, cloud cover, fogs, wind and cloud base move toward what is set over about
   25 seconds for a whole change of the weather, instead of jumping.
@@ -88,6 +88,7 @@ sets"). They left the graphics settings.
 | `bf_world_wind` | 0.3 | Wind, 0 calm to 1 a gale. |
 | `bf_world_cloud_height` | 450 | The cloud base over the sea, metres (100 to 1500). |
 | `bf_world_dynamic_storm` | false | The storm builds and eases over each round. |
+| `bf_world_storm_type` | 0 | The storm's type: 0 a thunderstorm, 1 a hurricane (D224). |
 | `bf_world_admins` | "" | Player IDs (comma separated) allowed to change the world while it runs. |
 
 Developers: `native_x_renderer_world_own` (off) makes a game use its own `native_x_renderer_*` world settings even in a
@@ -127,39 +128,57 @@ and lit toward the sun or the moon, at half the view's size and blended over the
 - **Taller and fuller** (D180): the low layer is 2800 m deep in its own scale, of a taller kind.
 - **Layers at several heights** (D211): the low cumulus layer; an altocumulus layer about 5 km up (small rounded
   cells in patches, more of them as the weather outside the storm rises); and cirrus about 10 km up, thicker as the
-  hurricane comes.
-- **Storm clouds** (D208, D211): in the storm's rain bands the low layer takes the cumulonimbus kind (the layer's whole
-  depth), and over the storm the cover closes toward a whole deck, its density up to 1.9 times.
-- **A volutus** (D211): a roll cloud low in the layer along the hurricane's gust front, just outside its rain shield,
+  storm comes.
+- **Storm clouds** (D208, D211): where the storm is strong (in a hurricane's rain bands) the low layer takes the
+  cumulonimbus kind (the layer's whole depth), and over the storm the cover closes toward a whole deck, its density up
+  to 1.9 times.
+- **A volutus** (D211): a roll cloud low in the layer along the storm's gust front, just outside its rain shield,
   broken along its length, from about a third of the match's weather to about 95%.
-- **The storm's wall from outside** (D212, D213): while the eye is outside the hurricane, the sky draws its towers
+- **The storm's wall from outside** (D212, D213): while the eye is outside the storm, the sky draws its towers
   toward it, 0.6 km tall as it forms and 2 km at full strength, with an anvil's flat top, dark blue-grey with the top
   lit and its foot in the haze.
 - **How fast they change:** the clouds' forming clock runs at the Cloud change rate (`bf_world_cloud_rate`, 0.33,
   where 1 is Beachhead's full speed), times 1 to 3 as the match's weather goes from 25% to 100% (D213, `storm.h`
   RateFactor).
 - **Cloud shadows** (D214, D215): by day (the sun over 3 degrees) each point seen looks toward the sun through the same
-  clouds that are drawn, the hurricane's included, and loses that share of the direct sun, so their shadows move with
+  clouds that are drawn, the storm's included, and loses that share of the direct sun, so their shadows move with
   them. Darkened in steps at the user's word to about 31% darker ground than in the sun. Under the weather's own
   overcast, where there is little direct sun left, they are kept lighter (D217). `native_x_renderer_cloud_shadows`.
 
-## The hurricane
+## The storm: a thunderstorm or a hurricane
 
-Since D208 the weather is a tropical hurricane over the level, local to where it is (`storm.h`):
+Since D208 the match's weather is a storm over the level, local to where it is (`storm.h`). Since D224 it has a type,
+chosen by the match (Custom Match > Weather and time > Storm type, the F9 panel, `bf_world_storm_type`):
 
-- **The match's weather is the storm's stage.** Under 25% there is no hurricane: the weather is the same everywhere.
-  From 25% it forms out at sea and comes in as the weather rises; at 100% its rain shield covers the level and its calm
-  eye passes over part of it.
+- **Storm** (the default): a thunderstorm. One storm cell, strongest over its middle out to about half its size and
+  fading to its edge, with heavier cells in it that drift round. No eye, no spiral bands.
+- **Hurricane:** a tropical hurricane, shaped as one is seen from above (D226): a clear, calm eye about a fifth of
+  its size with a steep wall, a dense core of cloud round it, and two open spiral bands (anticlockwise) with thinner
+  cloud between them. Where it rains, the gaps between the bands keep at least 0.75 of full strength, so at 100% the
+  map is still covered.
+
+**The storm's clouds come from a particle fluid** (D227 to D229, in progress): a GPU fluid of 16,384 particles in the
+storm's own frame pulls the air toward the storm and turns it. It carries a flow map that says where the sky's own
+clouds came from, so the clouds drifting in are pulled round into the storm with their own shapes, and a convection
+field where cells organise into bands from a real hurricane's radar (Hurricane Michael, 2018, D228). About 0.25 ms a
+step on an RX 7900 XTX. `native_x_renderer_fluid_storm` off brings back the drawn shape above.
+
+More types can be added: each is its own shape in `storm.h` (`At()` and the GLSL's `storm_at`), placed and sized by
+the same weather. A host that does not send a type (an older one, or the server package's `gmhost.py`) means Storm.
+
+What every type shares:
+
+- **The match's weather is the storm's stage.** Under 25% there is no storm: the weather is the same everywhere. From
+  25% it forms out at sea and comes in as the weather rises; at 100% it covers the level.
 - **Sized to the level** (D213): from the level's reach (its capture points' farthest from their middle, at least
-  300 m; Guadalcanal about 710 m). At 25% it is 4 reaches out with a shield 0.45 reaches across; at 100% its centre is
-  0.3 of a reach off the middle and its shield 1.5 reaches (about the level's own size). It is never bigger than the
-  map.
-- **Its strength at a place:** 0.15 in the eye, full at the eyewall, full out to 0.6 of the shield and fading to its
-  edge, with two rain bands spiralling in (anticlockwise) and at least 0.75 between them. Its bearing turns slowly with
-  the world's clock, so every player sees it in the same place.
+  300 m; Guadalcanal about 710 m). At 25% it is 4 reaches out with a rain shield 0.45 reaches across; at 100% its
+  centre is 0.3 of a reach off the middle and its shield 1.5 reaches (about the level's own size). It is never bigger
+  than the map. Its bearing turns slowly with the world's clock, so every player sees it in the same place.
 - **The weather where you are** is the larger of the storm's strength there and the weather outside it (at most 0.15).
   The rain, the mist, the light, the wetness and the rain's sound follow it. The wind is the match's own everywhere:
   outside the storm there is only the wind and a far rumble.
+- **Its clouds:** the towers and anvil seen from outside it (at the hurricane's eyewall, at a thunderstorm's middle),
+  the cumulonimbus in it, and the roll cloud along its gust front.
 - **Lightning falls only under it** (D208, D213): see [Lightning](#lightning).
 
 ## Fog and the storm's mist
@@ -188,7 +207,7 @@ Falls under heavy weather where you are (14 Nov, then D186, D189, D212).
 
 ## Lightning
 
-From about 60% of the weather (strongest by 95%), only under the hurricane (D184, D192, D208, D211, D212, D213):
+From about 60% of the weather (strongest by 95%), only under the storm (D184, D192, D208, D211, D212, D213):
 
 - **When and where** come from the world's clock alone (`sky.cpp` FlashInSlot), so every player sees the same strikes
   and the thunder (below) plays the same ones. A flash every 16 seconds or so at the storm's start, every 5 at its
@@ -212,10 +231,11 @@ From about 60% of the weather (strongest by 95%), only under the hurricane (D184
 - **Mixed into the game's own 5.1 output** (D187), at Master x Effects x Weather volume, silent outside a match.
 - **Rain** in three strengths cross-faded with the weather where you are; **wind** with the match's wind; a low
   **rumble** under a storm.
-- **Thunder for each strike** (D184, D185): the same strikes the sky draws, after the time the sound takes to come at
-  343 m/s. A close crack within 1.5 km, a distant strike to 5 km, a rumble in the clouds beyond. Within 400 m it is a
-  startling crack (D208). It comes from where the sky flashed: panned round the speakers by its bearing, quieter and
-  duller behind you, following the camera's turn.
+- **Thunder for each strike** (D184, D185, D225): the same strikes the sky draws, after the time the sound takes to
+  come at 343 m/s. A bolt within 350 m is a startling close crack (D208); a bolt further off the distant strike; a
+  flash inside the clouds their rumble. It comes from where the sky flashed: panned round the speakers by its bearing,
+  quieter and duller behind you, following the camera's turn. (Until D225 every strike played the close crack: the
+  storm the level's size put them all within the old 1.5 km threshold.)
 - **Under the game's sounds** (D207): the rain and the wind 18 dB down and the thunder 6 dB down, so gunfire and
   explosions stand over the rain and a close strike over the gunfire. In the game's loud moments the rain and the wind
   are turned down further (until the game stands 12 dB over them, 18 dB at most); the thunder at most 3 dB.

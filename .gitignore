@@ -8,6 +8,8 @@
 *.fbrb
 *.zz
 /bf/**/*.bin
+# (Our own: the storms' radar patterns, baked from public domain NWS radar by tools/storm_bake.py, D228.)
+!/bf/data/weather/storms/*.bin
 /bf/**/*.res
 /bf/**/*.dds
 /bf/**/*.wav

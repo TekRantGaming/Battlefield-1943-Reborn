@@ -1118,6 +1118,63 @@ void TickBlendBeforeTick(uint8_t* base) {
   g_trees_updated.clear();
 }
 
+// The ground fog's movers (NativeXRenderer's D231: "ground fog that can be pushed around by any dynamic object ...
+// vehicles, characters", the user, 21 Nov 2026): what moved in this tick within 110 m of the camera, from what is kept
+// here anyway: the part trees' bases (vehicles, planes; 8 parts or more taken for a vehicle's body) and the skinned
+// roots (soldiers), each with its place and its motion over the tick. The 32 nearest. (g.mutex held.)
+void PublishFogMoversLocked(uint64_t tick) {
+  float eye[3], right[3], forward[3];
+  double age = 0.0;
+  if (!native_x_renderer::ListenerView(eye, right, forward, &age) || age > 1.0) return;
+  struct Found {
+    native_x_renderer::FogMover mover;
+    float away = 0.0f;
+  };
+  std::vector<Found> found;
+  const float per_second = float(1.0 / kTick());
+  auto add = [&](const Xf& prev, const Xf& cur, float radius) {
+    Found f;
+    float speed2 = 0.0f;
+    for (int c = 0; c < 3; ++c) {
+      f.mover.position[c] = cur.m[3][c];
+      f.mover.velocity[c] = (cur.m[3][c] - prev.m[3][c]) * per_second;
+      speed2 += f.mover.velocity[c] * f.mover.velocity[c];
+    }
+    const float dx = cur.m[3][0] - eye[0], dz = cur.m[3][2] - eye[2];
+    f.away = dx * dx + dz * dz;
+    const float most = float(kMaxStep) * per_second;
+    if (!(f.away < 110.0f * 110.0f) || !(speed2 > 0.25f) || speed2 > most * most) return;
+    f.mover.radius = radius;
+    for (Found& other : found) {  // one for what is in one place (a vehicle's body and its riders): the widest
+      const float ox = other.mover.position[0] - f.mover.position[0], oz = other.mover.position[2] - f.mover.position[2];
+      if (ox * ox + oz * oz < 2.25f) {
+        if (radius > other.mover.radius) other = f;
+        return;
+      }
+    }
+    found.push_back(f);
+  };
+  for (const auto& [tree, t] : g_trees)
+    if (t.have && t.step && t.seen_tick == tick && t.count >= 2 && !t.cur.empty() && t.prev.size() == t.cur.size())
+      add(t.prev[0], t.cur[0], t.count >= 9 ? 2.8f : 1.2f);
+  for (const auto& [key, t] : g.tracks)
+    if (t.have && t.step && !t.jump && tick - t.seen_tick <= 1) add(t.prev, t.cur, 0.7f);
+  std::sort(found.begin(), found.end(), [](const Found& l, const Found& r) { return l.away < r.away; });
+  if (found.size() > 32) found.resize(32);
+  std::vector<native_x_renderer::FogMover> movers;
+  for (const Found& f : found) movers.push_back(f.mover);
+  native_x_renderer::SetFogMovers(movers.data(), uint32_t(movers.size()));
+  static uint64_t said = 0;
+  if (!movers.empty() && (said == 0 || tick - said > 1800)) {  // (now and then, for the log: a minute apart)
+    said = tick;
+    REXLOG_INFO("BF fog movers: {} within 110 m; the nearest at {:.1f} {:.1f} {:.1f}, {:.1f} m/s, radius {:.1f}",
+                movers.size(), movers[0].position[0], movers[0].position[1], movers[0].position[2],
+                std::sqrt(movers[0].velocity[0] * movers[0].velocity[0] + movers[0].velocity[1] * movers[0].velocity[1] +
+                          movers[0].velocity[2] * movers[0].velocity[2]),
+                movers[0].radius);
+  }
+}
+
 // After each client tick: the trees it updated take its values as their newest; the others stood still.
 void TickBlendAfterTick(uint8_t* base) {
 #if defined(BF_DEV_TOOLS)
@@ -1161,6 +1218,7 @@ void TickBlendAfterTick(uint8_t* base) {
     }
   g_trees_updated.clear();
   PublishOwnVehicleLocked(tick);
+  PublishFogMoversLocked(tick);
 #if defined(BF_DEV_TOOLS)
   {  // BF_DEV_VIEWREL=<parts>: every 15 ticks, the view against parts 0 and 21 of the nearest tree of that many parts
     static const int want = [] {

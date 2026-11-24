@@ -18,6 +18,7 @@
 #include "storage.h"
 #include "targets.h"
 #include "textures.h"
+#include "weapon_export.h"
 #include "weapon_skin.h"
 
 #include <rex/bit.h>
@@ -69,6 +70,8 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_tick_interpolation, false, "NativeXRendere
                     "with the tick's camera while its neighbours are blended, and gaps show (run vcam5)");
 
 namespace native_x_renderer {
+bool WeaponLayerMoveNow(double out[16]);  // (below, with RecordWeaponLayerMove)
+void NoteFirstPersonWeaponDrawn();        // sky.cpp: the sea splashes only on a view that holds a weapon
 
 // A developer's: the next draws logged (renderer.cpp names the moment).
 std::atomic<int> g_dump_next_draws{0};
@@ -286,6 +289,21 @@ struct DrawPath::MotionDraw {
   Mat4d reprojection;
 };
 
+// A skinned draw of the first person weapon, kept for DrawSkinOver (weapon_skin.h).
+struct DrawPath::SkinDraw {
+  Pipeline* pipeline;
+  size_t data;  // in skin_data_: the vertex shader's float constants, then the system, bool/loop and fetch constants
+  uint32_t constants_size;
+  Viewport viewport;
+  Rect scissor;
+  IBuffer* index_buffer;  // null: not indexed
+  uint64_t index_offset;
+  VALUE_TYPE index_type;
+  uint32_t vertex_count;
+  RefCntAutoPtr<ITextureView> texture;  // the skinned copy, as a plain 2D texture
+  float width, height;
+};
+
 DrawPath::DrawPath() = default;
 DrawPath::~DrawPath() {
   if (save_thread_.joinable()) save_thread_.join();
@@ -327,7 +345,8 @@ bool DrawPath::Initialize(Device& device, rg::RegisterFile& registers, rex::memo
   bool_loop_constants_buffer_ =
       CreateConstantBuffer(render_device, "NativeXRenderer bool/loop constants", kBoolLoopConstantsSize);
   fetch_constants_buffer_ = CreateConstantBuffer(render_device, "NativeXRenderer fetch constants", kFetchConstantsSize);
-  motion_constants_buffer_ = CreateConstantBuffer(render_device, "NativeXRenderer motion constants", 16);
+  // (64 bytes: the motion pass's one vec4, and after it the weapon skin's mesh pass's three, weapon_skin.cpp kOverPS.)
+  motion_constants_buffer_ = CreateConstantBuffer(render_device, "NativeXRenderer motion constants", 64);
   if (!system_constants_buffer_ || !bool_loop_constants_buffer_ || !fetch_constants_buffer_ ||
       !motion_constants_buffer_) {
     return false;
@@ -1835,6 +1854,10 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           view = textures_->View(binding.fetch_constant, regs.GetTextureFetch(binding.fetch_constant),
                                  binding.dimension, binding.is_signed);
           NoteShadowMap(stage, binding.fetch_constant, view);
+        if (stage == 1 && weapon_draw_ && view && WeaponExportOn()) export_textures_.push_back({binding.fetch_constant, view});
+        if (stage == 1 && !weapon_draw_ && skin_gun_address_ &&
+            uint32_t(regs.GetTextureFetch(binding.fetch_constant).base_address) == skin_gun_address_)
+          skin_3p_hit_ = true;
         view = SkinView(stage, binding.fetch_constant, view, *shader, regs);
         view = WetView(stage, binding.fetch_constant, view, *shader, regs);
         view = SeaSkyView(stage, binding.fetch_constant, view, *shader);
@@ -1883,6 +1906,10 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         IDeviceObject* view = textures_->View(binding.fetch_constant, regs.GetTextureFetch(binding.fetch_constant),
                                               binding.dimension, binding.is_signed);
         NoteShadowMap(stage, binding.fetch_constant, view);
+        if (stage == 1 && weapon_draw_ && view && WeaponExportOn()) export_textures_.push_back({binding.fetch_constant, view});
+        if (stage == 1 && !weapon_draw_ && skin_gun_address_ &&
+            uint32_t(regs.GetTextureFetch(binding.fetch_constant).base_address) == skin_gun_address_)
+          skin_3p_hit_ = true;
         view = SkinView(stage, binding.fetch_constant, view, *shader, regs);
         view = WetView(stage, binding.fetch_constant, view, *shader, regs);
         view = SeaSkyView(stage, binding.fetch_constant, view, *shader);
@@ -2026,9 +2053,11 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   place.align = aspect_align_;
   const bool hud_scaling = hud_scale_ != 1.0f || minimap_scale_ != 1.0f;
   bool hud_placed = false;
+  uint32_t hud_pixel_mask = 0;
   if (hud_classify_ && ((aspect_box_ && target_scale.x != target_scale.y) || hud_scaling)) {
     hud_sheet_w_ = hud_sheet_h_ = hud_sheet_format_ = 0;
     if (const uint32_t pixel_mask = pixel_shader ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0) {
+      hud_pixel_mask = pixel_mask;
       uint32_t first = 0;
       while (!(pixel_mask & (1u << first))) ++first;
       const auto fetch = regs.GetTextureFetch(first);
@@ -2036,6 +2065,22 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       hud_sheet_format_ = uint32_t(fetch.format);
     }
     place = ClassifyHudDraw(copies, vertex_program.hash), hud_placed = true;
+  }
+  // NXR_BOX_LOG=1 (a diagnosis aid, 19 Nov 2026: the loading screen's fade to black boxed at 16:9 on a wider screen):
+  // each boxed draw whose viewport covers the whole canvas, with how it was placed.
+  if (aspect_box_ && place.mode != HudMode::kStretch && target_scale.x != target_scale.y) {
+    static const bool box_log = std::getenv("NXR_BOX_LOG") != nullptr;
+    static std::set<uint64_t> box_said;  // once per shader, mode and extent (the same fade every frame filled the log)
+    const uint64_t key = vertex_program.hash ^ pixel_program.hash ^ uint64_t(place.mode) << 56 ^
+                         uint64_t(std::lround(place.lo * 20) & 0xFF) << 48 ^ uint64_t(std::lround(place.hi * 20) & 0xFF) << 40;
+    if (box_log && box_said.size() < 400 && viewport_info.xy_extent[0] >= sized->guest_width &&
+        viewport_info.xy_extent[1] >= sized->guest_height && box_said.insert(key).second) {
+      REXLOG_INFO("[native_x_renderer] box log: vs {:016X} ps {:016X} textures {:X} mode {} placed {} classify {} menu {} "
+                  "clip x {:.2f}..{:.2f} y {:.2f}..{:.2f}, {} vertices, {} copies, {} registers",
+                  vertex_program.hash, pixel_program.hash, hud_pixel_mask, int(place.mode), hud_placed, hud_classify_,
+                  hud_menu_, place.lo, place.hi, place.y_lo, place.y_hi,
+                  registers_->values[rg::XE_GPU_REG_VGT_DRAW_INITIATOR] >> 16, copies.size(), vertex_registers_.size());
+    }
   }
   if (aspect_box_ && place.mode != HudMode::kStretch && target_scale.x != target_scale.y) {
     float uniform = std::min(target_scale.x, target_scale.y);
@@ -2275,8 +2320,48 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       ++stats_.failed;
       return false;
   }
+  // D229 (NXR_DEVICE_FAULT=1, a diagnosis aid): an indexed draw whose indices run past the end of their buffer (index
+  // reads are not bounds checked like a shader's), logged (the first 20).
+  {
+    static const bool check = [] {
+      const char* v = std::getenv("NXR_DEVICE_FAULT");
+      return v && *v == '1';
+    }();
+    static int said = 0;
+    if (check && index_buffer && said < 20) {
+      const uint64_t size = index_buffer->GetDesc().Size;
+      const uint64_t end = index_offset + uint64_t(primitives.host_draw_vertex_count) * (index_type == VT_UINT16 ? 2 : 4);
+      if (end > size) {
+        ++said;
+        REXLOG_ERROR("[native_x_renderer] index read past its buffer: \"{}\" ({} bytes) from {:#x}, {} {}-bit indices "
+                     "(to {:#x}), index buffer type {}, VS {:016X}",
+                     index_buffer->GetDesc().Name ? index_buffer->GetDesc().Name : "?", size, index_offset,
+                     primitives.host_draw_vertex_count, index_type == VT_UINT16 ? 16 : 32, end,
+                     int(primitives.index_buffer_type), vertex_shader ? vertex_shader->ucode_data_hash() : 0);
+      }
+    }
+  }
+  // HudMode::kOversize: the stretched pass only outside the box (the bars at the sides, or above and below), so every
+  // pixel is drawn once. Over the box as well, a part transparent draw covered the middle twice: the loading screen's
+  // fade to black (a Flash rectangle from -1.5 to 1.5) went dark in the 16:9 middle first and the sides lagged (the
+  // user, 22 Nov 2026, at 3440x1440: "the black fade transitions are still bound to 16:9"; run uw_b21: sides 30,
+  // middle 9). A scope's mask looks as before: in the box its boxed pass drew over the stretched one anyway.
+  std::array<Rect, 4> bars{};
+  uint32_t bar_count = 0;
+  if (oversize) {
+    const Rect& s = stretched_scissor;
+    const int32_t bl = host_x(0), br = host_x(sized->guest_width), bt = host_y(0), bb = host_y(sized->guest_height);
+    auto add = [&](int32_t l, int32_t t, int32_t r, int32_t b) {
+      Rect bar{std::max(l, s.left), std::max(t, s.top), std::min(r, s.right), std::min(b, s.bottom)};
+      if (bar.right > bar.left && bar.bottom > bar.top) bars[bar_count++] = bar;
+    };
+    add(s.left, s.top, bl, s.bottom);                                // left of the box
+    add(br, s.top, s.right, s.bottom);                               // right of it
+    add(std::max(bl, s.left), s.top, std::min(br, s.right), bt);     // above it
+    add(std::max(bl, s.left), bb, std::min(br, s.right), s.bottom);  // below it
+  }
   recorder.Do([index_buffer, index_offset, index_type, count = primitives.host_draw_vertex_count, oversize,
-               stretched_viewport, stretched_scissor, viewport, scissor_rect, blend_factors,
+               stretched_viewport, bars, bar_count, viewport, scissor_rect, blend_factors,
                stencil = state.stencil_enable, stencil_reference](IDeviceContext* context) {
     if (stencil) context->SetStencilRef(stencil_reference);
     context->SetBlendFactors(blend_factors);
@@ -2291,15 +2376,95 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       }
     };
     if (oversize) {
-      // Stretched first (its black reaches the screen's edges), then in the box over it (its hole round).
+      // Stretched in the bars (its black reaches the screen's edges), then in the box (its hole round).
       context->SetViewports(1, &stretched_viewport, 0, 0);
-      context->SetScissorRects(1, &stretched_scissor, 0, 0);
-      issue();
+      for (uint32_t i = 0; i < bar_count; ++i) {
+        context->SetScissorRects(1, &bars[i], 0, 0);
+        issue();
+      }
       context->SetViewports(1, &viewport, 0, 0);
       context->SetScissorRects(1, &scissor_rect, 0, 0);
     }
     issue();
   });
+  // NXR_SKIN_3P_LOG=1 (a developer's): draws that are not the first person weapon's but have its colour texture:
+  // another player's gun, or one on the ground. Each pair of shaders once, with its size and its first constants.
+  {
+    static const bool log_3p = [] {
+      const char* v = std::getenv("NXR_SKIN_3P_LOG");
+      return v && *v == '1';
+    }();
+    if (log_3p && skin_3p_hit_ && pixel_shader) {
+      static std::set<uint64_t> said;
+      const uint64_t key = vertex_shader->ucode_data_hash() * 31 + pixel_shader->ucode_data_hash() + primitives.guest_draw_vertex_count;
+      if (said.size() < 40 && said.insert(key).second) {
+        const float* c = reinterpret_cast<const float*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+        std::string rows;
+        for (int r : {12, 13, 14, 15, 17, 18, 19, 20, 21, 22})
+          rows += fmt::format(" c{} {:.3f} {:.3f} {:.3f} {:.3f};", r, c[r * 4], c[r * 4 + 1], c[r * 4 + 2], c[r * 4 + 3]);
+        REXLOG_INFO("[native_x_renderer] skin 3p: a draw with the first person gun's colour texture: VS {:016X} PS {:016X}, {} "
+                    "indices, {} vertex constants, depth write {}, c255.x {:.1f};{}",
+                    vertex_shader->ucode_data_hash(), pixel_shader->ucode_data_hash(), primitives.guest_draw_vertex_count,
+                    vertex_registers_.size(), int(state.depth_write), c[255 * 4], rows);
+      }
+    }
+  }
+  // A developer's export of the first person weapons' models (weapon_export.h, NXR_WEAPON_EXPORT): this draw's
+  // vertices and indices from the game's memory, its bones from its constants, its textures. Not the hands' (told as
+  // SkinView tells them: a texture of 512 by 256, or three square DXT1 ones of 512).
+  if (weapon_draw_ && pixel_shader && output_sized && state.depth_write && WeaponExportOn()) {
+    bool hands = false;
+    uint32_t squares = 0;
+    std::vector<WeaponExportDraw::Texture> textures;
+    for (const ExportTexture& t : export_textures_) {
+      const auto f = regs.GetTextureFetch(t.fetch);
+      const uint32_t width = f.size_2d.width + 1, height = f.size_2d.height + 1;
+      if (width == 512 && height == 256) hands = true;
+      if (f.format == xenos::TextureFormat::k_DXT1 && width == 512 && height == 512) ++squares;
+      textures.push_back({t.fetch, width, height, uint32_t(f.format), static_cast<ITextureView*>(t.view)});
+    }
+    auto* kernel = rex::system::kernel_state();
+    const auto& bindings = vertex_shader->vertex_bindings();
+    if (!hands && squares < 3 && kernel && kernel->memory() && !bindings.empty()) {
+      const auto& binding = bindings[0];
+      const xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(binding.fetch_constant);
+      WeaponExportDraw d;
+      d.vs_hash = vertex_shader->ucode_data_hash();
+      d.ps_hash = pixel_shader->ucode_data_hash();
+      d.vs_constants = reinterpret_cast<const float*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+      d.vertex_address = fetch.address << 2;
+      d.vertices = kernel->memory()->TranslatePhysical<const uint8_t*>(d.vertex_address);
+      d.vertex_bytes = fetch.size << 2;
+      d.stride_bytes = binding.stride_words * 4;
+      for (const auto& attribute : binding.attributes) {
+        const auto& a = attribute.fetch_instr.attributes;
+        const int at = a.offset * 4;
+        if (a.data_format == xenos::VertexFormat::k_32_32_32_FLOAT && d.position < 0) d.position = at;
+        else if (a.data_format == xenos::VertexFormat::k_16_16_FLOAT && d.uv < 0) d.uv = at;
+        else if (a.data_format == xenos::VertexFormat::k_8_8_8_8 && a.is_integer && d.bone < 0) d.bone = at;
+        // (Of the three packed vectors the vertex shader 574AF3705A349158 reads, the normal is the one a word
+        // before the last: its tangents are at words 5 and 7.)
+        else if (a.data_format == xenos::VertexFormat::k_10_11_11 && at == 24) d.normal = at;
+      }
+      d.index_count = primitives.guest_draw_vertex_count;
+      d.index_32 = primitives.host_index_format != xenos::IndexFormat::kInt16;
+      d.primitive = uint32_t(primitives.guest_primitive_type);
+      if (primitives.index_buffer_type == rg::PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA) {
+        d.index_address = primitives.guest_index_base;
+        d.indices = kernel->memory()->TranslatePhysical<const uint8_t*>(d.index_address);
+      }
+      d.textures = textures.data();
+      d.texture_count = uint32_t(textures.size());
+      if (d.indices || primitives.index_buffer_type == rg::PrimitiveProcessor::ProcessedIndexBufferType::kNone)
+        WeaponExportDrawNow(d);
+    }
+  }
+  // The player's weapon skin (weapon_skin.h): a draw that took a skinned copy is kept, to be drawn again with the
+  // skin's light (DrawSkinOver). Not with MSAA (its target would have to be multisampled as the depth is).
+  if (skin_tex_now_ && output_sized && state.depth_enable && state.samples <= 1 && !vertex_registers_.empty()) {
+    KeepSkinDraw(*vertex_shader, vertex_modification.value, state, viewport, scissor_rect, index_buffer, index_offset,
+                 index_type, primitives.host_draw_vertex_count);
+  }
   // D163: a model with lamps (a jeep's body, by its index count): its world matrix for the night's lights, in the
   // registers given with it (rigid rows, the position in their fourth floats); taken only when rigid.
   if (model_lamp_counts_ && model_lamp_report_ && index_buffer && output_sized && state.depth_write) {
@@ -2823,6 +2988,148 @@ uint32_t DrawPath::DrawObjectMotion(ITextureView* motion, ITextureView* depth) {
   return drawn;
 }
 
+void DrawPath::KeepSkinDraw(rg::SpirvShader& vertex_shader, uint64_t vertex_modification, const PipelineState& state,
+                            const Viewport& viewport, const Rect& scissor, IBuffer* index_buffer, uint64_t index_offset,
+                            VALUE_TYPE index_type, uint32_t vertex_count) {
+  if (skin_over_failed_ || skin_draws_.size() >= 64) return;
+  if (!skin_over_shader_) {
+    skin_over_shader_ = CreateWeaponSkinOverShader(device_->device());
+    SamplerDesc linear;
+    linear.MinFilter = linear.MagFilter = linear.MipFilter = FILTER_TYPE_LINEAR;
+    linear.AddressU = linear.AddressV = linear.AddressW = TEXTURE_ADDRESS_WRAP;
+    device_->device()->CreateSampler(linear, &skin_sampler_);
+    if (!skin_over_shader_ || !skin_sampler_) {
+      skin_over_failed_ = true;
+      REXLOG_ERROR("[native_x_renderer] weapon skin: the mesh pass's pixel shader could not be created; no light of its own");
+      return;
+    }
+  }
+  ITextureView* plain = WeaponSkinPlainView(skin_tex_now_);
+  if (!plain) return;
+  // The gun's place from its own bones (the vertex shader 574AF3705A349158: a bone's rows are c[17 + 3 * bone] and the
+  // two after, in the world's space; c12 to c15 its view-projection).
+  {
+    const float* c = reinterpret_cast<const float*>(&(*registers_)[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+    const float step = c[255 * 4];
+    const int first = 17 + int(std::lround(step * float(WeaponSkinBodyBone())));
+    const int magazine = 17 + int(std::lround(step * float(WeaponSkinMagazineBone())));
+    double view_move[16];
+    const bool moved = WeaponLayerMoveNow(view_move);
+    if (step > 0.5f && step < 8.5f && first + 2 < 255 && magazine + 2 < 255)
+      WeaponSkinGunFrame(c + first * 4, c + magazine * 4, c + 12 * 4, weapon_px_, weapon_py_, moved ? view_move : nullptr);
+  }
+  // The draw's own vertex shader (the motion pass's copy of it: it gives the same positions and the game's own
+  // interpolators), the skin's pixel shader; depth tested equal to what the draw wrote, not written; no stencil, no
+  // blending; one target.
+  bool pending = false;
+  IShader* own_vertex_shader = shaders_->GetMotionShader(vertex_shader, vertex_modification, pending);
+  if (!own_vertex_shader) return;
+  PipelineState over = state;
+  over.vertex_shader = own_vertex_shader;
+  over.pixel_shader = skin_over_shader_.RawPtr();
+  std::fill(std::begin(over.rtv_formats), std::end(over.rtv_formats), uint16_t(0));
+  over.rtv_formats[0] = uint16_t(TEX_FORMAT_RGBA16_FLOAT);
+  over.render_target_count = 1;
+  over.depth_write = 0;
+  over.depth_func = uint8_t(COMPARISON_FUNC_EQUAL);
+  over.stencil_enable = 0;
+  over.stencil_read_mask = over.stencil_write_mask = 0;
+  std::memset(over.stencil_front, 0, sizeof(over.stencil_front));
+  std::memset(over.stencil_back, 0, sizeof(over.stencil_back));
+  std::memset(over.targets, 0, sizeof(over.targets));
+  over.targets[0].write_mask = uint8_t(COLOR_MASK_ALL);
+  Pipeline* pipeline = pipelines_->Get(over, vertex_shader, nullptr, nullptr, true);
+  if (!pipeline || !pipelines_->Ready(*pipeline)) return;
+  const TextureDesc& size = plain->GetTexture()->GetDesc();
+  SkinDraw draw{pipeline, skin_data_.size(), uint32_t(vertex_constants_.size()), viewport, scissor, index_buffer, index_offset,
+                index_type, vertex_count, RefCntAutoPtr<ITextureView>(plain), float(size.Width), float(size.Height)};
+  const rg::RegisterFile& regs = *registers_;
+  const auto* system = reinterpret_cast<const uint8_t*>(&system_constants_);
+  const auto* bool_loop = reinterpret_cast<const uint8_t*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031]);
+  const auto* fetch = reinterpret_cast<const uint8_t*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0]);
+  skin_data_.insert(skin_data_.end(), vertex_constants_.begin(), vertex_constants_.end());
+  skin_data_.insert(skin_data_.end(), system, system + sizeof(system_constants_));
+  skin_data_.insert(skin_data_.end(), bool_loop, bool_loop + kBoolLoopConstantsSize);
+  skin_data_.insert(skin_data_.end(), fetch, fetch + kFetchConstantsSize);
+  skin_draws_.push_back(std::move(draw));
+  static bool said = false;
+  if (!said) {
+    said = true;
+    REXLOG_INFO("[native_x_renderer] weapon skin: the gun's draws are drawn again with the storm's light (VS {:016X})",
+                vertex_shader.ucode_data_hash());
+  }
+}
+
+uint32_t DrawPath::DrawSkinOver(ITextureView* target, ITextureView* depth) {
+  uint32_t drawn = 0;
+  if (target) {
+    Recorder& recorder = device_->recorder();
+    // (A multisampled depth cannot be bound with the target: none kept then, the target only cleared.)
+    const bool tested = depth && depth->GetTexture()->GetDesc().SampleCount <= 1 &&
+                        depth->GetTexture()->GetDesc().Width == target->GetTexture()->GetDesc().Width &&
+                        depth->GetTexture()->GetDesc().Height == target->GetTexture()->GetDesc().Height;
+    recorder.Do([target, depth, tested](IDeviceContext* context) mutable {
+      context->SetRenderTargets(1, &target, tested ? depth : nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      const float none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      context->ClearRenderTarget(target, none, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    });
+    TargetsChanged();
+    if (tested && !skin_draws_.empty()) {
+      uploaded_frame_ = UINT64_MAX;  // its own bool/loop and fetch constants go into the draws' buffers (D81)
+      memory_->PrepareForRead();
+      for (const SkinDraw& draw : skin_draws_) {
+        const uint8_t* data = skin_data_.data() + draw.data;
+        Pipeline& pipeline = *draw.pipeline;
+        auto upload = [&](IBuffer* buffer, size_t size) {
+          MappedBuffer map(recorder, buffer);
+          std::memcpy(map.data(), data, size);
+          data += size;
+        };
+        {
+          MappedBuffer map(recorder, pipeline.previous_float_constants);  // (the motion copy's: not used by the skin)
+          std::memcpy(map.data(), data, draw.constants_size);
+        }
+        upload(pipeline.float_constants[0], draw.constants_size);
+        upload(system_constants_buffer_, sizeof(system_constants_));
+        upload(bool_loop_constants_buffer_, kBoolLoopConstantsSize);
+        upload(fetch_constants_buffer_, kFetchConstantsSize);
+        {
+          float k[16] = {};
+          WeaponSkinOverConstants(k + 4, draw.width, draw.height);
+          MappedBuffer map(recorder, motion_constants_buffer_);
+          std::memcpy(map.data(), k, sizeof(k));
+        }
+        recorder.Do([pso = pipeline.pso.RawPtr(), srb = pipeline.srb.RawPtr(), viewport = draw.viewport, scissor = draw.scissor,
+                     index_buffer = draw.index_buffer, index_offset = draw.index_offset, index_type = draw.index_type,
+                     vertex_count = draw.vertex_count, texture = draw.texture.RawPtr(),
+                     sampler = skin_sampler_.RawPtr()](IDeviceContext* context) {
+          if (auto* v = srb->GetVariableByName(SHADER_TYPE_PIXEL, "skinTex")) v->Set(texture);
+          if (auto* v = srb->GetVariableByName(SHADER_TYPE_PIXEL, "skinTex_sampler")) v->Set(sampler);
+          context->SetPipelineState(pso);
+          context->CommitShaderResources(srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+          context->SetViewports(1, &viewport, 0, 0);
+          context->SetScissorRects(1, &scissor, 0, 0);
+          if (index_buffer) {
+            context->SetIndexBuffer(index_buffer, index_offset, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+            DrawIndexedAttribs attribs{vertex_count, index_type, DRAW_FLAG_NONE};
+            context->DrawIndexed(attribs);
+          } else {
+            DrawAttribs attribs{vertex_count, DRAW_FLAG_NONE};
+            context->Draw(attribs);
+          }
+        });
+        ++drawn;
+      }
+    }
+    recorder.Do([](IDeviceContext* context) { context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE); });
+  }
+  // (Kept until the textures' references are let go on the recorder's side: the draws above hold raw pointers.)
+  recorder_skin_done_.swap(skin_draws_);
+  skin_draws_.clear();
+  skin_data_.clear();
+  return drawn;
+}
+
 // VulkanCommandProcessor::UpdateSystemConstantValues, for the host render target path (no fragment shader
 // interlock) at resolution scale 1. Fields that do not apply to a draw keep their last value, as there.
 void DrawPath::FillSystemConstants(const DrawContext& draw) {
@@ -3026,6 +3333,15 @@ std::atomic<float> g_weapon_move_py{0.0f};  // 1 / tan(half the weapon view's ve
 std::chrono::steady_clock::time_point g_weapon_move_until{};
 std::atomic<bool> g_weapon_move_on{false};
 }  // namespace
+// The move as it holds now (a view space 4 x 4, rows first), for what is drawn with the weapon but not by its own
+// draws (the weapon skin's cloud): false without one.
+bool WeaponLayerMoveNow(double out[16]) {
+  if (!g_weapon_move_on.load(std::memory_order_relaxed)) return false;
+  std::lock_guard lock(g_weapon_move_mutex);
+  if (std::chrono::steady_clock::now() > g_weapon_move_until) return false;
+  for (int i = 0; i < 16; ++i) out[i] = g_weapon_move[i];
+  return true;
+}
 void RecordWeaponLayerMove(const float* move, float fov_degrees) {
   std::lock_guard lock(g_weapon_move_mutex);
   if (!move) {
@@ -3583,7 +3899,10 @@ void DrawPath::ApplyOutdoorLight(uint64_t shader_hash, uint32_t stage, const uin
 // range; a draw of the nearest range whose own differs from it by 2% or more is the weapon's.
 void DrawPath::ClassifyWeapon(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, float z_min, float z_max) {
   weapon_draw_ = false;
-  if (wet_tint_ < 0 && wet_count_ * wet_show_ < 0.01f && WeaponDumpAt() < 0.0 && !WeaponSkinNow()) return;  // nothing to be wet or skinned
+  skin_tex_now_ = nullptr;
+  skin_3p_hit_ = false;
+  export_textures_.clear();
+  if (wet_tint_ < 0 && wet_count_ * wet_show_ < 0.01f && WeaponDumpAt() < 0.0 && !WeaponSkinNow() && !WeaponExportOn()) return;  // nothing to be wet, skinned or exported
   const bool nearest = z_min > 0.99f && z_max > 0.005f && z_max < 0.05f;
   const uint64_t frame = device_->frames_presented();
   const bool farther = !nearest && z_max < z_min && z_min < 0.05f && world_py_frame_ != frame;
@@ -3614,6 +3933,7 @@ void DrawPath::ClassifyWeapon(const uint32_t* regs, uint32_t first, const uint64
   }
   weapon_draw_ = world_py_ > 0.0f && std::abs(p.py - world_py_) > 0.02f * world_py_;
   weapon_constants_ = n;
+  if (weapon_draw_) weapon_px_ = std::abs(p.px), weapon_py_ = std::abs(p.py), NoteFirstPersonWeaponDrawn();
   static int said = 0;
   if (weapon_draw_ && said < 2) {
     ++said;
@@ -4139,6 +4459,8 @@ void DrawPath::EndFrame() {
   object_motion_.EndFrame();
   motion_draws_.clear();
   motion_data_.clear();
+  skin_draws_.clear();  // (not drawn again this frame: the skin's overlay did not run)
+  skin_data_.clear();
   glass_draws_.clear();  // D191: not drawn into a mask this frame
   glass_data_.clear();
   sea_draws_.clear();
@@ -4343,7 +4665,10 @@ IDeviceObject* DrawPath::SkinView(uint32_t stage, uint32_t fetch_constant, IDevi
     }
   }
   if (int(fetch_constant) != colour) return view;
-  return WeaponSkinView(view, hands || squares >= 3, device_->frames_presented());
+  if (!(hands || squares >= 3)) skin_gun_address_ = uint32_t(regs.GetTextureFetch(uint32_t(colour)).base_address);
+  IDeviceObject* skinned = WeaponSkinView(view, hands || squares >= 3, device_->frames_presented());
+  if (skinned != view) skin_tex_now_ = skinned;  // (the mesh pass draws this draw again, KeepSkinDraw)
+  return skinned;
 }
 
 IDeviceObject* DrawPath::WetView(uint32_t stage, uint32_t fetch_constant, IDeviceObject* view,

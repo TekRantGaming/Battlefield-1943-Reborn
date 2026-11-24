@@ -664,7 +664,12 @@ void Run() {
           dx = s.x - eye[0], dz = s.z - eye[2];
         }
         const float distance = std::max(150.0f, std::hypot(dx, dz));
-        s.sound = distance < 1500.0f ? kStrikeClose : distance < 5000.0f ? kStrikeDistant : kStrikeClouds;
+        // D225 (the user, 20 Nov 2026: "why is none of the other audio variants playing for distant thunder or
+        // lightning too? I only hear the same lightning audio, and its the one meant for lightning strikes being
+        // extremely close"): the storm the level's size (D213) puts every strike within about 1.5 km, where the
+        // thresholds of 17 Nov (1.5 and 5 km) gave every one the close crack. Now by what it is and how far: a bolt
+        // within 350 m the close crack, a bolt further off the distant strike, a flash inside the clouds their rumble.
+        s.sound = !strikes[i].bolt ? kStrikeClouds : distance < 350.0f ? kStrikeClose : kStrikeDistant;
         s.wait = int64_t(double(distance) / 343.0 * kRate);
         // D207 (the user: "Lightning and thunder can barely be heard too, and lightning should be relatively loud,
         // especially if close"): a close strike's crack up to 2.2 at 150 m, falling to 1.6 at 1.5 km; a distant one's
@@ -672,11 +677,11 @@ void Run() {
         // storm's rain). (Before: 1.0 at the most, and turned down with the
         // rest in the game's loud moments.)
         const float st = strikes[i].strength;
-        // D208: within 400 m (a strike near the players) a startling crack, 3.5 at 150 m to 2.8.
-        s.gain = s.sound == kStrikeClose     ? (distance < 400.0f ? std::clamp(st * (3.5f - 0.7f * (distance - 150.0f) / 250.0f), 1.6f, 3.5f)
-                                                                 : std::clamp(st * (2.8f - 1.2f * (distance - 400.0f) / 1100.0f), 0.8f, 2.8f))
-                 : s.sound == kStrikeDistant ? std::clamp(st * (1.9f - 0.9f * (distance - 1500.0f) / 3500.0f), 0.6f, 1.9f)
-                                             : std::clamp(st * (2.0f - distance / 8000.0f), 0.4f, 1.2f);
+        // D208: near the players a startling crack, 3.5 at 150 m to 2.8 at 350 m (D225). A distant strike 2.2 at 350 m
+        // to 0.8 at 3 km; the clouds' rumble 1.5 overhead to 0.5 at 3 km.
+        s.gain = s.sound == kStrikeClose     ? std::clamp(st * (3.5f - 0.7f * (distance - 150.0f) / 200.0f), 1.6f, 3.5f)
+                 : s.sound == kStrikeDistant ? std::clamp(st * (2.2f - 1.4f * (distance - 350.0f) / 2650.0f), 0.8f, 2.2f)
+                                             : std::clamp(st * (1.5f - distance / 3000.0f), 0.5f, 1.5f);
         if (Want(s.sound)) shots.push_back(s);
 #if defined(BF_DEV_TOOLS)
         constexpr double kSayEvery = 0.0;  // tests: every strike

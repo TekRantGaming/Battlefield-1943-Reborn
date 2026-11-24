@@ -93,7 +93,8 @@ player logs in to and which lists every server.
 - **Community servers**: anyone can host dedicated servers with `BF1943-Reborn-Server-<version>-windows.zip`, managed
   from a page in the browser, each with its own name, description, maps, players, region and tick rate. See
   [docs/SERVER.md](docs/SERVER.md)
-- **Custom Match**: a match on your own PC for you and your friends, online or LAN, with a password if you want one
+- **Custom Match**: a match on your own PC for you and your friends, online or LAN, with a password if you want one,
+  bots, a game mode, a map rotation, tickets and a match time ([docs/BOTS-AND-CUSTOM-MATCH.md](docs/BOTS-AND-CUSTOM-MATCH.md))
 - **Fairer teams** on Reborn servers: lopsided teams are evened out one player at a time, with no points lost
 - Messages from a server to everyone on it, for an update or a restart, and a clear message when a server is full or
   the servers are closed for maintenance
@@ -171,6 +172,8 @@ Everything is in our Settings menu, from the main menu and the pause menu, with 
 - **Ambient occlusion** (Intel's XeGTAO) and **global illumination**, with quality settings
 - **Grass and shrubs**, placed from each level's own data, drawn as far as the whole map
 - **Motion blur** (Off, Low, Medium, High), animation smoothing, HD textures
+- In detail: [docs/GRAPHICS-UPGRADES.md](docs/GRAPHICS-UPGRADES.md) and the weather, sky and clouds in
+  [docs/WEATHER-AND-SKY.md](docs/WEATHER-AND-SKY.md)
 
 </td>
 </tr>

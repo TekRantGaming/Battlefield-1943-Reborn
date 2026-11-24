@@ -25,7 +25,11 @@
 #include "scope.h"
 #include "ssgi.h"
 #include "dof.h"
+#include "fluid.h"
+#include "ground_fog.h"
+#include "cloud_mass.h"
 #include "sky.h"
+#include "weapon_export.h"
 #include "weapon_skin.h"
 #include "motion_blur.h"
 #include "upscaler.h"
@@ -70,6 +74,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -135,6 +140,13 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_wind, 0.3, "NativeXRenderer",
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_cloud_height, 450.0, "NativeXRenderer",
                       "The clouds' base over the sea, metres (100 to 3000): low enough, the planes fly through them "
                       "(with native_x_renderer_world_own; a match's server sets its own)");
+REXCVAR_DEFINE_INT32(native_x_renderer_storm_type, 0, "NativeXRenderer",
+                     "Developer: the storm's type with native_x_renderer_world_own (D224): 0 a thunderstorm, 1 a "
+                     "hurricane (a match's server sets its own)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_fluid_storm, true, "NativeXRenderer",
+                    "The storm made of the sky's own clouds by a particle fluid (D229): its air pulls them in and turns "
+                    "them round as the weather rises, convection from scattered cells organising into bands (a "
+                    "hurricane's on Hurricane Michael's radar); off, the storm's own drawn shape");
 REXCVAR_DEFINE_BOOL(native_x_renderer_cloud_shadows, true, "NativeXRenderer",
                     "The clouds cast their shadows on the ground by day (D214)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_lightning, true, "NativeXRenderer",
@@ -153,6 +165,16 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_wetness, true, "NativeXRenderer",
                     "Wetness: what you hold gets wet in the rain and in the sea, with beads of water, and dries again");
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_ground_fog, 0.0, "NativeXRenderer",
                       "The ground fog, 0 to 1: a low layer over the sea and the shore in drifting patches");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_ground_fog_height, 0.5, "NativeXRenderer",
+                      "How deep the ground fog is, metres (0.2 to 5; 0.5 is shin high)");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_ground_fog_sparse, 0.7, "NativeXRenderer",
+                      "How sparse the ground fog is, 0 everywhere to 1 a few small patches");
+REXCVAR_DEFINE_BOOL(native_x_renderer_cloud_particles, false, "NativeXRenderer",
+                    "Developer: the clouds' mass as particles (their tracers carried by the wind and drawn into a storm; "
+                    "the clouds' march reads their count in place of its weather map)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_fog_push, true, "NativeXRenderer",
+                    "The ground fog is pushed about by what moves through it, by blasts, shots, the wind and the rain, "
+                    "and comes back");
 REXCVAR_DEFINE_BOOL(native_x_renderer_world_own, false, "NativeXRenderer",
                     "Developer: the player's own time, weather and fog settings even in a match whose server keeps them");
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_sun_azimuth, -1.0, "NativeXRenderer",
@@ -355,6 +377,9 @@ Antialiasing g_aa;     // on the finished scene (D41)
 std::string g_aa_name;
 bool g_aa_live = false;
 Night g_night;         // the finished scene as a moonlit night (D162)
+// The weapon skin's overlay of this frame, to go over the picture after the night pass (weapon_skin.h).
+WeaponSkinBloomInputs g_skin_overlay;
+uint64_t g_skin_overlay_frame = ~0ull;
 Scope g_scope;         // the picture in picture sniper scope (D168)
 bool g_scope_pending = false;  // the scene's copy was made: the scope follows the game's composite (after the night)
 bool g_scope_mask_seen = false;  // the scope's pass was drawn in this frame (the research log's)
@@ -459,6 +484,39 @@ std::atomic<bool> g_night_vehicle_seated{false};  // D178: the player sits in a 
 // D208: the level's middle (SetMapArea), where the hurricane comes to; (0, 0) until a level's points are known.
 std::atomic<float> g_map_x{0.0f}, g_map_z{0.0f}, g_map_reach{1200.0f};  // (D213: its reach, 1200 m until known)
 std::atomic<bool> g_map_known{false};
+// D228: the storm's radar pattern (SetStormPattern, tools/storm_bake.py), kept until the render thread makes its
+// texture (a 2D array, a layer a frame, R8).
+std::mutex g_storm_pattern_mutex;
+std::vector<uint8_t> g_storm_pattern_bytes;
+StormPattern g_storm_pattern_meta;  // (its `frames` not kept: the bytes above)
+bool g_storm_pattern_new = false;
+RefCntAutoPtr<ITexture> g_storm_pattern_texture;
+// The pattern's texture, made on the render thread when a new pattern came (null: none yet).
+ITexture* StormPatternTexture() {
+  std::lock_guard lock(g_storm_pattern_mutex);
+  if (g_storm_pattern_new && g_device) {
+    g_storm_pattern_new = false;
+    const StormPattern& m = g_storm_pattern_meta;
+    TextureDesc d;
+    d.Name = "NativeXRenderer storm pattern";
+    d.Type = RESOURCE_DIM_TEX_2D_ARRAY;
+    d.Width = m.width, d.Height = m.height, d.ArraySize = m.count;
+    d.Format = TEX_FORMAT_R8_UNORM;
+    d.Usage = USAGE_IMMUTABLE;
+    d.BindFlags = BIND_SHADER_RESOURCE;
+    std::vector<TextureSubResData> layers(m.count);
+    for (uint32_t k = 0; k < m.count; ++k)
+      layers[k].pData = g_storm_pattern_bytes.data() + size_t(k) * m.width * m.height, layers[k].Stride = m.width;
+    TextureData data(layers.data(), m.count);
+    g_storm_pattern_texture.Release();
+    g_device->device()->CreateTexture(d, &data, &g_storm_pattern_texture);
+    REXLOG_INFO("[native_x_renderer] storm pattern (D228): {} frames of {}x{}, the eye {:.1f} px in radius, {:.3f} km a "
+                "pixel, {:.1f} minutes apart: {}",
+                m.count, m.width, m.height, m.eye_px, m.km_per_px, m.minutes,
+                g_storm_pattern_texture ? "made" : "not made");
+  }
+  return g_storm_pattern_texture;
+}
 uint64_t g_night_models_placed = 0;  // models placed with their lamps since the last log line
 void ReportNightModelDraw(uint32_t index_count, const Mat4d& m) {
   if (g_night_model_draws.size() < 48) g_night_model_draws.push_back({index_count, m});
@@ -493,6 +551,7 @@ bool GrassOn() {
   return g_grass_ready;
 }
 TerrainFrame g_terrain;  // this frame's terrain draws, for it
+TerrainFrame g_fog_terrain;  // D231: the last terrain seen (its heightmap kept), for the ground fog's ground
 bool g_scene_antialiased = false;  // this frame's scene copy antialiased already (Profile::scene_resolve_once, D94)
 Upscaler g_upscaler;   // NVIDIA DLSS (Phase 5, D46)
 // Motion blur (motion_blur.h, 0.4.2): made at its first use; the view's camera vote kept for it (the ambient
@@ -511,7 +570,15 @@ bool SkyLoaded() {
   }
   return g_sky_state == 1;
 }
-bool SkyOn() { return REXCVAR_GET(native_x_renderer_sky) && SkyLoaded(); }
+// NXR_SKY_OFF=1 (a developer's, D229): the renderer's sky off whatever the setting (a server's join turns it on).
+bool SkyForcedOff() {
+  static const bool off = [] {
+    const char* v = std::getenv("NXR_SKY_OFF");
+    return v && *v == '1';
+  }();
+  return off;
+}
+bool SkyOn() { return REXCVAR_GET(native_x_renderer_sky) && !SkyForcedOff() && SkyLoaded(); }
 // The clouds' march passes over the rays the scene hides (sky.cpp's kCloudPS). BF_CLOUD_AB=1 (tests): on and off by
 // turns, 600 frames each (a stats line's span), so both ways are timed in one run.
 bool AbEveryFrame() {
@@ -527,6 +594,15 @@ uint64_t AbPhase() {
 }
 // native_x_renderer_cloud_checkerboard: half the cloud texels marched each frame (about half the march's GPU time; in
 // motion the clouds a little softer for a frame or two). BF_CLOUD_CB_AB=1 (tests): on and off by turns, 600 frames each.
+// NXR_CLOUD_OLD=1 (a developer's, D229): the clouds' march held on the old way, before the Night Ops performance
+// pass's changes (the shape, the column's depth and the bands' noises for every sample; hidden rays marched).
+bool CloudOld() {
+  static const bool old = [] {
+    const char* v = std::getenv("NXR_CLOUD_OLD");
+    return v && *v == '1';
+  }();
+  return old;
+}
 bool CloudCheckerNow() {
   static const bool ab = [] {
     const char* v = std::getenv("BF_CLOUD_CB_AB");
@@ -538,6 +614,7 @@ bool CloudCheckerNow() {
 // BF_CLOUD_DENSITY_AB=1 (tests): the clouds' shape looked up for every sample (the old way) and only where it may
 // show (the new) by turns, 600 frames each.
 bool CloudDensityOldNow() {
+  if (CloudOld()) return true;
   static const bool ab = [] {
     const char* v = std::getenv("BF_CLOUD_DENSITY_AB");
     return v && *v == '1';
@@ -547,6 +624,7 @@ bool CloudDensityOldNow() {
 // BF_CLOUD_REACH_AB=1 (tests): the clouds' column depth looked up for every sample (the old way) and only where the
 // sample can be in the column (the new) by turns (with BF_AB_EVERY_FRAME every frame).
 bool CloudReachOldNow() {
+  if (CloudOld()) return true;
   static const bool ab = [] {
     const char* v = std::getenv("BF_CLOUD_REACH_AB");
     return v && *v == '1';
@@ -556,6 +634,7 @@ bool CloudReachOldNow() {
 // BF_CLOUD_BANDS_AB=1 (tests): the clouds' bands' noises worked out for every sample (the old way) or only where there
 // are bands (the new) by turns.
 bool CloudBandsOldNow() {
+  if (CloudOld()) return true;
   static const bool ab = [] {
     const char* v = std::getenv("BF_CLOUD_BANDS_AB");
     return v && *v == '1';
@@ -567,6 +646,7 @@ bool CloudSkipNow() {
     const char* v = std::getenv("BF_CLOUD_AB");
     return v && *v == '1';
   }();
+  if (CloudOld()) return false;
   return !ab || !g_device || AbPhase() == 0;
 }
 // The fog (sky.h's Fog), with either sky: whether the world now has any (ExecuteDraw keeps it), the camera and the
@@ -760,8 +840,11 @@ WorldState World() {
       w.weather = float(REXCVAR_GET(native_x_renderer_weather));
       w.fog = float(REXCVAR_GET(native_x_renderer_fog));
       w.ground_fog = float(REXCVAR_GET(native_x_renderer_ground_fog));
+      w.ground_fog_height = float(REXCVAR_GET(native_x_renderer_ground_fog_height));  // D231
+      w.ground_fog_sparse = float(REXCVAR_GET(native_x_renderer_ground_fog_sparse));
       w.wind = float(REXCVAR_GET(native_x_renderer_wind));
       w.cloud_height = float(REXCVAR_GET(native_x_renderer_cloud_height));
+      w.storm_type = REXCVAR_GET(native_x_renderer_storm_type);  // D224
     }
     own_evolve += dt * w.cloud_rate * storm::RateFactor(w.weather);  // D213
     if (w.day_night && w.day_minutes > 0.0) own_hours += dt / (w.day_minutes * 60.0) * 24.0;
@@ -807,18 +890,22 @@ WorldState World() {
       ease(shown.cloud_cover, w.cloud_cover, 0.04f);
       ease(shown.fog, w.fog, 0.04f);
       ease(shown.ground_fog, w.ground_fog, 0.04f);
+      ease(shown.ground_fog_height, w.ground_fog_height, 0.5f);  // D231
+      ease(shown.ground_fog_sparse, w.ground_fog_sparse, 0.1f);
       ease(shown.wind, w.wind, 0.05f);
       ease(shown.cloud_height, w.cloud_height, 25.0f);
     }
     w.weather = shown.weather, w.cloud_cover = shown.cloud_cover, w.fog = shown.fog, w.ground_fog = shown.ground_fog;
-    w.wind = shown.wind, w.cloud_height = shown.cloud_height;
+    w.wind = shown.wind, w.cloud_height = shown.cloud_height, w.ground_fog_height = shown.ground_fog_height;
+    w.ground_fog_sparse = shown.ground_fog_sparse;
   }
   // D208: the match's weather is the hurricane's stage (storm.h); the weather here is the storm's where the camera is
   // (the weather outside it while no camera is known yet). The lightning's strikes are told where they may fall.
   w.storm = w.weather;
   {
     const storm::Storm s = storm::Of(w.storm, w.cloud_seconds, g_map_x.load(std::memory_order_relaxed),
-                                     g_map_z.load(std::memory_order_relaxed), g_map_reach.load(std::memory_order_relaxed));
+                                     g_map_z.load(std::memory_order_relaxed), g_map_reach.load(std::memory_order_relaxed),
+                                     w.storm_type);
     float eye[3], right[3], forward[3];
     double age = 1e9;
     if (ListenerView(eye, right, forward, &age) && age < 5.0) {
@@ -828,10 +915,11 @@ WorldState World() {
       const int64_t now_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
       if (s.on && now_s - said.load(std::memory_order_relaxed) >= 10) {
         said.store(now_s, std::memory_order_relaxed);
-        REXLOG_INFO("[native_x_renderer] storm (D208): the match's weather {:.0f}%, the hurricane's centre at {:.0f}, {:.0f} "
+        REXLOG_INFO("[native_x_renderer] storm (D208, D224): the match's weather {:.0f}%, a {} centred at {:.0f}, {:.0f} "
                     "({:.0f} m from the camera; the level's middle {:.0f}, {:.0f}{}), its eye {:.0f} m, its rain shield {:.0f} m, "
                     "strength {:.2f}; the weather here {:.0f}%",
-                    w.storm * 100.0f, s.cx, s.cz, std::hypot(eye[0] - s.cx, eye[2] - s.cz), g_map_x.load(), g_map_z.load(),
+                    w.storm * 100.0f, storm::StormTypeName(s.type), s.cx, s.cz, std::hypot(eye[0] - s.cx, eye[2] - s.cz),
+                    g_map_x.load(), g_map_z.load(),
                     g_map_known.load() ? "" : ", not known", s.eye, s.radius, s.gain, w.weather * 100.0f);
       }
     } else if (s.on) {
@@ -841,15 +929,200 @@ WorldState World() {
   return w;
 }
 
+// D229: the storm made of the sky's own clouds (the fluid weather plan's step 3; the user, 20 Nov 2026: "when a storm
+// forms, it forms FROM the clouds, pulling them in"). A 2D FluidSim in the storm's own frame (its rain shield 1,000
+// units, whatever its size in the world: it grows and moves without the sim starting again), stepped 30 times a second
+// while there is a storm and the renderer's sky: the air pulled to the low, driven round it (anticlockwise seen from
+// above: +x east, +z north, the game's noon sun on Guadalcanal at +z) and turned by Coriolis, with an updraft at the eye
+// once it opens. Its flow map (FluidSim::Clouds) says where that air has carried the sky's clouds from, in two phases
+// that start again by turns every `kFlowPeriod` seconds, each faded out before it does, so the clouds coming in are
+// pulled round into the storm, their own shapes and cover, never stretched past a phase's span (sky.cpp reads the
+// weather map and the shape noise there). Over that, the storm's convection: scattered cells blended by the
+// organisation (rising with the stage) into the storm's pattern (Hurricane Michael's radar, D228, turned with its spin;
+// its radius to a power so the radar's eye is the storm's and its outer bands fall inside the rain shield), carried by
+// the air too. (Sky's storm_c, storm_cloud, storm_conv.) NXR_STORM_FLUID_LOG=1: the particles' state every 10 s.
+// D229: with NXR_DEVICE_FAULT=1, the renderer's passes as labelled groups in the command buffers (VK_EXT_debug_utils),
+// for AMD's Radeon GPU Detective's crash reports: which pass was in flight when the GPU faulted.
+bool FaultLabels() {
+  static const bool on = [] {
+    const char* v = std::getenv("NXR_DEVICE_FAULT");
+    return v && *v == '1';
+  }();
+  return on;
+}
+struct StormClouds {
+  FluidSim sim;
+  bool tried = false, seeded = false, reset = false;
+  double owed = 0.0, turn = 0.0, cells = 0.0, pattern_clock = 0.0, flow_clock = 0.0;
+  uint64_t steps = 0;
+  std::chrono::steady_clock::time_point last{};
+  float c[4] = {};
+  bool on = false;
+};
+StormClouds g_storm_clouds;
+// D232: the clouds' mass as particles (cloud_mass.h), a developer's first slice.
+CloudMass g_cloud_mass;
+void CloudMassInputs(Sky::Inputs& in) {
+  in.cloud_mass = nullptr, in.cloud_mass_size = 0.0f;
+  if (!REXCVAR_GET(native_x_renderer_cloud_particles) || !g_cloud_mass.Ready() || !g_cloud_mass.View()) return;
+  in.cloud_mass = g_cloud_mass.View();
+  in.cloud_mass_origin[0] = g_cloud_mass.origin()[0], in.cloud_mass_origin[1] = g_cloud_mass.origin()[1];
+  in.cloud_mass_size = CloudMass::kSize;
+}
+void StepCloudMass(IDeviceContext* context);
+void WakeInputs(Sky::Inputs& in);  // D234
+ITexture* StormPatternTexture();
+void StepStormClouds(IDeviceContext* context) {
+  StormClouds& sc = g_storm_clouds;
+  const WorldState w = World();
+  const storm::Storm s = storm::Of(w.storm, w.cloud_seconds, g_map_x.load(std::memory_order_relaxed),
+                                   g_map_z.load(std::memory_order_relaxed), g_map_reach.load(std::memory_order_relaxed),
+                                   w.storm_type);
+  sc.on = s.on && SkyOn() && REXCVAR_GET(native_x_renderer_fluid_storm);
+  if (!sc.on) {
+    sc.c[0] = 0.0f;
+    sc.seeded = false;  // the next storm starts afresh
+    return;
+  }
+  if (!sc.tried) {
+    sc.tried = true;
+    FluidSim::Config config;
+    config.particles = 16384;
+    config.tracers = 64;  // (none emitted: the cloud field is the storm's clouds)
+    config.spacing = 18.0f;
+    for (int k : {0, 2}) {
+      config.domain_min[k] = config.splat_min[k] = -1400.0f;
+      config.domain_max[k] = 1400.0f;
+      config.splat_size[k] = 2800.0f;
+    }
+    config.splat_dims[0] = config.splat_dims[2] = 4;
+    config.cloud_dims[0] = config.cloud_dims[1] = 256;
+    config.grid_dims[0] = config.grid_dims[1] = 128;
+    sc.sim.Initialize(g_device->device(), config, "storm");
+  }
+  if (!sc.sim.Ready()) {
+    sc.c[0] = 0.0f;
+    return;
+  }
+  // The sky's weather map and where it is (as the clouds were last drawn): none yet, nothing to carry.
+  ITextureView* weather = nullptr;
+  float drift[2] = {}, scale = 1.0f;
+  if (!g_own_sky.CloudMap(&weather, drift, &scale)) {
+    sc.c[0] = 0.0f;
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (!sc.seeded) {
+    const float centre[3] = {};
+    sc.sim.Seed(context, centre, 0.0f);
+    sc.seeded = true, sc.reset = true, sc.owed = 1.0 / 30.0, sc.last = now, sc.flow_clock = 0.0;
+  }
+  sc.owed = std::min(sc.owed + std::chrono::duration<double>(now - sc.last).count(), 0.25);
+  sc.last = now;
+  const bool hurricane = s.type == storm::kHurricane;
+  const float stage = storm::Smooth(0.25f, 1.0f, w.storm);
+  const float eye_open = hurricane ? storm::Smooth(0.65f, 0.9f, stage) : 0.0f;
+  FluidSim::Forces f;
+  f.pull = 0.25f, f.reach = 1500.0f, f.drag = 0.1f;
+  f.swirl = hurricane ? 0.9f * std::pow(stage, 1.5f) : 0.15f;  // (a terminal speed of swirl / drag at the edge, more within)
+  f.coriolis = hurricane ? 0.002f * stage : 0.0005f;
+  f.vorticity = 1.5f, f.viscosity = 0.03f;
+  f.sink = hurricane ? 1000.0f * (s.eye / std::max(s.radius, 1.0f)) * 0.8f * eye_open : 0.0f, f.source = 1350.0f;
+  f.tracer_life = 120.0f, f.splat_weight = 0.35f;
+  f.pattern_radius = 1000.0f;
+  static const float flow_speed = [] {  // (NXR_STORM_FLOW_SPEED: a developer's, for tuning)
+    const char* v = std::getenv("NXR_STORM_FLOW_SPEED");
+    return v && *v ? float(std::atof(v)) : 1.0f;
+  }();
+  f.flow_speed = flow_speed;
+  // The weather map it carries: the domain's unit the shield's 1/1000 in the world, the sky's units the world's over
+  // its scale (sky.cpp kCloudShared's weather_scale 40,000).
+  sc.sim.SetCloudSource(weather);
+  {  // D234: the storm's cloud grows out of the sky's own (their shape volume, their cover)
+    ITextureView* shape = nullptr;
+    float coverage = 0.5f, evolve = 0.0f;
+    if (g_own_sky.CloudShape(&shape, &coverage, &evolve)) {
+      sc.sim.SetCloudShape(shape);
+      f.cloud_coverage = coverage, f.shape_y = evolve;
+    } else {
+      sc.sim.SetCloudShape(nullptr);
+    }
+    f.eye = 1000.0f * s.eye / std::max(s.radius, 1.0f), f.eye_open = eye_open;
+  }
+  const float sky_scale = std::max(scale, 1e-3f);
+  f.cloud_origin[0] = s.cx / sky_scale, f.cloud_origin[1] = s.cz / sky_scale;
+  f.cloud_scale = s.radius / 1000.0f / sky_scale;
+  f.cloud_drift[0] = drift[0], f.cloud_drift[1] = drift[1];
+  f.weather_scale = 40000.0f;
+  f.convection = hurricane ? 0.4f + 0.6f * stage : 0.5f + 0.4f * stage;
+  f.convection_rate = 1.0f / 12.0f;  // (D234: how fast the clouds grow into the storm's)
+  f.organisation = hurricane ? storm::Smooth(0.3f, 0.85f, stage) : 0.12f;
+  // The pattern's eye (its radius in its texture, 8.4 of 128 pixels) where the storm's eye is, its edge at the rain
+  // shield's: the radius to the power that takes one to the other.
+  f.pattern_zoom = hurricane ? 1.0f : 0.5f;
+  {
+    const float eye = std::clamp(s.eye / std::max(s.radius, 1.0f), 0.05f, 0.5f);
+    f.pattern_power = hurricane ? std::clamp(std::log(8.4f / 128.0f) / std::log(eye), 1.0f, 3.0f) : 1.0f;
+  }
+  constexpr float kStep = 1.0f / 60.0f;  // (60 Hz: the user, 21 Nov 2026: "The simulation should be stepped at 60 Hz")
+  ITexture* pattern = StormPatternTexture();
+  sc.sim.SetPattern(pattern ? pattern->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr);
+  const uint32_t frames = pattern ? pattern->GetDesc().ArraySize : 1;
+  if (FaultLabels()) context->BeginDebugGroup("NativeXRenderer storm fluid"), g_device->FaultMarker(context, 60, true, "storm fluid");
+  while (sc.owed >= kStep) {
+    sc.owed -= kStep;
+    // The pattern turns with the storm (a turn in about 4 minutes at full strength) and its frames play there and back,
+    // ten times as fast as the radar's (its 55 minutes in 5.5).
+    sc.turn += kStep * (hurricane ? 0.026 * stage : 0.004);
+    sc.cells += kStep;
+    sc.pattern_clock += kStep * 10.0 / (5.0 * 60.0);
+    const double span = std::max(double(frames) - 1.0, 1.0);
+    const double pp = std::fmod(sc.pattern_clock, 2.0 * span);
+    const double at = pp <= span ? pp : 2.0 * span - pp;
+    f.pattern_layer_a = float(std::floor(at));
+    f.pattern_layer_b = float(std::min(std::floor(at) + 1.0, span));
+    f.pattern_blend = float(at - std::floor(at));
+    f.pattern_turn = -float(std::fmod(sc.turn, 6.283185307));
+    f.cells_time = float(std::fmod(sc.cells, 10000.0));
+    f.cloud_reset = sc.reset;
+    sc.reset = false;
+    // The flow map's phases: a starts again as its clock turns over, b half a period on.
+    constexpr double kFlowPeriod = 90.0;
+    const double before = sc.flow_clock / kFlowPeriod;
+    sc.flow_clock += kStep;
+    const double after = sc.flow_clock / kFlowPeriod;
+    f.restart_a = std::floor(after) != std::floor(before);
+    f.restart_b = std::floor(after + 0.5) != std::floor(before + 0.5);
+    f.share_b = float(std::abs(2.0 * std::fmod(after, 1.0) - 1.0));
+    sc.sim.Step(context, kStep, f, nullptr, 0, 0);
+    static const bool log_state = [] {
+      const char* v = std::getenv("NXR_STORM_FLUID_LOG");
+      return v && *v == '1';
+    }();
+    if (log_state && ++sc.steps % 300 == 0) sc.sim.LogState(context);
+  }
+  if (FaultLabels()) g_device->FaultMarker(context, 60, false, "storm fluid"), context->EndDebugGroup();
+  // Phase a's share: none as it starts again, all half a period on.
+  const double phase = std::fmod(sc.flow_clock / 90.0, 1.0);
+  const float share_a = float(1.0 - std::abs(2.0 * phase - 1.0));
+  sc.c[0] = 1.0f, sc.c[1] = share_a, sc.c[2] = 2.8f, sc.c[3] = eye_open;
+}
+
 // D208: the sky's view of the hurricane: the weather outside it and its two vectors for the clouds (storm::kGlsl).
 void StormInputs(const WorldState& world, Sky::Inputs& in) {
   const storm::Storm s = storm::Of(world.storm, world.cloud_seconds, g_map_x.load(std::memory_order_relaxed),
-                                   g_map_z.load(std::memory_order_relaxed), g_map_reach.load(std::memory_order_relaxed));
+                                   g_map_z.load(std::memory_order_relaxed), g_map_reach.load(std::memory_order_relaxed),
+                                   world.storm_type);
   in.match_weather = world.storm;
   in.world_snaps = g_world_snaps.load(std::memory_order_relaxed);  // D221
   in.weather_outside = s.outside;
   in.storm_a[0] = s.cx, in.storm_a[1] = s.cz, in.storm_a[2] = s.eye, in.storm_a[3] = s.radius;
-  in.storm_b[0] = s.gain, in.storm_b[1] = s.spin, in.storm_b[2] = s.on ? 1.0f : 0.0f;
+  in.storm_b[0] = s.gain, in.storm_b[1] = s.spin, in.storm_b[2] = s.on ? 1.0f + float(s.type) : 0.0f;  // (D224: its type)
+  // D229: the storm's clouds from the fluid.
+  for (int k = 0; k < 4; ++k) in.storm_c[k] = g_storm_clouds.on ? g_storm_clouds.c[k] : 0.0f;
+  const bool fluid = g_storm_clouds.on && g_storm_clouds.c[0] > 0.5f && g_storm_clouds.sim.Ready();
+  in.storm_cloud = fluid ? g_storm_clouds.sim.Clouds() : nullptr;
+  in.storm_conv = fluid ? g_storm_clouds.sim.Convection() : nullptr;
   // D211: the volutus (the roll cloud along the storm's gust front) while the storm comes in, gone once it is over the
   // level.
   in.storm_b[3] = storm::Smooth(0.33f, 0.5f, world.storm) * (1.0f - storm::Smooth(0.85f, 0.97f, world.storm));
@@ -1066,6 +1339,11 @@ class SectionTimers {
                                                  "(SSGI's composite)", "(GTAO's history and apply)",
                                                  "weapon skin", "weapon skin bloom"};
   void Begin(IRenderDevice* device, IDeviceContext* context, Id id) {
+    if (FaultLabels() && context && !labelled_[id]) {
+      context->BeginDebugGroup(kNames[id]);
+      if (g_device) g_device->FaultMarker(context, int(id), true, kNames[id]);
+      labelled_[id] = true;
+    }
     if (!REXCVAR_GET(native_x_renderer_gpu_sections) || !device || !context) return;
     Section& sec = sections_[id];
     if (!sec.tried) {
@@ -1095,6 +1373,11 @@ class SectionTimers {
     sec.active = true;
   }
   void End(IDeviceContext* context, Id id) {
+    if (labelled_[id] && context) {
+      if (g_device) g_device->FaultMarker(context, int(id), false, kNames[id]);
+      context->EndDebugGroup();
+      labelled_[id] = false;
+    }
     Section& sec = sections_[id];
     if (!sec.active) return;
     context->EndQuery(sec.queries[sec.index]);
@@ -1134,6 +1417,7 @@ class SectionTimers {
     uint64_t phase_uses[2] = {};
   };
   Section sections_[kCount];
+  bool labelled_[kCount] = {};
 } g_sections;
 // Parts of passes timed from their own files (SkySectionBegin / End: 0 the clouds' march, 1 their blend, 2 the sky
 // drawn; 3 SSGI's depth and normals, 4 GTAO's; 5 SSGI's light and gather, 6 its history and blur; 7 GTAO's occlusion
@@ -1758,7 +2042,7 @@ void ExecuteDraw(const Command& c) {
     g_fog_wanted = world.fog > 0.001f || world.ground_fog > 0.001f || world.weather > 0.45f || sky_debug == 4 || sky_debug == 5 ||
                    SeaReflection() ||
                    sky_debug == 6 || REXCVAR_GET(native_x_renderer_rain_lens) || REXCVAR_GET(native_x_renderer_wetness) ||
-                   REXCVAR_GET(native_x_renderer_sky);  // (the clouds over the view are laid with it)  // (the lens's water needs the sea's height)
+                   (REXCVAR_GET(native_x_renderer_sky) && !SkyForcedOff());  // (the clouds over the view are laid with it)  // (the lens's water needs the sea's height)
     // D175: the night's lights come on as the cycle's sun sets (from 4 degrees up) and are full 6 degrees under.
     {
       float dark = 0.0f;
@@ -1968,6 +2252,13 @@ void ExecuteDraw(const Command& c) {
       }
       MsaaWrite(t);
       g_night.Apply(g_device->device(), g_device->context(), t->texture, t->view, f, night);
+      // The player's weapon skin's overlay (its storm's light, its cloud), kept from the scene's end for here.
+      if (g_skin_overlay_frame == g_device->frames_presented() && g_skin_overlay.depth_srv && view_w > 0 && view_h > 0) {
+        g_skin_overlay_frame = ~0ull;
+        g_skin_overlay.color = t->texture;
+        g_skin_overlay.width = uint32_t(view_w), g_skin_overlay.height = uint32_t(view_h);
+        WeaponSkinBloom(g_device->device(), g_device->context(), g_skin_overlay);
+      }
       t->written = ++g_target_writes;
       g_draw->TargetsChanged();
     }
@@ -2704,8 +2995,10 @@ void ApplyOpaqueEffects() {
       in.evolve = world.cloud_evolve;
       in.weather = world.weather;
       StormInputs(world, in);  // D208
+  CloudMassInputs(in);  // D232
       in.fog = world.fog;
       in.ground_fog = world.ground_fog;
+      in.ground_fog_height = world.ground_fog_height, in.ground_fog_sparse = world.ground_fog_sparse;
       in.wind = world.wind;
       in.hour = world.hour;
       in.sun_azimuth = SkyNoonAzimuth();
@@ -2713,6 +3006,7 @@ void ApplyOpaqueEffects() {
       in.exposure = float(REXCVAR_GET(native_x_renderer_sky_exposure));
       in.debug = REXCVAR_GET(native_x_renderer_sky_debug);
       in.cloud_height = world.cloud_height;
+      WakeInputs(in);  // D234
       {  // NXR_CLOUD_LIFT=<metres> (a developer's check): the clouds seen as from that much higher, in them or over them
         static const float lift = [] {
           const char* v = std::getenv("NXR_CLOUD_LIFT");
@@ -2740,6 +3034,7 @@ void ApplyOpaqueEffects() {
     g_fog_dome = false;
   }
   NoteNightCamera();  // D163
+  if (g_terrain.valid && g_terrain.height && g_terrain.height_size) g_fog_terrain = g_terrain;  // D231
   g_terrain.Reset();
   GtaoSettings ao = GtaoSettings::FromCvars();
   ao.temporal_upscaler = g_temporal;
@@ -2904,10 +3199,13 @@ void ApplyLateSky() {
   in.evolve = world.cloud_evolve;
   in.weather = world.weather;
   StormInputs(world, in);  // D208
+  CloudMassInputs(in);  // D232
   in.fog = world.fog;
   in.ground_fog = world.ground_fog;
+  in.ground_fog_height = world.ground_fog_height, in.ground_fog_sparse = world.ground_fog_sparse;
   in.wind = world.wind;
   in.cloud_height = world.cloud_height;
+  WakeInputs(in);  // D234
   in.hour = world.hour;
   in.sun_azimuth = SkyNoonAzimuth();
   in.coverage = world.cloud_cover;
@@ -2934,6 +3232,323 @@ void ApplyLateSky() {
 
 // The fog over this frame's view (sky.h's Fog), once: after the game's sky dome's draws (ExecuteDraw), or, in a view
 // that drew none, before the finished scene is copied (ExecuteResolve).
+// D232: the clouds' mass as particles, stepped at 20 Hz (the far level: slow): the eye, the sky's weather map and its
+// drift (the clouds' wind is how fast that goes), the storm.
+void StepCloudMass(IDeviceContext* context) {
+  SetStrikeByMass(REXCVAR_GET(native_x_renderer_cloud_particles) && g_cloud_mass.Ready() && SkyOn());
+  if (!REXCVAR_GET(native_x_renderer_cloud_particles) || !g_device || !context || !SkyOn()) return;
+  static bool tried = false, made = false;
+  if (!tried) tried = true, made = g_cloud_mass.Initialize(g_device->device());
+  if (!made) return;
+  ITextureView* weather = nullptr;
+  float drift[2] = {}, scale = 1.0f;
+  if (!g_own_sky.CloudMap(&weather, drift, &scale) || !weather) return;
+  static std::chrono::steady_clock::time_point last{};
+  static double owed = 0.0;
+  static float drift_was[2] = {};
+  static bool have_drift = false;
+  const auto now = std::chrono::steady_clock::now();
+  const double frame = last.time_since_epoch().count() ? std::chrono::duration<double>(now - last).count() : 0.0;
+  last = now;
+  owed += frame < 0.5 ? frame : 0.0;
+  constexpr double kStep = 1.0 / 20.0;
+  if (owed < kStep) return;
+  const double dt = std::min(owed, 0.2);
+  owed = 0.0;
+  CloudMass::Step step;
+  step.eye[0] = g_fog_in.eye[0], step.eye[1] = g_fog_in.eye[2];
+  step.dt = float(dt), step.scale = scale, step.weather = weather;
+  step.drift[0] = drift[0], step.drift[1] = drift[1];
+  // (The clouds' wind: the weather map is read at a place plus its drift, 6 and 3 of the clouds' units a second of the
+  // clouds' clock (sky.cpp), so what it shows goes the other way. The clock: the match's, every player's the same.)
+  step.wind[0] = -6.0f * scale, step.wind[1] = -3.0f * scale;
+  step.seconds = g_fog_in.seconds;
+  (void)drift_was, (void)have_drift;
+  if (g_fog_in.storm_b[2] > 0.5f) {
+    step.storm[0] = g_fog_in.storm_a[0], step.storm[1] = g_fog_in.storm_a[1];
+    step.storm[2] = g_fog_in.storm_a[3], step.storm[3] = g_fog_in.storm_b[0];
+    step.storm_eye = g_fog_in.storm_a[2];
+  }
+  g_cloud_mass.Advance(context, step);
+}
+
+// D231: the ground fog pushed about (ground_fog.h): what the game says moves through it, its blasts and shots, kept
+// here until the field's next step; the field stepped at 30 Hz before the fog pass, which reads it.
+struct FogPush {
+  std::mutex mutex;
+  std::vector<GroundFog::Pusher> movers, once;  // once: blasts and shots, for one step
+  std::chrono::steady_clock::time_point movers_at{};
+};
+FogPush g_fog_push;
+// D234: the planes' wakes through the clouds (sky.cpp wake_density). What flies fast enough to be a plane (35 to 400
+// m/s): the camera itself (a plane's pilot or gunner: the local player's own plane) and the ground fog's movers (D231:
+// the vehicles within 110 m of the camera; a plane's body is 2.8 m round). Each one's path is cut into pieces of 150 m
+// while it is at the clouds' heights; a piece is kept 45 s, the newest 24 in all (the one still being flown among them,
+// so the hole follows the plane at once).
+struct WakeSegment {
+  float a[3], b[3];
+  double at_a, at_b;
+};
+struct WakeSource {
+  float at[3], from[3];
+  double from_t = 0.0, seen = 0.0;
+  bool camera = false;
+};
+struct Wakes {
+  std::vector<WakeSegment> done;
+  std::vector<WakeSource> sources;
+  float eye[3] = {};
+  double eye_t = -1.0;
+  bool eye_moving = false;
+} g_wakes;
+void WakeInputs(Sky::Inputs& in) {
+  Wakes& w = g_wakes;
+  in.wake_count = 0;
+  const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  constexpr double kKeep = 45.0;
+  constexpr float kPiece = 150.0f;
+  // The clouds' heights in the world (sky.cpp: over the sea, the layer's base at the height set, 3,200 of its
+  // 1,500-unit base over it).
+  float sea = 0.0f;
+  if (!g_own_sky.SeaLevel(&sea)) sea = in.eye[1] - 30.0f;
+  const float base = sea + std::clamp(in.cloud_height, 100.0f, 3000.0f);
+  const float lo = base - 150.0f, hi = sea + (base - sea) * (1.0f + 3200.0f / 1500.0f) + 150.0f;
+  auto in_band = [&](const float* p) { return p[1] > lo && p[1] < hi; };
+  auto close = [&](WakeSource& s) {
+    const float d = std::hypot(s.at[0] - s.from[0], s.at[1] - s.from[1], s.at[2] - s.from[2]);
+    if (d > 5.0f && (in_band(s.at) || in_band(s.from))) {
+      WakeSegment g;
+      std::memcpy(g.a, s.from, sizeof(g.a)), std::memcpy(g.b, s.at, sizeof(g.b));
+      g.at_a = s.from_t, g.at_b = s.seen;
+      w.done.push_back(g);
+    }
+    std::memcpy(s.from, s.at, sizeof(s.from));
+    s.from_t = s.seen;
+  };
+  struct Seen {
+    float p[3];
+    bool camera;
+  };
+  std::vector<Seen> seen;
+  // (The camera's speed over a tenth of a second or more: it moves with the game's ticks, so from one frame to the next
+  // it often stands still and then jumps two frames' way, run st_wake10.)
+  if (w.eye_t < 0.0 || now - w.eye_t > 1.0) {
+    std::memcpy(w.eye, in.eye, sizeof(w.eye)), w.eye_t = now, w.eye_moving = false;
+  } else if (now - w.eye_t >= 0.1) {
+    const float dist = std::hypot(in.eye[0] - w.eye[0], in.eye[1] - w.eye[1], in.eye[2] - w.eye[2]);
+    const float speed = dist / float(now - w.eye_t);
+    w.eye_moving = speed > 35.0f && speed < 400.0f;
+    std::memcpy(w.eye, in.eye, sizeof(w.eye)), w.eye_t = now;
+  }
+  if (w.eye_moving) seen.push_back({{in.eye[0], in.eye[1], in.eye[2]}, true});
+  // NXR_WAKE_TEST=x,y,z,dx,dy,dz,speed,after,seconds (a developer's check): a plane that is not drawn, flown in a
+  // straight line from (x, y, z) along (dx, dy, dz) at speed m/s, from `after` seconds after the first wakes were
+  // asked for, for `seconds`; taken as a mover is (not the camera), so its wake is seen from wherever the camera is.
+  {
+    static const std::array<float, 9> test = [] {
+      std::array<float, 9> q{};
+      const char* v = std::getenv("NXR_WAKE_TEST");
+      if (!v || std::sscanf(v, "%f,%f,%f,%f,%f,%f,%f,%f,%f", &q[0], &q[1], &q[2], &q[3], &q[4], &q[5], &q[6], &q[7], &q[8]) != 9)
+        q[6] = 0.0f;
+      return q;
+    }();
+    static const double test_from = now;
+    const double t = now - test_from - test[7];
+    if (test[6] > 0.0f && t >= 0.0 && t <= test[8]) {
+      const float len = std::max(std::hypot(test[3], test[4], test[5]), 1e-3f);
+      const float d = test[6] * float(t) / len;
+      seen.push_back({{test[0] + test[3] * d, test[1] + test[4] * d, test[2] + test[5] * d}, false});
+    }
+  }
+  {
+    std::lock_guard lock(g_fog_push.mutex);
+    if (std::chrono::steady_clock::now() - g_fog_push.movers_at < std::chrono::milliseconds(500))
+      for (const GroundFog::Pusher& p : g_fog_push.movers) {
+        const float v = std::hypot(p.velocity[0], p.velocity[1], p.velocity[2]);
+        if (p.kind != 0 || p.radius < 2.0f || v < 35.0f || v > 400.0f) continue;
+        // (Not the camera's own plane again.)
+        if (std::hypot(p.position[0] - in.eye[0], p.position[1] - in.eye[1], p.position[2] - in.eye[2]) < 25.0f) continue;
+        seen.push_back({{p.position[0], p.position[1], p.position[2]}, false});
+      }
+  }
+  for (const Seen& s : seen) {
+    WakeSource* best = nullptr;
+    float best_d = 0.0f;
+    for (WakeSource& src : w.sources) {
+      if (src.seen >= now) continue;  // (one source a thing a frame)
+      const float d = std::hypot(s.p[0] - src.at[0], s.p[1] - src.at[1], s.p[2] - src.at[2]);
+      const float most = 60.0f + 400.0f * float(now - src.seen);
+      if ((s.camera == src.camera) && d < most && (!best || d < best_d)) best = &src, best_d = d;
+    }
+    if (!best) {
+      WakeSource src;
+      std::memcpy(src.at, s.p, sizeof(src.at)), std::memcpy(src.from, s.p, sizeof(src.from));
+      src.from_t = src.seen = now, src.camera = s.camera;
+      w.sources.push_back(src);
+      continue;
+    }
+    std::memcpy(best->at, s.p, sizeof(best->at));
+    best->seen = now;
+    if (std::hypot(best->at[0] - best->from[0], best->at[1] - best->from[1], best->at[2] - best->from[2]) > kPiece) close(*best);
+  }
+  for (size_t i = 0; i < w.sources.size();) {  // gone a second: its last piece kept, the source let go
+    if (now - w.sources[i].seen > 1.0) {
+      close(w.sources[i]);
+      w.sources.erase(w.sources.begin() + i);
+    } else {
+      ++i;
+    }
+  }
+  w.done.erase(std::remove_if(w.done.begin(), w.done.end(), [&](const WakeSegment& g) { return now - g.at_b > kKeep; }),
+               w.done.end());
+  // The pieces still being flown first, then the newest done ones.
+  int n = 0;
+  auto put = [&](const float* a, double at_a, const float* b, double at_b) {
+    if (n >= Sky::Inputs::kWakeSegments) return;
+    float* o = in.wake[n++];
+    o[0] = a[0], o[1] = a[1], o[2] = a[2], o[3] = float(now - at_a);
+    o[4] = b[0], o[5] = b[1], o[6] = b[2], o[7] = float(now - at_b);
+  };
+  for (const WakeSource& s : w.sources)
+    if ((in_band(s.at) || in_band(s.from)) && std::hypot(s.at[0] - s.from[0], s.at[1] - s.from[1], s.at[2] - s.from[2]) > 1.0f)
+      put(s.from, s.from_t, s.at, s.seen);
+  for (auto it = w.done.rbegin(); it != w.done.rend(); ++it) put(it->a, it->at_a, it->b, it->at_b);
+  in.wake_count = n;
+  static double said = 0.0;
+  if (n > 0 && now - said > 10.0) {
+    said = now;
+    REXLOG_INFO("[native_x_renderer] wakes (D234): {} pieces in the clouds from {} planes, the newest at {:.0f} {:.0f} {:.0f}",
+                n, w.sources.size(), in.wake[0][4], in.wake[0][5], in.wake[0][6]);
+  }
+}
+GroundFog g_ground_fog;
+void StepGroundFog(IDeviceContext* context) {
+  g_fog_in.ground = nullptr, g_fog_in.ground_size = 0.0f;
+  g_fog_in.terrain = nullptr, g_fog_in.terrain_size = 0.0f;
+  float terrain_decode = 0.0f;
+  if (g_fog_terrain.valid && g_fog_terrain.height) {
+    // (How the heightmap's texels are read: grass.cpp's rule.)
+    const TEXTURE_FORMAT f = g_fog_terrain.height->GetDesc().Format;
+    terrain_decode = !g_fog_terrain.height_unorm ? 0.0f : f == TEX_FORMAT_R16_FLOAT ? 1.0f : f == TEX_FORMAT_R16_SNORM ? 2.0f : 0.0f;
+    g_fog_in.terrain = g_fog_terrain.height;
+    std::memcpy(g_fog_in.terrain_scale, g_fog_terrain.scale, sizeof(g_fog_in.terrain_scale));
+    std::memcpy(g_fog_in.terrain_offset, g_fog_terrain.offset, sizeof(g_fog_in.terrain_offset));
+    std::memcpy(g_fog_in.terrain_uv, g_fog_terrain.uv, sizeof(g_fog_in.terrain_uv));
+    g_fog_in.terrain_size = float(g_fog_terrain.height_size), g_fog_in.terrain_decode = terrain_decode;
+  }
+  if (!REXCVAR_GET(native_x_renderer_fog_push) || !g_device || !context) return;
+  // (Only while there is a ground fog: the fog pass's sheet reads it.)
+  if (g_fog_in.ground_fog <= 0.001f) return;
+  static bool tried = false, made = false;
+  if (!tried) tried = true, made = g_ground_fog.Initialize(g_device->device());
+  static bool said_terrain = false;
+  if (!said_terrain && g_fog_in.terrain) {
+    said_terrain = true;
+    REXLOG_INFO("[native_x_renderer] ground fog: the terrain's heightmap {} texels (read as {}), scale {:.3f} {:.3f} {:.3f}, "
+                "offset {:.1f} {:.1f} {:.1f}, uv {:.6f} {:.6f} {:.4f} {:.4f}", g_fog_in.terrain_size, terrain_decode,
+                g_fog_in.terrain_scale[0], g_fog_in.terrain_scale[1], g_fog_in.terrain_scale[2], g_fog_in.terrain_offset[0],
+                g_fog_in.terrain_offset[1], g_fog_in.terrain_offset[2], g_fog_in.terrain_uv[0], g_fog_in.terrain_uv[1],
+                g_fog_in.terrain_uv[2], g_fog_in.terrain_uv[3]);
+  }
+  if (!made) return;
+  static const bool test = [] {  // NXR_GROUND_FOG_TEST=1 (a developer's): something circling the eye, a blast, a shot
+    const char* v = std::getenv("NXR_GROUND_FOG_TEST");
+    return v && *v == '1';
+  }();
+  static std::chrono::steady_clock::time_point last{};
+  static double owed = 0.0, clock = 0.0;
+  const auto now = std::chrono::steady_clock::now();
+  const double frame = last.time_since_epoch().count() ? std::chrono::duration<double>(now - last).count() : 0.0;
+  last = now;
+  owed += frame < 0.5 ? frame : 0.0;
+  constexpr double kStep = 1.0 / 60.0;  // (60 Hz: the user, 21 Nov 2026)
+  auto smooth = [](float a, float b, float x) {
+    const float t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+  };
+  for (int steps = 0; owed >= kStep && steps < 3; ++steps) {
+    owed -= kStep, clock += kStep;
+    GroundFog::Step step;
+    std::memcpy(step.eye, g_fog_in.eye, sizeof(step.eye));
+    // (The gusts and the rain's dimples by the match's clock, every player's the same.)
+    step.dt = float(kStep), step.seconds = g_fog_in.seconds;
+    if (steps == 0) {  // what stands in the fog, from this frame's view (once a frame)
+      step.depth = g_fog_in.depth_srv;
+      std::memcpy(step.to_ndc, g_fog_in.to_ndc, sizeof(step.to_ndc));
+      std::memcpy(step.inverse, g_fog_in.inverse, sizeof(step.inverse));
+      step.depth_near = g_fog_in.depth_near, step.width = g_fog_in.width, step.height = g_fog_in.height;
+      step.terrain = g_fog_in.terrain;
+      std::memcpy(step.terrain_scale, g_fog_in.terrain_scale, sizeof(step.terrain_scale));
+      std::memcpy(step.terrain_offset, g_fog_in.terrain_offset, sizeof(step.terrain_offset));
+      std::memcpy(step.terrain_uv, g_fog_in.terrain_uv, sizeof(step.terrain_uv));
+      step.terrain_size = g_fog_in.terrain_size, step.terrain_decode = terrain_decode;
+      float sea = 0.0f;
+      if (g_own_sky.SeaLevel(&sea)) step.sea_floor = sea;
+    }
+    const float mist = smooth(0.45f, 1.0f, g_fog_in.weather), gale = smooth(0.75f, 1.0f, g_fog_in.weather);
+    // The wind: the way the fog's patches drift (sky.cpp: its drift is 6 and 3 m a second of the clouds' clock,
+    // 0.15 of it for the patches and 0.6 in a gale; they are read that far on, so they move the other way).
+    const float carried = 0.15f + 0.45f * gale;
+    step.wind[0] = -6.0f * carried, step.wind[1] = -3.0f * carried;
+    step.gust = 0.2f + 1.2f * std::clamp(g_fog_in.wind, 0.0f, 1.0f);
+    step.rain = mist;
+    // (The sheet lies on the ground wherever that is, which is not known here: nothing is left out by its height.)
+    step.layer_known = false;
+    std::vector<GroundFog::Pusher> pushers;
+    {
+      std::lock_guard lock(g_fog_push.mutex);
+      if (now - g_fog_push.movers_at < std::chrono::milliseconds(500)) {
+        // (Each carried on from where the game's last tick left it, along its motion: the game says where they are
+        // once a tick, the fog steps more often.)
+        pushers = g_fog_push.movers;
+        const float since = std::min(std::chrono::duration<float>(now - g_fog_push.movers_at).count(), 0.1f);
+        for (GroundFog::Pusher& p : pushers)
+          for (int c = 0; c < 3; ++c) p.position[c] += p.velocity[c] * since;
+      }
+      pushers.insert(pushers.end(), g_fog_push.once.begin(), g_fog_push.once.end());
+      g_fog_push.once.clear();
+    }
+    if (test) {
+      const float a = float(clock * 0.7);
+      GroundFog::Pusher mover;
+      mover.position[0] = step.eye[0] + 12.0f * std::cos(a), mover.position[1] = step.eye[1];
+      mover.position[2] = step.eye[2] + 12.0f * std::sin(a);
+      mover.velocity[0] = -8.4f * std::sin(a), mover.velocity[2] = 8.4f * std::cos(a);
+      mover.radius = 1.8f;
+      pushers.push_back(mover);
+      const int tick = int(clock * 30.0 + 0.5);
+      if (tick % 150 == 0) {
+        GroundFog::Pusher blast;
+        blast.kind = 1, blast.radius = 7.0f, blast.strength = 14.0f;
+        blast.position[0] = step.eye[0] + 18.0f, blast.position[1] = step.eye[1], blast.position[2] = step.eye[2] + 6.0f;
+        pushers.push_back(blast);
+      }
+      if (tick % 60 == 30) {
+        GroundFog::Pusher shot;
+        shot.kind = 2, shot.radius = 0.8f, shot.strength = 5.0f;
+        shot.position[0] = step.eye[0] - 2.0f, shot.position[1] = step.eye[1], shot.position[2] = step.eye[2] + 3.0f;
+        shot.velocity[0] = step.eye[0] - 30.0f, shot.velocity[1] = step.eye[1], shot.velocity[2] = step.eye[2] + 40.0f;
+        pushers.push_back(shot);
+      }
+    }
+    // (The nearest first when there are too many.)
+    if (pushers.size() > size_t(GroundFog::kMaxPushers)) {
+      auto away = [&](const GroundFog::Pusher& p) {
+        const float dx = p.position[0] - step.eye[0], dz = p.position[2] - step.eye[2];
+        return dx * dx + dz * dz;
+      };
+      std::sort(pushers.begin(), pushers.end(), [&](const auto& l, const auto& r) { return away(l) < away(r); });
+      pushers.resize(GroundFog::kMaxPushers);
+    }
+    g_ground_fog.Advance(context, step, pushers.data(), int(pushers.size()));
+  }
+  if (owed > kStep) owed = 0.0;  // (a slow frame: not made up for)
+  if (g_ground_fog.View()) {
+    g_fog_in.ground = g_ground_fog.View();
+    g_fog_in.ground_origin[0] = g_ground_fog.origin()[0], g_fog_in.ground_origin[1] = g_ground_fog.origin()[1];
+    g_fog_in.ground_size = GroundFog::kSize;
+  }
+}
 void ApplyFog() {
   if (!g_fog_ready) return;
   g_fog_ready = g_fog_dome = false;
@@ -3011,7 +3626,29 @@ void ApplyFog() {
     }();
     static const int kOff[5] = {0, 8, 16, 32, 64};
     g_fog_in.fog_parts_off = fog_parts ? kOff[(g_device->frames_presented() / 600) % 5] : 0;
+    // NXR_FOG_OFF=<bits> (a developer's, D229): those parts off all the time (8 the ground fog, 16 the shafts, 32 the
+    // rain here, 64 the sea's reflection).
+    static const int fog_off = [] {
+      const char* v = std::getenv("NXR_FOG_OFF");
+      return v && *v ? std::atoi(v) : 0;
+    }();
+    g_fog_in.fog_parts_off |= fog_off;
   }
+  {  // NXR_GROUND_FOG_HEIGHT=<metres> (a developer's, D231): the ground fog's top, whatever the match says
+    static const float height = [] {
+      const char* v = std::getenv("NXR_GROUND_FOG_HEIGHT");
+      return v && *v ? float(std::atof(v)) : 0.0f;
+    }();
+    if (height > 0.0f) g_fog_in.ground_fog_height = height;
+  }
+  {  // NXR_GROUND_FOG_SPARSE=<0 to 1> (a developer's): how sparse it is, whatever the match says
+    static const float sparse = [] {
+      const char* v = std::getenv("NXR_GROUND_FOG_SPARSE");
+      return v && *v ? float(std::atof(v)) : -1.0f;
+    }();
+    if (sparse >= 0.0f) g_fog_in.ground_fog_sparse = sparse;
+  }
+  StepGroundFog(g_device->context());  // D231
   {
     // D222: the buildings' rooms, as bright as the cycle is dark (none by day) and as the player's setting says.
     // BF_NIGHT_ROOMS_AB=1 (tests): with them and without by turns, 600 frames each.
@@ -3056,6 +3693,17 @@ void ApplyFog() {
     g_fog_in.room_count = uint32_t(g_night_rooms_frame.size());
   }
   const bool drawn = Timed(SectionTimers::kFog, [&] { return g_own_sky.Fog(g_device->context(), g_fog_in); });
+  {  // NXR_GROUND_FOG_DEBUG=1 (a developer's, D231): what stands in the fog, seen from above, over the top left corner
+    static const bool fog_debug = [] {
+      const char* v = std::getenv("NXR_GROUND_FOG_DEBUG");
+      return v && *v == '1';
+    }();
+    static DebugTextureView solid_view;
+    if (fog_debug && g_ground_fog.Ready() && g_ground_fog.Solid())
+      solid_view.Draw(g_device->device(), g_device->context(), g_ground_fog.Solid(), 2, 0.0f, g_scene_color->texture,
+                      g_scene_color->scale.HostWidth(g_profile->output_width),
+                      g_scene_color->scale.HostHeight(g_profile->output_height), 420, 16);
+  }
   if (drawn || over) g_draw->TargetsChanged();
   static bool said = false;
   if (!said) {
@@ -3127,7 +3775,7 @@ void ExecuteResolve(const Command& c) {
     }
     glass.cockpit = g_night_vehicle_seated.load(std::memory_order_relaxed);
     if (g_lens_due && g_scene_color && g_scene_color->texture && g_draw &&
-        ((drops && g_own_sky.lens_wet() >= 0.01f) || g_own_sky.sway() >= 0.005f || glassy)) {
+        ((drops && g_own_sky.lens_wet() >= 0.01f) || g_own_sky.sway() >= 0.005f || glassy || g_own_sky.shoving())) {
       g_lens_due = false;
       RendererTime time(&g_phase.effects);
       MsaaWrite(g_scene_color);
@@ -3137,6 +3785,111 @@ void ExecuteResolve(const Command& c) {
                                   g_scene_color->scale.HostHeight(g_profile->output_height), drops,
                                   glassy || glass.world_depth ? &glass : nullptr);
           })) {
+        g_draw->TargetsChanged();
+      }
+    }
+  }
+  // D229: the storm's clouds stepped once a frame (at the game's upscale point, as the test below).
+  if (g_device && c.caller == g_profile->upscale_resolve_caller && surface && !surface.depth) {
+    StepStormClouds(g_device->context());
+    StepCloudMass(g_device->context());  // D232
+    {  // NXR_CLOUD_MASS_DEBUG=1 (a developer's): the clouds' mass seen from above, over the picture's top left corner
+      static const bool mass_debug = [] {
+        const char* v = std::getenv("NXR_CLOUD_MASS_DEBUG");
+        return v && *v == '1';
+      }();
+      static DebugTextureView mass_view;
+      if (mass_debug && g_cloud_mass.Ready() && g_cloud_mass.View() && g_scene_color && g_scene_color->texture && g_draw) {
+        MsaaWrite(g_scene_color);
+        mass_view.Draw(g_device->device(), g_device->context(), g_cloud_mass.View(), 2, 0.0f, g_scene_color->texture,
+                       g_scene_color->scale.HostWidth(g_profile->output_width),
+                       g_scene_color->scale.HostHeight(g_profile->output_height), 520, 16);
+        g_draw->TargetsChanged();
+      }
+    }
+    // NXR_STORM_FLUID_DEBUG=1 (a developer's): the storm's fluid density over the picture's top left corner.
+    static const bool storm_debug = [] {
+      const char* v = std::getenv("NXR_STORM_FLUID_DEBUG");
+      return v && *v == '1';
+    }();
+    if (storm_debug && g_storm_clouds.on && g_storm_clouds.sim.Ready() && g_scene_color && g_scene_color->texture && g_draw) {
+      MsaaWrite(g_scene_color);
+      g_storm_clouds.sim.DrawDebug(g_device->context(), g_scene_color->texture,
+                                   g_scene_color->scale.HostWidth(g_profile->output_width),
+                                   g_scene_color->scale.HostHeight(g_profile->output_height), 640);
+      g_draw->TargetsChanged();
+    }
+  }
+  // D227: the fluid core's test (NXR_FLUID_TEST=1, a developer's): a 2D storm of 16,384 particles drawn toward its low
+  // and turned by the Coriolis term, tracers fed on a ring round it, 30 steps a second, its density over the
+  // picture's top left corner and its GPU time in the log.
+  {
+    static const bool fluid_test = [] {
+      const char* v = std::getenv("NXR_FLUID_TEST");
+      return v && *v == '1';
+    }();
+    if (fluid_test && g_scene_color && g_scene_color->texture && g_device && g_draw &&
+        c.caller == g_profile->upscale_resolve_caller && surface && !surface.depth) {
+      static FluidSim sim;
+      static bool tried = false, seeded = false;
+      static auto last = std::chrono::steady_clock::now();
+      static double owed = 0.0;
+      if (!tried) {
+        tried = true;
+        FluidSim::Config config;
+        config.spacing = 24.0f;
+        sim.Initialize(g_device->device(), config, "test");
+      }
+      if (sim.Ready()) {
+        IDeviceContext* context = g_device->context();
+        const float centre[3] = {0.0f, 0.0f, 0.0f};
+        if (!seeded) sim.Seed(context, centre, 0.0f), seeded = true;
+        const auto now = std::chrono::steady_clock::now();
+        owed = std::min(owed + std::chrono::duration<double>(now - last).count(), 0.25);
+        last = now;
+        constexpr float kStep = 1.0f / 30.0f;
+        FluidSim::Forces forces;
+        forces.pull = 0.5f, forces.reach = 2200.0f, forces.coriolis = 0.03f, forces.drag = 0.02f;
+        forces.sink = 120.0f, forces.source = 1700.0f;
+        forces.vorticity = 2.0f, forces.viscosity = 0.02f, forces.tracer_life = 60.0f, forces.splat_weight = 1.0f;
+        FluidSim::Emitter ring[8];
+        for (int e = 0; e < 8; ++e) {
+          const float a = float(e) * 0.785398f;
+          ring[e].position[0] = std::cos(a) * 1200.0f, ring[e].position[2] = std::sin(a) * 1200.0f;
+          ring[e].radius = 80.0f;
+        }
+        while (owed >= kStep) {
+          owed -= kStep;
+          sim.Step(context, kStep, forces, ring, 8, 16);  // (32,768 slots: each tracer lives its 60 s)
+          static uint32_t stepped = 0;
+          if (++stepped % 300 == 1) sim.LogState(context);
+        }
+        MsaaWrite(g_scene_color);
+        sim.DrawDebug(context, g_scene_color->texture, g_scene_color->scale.HostWidth(g_profile->output_width),
+                      g_scene_color->scale.HostHeight(g_profile->output_height), 640);
+        g_draw->TargetsChanged();
+      }
+    }
+  }
+  // D228: the storm's radar pattern over the picture's top left corner, its frames in turn a second each
+  // (NXR_STORM_PATTERN_DEBUG=1, a developer's).
+  {
+    static const bool pattern_debug = [] {
+      const char* v = std::getenv("NXR_STORM_PATTERN_DEBUG");
+      return v && *v == '1';
+    }();
+    if (pattern_debug && g_scene_color && g_scene_color->texture && g_device && g_draw &&
+        c.caller == g_profile->upscale_resolve_caller && surface && !surface.depth) {
+      if (ITexture* pattern = StormPatternTexture()) {
+        static DebugTextureView view;
+        static const auto start = std::chrono::steady_clock::now();
+        const uint32_t frames = pattern->GetDesc().ArraySize;
+        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        MsaaWrite(g_scene_color);
+        view.Draw(g_device->device(), g_device->context(), pattern->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE), true,
+                  float(uint64_t(t) % std::max(frames, 1u)), g_scene_color->texture,
+                  g_scene_color->scale.HostWidth(g_profile->output_width),
+                  g_scene_color->scale.HostHeight(g_profile->output_height), 640, 680);
         g_draw->TargetsChanged();
       }
     }
@@ -3732,6 +4485,8 @@ void UpscaleScene() {
       if (Timed(SectionTimers::kDof, [&] { return g_dof.Apply(g_device->context(), in); })) g_draw->TargetsChanged();
     }
   }
+  // A developer's weapon export (weapon_export.h): its textures read back here, where the context is used directly.
+  if (WeaponExportOn()) WeaponExportFlush(g_device->device(), g_device->context());
   // The player's weapon skin's subtle blue bloom round its arcs (weapon_skin.h), after the depth of field.
   if (WeaponSkinNow() && g_scene_color && g_scene_depth && g_scene_depth->srv && !(g_queries_on && g_queries.open())) {
     HostTarget* soft = upscaled && g_scene_color->reduced ? g_targets.Get(g_scene_color_surface) : g_scene_color;
@@ -3745,8 +4500,25 @@ void UpscaleScene() {
       in.height = soft->scale.HostHeight(g_profile->output_height);
       in.depth_width = g_scene_depth->scale.HostWidth(g_profile->output_width);
       in.depth_height = g_scene_depth->scale.HostHeight(g_profile->output_height);
-      if (Timed(SectionTimers::kSkinBloom, [&] { return WeaponSkinBloom(g_device->device(), g_device->context(), in); }))
+      in.ads = AdsBlendNow();
+      in.dark = NightLightsAmount();
+      if (g_draw) in.px = g_draw->weapon_px(), in.py = g_draw->weapon_py();
+      // The storm's light on the gun's own mesh: the gun's draws again, into a target of the depth's size.
+      if (g_draw && g_scene_depth->view && g_scene_depth->texture) {
+        const TextureDesc& depth_size = g_scene_depth->texture->GetDesc();
+        if (ITextureView* over = WeaponSkinOverTarget(g_device->device(), depth_size.Width, depth_size.Height))
+          g_draw->DrawSkinOver(over, g_scene_depth->view);
+      }
+      // By night the overlay goes over the picture after the night pass instead (at the game's composite, below):
+      // before it, the night's lamps lit the cloud as a surface, a tan haze brighter than the gun (run skin15_night).
+      if (NightPassOn()) {
+        in.color = nullptr;
+        in.after_night = true;
+        g_skin_overlay = in;
+        g_skin_overlay_frame = g_device->frames_presented();
+      } else if (Timed(SectionTimers::kSkinBloom, [&] { return WeaponSkinBloom(g_device->device(), g_device->context(), in); })) {
         g_draw->TargetsChanged();
+      }
     }
   }
   PromoteReduced(upscaled ? g_scene_color : nullptr);
@@ -5056,6 +5828,8 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
   if (threaded && REXCVAR_GET(native_x_renderer_record_thread)) {
     const uint32_t cores = AvailableCores(), need = uint32_t(std::max(0, REXCVAR_GET(native_x_renderer_record_thread_cores)));
     if (cores >= need) g_device->recorder().Start();
+    // D229: the race check's self-test (NXR_RACE_SELFTEST=1, with NXR_RACE_CHECK=1).
+    if (const char* t = std::getenv("NXR_RACE_SELFTEST"); t && *t == '1') g_device->RaceSelfTest();
     REXLOG_INFO("[native_x_renderer] recorder thread {} ({} cores, at least {} for it); waits {}",
                 cores >= need ? "on" : "off", cores, need, SpinWaitsAllowed() ? "spin, then sleep" : "sleep at once");
   }
@@ -5214,12 +5988,48 @@ bool NisSupport(bool* runs, std::string* gpu) {
 }
 
 void NightVehicleSeated(bool seated) { g_night_vehicle_seated.store(seated, std::memory_order_relaxed); }
+void SetStormPattern(const StormPattern& pattern) {
+  if (!pattern.frames || !pattern.width || !pattern.height || !pattern.count || pattern.count > 256) return;
+  std::lock_guard lock(g_storm_pattern_mutex);
+  const size_t bytes = size_t(pattern.width) * pattern.height * pattern.count;
+  g_storm_pattern_bytes.assign(pattern.frames, pattern.frames + bytes);
+  g_storm_pattern_meta = pattern;
+  g_storm_pattern_meta.frames = nullptr;
+  g_storm_pattern_new = true;
+}
 void SetMapArea(float x, float z, float reach) {
   g_map_x.store(x, std::memory_order_relaxed), g_map_z.store(z, std::memory_order_relaxed);
   if (reach > 0.0f) g_map_reach.store(reach, std::memory_order_relaxed);
   g_map_known.store(true, std::memory_order_relaxed);
 }
 void SetPlayerGroups(const float* xz, uint32_t count) { SetStrikeGroups(xz, count); }
+void SetFogMovers(const FogMover* movers, uint32_t count) {  // D231
+  std::lock_guard lock(g_fog_push.mutex);
+  g_fog_push.movers.clear();
+  for (uint32_t i = 0; movers && i < count && i < uint32_t(GroundFog::kMaxPushers); ++i) {
+    GroundFog::Pusher p;
+    std::memcpy(p.position, movers[i].position, sizeof(p.position));
+    std::memcpy(p.velocity, movers[i].velocity, sizeof(p.velocity));
+    p.radius = movers[i].radius;
+    g_fog_push.movers.push_back(p);
+  }
+  g_fog_push.movers_at = std::chrono::steady_clock::now();
+}
+void FogBlast(const float position[3], float radius, float strength) {
+  GroundFog::Pusher p;
+  p.kind = 1, p.radius = radius, p.strength = strength;
+  std::memcpy(p.position, position, sizeof(p.position));
+  std::lock_guard lock(g_fog_push.mutex);
+  if (g_fog_push.once.size() < 16) g_fog_push.once.push_back(p);
+}
+void FogShot(const float from[3], const float to[3], float strength) {
+  GroundFog::Pusher p;
+  p.kind = 2, p.radius = 0.8f, p.strength = strength;
+  std::memcpy(p.position, from, sizeof(p.position));
+  std::memcpy(p.velocity, to, sizeof(p.velocity));
+  std::lock_guard lock(g_fog_push.mutex);
+  if (g_fog_push.once.size() < 16) g_fog_push.once.push_back(p);
+}
 void NightModels(const NightModelLamps* models, uint32_t count) {
   std::lock_guard lock(g_night_lamps_mutex);
   if (models && count) g_night_models.assign(models, models + count);

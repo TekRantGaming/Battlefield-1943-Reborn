@@ -259,7 +259,7 @@
         d->AddRectFilled(a, ImVec2(a.x + st(5), b.y), kit::kStamp);
       }
       d->AddRectFilled(ImVec2(a.x, b.y - 1), ImVec2(b.x, b.y), IM_COL32(241, 234, 211, 20));
-      const bool locked = i == kRowUnlockables;
+      const bool locked = false;  // (Unlockables was "COMING SOON" until its screen: UnlockablesPage)
       kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(24), a.y + h * 0.5f - st(5)), sel ? kit::kInkSection : kit::kKhakiDim,
                   fmt::format("{:02d}", i + 1), st(1.5f));
       const float cap = row.compact ? st(13) : st(19);
@@ -267,7 +267,10 @@
                     sel ? kit::kInk : locked ? kit::kKhakiDim : kit::kKhaki, row.name);
       std::string note;
       ImU32 note_col = sel ? kit::kInkSection : kit::kKhakiDim;
-      if (locked) note = "COMING SOON";
+      if (i == kRowUnlockables) {
+        const bool have = Truthy(Cvar("bf_skin_electric"));
+        note = !have ? "0 OF 1 UNLOCKED" : Cvar("bf_skin_equipped") == "electric" ? "ELECTRIC EQUIPPED" : "1 OF 1 UNLOCKED";
+      }
       else if (i == kRowUpdate) note = Upper(UpdateNote()), note_col = sel ? kit::kGreenDark : kit::kGreenBright;
       else if (i == kRowNews) {
         if (const int unseen = NewsUnseen(); unseen > 0) note = fmt::format("{} NEW", unseen), note_col = sel ? kit::kGreenDark : kit::kGreenBright;
@@ -411,7 +414,7 @@
         page_ = Page::kSettings, from_home_ = home, from_pause_ = false, tab_ = 0, row_ = 0, scroll_ = 0, sub_ = kSubNone;
         return;
       case kRowHelp: page_ = Page::kHelp, help_row_ = 0; return;
-      case kRowUnlockables: return;  // nothing yet (TekRantGaming, 8 Nov)
+      case kRowUnlockables: page_ = Page::kUnlockables; return;
       case kRowNews: OpenNews("the News row"); return;
       case kRowUpdate: return UpdateNow();
       case kRowReport: page_ = Page::kReport; return;

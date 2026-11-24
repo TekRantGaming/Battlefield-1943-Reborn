@@ -72,12 +72,20 @@ REXCVAR_DEFINE_DOUBLE(bf_world_cloud_rate, 0.33, "BF1943/World",
 REXCVAR_DEFINE_DOUBLE(bf_world_weather, 0.0, "BF1943/World", "The match's weather, 0 fair to 1 a storm");
 REXCVAR_DEFINE_DOUBLE(bf_world_fog, 0.0, "BF1943/World", "The match's distance fog, 0 to 1");
 REXCVAR_DEFINE_DOUBLE(bf_world_ground_fog, 0.0, "BF1943/World", "The match's ground fog, 0 to 1");
+REXCVAR_DEFINE_DOUBLE(bf_world_ground_fog_height, 0.5, "BF1943/World",
+                      "How deep the match's ground fog is, metres (0.2 to 5; 0.5 is shin high)");
+REXCVAR_DEFINE_DOUBLE(bf_world_ground_fog_sparse, 0.7, "BF1943/World",
+                      "How sparse the match's ground fog is, 0 everywhere to 1 a few small patches");
 REXCVAR_DEFINE_DOUBLE(bf_world_wind, 0.3, "BF1943/World", "The match's wind, 0 calm to 1 a gale");
 REXCVAR_DEFINE_DOUBLE(bf_world_cloud_height, 450.0, "BF1943/World",
                       "The match's cloud base over the sea, metres (100 to 1500): low, the planes fly through the clouds");
 REXCVAR_DEFINE_BOOL(bf_world_dynamic_storm, false, "BF1943/World",
                     "The match's weather builds to a storm over each round and eases again (from bf_world_weather; "
                     "over the round's time limit, else over 30 minutes)");
+// D224 (the user, 20 Nov 2026: "make the Hurricane and storm-type that can be selected, but by default we just run the
+// regular storm"): the storm's type, NativeXRenderer's storm.h StormType.
+REXCVAR_DEFINE_INT32(bf_world_storm_type, 0, "BF1943/World",
+                     "The match's storm: 0 a thunderstorm (the default), 1 a hurricane; both local to where they are");
 REXCVAR_DEFINE_STRING(bf_world_admins, "", "BF1943/World",
                       "Player IDs (as the game's settings show them, separated by commas) whose games may change the "
                       "match's world while it runs");
@@ -112,6 +120,8 @@ struct MatchClock {  // match_rules.cpp: the match's rules and the round's clock
   uint32_t round = 0;
 };
 MatchClock CurrentMatchClock();
+// bots.cpp: a player's chat line as this host relayed it (a bot may answer it).
+void BotsHeardChat(const std::string& name, int team, int squad, int channel, const std::string& text);
 }  // namespace bf1943
 
 namespace {
@@ -284,6 +294,39 @@ struct Player {
 class Host;
 
 // One player's link to us.
+
+// The voice and text chat relay (the user, 19 Nov 2026: "the LAN host doesn't have text chat available to it"):
+// server/gmhost.py's Comms, ported for the host a player's own game starts, on the same UDP socket ("BF43COMM", a
+// kind byte, big endian fields; comms.cpp is the client). HELLO (a player joined here, by name and address) gets
+// WELCOME and an id kept by name; STATE says its team, squad and place; CHAT goes to everyone, the team or the squad
+// (twice each: UDP may lose one), at most 5 in 5 s; VOICE goes to those within 80 m; ROSTER every 5 s; a client silent
+// for 10 s or no longer in the game is dropped. Also the server's own lines: the bots' chat (GmHostChat, any thread).
+constexpr int kCommsProtocol = 1;
+enum CommsKind { kCHello = 1, kCWelcome, kCState, kCChatRelay, kCChat, kCRoster, kCVoice, kCVoiceRelay, kCBye, kCRefused };
+constexpr size_t kChatMax = 200, kVoiceMax = 400;
+constexpr float kVoiceRange = 80.0f;
+
+struct CommsClient {
+  uint16_t id = 0;
+  sockaddr_in addr{};
+  std::string name;
+  int team = 0, squad = 0, flags = 0;
+  bool has_pos = false;
+  float pos[3] = {};
+  Clock::time_point last_heard = Clock::now();
+  std::vector<Clock::time_point> chat_times;
+  std::vector<uint16_t> chat_seen;
+  int64_t voice_second = 0;
+  int voice_count = 0;
+};
+
+struct BotLine {
+  std::string name, text;
+  int team = 0, squad = 0, channel = 0;
+};
+std::mutex g_bot_lines_mutex;
+std::vector<BotLine> g_bot_lines;  // the bots' chat lines, sent from the host's thread
+
 struct Peer {
   struct Unacked {
     uint32_t seq;
@@ -452,11 +495,15 @@ class Host {
   // follows the weather (the two the same), as an admin's change does. After the cloud height: a byte, 1 on, in both;
   // and in the answer then the match's rules (match_rules.cpp): tickets and the time limit in minutes (16 bits each,
   // 0 the level's own and none) and the round's seconds left (a float, -1 none).
+  //
+  // D224 (20 Nov 2026), last in both: the storm's type, a byte (0 a thunderstorm, 1 a hurricane). A game or host from
+  // before it sends and reads none: a thunderstorm.
   struct World {
     bool started = false, day_night = false;
     double hour = 16, day_minutes = 0, cover = 0.35, rate = 0.33, weather = 0, fog = 0, ground_fog = 0, wind = 0.3, seconds = 0,
-           evolve = 0, cloud_height = 450;
+           evolve = 0, cloud_height = 450, ground_fog_height = 0.5, ground_fog_sparse = 0.7;
     bool storm = false;
+    int storm_type = 0;  // D224
     double storm_base = 0, storm_t = 0;
     uint32_t round = 0;
     Clock::time_point at;
@@ -505,17 +552,20 @@ class Host {
       world.weather = std::clamp(REXCVAR_GET(bf_world_weather), 0.0, 1.0);
       world.fog = std::clamp(REXCVAR_GET(bf_world_fog), 0.0, 1.0);
       world.ground_fog = std::clamp(REXCVAR_GET(bf_world_ground_fog), 0.0, 1.0);
+      world.ground_fog_height = std::clamp(REXCVAR_GET(bf_world_ground_fog_height), 0.2, 5.0);
+      world.ground_fog_sparse = std::clamp(REXCVAR_GET(bf_world_ground_fog_sparse), 0.0, 1.0);
       world.wind = std::clamp(REXCVAR_GET(bf_world_wind), 0.0, 1.0);
       world.cloud_height = std::clamp(REXCVAR_GET(bf_world_cloud_height), 100.0, 1500.0);
       world.storm = REXCVAR_GET(bf_world_dynamic_storm);
+      world.storm_type = std::clamp(REXCVAR_GET(bf_world_storm_type), 0, 1);
       StormBegin();
       const bf1943::MatchClock clock = bf1943::CurrentMatchClock();
       Note(fmt::format("world: day and night {}, {:.1f} h, a day in {:.0f} min, clouds {:.0f}% at rate {:.0f}%, weather "
-                       "{:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m, dynamic storm {}; "
-                       "tickets {}, time limit {}",
+                       "{:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m, dynamic storm {}, "
+                       "storm type {}; tickets {}, time limit {}",
                        world.day_night ? "on" : "off", world.hour, world.day_minutes, world.cover * 100, world.rate * 100,
                        world.weather * 100, world.fog * 100, world.ground_fog * 100, world.wind * 100,
-                       world.cloud_height, world.storm ? "on" : "off",
+                       world.cloud_height, world.storm ? "on" : "off", world.storm_type == 1 ? "hurricane" : "storm",
                        clock.tickets > 0 ? std::to_string(clock.tickets) : std::string("the level's own"),
                        clock.time_limit > 0 ? fmt::format("{} min", clock.time_limit) : std::string("none")));
     }
@@ -602,6 +652,14 @@ class Host {
       // up to two seconds old), and the wind too while the asker's follows its weather.
       bool storm = world.storm;
       if (at != Bytes::npos && at < data.size()) storm = u8() != 0;
+      int storm_type = world.storm_type;  // D224: last, from a game that sends it
+      if (at != Bytes::npos && at < data.size()) storm_type = std::clamp(u8(), 0, 1);
+      double fog_height = world.ground_fog_height;  // 21 Nov 2026: last, from a game that sends it
+      double fog_sparse = world.ground_fog_sparse;
+      if (at != Bytes::npos && at + 8 <= data.size()) {
+        fog_height = std::clamp(f32(), 0.2, 5.0);
+        fog_sparse = std::clamp(f32(), 0.0, 1.0);
+      }
       double weather_set = weather, wind_set = wind;
       if (storm && world.storm) {
         weather_set = world.weather;
@@ -611,7 +669,10 @@ class Host {
         const bool changed = world.day_night != (day_night != 0) || std::abs(world.hour - hour) > 0.01 ||
                              world.day_minutes != minutes || world.cover != cover || world.rate != rate ||
                              world.weather != weather_set || world.fog != fog || world.ground_fog != ground_fog ||
-                             world.wind != wind_set || world.cloud_height != cloud_height || world.storm != storm;
+                             world.wind != wind_set || world.cloud_height != cloud_height || world.storm != storm ||
+                             world.storm_type != storm_type || world.ground_fog_height != fog_height ||
+                             world.ground_fog_sparse != fog_sparse;
+        world.ground_fog_height = fog_height, world.ground_fog_sparse = fog_sparse;
         world.day_night = day_night != 0;
         world.hour = std::fmod(std::max(hour, 0.0), 24.0);
         world.day_minutes = std::clamp(minutes, 0.0, 1440.0);
@@ -624,14 +685,16 @@ class Host {
         world.cloud_height = cloud_height;
         if (storm && !world.storm) StormBegin();
         world.storm = storm;
+        world.storm_type = storm_type;
         if (changed)
           Note(fmt::format("world: {} set day and night {}, {:.1f} h, a day in {:.0f} min, clouds {:.0f}% at rate {:.0f}%, "
                            "weather {:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m, "
-                           "dynamic storm {}",
+                           "dynamic storm {}, storm type {}",
                            name.empty() ? "an admin" : name,
                            world.day_night ? "on" : "off", world.hour, world.day_minutes, world.cover * 100,
                            world.rate * 100, world.weather * 100, world.fog * 100, world.ground_fog * 100,
-                           world.wind * 100, world.cloud_height, world.storm ? "on" : "off"));
+                           world.wind * 100, world.cloud_height, world.storm ? "on" : "off",
+                           world.storm_type == 1 ? "hurricane" : "storm"));
       }
     }
     Bytes reply = "BF43WRLR";
@@ -663,6 +726,13 @@ class Host {
       const float left = clock.seconds_left;
       uint32_t bits;
       std::memcpy(&bits, &left, 4);
+      Put32(reply, bits);
+      reply += char(world.storm_type);  // D224
+      const float fog_height = float(world.ground_fog_height);  // 21 Nov 2026, last
+      std::memcpy(&bits, &fog_height, 4);
+      Put32(reply, bits);
+      const float fog_sparse = float(world.ground_fog_sparse);
+      std::memcpy(&bits, &fog_sparse, 4);
       Put32(reply, bits);
     }
     sendto(sock, reply.data(), int(reply.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
@@ -747,6 +817,10 @@ class Host {
       WorldDatagram(data, from);
       return;
     }
+    if (data.compare(0, 8, "BF43COMM") == 0) {  // the chat relay's, never a game packet
+      CommsDatagram(data, from);
+      return;
+    }
     Peer* peer = Find(from);
     if (!peer) {
       peer = Add(from);
@@ -777,8 +851,187 @@ class Host {
     return out;
   }
 
+
+  // ---- the chat relay (above)
+  std::vector<CommsClient> comms;
+  std::map<std::string, uint16_t> comms_ids;  // by name, for the server's life (a rejoin keeps its id)
+  uint16_t comms_next_id = 1, bot_msg = 0;
+  Clock::time_point roster_at{};
+  void CommsSend(int kind, const Bytes& body, const sockaddr_in& to) const {
+    const Bytes d = Bytes("BF43COMM") + char(kind) + body;
+    sendto(sock, d.data(), int(d.size()), 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+  }
+  static Bytes ShortText(const std::string& t) { return char(std::min<size_t>(t.size(), 255)) + t.substr(0, 255); }
+  bool JoinedHere(const std::string& name, const sockaddr_in& from) const {
+    for (const auto& p : peers)
+      if (p->state == Peer::State::kJoined && p->player && p->player->name == name &&
+          p->addr.sin_addr.s_addr == from.sin_addr.s_addr)
+        return true;
+    return false;
+  }
+  uint16_t CommsId(const std::string& name) {
+    auto it = comms_ids.find(name);
+    if (it != comms_ids.end()) return it->second;
+    const uint16_t id = comms_next_id;
+    comms_next_id = uint16_t(comms_next_id % 65535 + 1);
+    comms_ids[name] = id;
+    return id;
+  }
+  // One chat line to those it is for, twice each.
+  void Relay(uint16_t id, uint16_t msg, int channel, int team, int squad, const std::string& name, const std::string& text,
+             const CommsClient* from) const {
+    Bytes body;
+    Put16(body, id), Put16(body, msg);
+    body += char(channel), body += char(team);
+    const std::string n = name.substr(0, 64), t = text.substr(0, kChatMax);
+    body += char(n.size()), body += n, body += char(t.size()), body += t;
+    for (const CommsClient& c : comms) {
+      if (channel == 1 && c.team != team) continue;
+      if (channel == 2 && (c.team != team || c.squad != squad || !squad)) continue;
+      (void)from;
+      for (int k = 0; k < 2; ++k) CommsSend(kCChatRelay, body, c.addr);
+    }
+  }
+  void CommsDatagram(const Bytes& data, const sockaddr_in& from) {
+    if (data.size() < 9) return;
+    const int kind = uint8_t(data[8]);
+    const Bytes body = data.substr(9);
+    const auto now = Clock::now();
+    auto u8 = [&](size_t at) { return at < body.size() ? int(uint8_t(body[at])) : -1; };
+    CommsClient* client = nullptr;
+    for (CommsClient& c : comms)
+      if (SameAddress(c.addr, from)) client = &c;
+    if (kind == kCHello) {
+      if (body.size() < 4) return;
+      const int proto = u8(0), team = u8(1), squad = u8(2), n = u8(3);
+      const std::string name = body.substr(4, size_t(n));
+      if (proto != kCommsProtocol) {
+        CommsSend(kCRefused, Bytes(1, char(2)) + ShortText(fmt::format("this server speaks comms version {}", kCommsProtocol)),
+                  from);
+        return;
+      }
+      if (!JoinedHere(name, from)) {
+        CommsSend(kCRefused, Bytes(1, char(1)) + ShortText("not in the game on this server yet"), from);
+        return;
+      }
+      if (!client) {
+        comms.erase(std::remove_if(comms.begin(), comms.end(), [&](const CommsClient& c) { return c.name == name; }),
+                    comms.end());
+        CommsClient c;
+        c.id = CommsId(name), c.addr = from, c.name = name;
+        comms.push_back(c);
+        client = &comms.back();
+        Note(fmt::format("comms: {} in (id {})", name, c.id));
+        roster_at = {};
+      }
+      client->team = team, client->squad = squad, client->last_heard = now;
+      Bytes w;
+      Put16(w, client->id);
+      w += char(kCommsProtocol);
+      CommsSend(kCWelcome, w, from);
+      return;
+    }
+    if (!client) {
+      CommsSend(kCRefused, Bytes(1, char(3)) + ShortText("say hello first"), from);
+      return;
+    }
+    client->last_heard = now;
+    if (kind == kCState && body.size() >= 17) {
+      client->team = u8(2), client->squad = u8(3), client->flags = u8(4);
+      float v[3];
+      for (int i = 0; i < 3; ++i) {
+        uint32_t bits = uint32_t(u8(5 + 4 * i)) << 24 | uint32_t(u8(6 + 4 * i)) << 16 | uint32_t(u8(7 + 4 * i)) << 8 |
+                        uint32_t(u8(8 + 4 * i));
+        std::memcpy(&v[i], &bits, 4);
+      }
+      client->has_pos = (client->flags & 1) && std::fabs(v[0]) < 1e6f && std::fabs(v[1]) < 1e6f && std::fabs(v[2]) < 1e6f;
+      if (client->has_pos) std::copy(v, v + 3, client->pos);
+    } else if (kind == kCChat && body.size() >= 6) {
+      const uint16_t msg = uint16_t(Get16(body, 2));
+      const int channel = u8(4), n = u8(5);
+      std::string text = body.substr(6, std::min<size_t>(size_t(n), kChatMax));
+      while (!text.empty() && (text.back() == ' ' || text.back() == '\n')) text.pop_back();
+      if (std::find(client->chat_seen.begin(), client->chat_seen.end(), msg) != client->chat_seen.end()) return;
+      client->chat_seen.push_back(msg);
+      if (client->chat_seen.size() > 32) client->chat_seen.erase(client->chat_seen.begin());
+      client->chat_times.erase(std::remove_if(client->chat_times.begin(), client->chat_times.end(),
+                                              [&](Clock::time_point t) { return now - t > std::chrono::seconds(5); }),
+                               client->chat_times.end());
+      client->chat_times.push_back(now);
+      if (text.empty() || client->chat_times.size() > 5 || channel < 0 || channel > 2) return;
+      if ((channel == 1 && !client->team) || (channel == 2 && !client->squad)) return;
+      Relay(client->id, msg, channel, client->team, client->squad, client->name, text, client);
+      Note(fmt::format("comms chat {} {}: {}", channel == 0 ? "all" : channel == 1 ? "team" : "squad", client->name,
+                       text.substr(0, 80)));
+      bf1943::BotsHeardChat(client->name, client->team, client->squad, channel, text);
+    } else if (kind == kCVoice && body.size() >= 19) {
+      const size_t n = Get16(body, 17);
+      if (n > kVoiceMax || body.size() < 19 + n) return;
+      const int64_t second = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+      if (second != client->voice_second) client->voice_second = second, client->voice_count = 0;
+      if (++client->voice_count > 60) return;
+      float at[3];
+      for (int i = 0; i < 3; ++i) {
+        uint32_t bits = uint32_t(u8(4 + 4 * i)) << 24 | uint32_t(u8(5 + 4 * i)) << 16 | uint32_t(u8(6 + 4 * i)) << 8 |
+                        uint32_t(u8(7 + 4 * i));
+        std::memcpy(&at[i], &bits, 4);
+      }
+      Bytes relay;
+      Put16(relay, client->id);
+      relay += body.substr(2, 17 + n);
+      for (const CommsClient& other : comms) {
+        if (&other == client) continue;
+        if (other.has_pos) {
+          const float dx = other.pos[0] - at[0], dy = other.pos[1] - at[1], dz = other.pos[2] - at[2];
+          if (dx * dx + dy * dy + dz * dz > kVoiceRange * kVoiceRange) continue;
+        }
+        CommsSend(kCVoiceRelay, relay, other.addr);
+      }
+    } else if (kind == kCBye) {
+      Note(fmt::format("comms: {} out", client->name));
+      const std::string name = client->name;
+      comms.erase(std::remove_if(comms.begin(), comms.end(), [&](const CommsClient& c) { return c.name == name; }),
+                  comms.end());
+      roster_at = {};
+    }
+  }
+  void CommsTick(Clock::time_point now) {
+    for (auto it = comms.begin(); it != comms.end();) {
+      const bool silent = now - it->last_heard > std::chrono::seconds(10);
+      if (silent || !JoinedHere(it->name, it->addr)) {
+        Note(fmt::format("comms: {} out ({})", it->name, silent ? "silent" : "not in the game"));
+        it = comms.erase(it);
+        roster_at = {};
+      } else {
+        ++it;
+      }
+    }
+    std::vector<BotLine> lines;
+    {
+      std::lock_guard lock(g_bot_lines_mutex);
+      lines.swap(g_bot_lines);
+    }
+    for (const BotLine& l : lines) {
+      bot_msg = uint16_t(bot_msg % 0xFFFF + 1);
+      Relay(CommsId(l.name), bot_msg, l.channel, l.team, l.squad, l.name, l.text, nullptr);
+      Note(fmt::format("comms chat {} {} (bot): {}", l.channel == 0 ? "all" : l.channel == 1 ? "team" : "squad", l.name,
+                       l.text.substr(0, 80)));
+    }
+    if (!comms.empty() && now - roster_at > std::chrono::seconds(5)) {
+      roster_at = now;
+      Bytes body(1, char(std::min<size_t>(comms.size(), 64)));
+      for (size_t i = 0; i < comms.size() && i < 64; ++i) {
+        const std::string n = comms[i].name.substr(0, 64);
+        Put16(body, comms[i].id);
+        body += char(comms[i].team), body += char(comms[i].squad), body += char(n.size()), body += n;
+      }
+      for (const CommsClient& c : comms) CommsSend(kCRoster, body, c.addr);
+    }
+  }
+
   void Tick() {
     const auto now = Clock::now();
+    CommsTick(now);
     std::vector<sockaddr_in> silent;
     for (auto& p : peers) {
       p->Resend();
@@ -1367,5 +1620,13 @@ void GmHostStart() {
     StartLanBackend();
     std::thread(Serve).detach();
   });
+}
+
+// A bot's chat line (bots.cpp), sent to those it is for by the host's thread at its next tick: channel 0 all, 1 the
+// team, 2 the squad, as a player's.
+void GmHostChat(const std::string& name, int team, int squad, int channel, const std::string& text) {
+  if (text.empty() || channel < 0 || channel > 2) return;
+  std::lock_guard lock(g_bot_lines_mutex);
+  if (g_bot_lines.size() < 64) g_bot_lines.push_back({name, text.substr(0, kChatMax), team, squad, channel});
 }
 }  // namespace bf1943

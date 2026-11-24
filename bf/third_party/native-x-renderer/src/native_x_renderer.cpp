@@ -158,7 +158,11 @@ void NightModels(const NightModelLamps* models, uint32_t count) { renderer::Nigh
 void NightRooms(const NightRoom* rooms, uint32_t count) { renderer::NightRooms(rooms, count); }
 void NightVehicleSeated(bool seated) { renderer::NightVehicleSeated(seated); }
 void SetMapArea(float x, float z, float reach) { renderer::SetMapArea(x, z, reach); }
+void SetStormPattern(const StormPattern& pattern) { renderer::SetStormPattern(pattern); }  // D228
 void SetPlayerGroups(const float* xz, uint32_t count) { renderer::SetPlayerGroups(xz, count); }
+void SetFogMovers(const FogMover* movers, uint32_t count) { renderer::SetFogMovers(movers, count); }  // D231
+void FogBlast(const float position[3], float radius, float strength) { renderer::FogBlast(position, radius, strength); }
+void FogShot(const float from[3], const float to[3], float strength) { renderer::FogShot(from, to, strength); }
 
 void SetGameAspectBox(bool on) {
   if (g_renderer) renderer::SetGameAspectBox(on);

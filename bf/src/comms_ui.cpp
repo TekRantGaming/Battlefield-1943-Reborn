@@ -206,7 +206,8 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
     ImFont* font = MenuFont(1) ? MenuFont(1) : ImGui::GetFont();
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     const float size = 42.0f * s, head = 20.0f * s, pad = 30.0f * s;
-    const float max_w = io.DisplaySize.x * 0.66f, wrap = max_w - 2 * pad;
+    // Its width from a 16:9 screen of this height: on 21:9 and 32:9 the box no longer runs across most of the screen.
+    const float max_w = std::min(io.DisplaySize.x, io.DisplaySize.y * 16.0f / 9.0f) * 0.66f, wrap = max_w - 2 * pad;
     const ImVec2 ts = bold->CalcTextSizeA(size, FLT_MAX, wrap, text.c_str());
     const char* label = kind == 1 ? "GAME UPDATE" : kind == 2 ? "SERVER RESTART" : kind == 3 ? "MAINTENANCE" : "SERVER MESSAGE";
     const float w = std::max(std::max(ts.x, 520.0f * s) + 2 * pad, font->CalcTextSizeA(head, FLT_MAX, 0, label).x + 2 * pad);
@@ -238,7 +239,10 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     const float size = 20.0f * s, line = 26.0f * s, x0 = 18.0f * s;
     float y = std::max(16.0f * s, PerfOverlayBottom() + 10.0f * s);
-    const float wrap = io.DisplaySize.x * 0.38f;
+    // The lines' width as on a 16:9 screen of this height (the user, 22 Nov 2026: every screen to work on 21:9 and
+    // 32:9; at 32:9 the chat ran 38% of the whole width across, about 1950 pixels at 5120x1440).
+    const float wide = std::min(io.DisplaySize.x, io.DisplaySize.y * 16.0f / 9.0f);
+    const float wrap = wide * 0.38f;
     const double now = comms::Now();
     const bool typing = comms::Typing();
     auto shadowed = [&](ImFont* f, ImVec2 at, ImU32 color, const std::string& t, float alpha) {
@@ -342,7 +346,7 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
         else
           shadowed(bold, ImVec2(x + 16 * s, y), IM_COL32(235, 235, 228, 255), shown, 1.0f);
         x += 26 * s + bold->CalcTextSizeA(size, FLT_MAX, 0, shown.c_str()).x;
-        if (x > io.DisplaySize.x * 0.45f) break;
+        if (x > wide * 0.45f) break;
       }
     }
   }
