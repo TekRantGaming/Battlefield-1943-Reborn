@@ -123,6 +123,16 @@ function New-Bin([string]$dest, [switch]$Shaders, [switch]$Flat) {
         } else {
             Write-Warning "no weather sounds in the build ($weather): the package has none"
         }
+        # The storms' radar patterns (bf\src\storm_patterns.cpp, D228: baked from public domain NWS radar by
+        # tools\storm_bake.py): the player's only. Without them the hurricane keeps its own shape.
+        $storms = Join-Path $build "data\weather\storms"
+        if (Test-Path $storms) {
+            $to = Join-Path $bin "data\weather\storms"
+            New-Item -ItemType Directory -Force $to | Out-Null
+            Get-ChildItem $storms -File -Filter *.bin | ForEach-Object { Copy-Item $_.FullName $to }
+        } else {
+            Write-Warning "no storm patterns in the build ($storms): the package has none"
+        }
         # The news window's YouTube player (bf\src\news_video.cpp, docs\NEWS.md): Microsoft's WebView2 loader, signed by
         # Microsoft (no submission of ours needed). The player's only.
         Copy-Item (Join-Path $root "bf\third_party\webview2\x64\WebView2Loader.dll") $bin
