@@ -38,4 +38,17 @@ bool VideoFailed();
 // Esc pressed while the player had the keyboard (the view takes it on a click): the window's Close. Taken once.
 bool VideoTakeEscape();
 
+// The news window's storm (TekRantGaming, 23 Nov 2026, the Storm look for 0.4.8: "when it first shows rain wind and the
+// lightning sounds ... with a slow fade out until mute", so the trailer's sound is not covered): the weather's own
+// recordings (weather_audio.cpp, data\sounds\weather) on a sound stream of their own, as the menus' sounds are. Every
+// frame of our menus with `open` true while the window shows, at the master, effects and weather volumes (the
+// Weather volume row). An opening starts the rain and the wind at once, holds them a few seconds and fades them out until they are
+// silent; a close fades them out in half a second.
+void StormSound(bool open);
+// A strike's thunder (0 a close strike, 1 a distant one, 2 lightning in the clouds), as its flash shows: each comes
+// after its own time on the way, under the same fade.
+void StormThunder(int kind);
+// Readies the recordings (decoded on threads of their own), so the window's first second already has them.
+void StormPrepare();
+
 }  // namespace bf1943::news

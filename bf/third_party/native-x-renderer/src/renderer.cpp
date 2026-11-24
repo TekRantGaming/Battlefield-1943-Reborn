@@ -456,6 +456,7 @@ std::vector<NightRoom> g_night_rooms_render;
 uint64_t g_night_rooms_render_version = 0;
 std::vector<uint32_t> g_room_intact_counts;
 std::vector<uint64_t> g_room_seen;
+std::vector<float> g_room_weight;  // D222: each room's light coming in or going (0 to 1, a thirtieth a frame)
 uint64_t g_room_frame = 0;
 uint32_t g_room_matches = 0;  // since the last log line
 void NoteIntactPart(uint32_t index_count, const float* places, uint32_t n) {
@@ -3666,22 +3667,22 @@ void ApplyFog() {
     uint32_t down = 0;
     if (g_fog_in.room_amount > 0.001f) {
       // A room whose building has a standing part is lit while that was drawn at its place in the last 600 frames
-      // (the game culls a part out of view; a destroyed house's roof is never drawn again), or while the eye is in it.
+      // (the game culls a part out of view; a destroyed house's roof is never drawn again). Its light comes and goes
+      // over half a second, not at once. (24 Nov 2026: no more "or while the eye is in it": walking in and out of a
+      // ruin's door switched its light on and off, which TekRantGaming saw as flicker when moving.)
+      if (g_room_weight.size() != g_night_rooms_render.size()) g_room_weight.assign(g_night_rooms_render.size(), 0.0f);
       for (size_t i = 0; i < g_night_rooms_render.size(); ++i) {
         const NightRoom& r = g_night_rooms_render[i];
         bool live = !r.intact[0] && !r.intact[1];
         if (!live && i < g_room_seen.size()) live = g_room_seen[i] && g_room_frame - g_room_seen[i] <= 600;
-        if (!live) {
-          bool in = true;
-          for (int a = 0; a < 3 && in; ++a) {
-            const float q = r.to_local[a][0] * g_fog_in.eye[0] + r.to_local[a][1] * g_fog_in.eye[1] +
-                            r.to_local[a][2] * g_fog_in.eye[2] + r.to_local[a][3];
-            in = std::abs(q) <= r.half[a] + 0.5f;
-          }
-          live = in;
+        float& w = g_room_weight[i];
+        w = std::clamp(w + (live ? 1.0f : -1.0f) / 30.0f, 0.0f, 1.0f);
+        if (w > 0.0f) {
+          NightRoom lit = r;
+          lit.lift = 1.0f + (std::max(r.lift, 1.0f) - 1.0f) * w * w * (3.0f - 2.0f * w);
+          g_night_rooms_frame.push_back(lit);
         }
-        if (live) g_night_rooms_frame.push_back(r);
-        else ++down;
+        if (!live) ++down;
       }
     }
     static uint64_t said_at = 0;
@@ -5002,6 +5003,7 @@ void ExecutePresent(const Command& c) {
       g_night_rooms_render_version = g_night_rooms_version;
       g_night_rooms_render = g_night_rooms;
       g_room_seen.assign(g_night_rooms_render.size(), 0);
+      g_room_weight.assign(g_night_rooms_render.size(), 0.0f);
       g_room_intact_counts.clear();
       for (const NightRoom& r : g_night_rooms_render)
         for (uint32_t c : r.intact)
