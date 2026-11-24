@@ -90,7 +90,14 @@ struct Pending {
 thread_local Pending g_pending;
 
 std::mutex g_mutex;
-std::vector<GameRun> g_runs;  // the last quarter second's runs that could be a heading or a row
+std::vector<GameRun> g_runs;  // the last moments' runs that could be a heading or a row (EndGameText)
+// How long a run is kept, and how many at most. Two full tables of a 32 player server are about 36 runs a frame; at 80
+// frames a second the old quarter second and 600 runs ran full, the newest runs (the next frame's headings among
+// them) were dropped, and the speakers and pings went off for a frame about every quarter second (run sb169a,
+// 24 Nov 2026). Only the latest frame is drawn (DrawOverGame), so a tenth of a second is plenty, and when full the
+// oldest go.
+constexpr double kRunsKept = 0.1;
+constexpr size_t kRunsMost = 4000;
 
 // The ping column's room (TekRantGaming, 20 Nov 2026: "push the ping information to the furthest right of the
 // scoreboard"). The game's tables have no space right of their Scr. column, so while the ping column shows, the game's
@@ -247,9 +254,10 @@ void EndGameText() {
   if (!g_pending.pen || !std::isfinite(g_pending.run.x) || !std::isfinite(g_pending.run.y)) return;
   g_pending.run.at = Seconds();
   std::lock_guard lock(g_mutex);
-  const double old = g_pending.run.at - 0.25;
+  const double old = g_pending.run.at - kRunsKept;
   g_runs.erase(std::remove_if(g_runs.begin(), g_runs.end(), [old](const GameRun& r) { return r.at < old; }), g_runs.end());
-  if (g_runs.size() < 600) g_runs.push_back(g_pending.run);
+  if (g_runs.size() >= kRunsMost) g_runs.erase(g_runs.begin(), g_runs.begin() + kRunsMost / 2);
+  g_runs.push_back(g_pending.run);
 }
 
 bool RewriteGameText(uint8_t* base, uint32_t head) {
