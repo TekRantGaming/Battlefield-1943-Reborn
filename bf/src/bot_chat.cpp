@@ -86,10 +86,28 @@ std::string First(const std::string& name) {  // "Earl Morgan" -> "Earl"; a Japa
   const size_t space = name.find(' ');
   return space == std::string::npos ? name : name.substr(0, space);
 }
-std::string Fill(std::string line, const std::map<std::string, std::string>& values) {
-  for (const auto& [key, value] : values)
-    for (size_t at; (at = line.find("{" + key + "}")) != std::string::npos;) line.replace(at, key.size() + 2, value);
-  return line;
+// One pass from left to right: a value put in is never read again, so a name with braces in it stays as it is.
+std::string Fill(const std::string& line, const std::map<std::string, std::string>& values) {
+  std::string out;
+  out.reserve(line.size() + 32);
+  for (size_t at = 0; at < line.size();) {
+    const size_t open = line.find('{', at);
+    if (open == std::string::npos) {
+      out.append(line, at, std::string::npos);
+      break;
+    }
+    out.append(line, at, open - at);
+    const size_t close = line.find('}', open + 1);
+    const auto it = close == std::string::npos ? values.end() : values.find(line.substr(open + 1, close - open - 1));
+    if (it == values.end()) {
+      out += '{';
+      at = open + 1;
+    } else {
+      out += it->second;
+      at = close + 1;
+    }
+  }
+  return out;
 }
 
 // A line for a bot, in a channel, a few seconds on, if the bot and the channel have been quiet long enough.

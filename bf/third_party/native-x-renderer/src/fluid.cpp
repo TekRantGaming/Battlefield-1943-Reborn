@@ -599,7 +599,8 @@ void main() {
   float fs = clamp((s.r - (wfbm - 1.0)) / max(2.0 - wfbm, 1e-3), 0.0, 1.0);
   float cover = clamp(f_cloud3.z * (0.6 + wm.r * 0.8), 0.05, 1.0);
   float seed = clamp((fs - (1.0 - cover)) / cover, 0.0, 1.0);
-  float wall = exp(-pow((r - eye * 1.45) / 0.14, 2.0));   // the eye's wall, where the inflow piles up and rises
+  float wall_x = (r - eye * 1.45) / 0.14;  // (squared by hand: pow of a negative base is undefined in SPIR-V)
+  float wall = exp(-wall_x * wall_x);   // the eye's wall, where the inflow piles up and rises
   float reach = 1.0 - smoothstep(0.55, 1.0, r);           // the rain shield
   float ready = f_pattern1.w > 0.5 ? mix(1.0, 0.45 + 1.1 * emit_chance(rel), 0.5) : 1.0;
   float target = strength * reach * clamp(smoothstep(mix(0.08, 0.0, wall), mix(0.55, 0.2, wall), seed) * ready, 0.0, 1.0);
