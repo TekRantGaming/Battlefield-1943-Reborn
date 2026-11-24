@@ -40,6 +40,7 @@ void SetWorldState(const WorldState& state);
 WorldState CurrentWorldState();
 void SnapWorld(double seconds);  // D221
 void NightModels(const NightModelLamps* models, uint32_t count);
+void NightRooms(const NightRoom* rooms, uint32_t count);  // D222
 void NightVehicleSeated(bool seated);
 void SetMapArea(float x, float z, float reach);            // D208, D213
 void SetPlayerGroups(const float* xz, uint32_t count);     // D208

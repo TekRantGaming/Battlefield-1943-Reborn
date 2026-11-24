@@ -2338,6 +2338,29 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       }
     }
   }
+  // D222: a part drawn only while a building stands (its roof, by its index count): where it is, from the rigid
+  // matrices among its vertex shader's constants (its world matrix's register is not known for every shader, so the
+  // renderer matches the places against the level's buildings).
+  if (intact_counts_ && intact_report_ && index_buffer && output_sized && state.depth_write &&
+      std::binary_search(intact_counts_->begin(), intact_counts_->end(), primitives.guest_draw_vertex_count)) {
+    float found[12];
+    uint32_t n = 0;
+    for (uint32_t first = 16; first + 3 <= 48 && n < 4; ++first) {
+      float w[12];
+      std::memcpy(w, &regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X + first * 4], sizeof(w));
+      bool rigid = true;
+      for (int r = 0; r < 3 && rigid; ++r)
+        for (int q = 0; q < 3 && rigid; ++q) {
+          const float d = w[r * 4] * w[q * 4] + w[r * 4 + 1] * w[q * 4 + 1] + w[r * 4 + 2] * w[q * 4 + 2];
+          rigid = std::abs(d - (r == q ? 1.0f : 0.0f)) < 0.02f;
+        }
+      if (!rigid || !(std::abs(w[3]) < 1e5f && std::abs(w[7]) < 1e5f && std::abs(w[11]) < 1e5f)) continue;
+      found[n * 3] = w[3], found[n * 3 + 1] = w[7], found[n * 3 + 2] = w[11];
+      ++n;
+      first += 2;  // (its three rows)
+    }
+    if (n) intact_report_(primitives.guest_draw_vertex_count, found, n);
+  }
 
   // Object motion (D48): the main view's draws that write depth, matched with the last frame's; those that
   // moved are kept to draw their motion. A vertex shader that samples textures is left to the camera's

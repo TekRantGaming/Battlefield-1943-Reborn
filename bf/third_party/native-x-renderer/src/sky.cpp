@@ -259,6 +259,8 @@ layout(std140, set = 0, binding = 0) uniform SkyConstants {
   vec4 storm_a;              // D208: the hurricane (storm.h): its centre (x, z), its eye's radius and its rain shield's
   vec4 storm_b;              // its strength, its bands' turn, 1 while there is one, its volutus (D211)
   vec4 layers;               // D211: x the altocumulus's cover, y its brightness; z the clouds' shadows on (D214)
+  vec4 rooms[192];           // D222: per room (kMaxRooms) the world to its space (three rows), its half size and lift (w), its box on the view (0 to 1), its roof's slopes (xy)
+  vec4 room_info;            // D222: x how many rooms; y 1 to tint them
 };
 layout(set = 0, binding = 1) uniform sampler2D weatherTex;
 
@@ -899,6 +901,44 @@ float haze_depth(float a, float H, float h0, float dy, float L) {
 }
 // The drop that lands in the 32 cm square of the ground around xz now: xy where (metres), z how far through its
 // second or so it is (0 to 1), w whether there is one (the more rain, the more squares have one).
+// D222: the buildings' rooms at night (TekRantGaming, 23 Nov 2026: "the insides of buildings are far too dark"): what
+// is inside a room is drawn brighter, the scene's own colour times the room's lift (its share of the fog pass's alpha,
+// which keeps the scene by what shows through the fog). Inside: within the box of the inside faces of its walls, floor
+// and ceiling (a pitched roof's underside falls from the ridge toward the walls). Near a face (15 cm either side) not
+// what faces clearly out, so the inside of a wall is lit and its outside (a hangar's sheet metal is 4 cm) is not, nor the
+// roof on top. Returns the lift (1: none); `seen` how much of a room this is, `left` how much a face near one left out.
+float RoomLift(vec3 P, vec3 facing, out float seen, out float left) {
+  float room = 1.0;
+  seen = 0.0, left = 0.0;
+  int rn = int(room_info.x + 0.5);
+  vec2 uv = gl_FragCoord.xy / view.xy;
+  for (int i = 0; i < rn; ++i) {
+    vec4 rect = rooms[i * 6 + 4];
+    if (uv.x < rect.x || uv.y < rect.y || uv.x > rect.z || uv.y > rect.w) continue;
+    vec4 r0 = rooms[i * 6], r1 = rooms[i * 6 + 1], r2 = rooms[i * 6 + 2], hl = rooms[i * 6 + 3];
+    vec2 roof = rooms[i * 6 + 5].xy;
+    vec3 q = vec3(dot(r0.xyz, P) + r0.w, dot(r1.xyz, P) + r1.w, dot(r2.xyz, P) + r2.w);
+    vec3 out_by = abs(q) - hl.xyz;  // over 0: beyond the inside face on that axis
+    if (q.y > 0.0) out_by.y = q.y - (hl.y - roof.x * abs(q.x) - roof.y * abs(q.z));
+    float worst = max(out_by.x, max(out_by.y, out_by.z));
+    if (worst > 0.15) continue;
+    float k = 1.0;
+    if (worst > -0.05) {
+      // The nearest face, and which way into the room is there.
+      vec3 axis = out_by.x >= out_by.y && out_by.x >= out_by.z ? r0.xyz : out_by.y >= out_by.z ? r1.xyz : r2.xyz;
+      float side = out_by.x >= out_by.y && out_by.x >= out_by.z ? q.x : out_by.y >= out_by.z ? q.y : q.z;
+      float into = dot(facing, -sign(side) * axis);
+      if (isnan(into)) into = 0.0;  // (no facing where the depth's neighbours are one point)
+      // (Only what faces clearly out is left out: at a room's own corners the facing from the depth's neighbours
+      // mixes two walls, and run rooms_dbg1's corners came out as dark lines when inward facing was asked for.)
+      k = smoothstep(-0.45, -0.15, into) * (1.0 - smoothstep(0.06, 0.15, worst));
+      left = max(left, (1.0 - k) * step(worst, 0.06));
+    }
+    if (k * (hl.w - 1.0) > (room - 1.0)) room = 1.0 + k * (hl.w - 1.0);
+    seen = max(seen, k);
+  }
+  return room;
+}
 vec4 Drop(vec2 xz, float amount, float tsec) {
   vec2 id = floor(xz / 0.32);
   float h = h21(id), hh = h21(id + 19.7);
@@ -919,6 +959,14 @@ void main() {
   vec3 P = eye_world.xyz + r * (fog_b.x / max(depth, 1e-7));
   vec3 facing = normalize(cross(dFdx(P), dFdy(P)));
   if (dot(facing, r) > 0.0) facing = -facing;  // toward the eye
+  // D222: the pass drawn for the rooms alone (no fog, weather or rain now): their lift, nothing else.
+  if (room_info.z > 0.5) {
+    float seen, left;
+    float lift = nothing ? 1.0 : RoomLift(P, facing, seen, left);
+    vec3 tint = room_info.y > 0.5 && !nothing ? (vec3(0.0, 0.25, 0.0) * seen + vec3(0.3, 0.0, 0.0) * left) * view.z : vec3(0.0);
+    out_color = vec4(tint, lift);
+    return;
+  }
   float seen = L;
   float sea = eye_world.w;
   float eye_h = eye_world.y - sea;
@@ -1424,8 +1472,11 @@ void main() {
       cloud_shade = mix(1.0, through, 0.92 * direct * smoothstep(0.05, 0.12, ls.y));
     }
   }
-  out_color = vec4((light + rain_light + bolt_light) * view.z + sea_refl * sea_f * shows,
-                   shows * wet * (1.0 + (0.45 + 0.35 * smoothstep(0.75, 1.0, fog_b.w)) * streaks) * (1.0 - sea_f) * cloud_shade);
+  float room_seen = 0.0, room_left = 0.0;
+  float room = !nothing && room_info.x > 0.5 ? RoomLift(P, facing, room_seen, room_left) : 1.0;
+  vec3 room_tint = room_info.y > 0.5 ? (vec3(0.0, 0.25, 0.0) * room_seen + vec3(0.3, 0.0, 0.0) * room_left) * view.z : vec3(0.0);
+  out_color = vec4((light + rain_light + bolt_light) * view.z + sea_refl * sea_f * shows + room_tint,
+                   shows * wet * (1.0 + (0.45 + 0.35 * smoothstep(0.75, 1.0, fog_b.w)) * streaks) * (1.0 - sea_f) * cloud_shade * room);
 }
 )";
 // The view's lowest heights, for the sea's (Sky::ReadSea): each pixel of the small target the lowest of 4 x 4 places of
@@ -1852,6 +1903,9 @@ float Smooth(float lo, float hi, float v) {
 
 }  // namespace
 
+// D222: the rooms the fog pass lights at most (kCommon's rooms[192]: six vec4 each).
+constexpr uint32_t kMaxRooms = 32;
+constexpr uint32_t kRoomRows = 6;
 struct SkyConstantBlock {
   float inv[3][4];
   float eye[4], to_ndc[4], view[4];
@@ -1866,7 +1920,71 @@ struct SkyConstantBlock {
   float gale[4];  // D194
   float storm_a[4], storm_b[4];  // D208
   float layers[4];               // D211
+  float rooms[kMaxRooms * kRoomRows][4];  // D222: per room the world to its space (three rows), its half size and lift, its box on the view, its roof
+  float room_info[4];             // D222: x how many rooms; y 1 to tint them (the developer's view)
 };
+
+static_assert(kMaxRooms * kRoomRows == 192, "kCommon's rooms[] holds six vec4 a room");
+
+// D222: the nearest rooms in view into the fog pass's constants: each its world to its space, its half size and lift
+// (1 + (lift - 1) times the amount), and the part of the view (0 to 1) its box can show in. A box that reaches behind
+// the eye covers the whole view. Returns how many.
+static uint32_t PackRooms(const Sky::Inputs& in, SkyConstantBlock& k) {
+  if (!in.rooms || !in.room_count || in.room_amount <= 0.001f || !in.width || !in.height ||
+      std::abs(in.to_ndc[0]) < 1e-6f || std::abs(in.to_ndc[1]) < 1e-6f)
+    return 0;
+  struct Near {
+    float d2;
+    uint32_t i;
+    float rect[4];
+  };
+  std::vector<Near> near;
+  near.reserve(in.room_count);
+  constexpr float kReach = 250.0f;  // metres: farther rooms are a few pixels, and their light is not missed
+  for (uint32_t i = 0; i < in.room_count; ++i) {
+    const NightRoom& r = in.rooms[i];
+    const float dx = r.centre[0] - in.eye[0], dy = r.centre[1] - in.eye[1], dz = r.centre[2] - in.eye[2];
+    const float d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 > kReach * kReach) continue;
+    // Its eight corners (a little outside its faces, where its light can still be) on the view. The room's own space
+    // to the world: the rows of to_local are a rotation's (its columns the world's axes in the room's space).
+    float rect[4] = {1e9f, 1e9f, -1e9f, -1e9f};
+    bool behind = false;
+    for (int c = 0; c < 8 && !behind; ++c) {
+      const float l[3] = {(c & 1 ? 1.0f : -1.0f) * (r.half[0] + 0.3f), (c & 2 ? 1.0f : -1.0f) * (r.half[1] + 0.3f),
+                          (c & 4 ? 1.0f : -1.0f) * (r.half[2] + 0.3f)};
+      float d[3];
+      for (int a = 0; a < 3; ++a) d[a] = r.centre[a] + r.to_local[0][a] * l[0] + r.to_local[1][a] * l[1] + r.to_local[2][a] * l[2] - in.eye[a];
+      float clip[3];
+      for (int row = 0; row < 3; ++row) clip[row] = in.forward[row][0] * d[0] + in.forward[row][1] * d[1] + in.forward[row][2] * d[2];
+      if (clip[2] < 0.05f) {
+        behind = true;
+        break;
+      }
+      const float u = (clip[0] / clip[2] - in.to_ndc[2]) / in.to_ndc[0], v = (clip[1] / clip[2] - in.to_ndc[3]) / in.to_ndc[1];
+      rect[0] = std::min(rect[0], u), rect[1] = std::min(rect[1], v), rect[2] = std::max(rect[2], u), rect[3] = std::max(rect[3], v);
+    }
+    if (behind) rect[0] = rect[1] = -1.0f, rect[2] = rect[3] = 2.0f;
+    if (rect[2] < 0.0f || rect[3] < 0.0f || rect[0] > 1.0f || rect[1] > 1.0f) continue;  // out of view
+    near.push_back({d2, i, {rect[0], rect[1], rect[2], rect[3]}});
+  }
+  if (near.size() > kMaxRooms) {
+    std::partial_sort(near.begin(), near.begin() + kMaxRooms, near.end(), [](const Near& a, const Near& b) { return a.d2 < b.d2; });
+    near.resize(kMaxRooms);
+  }
+  uint32_t n = 0;
+  for (const Near& e : near) {
+    const NightRoom& r = in.rooms[e.i];
+    float (*out)[4] = k.rooms + n * kRoomRows;
+    for (int a = 0; a < 3; ++a) std::memcpy(out[a], r.to_local[a], sizeof(float) * 4);
+    out[3][0] = r.half[0], out[3][1] = r.half[1], out[3][2] = r.half[2];
+    out[3][3] = 1.0f + (std::max(r.lift, 1.0f) - 1.0f) * in.room_amount;
+    std::memcpy(out[4], e.rect, sizeof(e.rect));
+    out[5][0] = r.slope[0], out[5][1] = r.slope[1], out[5][2] = out[5][3] = 0.0f;
+    ++n;
+  }
+  return n;
+}
 
 bool Sky::SeaSkyColours(float zenith[3], float horizon[3]) const {
   if (last_fill_.size() != sizeof(SkyConstantBlock)) return false;
@@ -2982,6 +3100,17 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   SkyConstantBlock k{};
   Fill(in, k);
   k.bolt[3] = (in.old_rain_order ? 4.0f : 0.0f) + float(in.fog_parts_off);  // BF_FOG_AB, BF_FOG_PARTS (tests)
+  k.room_info[0] = float(PackRooms(in, k));  // D222
+  k.room_info[1] = in.room_debug ? 1.0f : 0.0f;
+  k.room_info[2] = FogWanted(in) ? 0.0f : 1.0f;  // drawn for the rooms alone
+  {
+    static uint64_t said_at = 0;
+    if (fog_frames_ >= said_at + 3600) {
+      said_at = fog_frames_;
+      REXLOG_INFO("[native_x_renderer] night rooms (D222): {} of {} lit in view, amount {:.2f}", int(k.room_info[0]),
+                  in.room_count, in.room_amount);
+    }
+  }
   {
     // How wet the lens is: it builds up in two seconds of rain on the eye, and dries in four under cover or once
     // the rain stops.
@@ -3076,8 +3205,8 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   }
   const bool probed = sea_wait_ == 4;
   ++fog_frames_;
-  // Without fog, weather or rain the pass only keeps the sea's height and the lens.
-  if (!FogWanted(in)) return probed;
+  // Without fog, weather or rain the pass only keeps the sea's height and the lens (D222: and lights no rooms).
+  if (!FogWanted(in) && k.room_info[0] < 0.5f) return probed;
   ITextureView* target = in.color->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET);
   if (!target) return probed;
   // D190: the scene as it is, for the sea's reflection (only while that is on).

@@ -53,6 +53,7 @@
 #include "Texture.h"
 
 #include "storm.h"
+#include <native_x_renderer/native_x_renderer.h>
 
 namespace native_x_renderer {
 
@@ -102,6 +103,12 @@ class Sky {
     // shadows is under something along the light, and gets no rain. Null: no cover known.
     Diligent::ITextureView* cover = nullptr;
     float cover_m[3][3][4] = {};
+    // D222: the buildings' rooms (NightRoom) drawn brighter at night in the fog pass, their lifts times `room_amount`
+    // (0: none; the cycle's dark times the player's setting). The nearest kMaxRooms in view are taken.
+    const NightRoom* rooms = nullptr;
+    uint32_t room_count = 0;
+    float room_amount = 0.0f;
+    bool room_debug = false;
     int debug = 0;              // 1: the sky's pixels in one flat colour (which pixels are taken)
   };
   ~Sky();

@@ -269,15 +269,119 @@ const std::vector<LampModel>& Models() {
   return models;
 }
 
+// D222: the rooms of the buildings, brighter at night (TekRantGaming, 23 Nov 2026: "the insides of buildings are far
+// too dark", and most of them have nowhere a lamp could hang; the review's option C). Each a box in the building's own
+// space (x right, y up, z forward): the inside faces of its outer walls, its floor and its ceiling, measured from the
+// lowest level of detail's triangles (each building cut at 1.4 m over its floor, the walls' inner faces found along
+// lines across it; the beach houses' pitched roofs from cuts every half metre up). The rooms within a building's
+// inner walls are left as one: both faces of an inner wall are inside. The beach houses' roof falls 0.495 m a metre
+// from its ridge. Measured on 23 and 24 Nov 2026 from the meshes' triangles (positions as half floats; the warehouse's
+// as 32 bit floats).
+struct RoomBox {
+  float x0, x1, y0, y1, z0, z1;
+  float slope_x = 0.0f, slope_z = 0.0f;  // the top falls this much a metre from the box's middle along x and z
+};
+struct RoomModel {
+  const char* blueprint;
+  std::vector<RoomBox> boxes;
+  float lift;  // how many times as bright at full night (run rooms_ab1: 3 left a beach house nearly black)
+  // A part drawn only while the building stands, by its draws' index counts (its mesh's triangles times 3, levels of
+  // detail 0 and 1; 0 none): the beach houses' roof (part_01_Roof_Exterior; the short house's whole baked mesh far
+  // off). The storeroom's, the factory's and the hangar's are their largest breakable parts (not yet seen destroyed).
+  uint32_t intact0 = 0, intact1 = 0;
+};
+const std::vector<RoomModel>& Rooms() {
+  static const std::vector<RoomModel> rooms = {
+      // The beach houses: walls 0.3 m thick, the floor at 0.2 m, open to the roof (its underside 5.54 m at the ridge).
+      {"objects/architecture/beach/beachhouse_t01/beachhouse_t01", {{-6.70f, 6.70f, 0.15f, 5.54f, -3.70f, 3.70f, 0.0f, 0.495f}}, 5.0f, 603, 7998},
+      // The long beach house: an L, its wing along z (ridge 5.39 m, along z) and its part across (as the short house).
+      {"objects/architecture/beach/beachhouse_t02/beachhouse_t02",
+       {{-6.70f, -0.21f, 0.15f, 5.39f, -12.40f, -3.70f, 0.495f, 0.0f}, {-6.70f, 6.70f, 0.15f, 5.54f, -3.70f, 3.70f, 0.0f, 0.495f}},
+       5.0f, 1038},
+      // The storeroom: its roof falls 0.31 m a metre from the ridge (5.96 m) over its width.
+      {"objects/architecture/beach/storeroom_t01/storeroom_t01", {{-6.70f, 6.70f, 1.05f, 5.96f, -4.20f, 4.20f, 0.0f, 0.31f}}, 5.0f, 5541, 6366},
+      // The factory: its hall, the strip at its right, its tower part at the back.
+      {"objects/architecture/beach/factory_t01/factory_t01",
+       {{-4.60f, 11.11f, 1.85f, 5.95f, 0.88f, 14.62f}, {11.11f, 13.00f, 1.85f, 5.95f, 2.73f, 14.62f},
+        {4.70f, 11.08f, 1.85f, 5.45f, -3.35f, 0.88f}},
+       5.0f, 11415, 14319},
+      // The hangar (sheet metal 4 cm thick; its own work lamps light it too): its roof rises to 8.2 m over the middle.
+      {"objects/architecture/beach/hangar_t01/hangar_t01", {{-13.07f, 13.07f, 0.15f, 8.20f, -10.03f, 10.03f, 0.0f, 0.21f}}, 4.0f, 1005, 6123},
+      // Iwo Jima's warehouse (its mesh's positions are 32 bit floats, not halves): walls 0.3 m, the floor at 0.2 m, its roof's
+      // underside 8.11 m at the ridge, falling 0.197 m a metre; its roof part1_Roof_Exterior (1152 indices).
+      {"objects/architecture/beach/warehouse_t01/warehouse_t01", {{-12.70f, 12.70f, 0.15f, 8.11f, -9.70f, 9.70f, 0.0f, 0.197f}}, 5.0f, 1152, 12117},
+      // The control tower's glass cab.
+      {"objects/architecture/beach/airtower_t01/airtower_t01", {{-1.92f, 1.92f, 13.15f, 15.65f, -1.92f, 1.92f}}, 3.5f},
+      // The lighthouse's two floors: round, its inside 3.37 m from the middle, its outside narrowing from 4.2 m at the
+      // foot to 3.98 m at 7.5 m and 3.74 m at 15 m, so three boxes across each other per floor whose corners stay inside
+      // the outer face (runs rooms_iwo1 to rooms_iwo4: larger corners lit strips of its outside; the upper floor stops 0.4 m under the
+      // gallery's underside at 15.7 m, which a top at 15.65 m lit from outside).
+      {"objects/architecture/beach/lighthouse_t01/lighthouse_t01",
+       {{-3.37f, 3.37f, -0.45f, 7.35f, -2.00f, 2.00f}, {-2.00f, 2.00f, -0.45f, 7.35f, -3.37f, 3.37f},
+        {-2.75f, 2.75f, -0.45f, 7.35f, -2.75f, 2.75f}, {-3.37f, 3.37f, 7.45f, 15.30f, -1.30f, 1.30f},
+        {-1.30f, 1.30f, 7.45f, 15.30f, -3.37f, 3.37f}, {-2.50f, 2.50f, 7.45f, 15.30f, -2.50f, 2.50f}},
+       4.0f},
+      // The bunkers (their concrete 0.5 m or more; a lantern inside each too). Not the radar bunker or the pillbox: solid,
+      // no floor inside to speak of (5 m2; run rooms_dbg1 lit the radar bunker's front).
+      {"objects/architecture/military/mil_bunker_t01v01/mil_bunker_t01v01", {{-3.25f, 3.92f, 0.35f, 2.95f, -3.68f, 1.66f}}, 4.0f},
+      {"objects/architecture/beach/bunker_1/bunker_1", {{-3.85f, 3.85f, 0.35f, 2.95f, -3.35f, 3.35f}}, 4.0f},
+  };
+  return rooms;
+}
+
 }  // namespace
 
 void NightJeeps();
+
+// D222: the rooms of the placed buildings to the renderer (see Rooms()).
+static void NightRoomsFromPlaced(const std::vector<Placed>& placed, const std::string& folder) {
+  std::vector<native_x_renderer::NightRoom> out;
+  uint32_t buildings = 0;
+  for (const Placed& p : placed) {
+    std::string lower = p.blueprint;
+    for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+    for (const RoomModel& model : Rooms()) {
+      if (lower.rfind(model.blueprint, 0) != 0) continue;
+      const float* r = p.m;  // right 0..2, up 4..6, forward 8..10, position 12..14
+      float len[3], unit[3][3];
+      for (int a = 0; a < 3; ++a) {
+        const float* v = r + 4 * a;
+        len[a] = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        for (int k = 0; k < 3; ++k) unit[a][k] = len[a] > 1e-4f ? v[k] / len[a] : 0.0f;
+      }
+      if (len[0] < 1e-4f || len[1] < 1e-4f || len[2] < 1e-4f) break;
+      ++buildings;
+      for (const RoomBox& b : model.boxes) {
+        const float mid[3] = {0.5f * (b.x0 + b.x1), 0.5f * (b.y0 + b.y1), 0.5f * (b.z0 + b.z1)};
+        native_x_renderer::NightRoom room;
+        for (int k = 0; k < 3; ++k) room.centre[k] = r[12 + k] + mid[0] * r[k] + mid[1] * r[4 + k] + mid[2] * r[8 + k];
+        for (int a = 0; a < 3; ++a) {
+          for (int k = 0; k < 3; ++k) room.to_local[a][k] = unit[a][k];
+          room.to_local[a][3] = -(unit[a][0] * room.centre[0] + unit[a][1] * room.centre[1] + unit[a][2] * room.centre[2]);
+        }
+        room.half[0] = 0.5f * (b.x1 - b.x0) * len[0];
+        room.half[1] = 0.5f * (b.y1 - b.y0) * len[1];
+        room.half[2] = 0.5f * (b.z1 - b.z0) * len[2];
+        room.slope[0] = b.slope_x * len[1] / len[0];
+        room.slope[1] = b.slope_z * len[1] / len[2];
+        room.lift = model.lift;
+        room.intact[0] = model.intact0, room.intact[1] = model.intact1;
+        for (int k = 0; k < 3; ++k) room.building[k] = r[12 + k];
+        out.push_back(room);
+      }
+      break;
+    }
+  }
+  native_x_renderer::NightRooms(out.data(), uint32_t(out.size()));
+  REXLOG_INFO("BF level {}: {} buildings with rooms ({} rooms) for the night", folder, buildings, out.size());
+}
 
 // The level's main partition's bytes (levels/<map>.dbx): its lamps to the renderer (none if it has none).
 void NightLampsFromLevel(const uint8_t* data, size_t size, const std::string& folder) {
   std::vector<Placed> placed;
   if (!Reader(data, size).Read(placed)) {
     native_x_renderer::NightLamps(nullptr, 0);
+    native_x_renderer::NightRooms(nullptr, 0);
     REXLOG_WARN("BF level {}: its objects could not be read ({} placed before the error): no lamps at night", folder,
                 placed.size());
     return;
@@ -331,6 +435,7 @@ void NightLampsFromLevel(const uint8_t* data, size_t size, const std::string& fo
   native_x_renderer::NightLamps(lamps.data(), uint32_t(lamps.size()));
   REXLOG_INFO("BF level {}: {} placed objects, {} with lamps ({} lamps) for the night", folder, placed.size(), objects,
               lamps.size());
+  NightRoomsFromPlaced(placed, folder);
   NightJeeps();
 }
 
