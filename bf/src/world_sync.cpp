@@ -17,6 +17,9 @@
 // 0 the level's own), the time limit in minutes (16 bits, 0 none) and the round's seconds left (a float, -1 none).
 // The cloud height came later and stands last in both: a host from before it sends and reads none (450 m then).
 // D224 (20 Nov 2026), last in both: the storm's type, a byte (0 a thunderstorm, 1 a hurricane); none: a thunderstorm.
+// Night Ops' admin (24 Nov 2026): a change ends with a u16 of the settings the admin moved (world_sync.h Touched); an
+// ask with flag 8 is "Back to Night Ops"; the answer's flags add 4 (a Night Ops server) and 8 (an admin's settings hold
+// some of its schedule for the rest of the round). Hosts and games from before read none of them.
 // Big endian. An admin is the game that shows the host's key (the game that started a private match has it), or a
 // joined player whose ID is in the host's list (bf_world_admins; a dedicated server's --admins).
 //
@@ -108,7 +111,9 @@ std::string g_joined, g_key;
 Status g_status;
 bool g_have_request = false;
 Settings g_request;
+unsigned g_request_touched = 0;  // every setting moved since the last change went out (sent three times)
 int g_request_sends = 0;
+int g_back_sends = 0;  // Night Ops' "Back to Night Ops": asked until an answer says nothing is held (at most 3)
 std::atomic<bool> g_started{false};
 
 // The pings (g_mutex): this game's own, and the host's list of every player's (names lower case, without a clan tag).
@@ -176,11 +181,13 @@ void Run() {
     }
     std::string joined, key;
     Settings request;
-    bool have_request = false;
+    unsigned touched = 0;
+    bool have_request = false, back = false;
     {
       std::lock_guard lock(g_mutex);
       joined = g_joined, key = g_key;
-      if (g_have_request && g_request_sends > 0) have_request = true, request = g_request;
+      if (g_have_request && g_request_sends > 0) have_request = true, request = g_request, touched = g_request_touched;
+      back = !have_request && g_back_sends > 0;
     }
     const double now = Now();
     if (joined != target) {
@@ -242,14 +249,17 @@ void Run() {
       pings_out.emplace_back(id, Now());
       if (pings_out.size() > 8) pings_out.erase(pings_out.begin());
     }
-    if (now >= next_ask || have_request) {
-      next_ask = now + (have_request ? 0.3 : 2.0);
+    if (now >= next_ask || have_request || back) {
+      next_ask = now + (have_request || back ? 0.3 : 2.0);
       std::string ask = "BF43WRLD";
       ask += char(1);
-      ask += char(have_request ? 1 : 4);  // 4: the ping follows the key
+      ask += char(have_request ? 1 : back ? 8 : 4);  // 4: the ping follows the key; 8: Back to Night Ops
       PutText(ask, PlayerName());
       PutText(ask, key);
-      if (!have_request) {
+      if (back) {
+        std::lock_guard lock(g_mutex);
+        --g_back_sends;
+      } else if (!have_request) {
         const int own = g_own_ping.load();
         const uint32_t ms = own < 0 ? 0xFFFF : uint32_t(std::min(own, 0xFFFE));
         ask += char(ms >> 8), ask += char(ms & 0xFF);
@@ -265,11 +275,14 @@ void Run() {
         ask += char(std::clamp(request.storm_type, 0, 1));  // D224, last
         PutF32(ask, request.ground_fog_height);  // 21 Nov 2026, last: a host from before it reads none
         PutF32(ask, request.ground_fog_sparse);
+        // 24 Nov 2026, last: the settings the admin moved (u16; world_sync.h Touched). A Night Ops server takes only
+        // those, so a value its schedule moved since this game's last answer is never set back; others read none.
+        ask += char((touched >> 8) & 0xFF), ask += char(touched & 0xFF);
         std::lock_guard lock(g_mutex);
-        if (--g_request_sends <= 0) g_have_request = false;
+        if (--g_request_sends <= 0) g_have_request = false, g_request_touched = 0;
       }
       sendto(sock, ask.data(), int(ask.size()), 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to));
-      if (have_request) std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      if (have_request || back) std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
     for (;;) {
       uint8_t buf[2048];
@@ -330,6 +343,7 @@ void Run() {
       s.answered = true;
       s.now.day_night = (buf[9] & 1) != 0;
       s.admin = (buf[9] & 2) != 0;
+      s.night_ops = (buf[9] & 4) != 0, s.held = (buf[9] & 8) != 0;  // 24 Nov 2026
       s.now.hour = GetF32(buf + 10), s.now.day_minutes = GetF32(buf + 14), s.now.cloud_cover = GetF32(buf + 18);
       s.now.cloud_rate = GetF32(buf + 22), s.now.weather = GetF32(buf + 26);
       s.now.fog = GetF32(buf + 30), s.now.ground_fog = GetF32(buf + 34), s.now.wind = GetF32(buf + 38);
@@ -358,12 +372,20 @@ void Run() {
       w.cloud_seconds = GetF64(buf + 42), w.cloud_evolve = GetF64(buf + 50);
       w.storm_type = s.now.storm_type;
       native_x_renderer::SetWorldState(w);
-      bool was_admin;
+      bool was_admin, was_held;
       {
         std::lock_guard lock(g_mutex);
-        was_admin = g_status.admin;
+        was_admin = g_status.admin, was_held = g_status.held;
         g_status = s;
+        if (!s.held) g_back_sends = 0;  // on Night Ops' schedule: "Back to Night Ops" done
       }
+      // Night Ops: an admin's settings now hold its schedule, or it is back on it (every player's game says so).
+      if (s.night_ops && valid && s.held != was_held)
+        REXLOG_INFO("BF world: Night Ops {}: {:.2f} h, a day in {:.0f} min, clouds {:.0f}%, weather {:.0f}%, fog {:.0f}%, "
+                    "ground fog {:.0f}%",
+                    s.held ? "held by an admin's settings for the rest of the round" : "on its schedule again",
+                    s.now.hour, s.now.day_minutes, s.now.cloud_cover * 100, s.now.weather * 100, s.now.fog * 100,
+                    s.now.ground_fog * 100);
       bf1943::SkinMatchSample(s.now.storm_type, s.now.weather, s.time_limit, s.time_left);  // fov.cpp: the skin's unlock
       if (!valid)
         REXLOG_INFO("BF world: the match's host keeps its world: day and night {}, {:.1f} h, a day in {:.0f} min, clouds "
@@ -388,6 +410,20 @@ void StartOnce() {
 // ---------------------------------------------------------------------------------------------------------------
 // The admin's panel (F9): the f8 panel's look, mouse and keys.
 
+// Where the panel's rows are (in the 720 high stage's units `u`): its top, a row's height (as high as fit the screen
+// with the title and the help below, 44 at most), and a row's track under its label.
+constexpr int kPanelRows = 14;
+struct Layout {
+  float y0, rh, track;
+};
+Layout PanelLayout(float u) {
+  Layout l;
+  l.y0 = 72 * u;
+  l.rh = std::min(44 * u, (720 * u - l.y0 - 48 * u - 64 * u - 6 * u) / kPanelRows);
+  l.track = std::min(30 * u, l.rh - 9 * u);
+  return l;
+}
+
 class AdminPanel final : public rex::ui::ImGuiDialog {
  public:
   explicit AdminPanel(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
@@ -408,33 +444,50 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
       // Where the rows below are drawn: a row's track at a fraction, and its value's box.
       const float du = io.DisplaySize.y / 720.0f;
       const float tx0 = 16 * du + 14 * du, tx1 = 16 * du + 420 * du - 14 * du;
-      auto row_y = [&](int i) { return 120 * du + 48 * du + 44 * du * i; };
-      auto track = [&](int i, float at) { return ImVec2(tx0 + (tx1 - tx0) * at, row_y(i) + 30 * du); };
+      const Layout lay = PanelLayout(du);
+      auto row_y = [&](int i) { return lay.y0 + 48 * du + lay.rh * i; };
+      auto track = [&](int i, float at) { return ImVec2(tx0 + (tx1 - tx0) * at, row_y(i) + lay.track); };
       auto box = [&](int i) { return ImVec2(16 * du + 416 * du - 30 * du, row_y(i) + 11 * du); };
       auto type = [&](const char* text) {
         for (const char* c = text; *c; ++c) io.AddInputCharacter(ImWchar(*c));
         io.AddKeyEvent(ImGuiKey_Enter, true);
       };
-      static const double kAt[] = {0.0, 3.0, 3.3, 3.6, 6.0, 6.2, 6.4, 8.0, 8.2, 8.4, 11.0};
+      // 24 Nov 2026 (Night Ops' admin): BF_DEV_WORLD_PANEL_TIME the time typed (18:30:15 if none), the panel closed
+      // two seconds after the log, and BF_DEV_WORLD_PANEL_BACK=<s> (from the same start) opens it again and clicks
+      // "Back to Night Ops" (a Night Ops server's last row), then logs what the host keeps and closes it.
+      const char* typed_time = std::getenv("BF_DEV_WORLD_PANEL_TIME");
+      const char* back_env = std::getenv("BF_DEV_WORLD_PANEL_BACK");
+      const double back_at = back_env && *back_env ? std::atof(back_env) : 1e9;
+      const double kAt[] = {0.0, 3.0, 3.3, 3.6, 6.0, 6.2, 6.4, 8.0, 8.2, 8.4, 11.0, 13.0,
+                            back_at, back_at + 0.5, back_at + 0.7, back_at + 4.0};
       if (stage < int(std::size(kAt)) && after > kAt[stage]) {
         switch (stage) {
           case 0: open = true, edit_ = status.now, edited_at_ = -100; break;
           case 1: io.MousePos = track(5, 0.6f), io.MouseDown[0] = true; break;  // weather: pressed at 60%
           case 2: io.MousePos = track(5, 0.4f); break;                          // dragged to 40%
           case 3: io.MouseDown[0] = false; break;
-          case 4: io.MousePos = box(9), io.MouseDown[0] = true; break;  // the cloud height's box
+          case 4: io.MousePos = box(10), io.MouseDown[0] = true; break;  // the cloud height's box
           case 5: io.MouseDown[0] = false, type("777"); break;
           case 6: io.AddKeyEvent(ImGuiKey_Enter, false); break;
           case 7: io.MousePos = box(1), io.MouseDown[0] = true; break;  // the time's box
-          case 8: io.MouseDown[0] = false, type("18:30:15"); break;
+          case 8: io.MouseDown[0] = false, type(typed_time && *typed_time ? typed_time : "18:30:15"); break;
           case 9: io.AddKeyEvent(ImGuiKey_Enter, false); break;
-          case 10: {
+          case 10:
+          case 15: {
             const long t = std::lround(double(status.now.hour) * 3600.0) % 86400;
-            REXLOG_INFO("BF world: the panel's test (pointer and keys): the host keeps weather {:.0f}%, cloud height "
-                        "{:.0f} m, time {:02d}:{:02d}:{:02d}",
-                        status.now.weather * 100, status.now.cloud_height, t / 3600, t / 60 % 60, t % 60);
+            REXLOG_INFO("BF world: the panel's test (pointer and keys){}: the host keeps weather {:.0f}%, cloud height "
+                        "{:.0f} m, time {:02d}:{:02d}:{:02d}, clouds {:.0f}%, fog {:.0f}%{}",
+                        stage == 15 ? " after Back to Night Ops" : "", status.now.weather * 100,
+                        status.now.cloud_height, t / 3600, t / 60 % 60, t % 60, status.now.cloud_cover * 100,
+                        status.now.fog * 100,
+                        !status.night_ops ? "" : status.held ? "; Night Ops held by an admin" : "; Night Ops on its schedule");
+            if (stage == 15) open = false;
             break;
           }
+          case 11: open = false, io.MousePos = ImVec2(-1, -1); break;
+          case 12: open = true, edit_ = status.now, edited_at_ = -100; break;
+          case 13: io.MousePos = ImVec2(16 * du + 420 * du - 12 * du - 90 * du, lay.y0 + 20 * du), io.MouseDown[0] = true; break;
+          case 14: io.MouseDown[0] = false; break;
         }
         ++stage;
       }
@@ -527,6 +580,7 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
          "What the weather builds: a thunderstorm, or a hurricane with its eye and spiral rain bands."},
     };
     constexpr int kStormRow = 12, kTypeRow = 13;  // (10 and 11: the heights, in metres)
+    static_assert(std::size(rows) == kPanelRows);
     auto is_switch = [&](int i) { return i == 0 || i == kStormRow || i == kTypeRow; };
     // A value put on its row's steps: whole seconds, percents, minutes or metres.
     auto snap = [](const Row& r, float v) {
@@ -537,12 +591,33 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
     // ImGui's clip would be its hidden 400 by 400 default window's, and most of the panel would not see the mouse.
     auto over = [](ImVec2 a, ImVec2 b) { return ImGui::IsMouseHoveringRect(a, b, false); };
     const int count = int(std::size(rows));
-    const float w = 420 * u, x0 = 16 * u, x1 = x0 + w, y0 = 120 * u, rh = 44 * u;
+    // Rows as high as fit the screen (24 Nov 2026: fourteen rows of 44 reached past its foot), 44 at most.
+    const Layout lay = PanelLayout(u);
+    const float w = 420 * u, x0 = 16 * u, x1 = x0 + w, y0 = lay.y0, rh = lay.rh;
     const float y1 = y0 + 48 * u + rh * count + 64 * u;
     d->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(18, 22, 14, 225));
     d->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(201, 183, 122, 102), 0, 0, u);
     d->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + 40 * u), IM_COL32(93, 138, 50, 90));
     d->AddText(f.ui_bold, 20 * u, ImVec2(x0 + 12 * u, y0 + 6 * u), kit::kCream, "MATCH ADMIN (F9)");
+    // Night Ops (24 Nov 2026): what an admin changes here holds for the rest of the round (server/gmhost.py
+    // NIGHT_OPS_HELD); this button, or N, hands it all back to the server's schedule (19:00, the storm by the tickets).
+    // In the header: the rows already reach past the screen's foot.
+    if (status.night_ops) {
+      const ImVec2 b1(x1 - 12 * u, y0 + 33 * u), b0(b1.x - 180 * u, y0 + 7 * u);
+      const bool hot = status.held && over(b0, b1);
+      const char* label = status.held ? "BACK TO NIGHT OPS (N)" : "ON NIGHT OPS' SCHEDULE";
+      d->AddRectFilled(b0, b1, status.held ? (hot ? IM_COL32(201, 183, 122, 90) : IM_COL32(18, 22, 14, 160))
+                                           : IM_COL32(18, 22, 14, 80));
+      d->AddRect(b0, b1, status.held ? kit::kGold : IM_COL32(232, 226, 204, 60), 0, 0, u);
+      d->AddText(f.ui_bold, 12 * u, ImVec2(b0.x + (180 * u - kit::TextWidth(f.ui_bold, 12 * u, label)) * 0.5f, b0.y + 6 * u),
+                 status.held ? kit::kCream : IM_COL32(207, 198, 168, 160), label);
+      if (status.held && typing_ < 0 &&
+          ((hot && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) || ImGui::IsKeyPressed(ImGuiKey_N, false))) {
+        BackToNightOps();
+        edited_at_ = -100;  // the host's values again as soon as it answers
+        REXLOG_INFO("BF world: the admin asked for Night Ops' schedule back");
+      }
+    }
     if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) row_ = (row_ + count - 1) % count;
     if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) row_ = (row_ + 1) % count;
     // Left and right: a step; with Shift, ten (sixty on the time: a minute).
@@ -622,7 +697,7 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
       }
       d->AddText(f.ui, 15 * u, ImVec2(b.x - 10 * u - kit::TextWidth(f.ui, 15 * u, value), yy + 2 * u), kit::kGreenBright, value);
       // The track: dragged with the mouse, stepped with left and right.
-      const float tx0 = a.x + 10 * u, tx1 = b.x - 10 * u, ty = yy + 30 * u;
+      const float tx0 = a.x + 10 * u, tx1 = b.x - 10 * u, ty = yy + lay.track;
       d->AddRectFilled(ImVec2(tx0, ty - u), ImVec2(tx1, ty + u), IM_COL32(232, 226, 204, 60));
       // A typed day's length past the track's end (up to 1440 minutes) keeps its knob at the end.
       const float at = tx0 + (tx1 - tx0) * std::clamp((*r.value - r.lo) / (r.hi - r.lo), 0.0f, 1.0f);
@@ -659,13 +734,27 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
       edit_.wind = edit_.weather;
     if (changed) {
       edited_at_ = ImGui::GetTime();
-      Request(edit_);
+      // What this change moved (24 Nov 2026): a Night Ops server takes only those and holds them for the round.
+      const Settings& e = edit_;
+      const unsigned touched =
+          (e.day_night != before.day_night ? kTouchDayNight : 0) | (e.hour != before.hour ? kTouchHour : 0) |
+          (e.day_minutes != before.day_minutes ? kTouchDayMinutes : 0) |
+          (e.cloud_cover != before.cloud_cover ? kTouchCover : 0) | (e.cloud_rate != before.cloud_rate ? kTouchRate : 0) |
+          (e.weather != before.weather ? kTouchWeather : 0) | (e.fog != before.fog ? kTouchFog : 0) |
+          (e.ground_fog != before.ground_fog ? kTouchGroundFog : 0) | (e.wind != before.wind ? kTouchWind : 0) |
+          (e.cloud_height != before.cloud_height ? kTouchCloudHeight : 0) |
+          (e.dynamic_storm != before.dynamic_storm ? kTouchStorm : 0) |
+          (e.storm_type != before.storm_type ? kTouchStormType : 0) |
+          (e.ground_fog_height != before.ground_fog_height ? kTouchFogHeight : 0) |
+          (e.ground_fog_sparse != before.ground_fog_sparse ? kTouchFogSparse : 0);
+      Request(edit_, touched);
     }
     const float fy = y0 + 48 * u + rh * count + 6 * u;
     d->AddLine(ImVec2(x0 + 12 * u, fy), ImVec2(x1 - 12 * u, fy), IM_COL32(201, 183, 122, 64));
     d->AddText(f.ui, 12 * u, ImVec2(x0 + 12 * u, fy + 6 * u), IM_COL32(207, 198, 168, 255), rows[row_].help);
     d->AddText(f.ui, 12 * u, ImVec2(x0 + 12 * u, fy + 24 * u), IM_COL32(207, 198, 168, 255),
-               "Every player of the match sees a change within two seconds.");
+               status.night_ops ? "Every player sees a change within two seconds. Night Ops: it holds to the round's end."
+                                : "Every player of the match sees a change within two seconds.");
     d->AddText(f.ui, 12 * u, ImVec2(x0 + 12 * u, fy + 40 * u), IM_COL32(207, 198, 168, 255),
                "Drag a slider, click a value to type it, or use the arrows \xC2\xB7 F9 or Esc: close");
   }
@@ -701,9 +790,17 @@ Status Current() {
   return g_status;
 }
 
-void Request(const Settings& settings) {
+void Request(const Settings& settings, unsigned touched) {
   std::lock_guard lock(g_mutex);
-  g_request = settings, g_have_request = true, g_request_sends = 3;  // UDP may lose one
+  // UDP may lose one; a change still going out keeps what it moved (its values are in this one too: the panel's).
+  g_request_touched = (g_have_request ? g_request_touched : 0) | (touched & kTouchAll);
+  g_request = settings, g_have_request = true, g_request_sends = 3;
+  g_back_sends = 0;
+}
+
+void BackToNightOps() {
+  std::lock_guard lock(g_mutex);
+  g_back_sends = 3, g_have_request = false, g_request_touched = 0;
 }
 
 bool AdminPanelOpen() { return g_panel && g_panel->open.load(); }

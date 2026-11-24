@@ -1076,6 +1076,7 @@ class World:
         self.admins, self.key = set(), ''
         self.night_ops = False
         self.round, self.progress, self.stage = None, 0.0, -1  # Night Ops: the round's build (match)
+        self.held = set()  # Night Ops: what an admin set this round (NIGHT_OPS_HELD), which the build leaves alone
         self.ramp_from = time.monotonic()
         self.pings = {}  # a joined player's name -> (their ping in ms, when they said it): the scoreboards' ping
 
@@ -1092,7 +1093,7 @@ class World:
     # rows the values go in a straight line, and players' games ease each change over about 25 s. Since pull request 62
     # the weather is a hurricane that forms at sea from 25%, rains where it is past 75% and covers the whole map at
     # 100% (85% left the carrier dry, run night048g). The progress never goes back within a round; a new round starts
-    # clear. On a Night Ops server these four are the build's: an admin's F9 keeps the rest (cloud rate, wind, height).
+    # clear. On a Night Ops server these four are the build's, except what an admin sets this round (NIGHT_OPS_HELD).
     NIGHT_OPS_STAGES = (
         (0.00, 0.15, 0.00, 0.00),  # a clear night: stars and the moon
         (0.40, 0.15, 0.00, 0.00),  # still clear at 40%
@@ -1101,6 +1102,19 @@ class World:
         (1.00, 0.90, 1.00, 0.50),  # the full storm to the end
     )
     NIGHT_OPS_STAGE_NAMES = ('a clear night', 'the clouds gather', 'the storm rolls in', 'the full storm')
+    # An admin's F9 on a Night Ops server (TekRantGaming, 24 Nov 2026: "if an admin chooses to change these mid-game,
+    # they should be able to"; they used to snap back to the build). Per setting: what the admin moves is held at their
+    # value for the rest of the round, and the build keeps driving the rest (the time moved, the storm still builds;
+    # the weather moved, it stays there while the clouds and fog still follow the tickets). The next round starts as
+    # a plain Night Ops round (19:00, clear), and the panel's "Back to Night Ops" (ask flag 8) hands everything back to
+    # the schedule at once. The settings the build drives: the clock (day and night, hour, a day's minutes), cloud
+    # cover, weather, distance fog, ground fog. Cloud rate, wind and cloud height were always the admin's.
+    NIGHT_OPS_HELD = ('clock', 'clouds', 'weather', 'fog', 'ground fog')
+    # The ask's "touched" mask (world_sync.cpp, 24 Nov 2026, a u16 last after the ground fog's sparseness): which
+    # settings the admin moved. A game from before it sends none: a setting then counts as moved when it is not the
+    # server's (TOUCHED_BY_VALUE).
+    TOUCHED = {'day_night': 1, 'hour': 2, 'day_minutes': 4, 'cover': 8, 'rate': 16, 'weather': 32, 'fog': 64,
+               'ground_fog': 128, 'wind': 256, 'cloud_height': 512}
 
     @classmethod
     def night_ops_values(cls, progress):
@@ -1124,13 +1138,14 @@ class World:
         self.hour = clamp(args.time, 0, 24) % 24
         self.day_minutes = clamp(args.day_minutes, 0, 1440)
         if self.night_ops:
-            self.day_night, self.hour, self.day_minutes = True, self.NIGHT_OPS_HOUR, 0.0
+            self.night_ops_clock()
         self.cover, self.rate = clamp(args.cloud_cover, 0, 1), clamp(args.cloud_rate, 0, 1)
         self.weather = clamp(args.weather, 0, 1)
         self.fog, self.ground_fog = clamp(args.fog, 0, 1), clamp(args.ground_fog, 0, 1)
         self.wind = clamp(args.wind, 0, 1)
         self.cloud_height = clamp(args.cloud_height, 100, 1500)
         self.round, self.progress, self.stage = None, 0.0, -1
+        self.held = set()
         self.match_file, self.match_read = getattr(args, 'match_file', '') or '', 0.0
         if self.night_ops:
             self.set_night_ops(0.0)
@@ -1147,13 +1162,39 @@ class World:
             self.weather * 100, self.fog * 100, self.ground_fog * 100, self.wind * 100, self.cloud_height)
 
     def set_night_ops(self, progress):
+        """The build at a round's progress, on every setting an admin has not set this round (held)."""
         self.progress = progress
-        self.cover, self.weather, fog, stage = self.night_ops_values(progress)
-        self.fog = self.ground_fog = fog
+        cover, weather, fog, stage = self.night_ops_values(progress)
+        if 'clouds' not in self.held:
+            self.cover = cover
+        if 'weather' not in self.held:
+            self.weather = weather
+        if 'fog' not in self.held:
+            self.fog = fog
+        if 'ground fog' not in self.held:
+            self.ground_fog = fog
         if stage != self.stage:
             self.stage = stage
-            self.host.note('world: Night Ops at %.0f%% of the round: %s, %s' % (
-                progress * 100, self.NIGHT_OPS_STAGE_NAMES[stage], self.said()))
+            self.host.note('world: Night Ops at %.0f%% of the round: %s, %s%s' % (
+                progress * 100, self.NIGHT_OPS_STAGE_NAMES[stage], self.said(), self.held_said()))
+
+    def held_said(self):
+        held = [h for h in self.NIGHT_OPS_HELD if h in self.held]
+        return '; held by an admin this round: %s' % ', '.join(held) if held else ''
+
+    def night_ops_clock(self):
+        self.day_night, self.hour, self.day_minutes = True, self.NIGHT_OPS_HOUR, 0.0
+
+    def night_ops_back(self, who):
+        """Night Ops: everything an admin set this round back on the schedule (the panel's "Back to Night Ops")."""
+        if not self.night_ops or not self.held:  # on it already (the panel sends it until an answer says so)
+            return
+        had = self.held_said()
+        self.held = set()
+        self.night_ops_clock()
+        self.stage = -1  # says the stage again
+        self.host.note('world: %s put Night Ops back on its schedule (%s)' % (who or 'an admin', had.lstrip('; ')))
+        self.set_night_ops(self.progress)
 
     def match(self, round_number, left):
         """Night Ops: the round's progress from the server (round number, the share of tickets the team with fewer still
@@ -1169,7 +1210,11 @@ class World:
                 test = ''
         if round_number != self.round:
             if self.round is not None:
-                self.host.note('world: Night Ops round %s starts clear' % round_number)
+                self.host.note('world: Night Ops round %s starts clear%s' % (
+                    round_number, ', the last round\'s admin settings ended' if self.held else ''))
+            if self.held:  # an admin's settings last the round: the next is a plain Night Ops round
+                self.held = set()
+                self.night_ops_clock()
             self.round, self.stage = round_number, -1
             self.ramp_from = time.monotonic()
             self.set_night_ops(0.0 if not test else progress)
@@ -1231,6 +1276,50 @@ class World:
             count += 1
         return b'BF43PNGL' + bytes([2 if complete else 1, count]) + body
 
+    def night_ops_set(self, name, data, at):
+        """Night Ops: an admin's change (an ask with flag 1 from `at`): each setting they moved takes their value, and
+        those the build drives are held for the rest of the round (NIGHT_OPS_HELD); the rest stay as they are, so the
+        asker's copy of a value the build moved since its last answer never sets it back."""
+        day_night = data[at] != 0
+        values = [v if math.isfinite(v) else 0.0 for v in struct.unpack_from('>8f', data, at + 1)]
+        hour, minutes = max(0.0, values[0]) % 24, max(0.0, min(1440.0, values[1]))
+        cover, rate, weather, fog, ground_fog, wind = (max(0.0, min(1.0, v)) for v in values[2:8])
+        height = None
+        if len(data) >= at + 37:
+            h = struct.unpack_from('>f', data, at + 33)[0]
+            if math.isfinite(h):
+                height = max(100.0, min(1500.0, h))
+        t = self.TOUCHED
+        if len(data) >= at + 49:
+            touched = struct.unpack_from('>H', data, at + 47)[0]
+        else:  # a game from before the mask: what is not the server's (a step of a slider is 1%, of the time 1 s)
+            touched = ((t['day_night'] if day_night != self.day_night else 0) |
+                       (t['hour'] if abs(hour - self.hour) > 0.5 / 3600 else 0) |
+                       (t['day_minutes'] if abs(minutes - self.day_minutes) > 0.5 else 0))
+            for key, v in (('cover', cover), ('rate', rate), ('weather', weather), ('fog', fog),
+                           ('ground_fog', ground_fog), ('wind', wind)):
+                if abs(v - getattr(self, key)) > 0.005:
+                    touched |= t[key]
+            if height is not None and abs(height - self.cloud_height) > 0.5:
+                touched |= t['cloud_height']
+        before, held_before = self.said(), set(self.held)
+        if touched & (t['day_night'] | t['hour'] | t['day_minutes']):
+            self.day_night, self.hour, self.day_minutes = day_night, hour, minutes
+            self.held.add('clock')
+        for key, v, held in (('cover', cover, 'clouds'), ('weather', weather, 'weather'), ('fog', fog, 'fog'),
+                             ('ground_fog', ground_fog, 'ground fog')):
+            if touched & t[key]:
+                setattr(self, key, v)
+                self.held.add(held)
+        if touched & t['rate']:
+            self.rate = rate
+        if touched & t['wind']:
+            self.wind = wind
+        if touched & t['cloud_height'] and height is not None:
+            self.cloud_height = height
+        if self.said() != before or self.held != held_before:
+            self.host.note('world: %s set %s%s' % (name or 'an admin', self.said(), self.held_said()))
+
     def receive(self, data, addr):
         try:
             version, flags = data[0], data[1]
@@ -1245,18 +1334,19 @@ class World:
             self.advance()
             self.read_match()  # Night Ops: a new round's world at once
             admin = self.admin(name, key, addr)
-            if flags & 1 and admin and len(data) >= at + 33:
+            if flags & 8 and admin:  # Night Ops: "Back to Night Ops" (24 Nov 2026)
+                self.night_ops_back(name)
+            if flags & 1 and admin and len(data) >= at + 33 and self.night_ops:
+                self.night_ops_set(name, data, at)
+            elif flags & 1 and admin and len(data) >= at + 33:
                 day_night = data[at] != 0
                 values = [v if math.isfinite(v) else 0.0 for v in struct.unpack_from('>8f', data, at + 1)]
                 before = self.said()
-                if not self.night_ops:  # a Night Ops server's clock stays at its night (configure)
-                    self.day_night = day_night
-                    self.hour = max(0.0, values[0]) % 24
-                    self.day_minutes = max(0.0, min(1440.0, values[1]))
-                (cover, self.rate, weather, fog, ground_fog,
+                self.day_night = day_night
+                self.hour = max(0.0, values[0]) % 24
+                self.day_minutes = max(0.0, min(1440.0, values[1]))
+                (self.cover, self.rate, self.weather, self.fog, self.ground_fog,
                  self.wind) = (max(0.0, min(1.0, v)) for v in values[2:8])
-                if not self.night_ops:  # a Night Ops server's clouds, weather and fogs follow its tickets (match)
-                    self.cover, self.weather, self.fog, self.ground_fog = cover, weather, fog, ground_fog
                 if len(data) >= at + 37:
                     height = struct.unpack_from('>f', data, at + 33)[0]
                     if math.isfinite(height):
@@ -1274,7 +1364,10 @@ class World:
                         self.pings[name] = (ms, time.monotonic())
                     else:
                         self.pings.pop(name, None)
-            reply = b'BF43WRLR' + bytes([1, (1 if self.day_night else 0) | (2 if admin else 0)]) + struct.pack(
+            # Flags 4 and 8 (24 Nov 2026; a game from before reads only 1 and 2): a Night Ops server, and an admin's
+            # settings hold some of its build this round (the panel's "Back to Night Ops").
+            reply = b'BF43WRLR' + bytes([1, (1 if self.day_night else 0) | (2 if admin else 0) |
+                                         (4 if self.night_ops else 0) | (8 if self.held else 0)]) + struct.pack(
                 '>8f2d', self.hour, self.day_minutes, self.cover, self.rate, self.weather, self.fog, self.ground_fog,
                 self.wind, self.seconds, self.evolve) + struct.pack('>f', self.cloud_height)
             self.host.transport.sendto(reply, addr)

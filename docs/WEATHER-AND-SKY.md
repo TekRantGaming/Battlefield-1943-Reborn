@@ -72,8 +72,14 @@ sets"). They left the graphics settings.
   [BOTS-AND-CUSTOM-MATCH.md](BOTS-AND-CUSTOM-MATCH.md#dynamic-storm).
 - **Night Ops servers** (upstream, 20 Nov): the world held at 19:00, and the storm built by the round's tickets: a clear
   starry night for the first 40% of the tickets lost, the clouds gathering to 55%, the storm rolling in to 100% weather
-  by 80%, then the full storm; a new round starts clear. On a Night Ops server the F9 panel no longer sets the clouds,
-  weather or fog. `BF_DEV_NIGHT_RAMP=<seconds>` (tests) runs the build by time.
+  by 80%, then the full storm; a new round starts clear. `BF_DEV_NIGHT_RAMP=<seconds>` (tests) runs the build by time.
+  **An admin's F9 on Night Ops** (24 Nov 2026, TekRantGaming's ask): what the admin moves (the time, cloud cover,
+  weather, distance fog, ground fog) takes effect for every player and is held for the rest of the round, while the
+  settings they did not touch still follow the schedule (move only the time, and the storm still builds). The next
+  round is a plain Night Ops round again, and the panel's **Back to Night Ops (N)** button in its title bar hands
+  everything back to the schedule at once. The panel sends which rows were moved, so a value the schedule changed since
+  the admin's last answer is never set back (`server/gmhost.py` `World.NIGHT_OPS_HELD`, `TOUCHED`;
+  `tools/test_night_ops_admin.py`).
 
 | Host cvar | Default | What it sets |
 |---|---|---|

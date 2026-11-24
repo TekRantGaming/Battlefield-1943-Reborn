@@ -39,10 +39,23 @@ struct Status {
   int time_limit = 0;       // minutes a round lasts; 0: none
   float time_left = -1;     // seconds left in the round when answered; -1: no limit or no round running
   double answered_at = 0;   // when (world::Now()), for the time left since
+  // A Night Ops server (24 Nov 2026; an older host never says): its schedule drives the time, clouds, weather and fog,
+  // and `held`: an admin's settings hold some of them for the rest of the round.
+  bool night_ops = false;
+  bool held = false;
 };
 Status Current();
-// An admin's change: sent to the host, which every player's game then follows.
-void Request(const Settings& settings);
+// Which settings an admin moved (Request's `touched`; the host's World.TOUCHED in server/gmhost.py).
+enum Touched : unsigned {
+  kTouchDayNight = 1, kTouchHour = 2, kTouchDayMinutes = 4, kTouchCover = 8, kTouchRate = 16, kTouchWeather = 32,
+  kTouchFog = 64, kTouchGroundFog = 128, kTouchWind = 256, kTouchCloudHeight = 512, kTouchStorm = 1024,
+  kTouchStormType = 2048, kTouchFogHeight = 4096, kTouchFogSparse = 8192, kTouchAll = 0x3FFF,
+};
+// An admin's change: sent to the host, which every player's game then follows. `touched`: the settings moved (a Night
+// Ops server takes only those, and holds them for the rest of the round).
+void Request(const Settings& settings, unsigned touched = kTouchAll);
+// Night Ops: an admin's "Back to Night Ops": everything set this round back on the server's schedule.
+void BackToNightOps();
 
 // Seconds on world_sync's clock (Status::answered_at's).
 double Now();

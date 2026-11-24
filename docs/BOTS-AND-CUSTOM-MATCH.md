@@ -365,6 +365,8 @@ Wind, Cloud height and, last, **Dynamic storm** (a switch). The mouse works on e
 typed in, and the arrows step it. The panel has no bot, ticket or match time controls. The storm switch works only
 where the match's host is the game's own (Custom Match). The switch and the host taking it were not tested (D209).
 
+On a Night Ops server the panel's title bar holds **Back to Night Ops (N)** (24 Nov 2026; see WEATHER-AND-SKY.md).
+
 ## Known gaps
 
 - No difficulty setting, no Co-op mode, no settings for bots in the server manager. Aggression changes by itself
@@ -461,6 +463,7 @@ Reported by the player on 19 Nov 2026 and not yet fixed or not yet confirmed fix
 | `BF_DEV_CHAT=<s>:<all\|team\|squad>:<text>[;...]` | developer | The player's game sends chat lines after the relay answers. |
 | `BF_DEV_TICKETS=<after s>[,<offset hex>,<value>]` | developer | Logs the ticket counters; can set them to end a round on demand. |
 | `BF_DEV_WORLD_PANEL=<seconds>` | developer | Opens the F9 panel by itself in a test run. |
+| `BF_DEV_WORLD_PANEL_TIME`, `BF_DEV_WORLD_PANEL_BACK=<s>` | developer | The time that test types; its click on Back to Night Ops. |
 
 - `BF_HOST_LAN_AT_START=1` makes the game host a LAN Custom Match from its saved choices as it starts (the game also
   uses it to restart into a LAN host).
