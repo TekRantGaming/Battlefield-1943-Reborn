@@ -45,8 +45,10 @@
 
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
 REXCVAR_DECLARE(std::string, user_data_root);
+REXCVAR_DECLARE(int32_t, bf_gm_max_players);  // gm_host.cpp: the server's size (server.json max_players)
 REXCVAR_DEFINE_INT32(bf_match_tickets, 0, "BF1943/Server",
-                     "Each team's tickets at a round's start; 0: the level's own (130, Coral Sea 100)");
+                     "Each team's tickets at a round's start; 0: automatic, the level's own (130, Coral Sea 100) "
+                     "scaled to the server's size past 24 players; -1: the level's own, never scaled");
 REXCVAR_DEFINE_DOUBLE(bf_match_time_limit, 0.0, "BF1943/Server",
                       "Minutes a round lasts before the team with fewer tickets loses; 0: no limit (a round ends only "
                       "when a team has no tickets left)");
@@ -93,22 +95,60 @@ struct State {
 
 std::atomic<uint32_t> g_round{0};         // counts the rounds started (the match's world restarts its storm)
 std::atomic<float> g_seconds_left{-1.0f};  // the round's time left; -1: no limit or no round
+std::atomic<int> g_tickets_now{0};        // each team's tickets at this round's start; 0: no round's counters yet
 
-int Tickets() { return std::clamp(REXCVAR_GET(bf_match_tickets), 0, 9999); }
+// The setting: > 0 a count the server's owner chose, 0 automatic, -1 the level's own.
+int TicketsSetting() { return std::clamp(REXCVAR_GET(bf_match_tickets), -1, 9999); }
 double LimitSeconds() { return std::clamp(REXCVAR_GET(bf_match_time_limit), 0.0, 600.0) * 60.0; }
+
+// Automatic tickets (TekRantGaming, 24 Nov 2026: "if the server owner was to select, for example, 64 players, but not
+// change the ticket count from the game's default, the matches would run pretty quick, because more players equals
+// more death equals more ticket drop ... implement automatic ticket scaling based on what the server's running at ...
+// But it shouldn't take away the ability for the server owner to then customize it"): a team loses one ticket for each
+// of its soldiers who dies, so the level's own count, made for 24 players, goes up with the server's size: 130 at 24,
+// 175 at 32, 345 at 64 (Coral Sea's 100: 135 and 265), to the nearest 5. 24 and smaller keep the level's own, as the
+// original game did. The flags' bleed (about 4 a minute) is the level's and stays as it is.
+int AutoTickets(int own) {
+  const int size = std::clamp(int(REXCVAR_GET(bf_gm_max_players)), 2, 64);  // player_limits.h kMaxServerSize
+  if (own <= 0 || size <= 24) return own;
+  return std::clamp(int(std::lround(double(own) * size / 24.0 / 5.0)) * 5, 1, 9999);
+}
+
+// The level's own count of a counter's data. The data keeps what we write into it (the game's own reset reads it
+// again), so each data's own count is remembered with what was written: a reset finds ours there and takes the own.
+struct OwnCount {
+  uint32_t data;
+  int own, written;
+};
+std::vector<OwnCount> g_own;  // under g.mutex
+int LevelOwn(uint8_t* base, uint32_t data) {
+  const int now = int(Load32(base, data + 136));
+  for (OwnCount& o : g_own) {
+    if (o.data != data) continue;
+    if (now != o.written) o.own = now, o.written = -1;  // a new level's data where the old one was
+    return o.own;
+  }
+  g_own.push_back({data, now, -1});
+  return now;
+}
 
 // A counter just made or reset: the match's tickets into its data (and its count), and the round's clock from now.
 void CounterStarts(uint8_t* base, uint32_t counter, bool reset) {
   const uint32_t data = Load32(base, counter + 20);
   const int team = Plausible(data) ? int(Load32(base, data + 156)) : 0;
-  const int own = Plausible(data) ? int(Load32(base, data + 136)) : 0;
-  const int tickets = Tickets();
-  if (tickets > 0 && Plausible(data)) {
-    Store32(base, data + 136, uint32_t(tickets));
-    StoreF(base, counter + 132, float(tickets));
-  }
+  const int setting = TicketsSetting();
+  int own = 0, tickets = 0;
   {
     std::lock_guard lock(g.mutex);
+    if (Plausible(data)) {
+      own = LevelOwn(base, data);
+      tickets = setting > 0 ? setting : setting == 0 ? AutoTickets(own) : own;
+      Store32(base, data + 136, uint32_t(tickets));
+      StoreF(base, counter + 132, float(tickets));
+      for (OwnCount& o : g_own)
+        if (o.data == data) o.written = tickets;
+    }
+    if (tickets > 0) g_tickets_now = tickets;
     if (!reset && std::find(g.counters.begin(), g.counters.end(), counter) == g.counters.end())
       g.counters.push_back(counter);
     const auto now = Clock::now();
@@ -119,8 +159,10 @@ void CounterStarts(uint8_t* base, uint32_t counter, bool reset) {
     }
     g.round_start = now, g.running = true, g.ended = false;
   }
-  REXLOG_INFO("BF match rules: {}'s tickets {} ({} the level's {}){}", TeamName(team), tickets > 0 ? tickets : own,
-              tickets > 0 ? "instead of" : "", own, reset ? ", the round's reset" : "");
+  const char* why = setting > 0 ? "the server's choice" : setting < 0 ? "the level's own" : tickets == own
+                        ? "automatic: the level's own at this size" : "automatic for this size";
+  REXLOG_INFO("BF match rules: {}'s tickets {} ({}; the level's {}, a server of {}){}", TeamName(team), tickets, why, own,
+              REXCVAR_GET(bf_gm_max_players), reset ? ", the round's reset" : "");
 }
 }  // namespace
 
@@ -128,14 +170,17 @@ namespace bf1943 {
 
 // For our GameManager host (gm_host.cpp): the rules and the round's clock, to tell every player's game.
 struct MatchClock {
-  int tickets = 0;          // 0: the level's own
+  int tickets = 0;          // each team's tickets at this round's start (the players' HUD bars); 0: the level's own
   int time_limit = 0;       // minutes; 0: none
   float seconds_left = -1;  // -1: no limit, or no round running
   uint32_t round = 0;       // counts the rounds started
 };
 MatchClock CurrentMatchClock() {
   MatchClock c;
-  c.tickets = Tickets();
+  // The count this round's counters were given (automatic tickets differ from map to map); before a round's counters
+  // are made, the owner's count if they chose one, else 0 (the players' own level).
+  const int now = g_tickets_now.load(), setting = TicketsSetting();
+  c.tickets = now > 0 ? now : std::max(setting, 0);
   c.time_limit = int(std::lround(LimitSeconds() / 60.0));
   c.seconds_left = g_seconds_left.load();
   c.round = g_round.load();
@@ -154,7 +199,9 @@ void MatchRulesRoundOver() {
 // to start the weather so when the game has reached its halfway point the rain should start"): each second, the round's
 // number and the tickets the team with fewer left still has, over its count at the round's start (1 at the start, 0
 // when a team is out), into <user data>/match.txt as "<round> <left>", which gmhost.py --match-file reads. Written only
-// when it changes; a round with no counters running writes nothing.
+// when it changes; a round with no counters running writes nothing. Third (24 Nov 2026): each team's tickets at the
+// round's start, which gmhost.py tells the players' games for their HUD's ticket bars (automatic tickets, a count
+// chosen by the server's owner).
 void WriteMatchProgress(uint8_t* base) {
   static Clock::time_point next{};
   static std::string written;
@@ -168,12 +215,13 @@ void WriteMatchProgress(uint8_t* base) {
     counters = g.counters;
   }
   double left = 1.0;
-  int found = 0;
+  int found = 0, most = 0;
   for (uint32_t c : counters) {
     if (Load32(base, c) != kCounterVtable) continue;
     const uint32_t data = Load32(base, c + 20);
     const double start = Plausible(data) ? double(Load32(base, data + 136)) : 0.0;
     if (start <= 0) continue;
+    most = std::max(most, int(start));
     const double t = Load32(base, c + 140) != 0 ? 0.0 : std::max(0.0, double(LoadF(base, c + 132)));
     left = std::min(left, std::clamp(t / start, 0.0, 1.0));
     ++found;
@@ -182,7 +230,7 @@ void WriteMatchProgress(uint8_t* base) {
   const std::filesystem::path dir = REXCVAR_GET(user_data_root);
   if (dir.empty()) return;
   char line[64];
-  std::snprintf(line, sizeof(line), "%u %.3f\n", g_round.load(), left);
+  std::snprintf(line, sizeof(line), "%u %.3f %d\n", g_round.load(), left, most);
   if (written == line) return;
   const std::filesystem::path file = dir / "match.txt", tmp = dir / "match.txt.new";
   {
@@ -269,7 +317,7 @@ REX_HOOK_RAW(sub_82321E88) {
   if (REXCVAR_GET(server)) {
     std::lock_guard lock(g.mutex);
     g.counters.erase(std::remove(g.counters.begin(), g.counters.end(), ctx.r3.u32), g.counters.end());
-    if (g.counters.empty()) g.running = false, g_seconds_left = -1.0f;
+    if (g.counters.empty()) g.running = false, g_seconds_left = -1.0f, g_tickets_now = 0;  // the next level's own
   }
   __imp__sub_82321E88(ctx, base);
 }

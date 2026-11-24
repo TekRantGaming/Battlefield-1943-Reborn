@@ -261,7 +261,7 @@ LAN), Port and Host the match.
 | Game mode | Conquest, Air Superiority, All modes | Conquest |
 | Map | the maps of the game mode | as last chosen |
 | Map rotation | opens its own list: Rotation, Rotate all maps, one row a map | off (all maps ticked) |
-| Tickets | the map's own, 25, 50, 75, 100, 130, 150, 200, 250, 300, 400, 500, 750, 1000 | the map's own |
+| Tickets | 25, 50, 75, 100, the map's own (130, Coral Sea 100), 150, 200, 250, 300, 400, 500, 750, 1000 | the map's own |
 | Match time | off (tickets only), 5, 10, 15, 20, 25, 30, 40, 45, 60, 90, 120 minutes | off |
 | Bots | 0 to 24, in steps of 1, shown as "8 - 4 A SIDE" | none |
 | Dynamic storm (in Weather and time) | on or off | off |
@@ -299,6 +299,7 @@ turn, the next one after each round's end screen (45 seconds for a Custom Match)
 Each team's tickets at a round's start. "The map's own" keeps the level's count: 130 on the Conquest maps, 100 on
 Coral Sea. The server writes the chosen count into the game's own ticket counters, so the ticket bleed, the "tickets
 low" warnings and the end of round all use it. Players' HUD ticket bars are scaled to the match's count.
+A Custom Match holds 24 players, so "the map's own" is never scaled (it passes `--bf_match_tickets=-1`).
 
 ### Match time
 
@@ -329,7 +330,7 @@ A dedicated server takes the same things as command-line flags of the game (`bin
 | Flag | Default | Range | What it does |
 |---|---|---|---|
 | `--bf_bots=<n>` | 0 | 0 to 24 | Bots in the match. |
-| `--bf_match_tickets=<n>` | 0 | 0 to 9999 (0: the map's own) | Each team's tickets. |
+| `--bf_match_tickets=<n>` | 0 | -1 to 9999 | Each team's tickets. 0: automatic, the map's own scaled to `--bf_gm_max_players` past 24 (below). -1: the map's own at any size. |
 | `--bf_match_time_limit=<minutes>` | 0 | 0 to 600 (0: none) | A round's time limit. |
 | `--bf_world_dynamic_storm=true` | false | | The dynamic storm (run by the match's host, see below). |
 | `--bf_bots_squad_humans=true` | false | | Players in no squad are put in squads with bots. |
@@ -337,16 +338,35 @@ A dedicated server takes the same things as command-line flags of the game (`bin
 | `--bf_bots_dynamic_aggression=false` | true | | Bots do not press harder when the players are ahead. |
 | `--bf_gm_max_players=<n>` | 24 | | The most players; bots fill only what humans leave of it. |
 
+### Automatic tickets
+
+TekRantGaming, 24 Nov 2026: on a bigger server more soldiers die, and a team loses a ticket for each one, so the
+map's own count, made for 24 players, ran out much sooner. With `--bf_match_tickets` at 0 (the default), the server
+scales the map's own count to its size (`--bf_gm_max_players`), to the nearest 5 (`match_rules.cpp` AutoTickets):
+
+| Server size | Wake Island, Guadalcanal, Iwo Jima | Coral Sea |
+|---|---|---|
+| 24 and fewer | 130 (the map's own) | 100 |
+| 32 | 175 | 135 |
+| 64 | 345 | 265 |
+
+The flags' bleed (about 4 tickets a minute while the enemy holds 3 of the 5 flags) is the level's and is not
+scaled. A count chosen by the server's owner (above 0) is used on every map as it is, and -1 keeps the map's own at any
+size. The server log says which it used ("BF match rules: the US's tickets 175 (automatic for this size; the level's
+130, a server of 32)").
+
 What works where:
 
 - **Custom Match** (the game's own host, `gm_host.cpp`): everything. The game passes all of these itself.
-- **Server package** (`server\manager.py` and `server\gmhost.py`): **the manager and gmhost.py do not pass any of the
-  new options yet**, and the manager has no page settings for them. The manager adds the game flags in the
+- **Server package** (`server\manager.py` and `server\gmhost.py`): the manager passes the size, the bots and, since 24
+  Nov 2026, the tickets (server.json `tickets`: `"auto"`, the default; `"map"`; or a number; the edit form's
+  "Tickets, each team", whose Automatic choice shows the count for the Players chosen). gmhost.py reads each round's
+  count from the server's `match.txt` and sends it to the players' games, so their HUD ticket bars fit it. The
+  manager has no page settings for the other new options. The manager adds the game flags in the
   `BF_SERVER_GAME_ARGS` environment variable (separated by spaces) to every server it starts, which is meant for tests
   and tuning. From the code, not tested on a package server:
   - Bots, tickets and the time limit are run by the game server itself, so the flags take effect.
-  - The players' HUD bars are still scaled to the level's count and no clock shows, because gmhost.py does not send
-    the match's tickets and time (D209).
+  - No clock shows for a time limit, because gmhost.py does not send the match's time (D209).
   - The dynamic storm does not run: the storm lives in the game's own host, and gmhost.py keeps its own world without
     one (it ignores the storm byte).
   - The bots' chat lines are not carried: they go out through the game's own host only.
@@ -451,7 +471,7 @@ Reported by the player on 19 Nov 2026 and not yet fixed or not yet confirmed fix
 | `bf_bots` | `bots.cpp` | 0 (clamped to 0 to 24) |
 | `bf_bots_squad_humans` | `bots.cpp` | true |
 | `bf_bot_chat` | `bot_chat.cpp` | true |
-| `bf_match_tickets` | `match_rules.cpp` | 0 (clamped to 0 to 9999) |
+| `bf_match_tickets` | `match_rules.cpp` | 0, automatic (clamped to -1 to 9999) |
 | `bf_match_time_limit` | `match_rules.cpp` | 0 minutes (clamped to 0 to 600) |
 | `bf_world_dynamic_storm` | `gm_host.cpp` | false |
 | `bf_gm_max_players` | `gm_host.cpp` | 24 |
