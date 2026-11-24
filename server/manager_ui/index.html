@@ -366,10 +366,12 @@ header { background: url(logo) right center / contain no-repeat, #111; }
   <div class="grid2">
     <label class="field"><span>Players</span><select id="e-max"></select></label>
     <label class="field"><span>Bots</span><select id="e-bots"></select></label>
+    <label class="field"><span>Tickets, each team</span><select id="e-tickets"></select></label>
     <label class="field"><span>Port (UDP)</span><input type="number" id="e-port" min="1024" max="65535"></label>
     <label class="field"><span>Pause between rounds</span><select id="e-delay"></select></label>
     <label class="field"><span>Tick rate</span><select id="e-tick"></select></label>
   </div>
+  <p class="hint" id="e-tickets-note"></p>
   <p class="hint" id="e-bots-note">Bots sit out Coral Sea, because they can't fly. They come back on the next map.</p>
   <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Maps, in the order they are played</span><div class="maps" id="e-maps"></div></div>
   <label class="check"><input type="checkbox" id="e-listed"><span>Listed in the server browser<br><small>Off: players join only with Direct connect, by the address you give them.</small></span></label>
@@ -704,7 +706,8 @@ function openEdit(n) {
     botsNote();
   };
   drawBots(sv.max_players, sv.bots ?? 0);
-  $('e-max').onchange = () => { const was = Number($('e-bots').value), size = Number($('e-max').value); drawBots(size, was >= Number($('e-max').dataset.size || 0) && was > 0 ? size : Math.min(was, size)); $('e-max').dataset.size = size; };
+  drawTickets(sv.max_players, sv.tickets ?? 'auto');
+  $('e-max').onchange = () => { const was = Number($('e-bots').value), size = Number($('e-max').value); drawBots(size, was >= Number($('e-max').dataset.size || 0) && was > 0 ? size : Math.min(was, size)); drawTickets(size, $('e-tickets').value); $('e-max').dataset.size = size; };
   $('e-max').dataset.size = sv.max_players;
   $('e-delay').replaceChildren(...[30, 45, 60, 90, 120].map(m => h('option', { value: m, text: m + ' seconds' })));
   if (![30, 45, 60, 90, 120].includes(sv.round_end_delay)) $('e-delay').append(h('option', { value: sv.round_end_delay, text: sv.round_end_delay + ' seconds' }));
@@ -729,6 +732,32 @@ function openEdit(n) {
   $('e-note').textContent = fresh ? '' : 'A running server takes its new settings when it is restarted.';
   $('edit-modal').classList.add('on'); $('e-name').focus();
 }
+// Tickets (TekRantGaming, 24 Nov 2026: automatic ticket scaling to the server's size, which the owner can still change):
+// Automatic follows the Players choice, as the game works it out (bf/src/match_rules.cpp AutoTickets): the map's own
+// (130, Coral Sea 100) times the size over 24, to the nearest 5, past 24 players. The map's own, or a count, stay put.
+function autoTickets(own, size) { return size <= 24 ? own : Math.round(own * size / 24 / 5) * 5; }
+function drawTickets(size, tickets) {
+  const conquest = autoTickets(130, size), coral = autoTickets(100, size);
+  const counts = [50, 75, 100, 130, 150, 175, 200, 250, 300, 350, 400, 500, 750, 1000];
+  const picked = tickets === 'auto' || tickets === 'map' ? tickets : String(Number(tickets) || 'auto');
+  $('e-tickets').replaceChildren(
+    h('option', { value: 'auto', text: 'Automatic: ' + conquest + ' (Coral Sea ' + coral + ')' }),
+    h('option', { value: 'map', text: "The map's own: 130 (Coral Sea 100)" }),
+    ...counts.map(c => h('option', { value: c, text: c + ' on every map' })));
+  if (picked !== 'auto' && picked !== 'map' && !counts.includes(Number(picked)))
+    $('e-tickets').append(h('option', { value: picked, text: picked + ' on every map' }));
+  $('e-tickets').value = picked;
+  ticketsNote();
+}
+function ticketsNote() {
+  const size = Number($('e-max').value), v = $('e-tickets').value;
+  $('e-tickets-note').textContent = v === 'auto'
+    ? (size <= 24 ? "A team loses a ticket each time one of its soldiers dies. Automatic keeps the map's own count at 24 players and fewer, and raises it on bigger servers (175 at 32, 345 at 64), so rounds last about as long."
+                  : 'A team loses a ticket each time one of its soldiers dies, so a bigger server gets more: ' + autoTickets(130, size) + ' at ' + size + " players instead of the map's 130, for rounds about as long as the original's.")
+    : v === 'map' ? "The game's own count at any size. On a server past 24 players rounds end sooner, as more soldiers die."
+    : 'Each team starts every map, Coral Sea too, with ' + v + ' tickets.';
+}
+$('e-tickets').addEventListener('change', ticketsNote);
 // Said only where it matters: a server with bots and Coral Sea among its maps (bots.cpp SitsOut).
 function botsNote() {
   const coral = readMaps().some(r => r.key === 'coral' && r.on);
@@ -759,7 +788,8 @@ async function saveEdit(restart) {
   for (const k of ['balance_gap', 'balance_min_players', 'balance_delay', 'balance_block_stacking'])
     if (servers[editing - 1] && servers[editing - 1][k] !== undefined) kept[k] = servers[editing - 1][k];
   servers[editing - 1] = { ...kept, team_balance: $('e-balance').checked, name: name, description: $('e-description').value.trim(), maps: maps, round_end_delay: Number($('e-delay').value), listed: $('e-listed').checked,
-    night: $('e-night').checked, port: port, max_players: Number($('e-max').value), bots: Number($('e-bots').value) || 0, autostart: $('e-autostart').checked,
+    night: $('e-night').checked, port: port, max_players: Number($('e-max').value), bots: Number($('e-bots').value) || 0,
+    tickets: ['auto', 'map'].includes($('e-tickets').value) ? $('e-tickets').value : Number($('e-tickets').value), autostart: $('e-autostart').checked,
     tick: Number($('e-tick').value) || 0,
     day_night: $('e-daynight').checked, time: Number($('e-time').value) || 0, day_minutes: Number($('e-dayminutes').value) || 0,
     cloud_cover: Number($('e-cloud').value) || 0, cloud_rate: Number($('e-cloudrate').value) || 0, weather: Number($('e-weather').value) || 0,

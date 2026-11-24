@@ -2343,7 +2343,16 @@
   // Island, Guadalcanal and Iwo Jima Conquest, Coral Sea Air Superiority), so the mode chooses the maps that play it.
   static constexpr const char* kPmModeNames[] = {"CONQUEST", "AIR SUPERIORITY", "ALL MODES"};
   static bool PmMapInMode(int mode, int map) { return mode == 2 || (mode == 0 ? map < 3 : map == 3); }
-  static constexpr int kPmTicketSteps[] = {0, 25, 50, 75, 100, 130, 150, 200, 250, 300, 400, 500, 750, 1000};
+  // The map's own (0: 130, Coral Sea 100) in its place among the counts (24 Nov 2026: first in the list, right from it
+  // went down to 25).
+  static constexpr int kPmTicketSteps[] = {25, 50, 75, 100, 0, 150, 200, 250, 300, 400, 500, 750, 1000};
+  static int PmTicketAt(int now) {  // the step at or under `now`, the map's own counted as 130
+    const auto count = [](int v) { return v == 0 ? 130 : v; };
+    int at = 0;
+    for (int k = 0; k < int(std::size(kPmTicketSteps)); ++k)
+      if (count(kPmTicketSteps[k]) <= count(now)) at = k;
+    return at;
+  }
   static constexpr int kPmTimeSteps[] = {0, 5, 10, 15, 20, 25, 30, 40, 45, 60, 90, 120};
   int pm_mode_ = 0;            // kPmModeNames
   bool pm_rotation_ = false;   // the maps in turn (pm_rot_maps_) rather than the one map
@@ -2468,20 +2477,23 @@
                                 : (c >= '0' && c <= '9');
   }
   std::string PmPassShown(const std::string& pass) const { return pm_pass_shown_ ? pass : std::string(pass.size(), '*'); }
+  // The port too (24 Nov 2026: a controller could not change it at all), digits only (PmCharOk).
+  std::string& PmEditTarget(int row) { return row == kPmName ? pm_name_ : row == kPmPort ? pm_port_text_ : pm_pass_; }
+  static const char* PmEditWhat(int row) { return row == kPmName ? "server name" : row == kPmPort ? "port" : "password"; }
   void PmEditOpen(int row) {
-    pm_edit_ = row, pm_edit_key_ = 10;
-    pm_edit_text_ = row == kPmName ? pm_name_ : pm_pass_;
+    pm_edit_ = row, pm_edit_key_ = row == kPmPort ? 0 : 10;  // the port's keys start on the 1
+    pm_edit_text_ = PmEditTarget(row);
     pm_edit_caps_ = row == kPmName && pm_edit_text_.empty();
-    REXLOG_INFO("BF private match: the on screen keys open on the {}", row == kPmName ? "server name" : "password");
+    REXLOG_INFO("BF private match: the on screen keys open on the {}", PmEditWhat(row));
   }
   void PmEditClose(bool save) {
     if (pm_edit_ < 0) return;
     if (save) {
-      (pm_edit_ == kPmName ? pm_name_ : pm_pass_) = pm_edit_text_;
+      PmEditTarget(pm_edit_) = pm_edit_text_;
       SavePrivateMatchChoices();
     }
     REXLOG_INFO("BF private match: the on screen keys {} the {} ({} characters)", save ? "saved" : "cancelled",
-                pm_edit_ == kPmName ? "server name" : "password", (pm_edit_ == kPmName ? pm_name_ : pm_pass_).size());
+                PmEditWhat(pm_edit_), PmEditTarget(pm_edit_).size());
     pm_edit_ = -1;
   }
   int pm_row_ = 0, pm_map_ = 0;
@@ -2813,7 +2825,7 @@
     switch (row) {
       case kPmName:
         return "The match's name in the server browser. Type it with the keyboard, or A for the on screen keys; left empty it is "
-               "your name's match.";
+               "your name's match. On a controller, right moves over to the Levels.";
       case kPmPassText:
         return "The password players type to join: up to 24 letters, digits or signs, no spaces. Empty, anybody who sees the "
                "match can join; the browser shows a padlock by a match with one. Y (F2) shows it.";
@@ -2838,7 +2850,7 @@
                "port below on your router yourself.";
       case kPmPort:
         return "The UDP port players reach your match on, when UPnP is off or the match is a LAN one: 18300 unless you want another. "
-               "For an Online match, open it on your router for friends outside your home.";
+               "For an Online match, open it on your router for friends outside your home. Type it, or A for the on screen keys.";
       case kPmWeatherOn:
         return "Off: the map's usual afternoon, 16:00 and fair, and no Weather tab. On: a Weather tab appears beside Match with the "
                "time of day, clouds, weather, wind and fog. F9 changes them while the match runs.";
@@ -2958,8 +2970,11 @@
     } else {
       if (pm_col_ == 0) {
         const bool text_row = pm_row_ == kPmName || pm_row_ == kPmPassText || pm_row_ == kPmPort;
-        if (!text_row) cues.push_back({kit::Button::kA, pm_tab_ == 1 && PmSlideRow(pm_row_) ? "TYPE IT" : "CHANGE"});
-        else if (device_ != Device::kKeyboard && pm_row_ != kPmPort) cues.push_back({kit::Button::kA, "EDIT"});
+        // A slider's box is typed into, so a controller's A steps it as on the other rows (it opened a box only a
+        // keyboard could fill).
+        if (!text_row)
+          cues.push_back({kit::Button::kA, pm_tab_ == 1 && PmSlideRow(pm_row_) && device_ == Device::kKeyboard ? "TYPE IT" : "CHANGE"});
+        else if (device_ != Device::kKeyboard) cues.push_back({kit::Button::kA, "EDIT"});
         if (pm_row_ == kPmPassText) cues.push_back({kit::Button::kY, pm_pass_shown_ ? "HIDE" : "SHOW", "F2"});
         if (pm_weather_on_) cues.push_back({kit::Button::kLB, "MATCH / WEATHER"});
       } else if (pm_col_ == 1) {
@@ -2974,7 +2989,7 @@
       }
       cues.push_back({kit::Button::kBack, "COLUMNS"});
       cues.push_back({kit::Button::kStart, "HOST ONLINE", "", true});
-      cues.push_back({kit::Button::kB, pm_grab_ ? "PUT DOWN" : pm_tab_ == 1 ? "MATCH" : "BACK"});
+      cues.push_back({kit::Button::kB, pm_grab_ ? "PUT DOWN" : pm_col_ != 0 ? "SETTINGS" : pm_tab_ == 1 ? "MATCH" : "BACK"});
     }
     Prompts(d, st, st.P(48, 662), cues, in, 15);
     // F2 (the keyboard's Y here: R types a letter) shows or hides the password.
@@ -3014,6 +3029,30 @@
       const int m = int(order.size());
       if (in.up) pm_row_ = order[size_t((at_row + m - 1) % m)], pm_slide_edit_ = -1;
       if (in.down) pm_row_ = order[size_t((at_row + 1) % m)], pm_slide_edit_ = -1;
+    }
+    // Across the columns with left and right wherever they change nothing (TekRantGaming, 24 Nov 2026: "the custom
+    // match screen needs to work a little bit better with controller. Can you just make sure that the controller can
+    // navigate the page properly?"): the levels' and the rotation's rows, and the settings' rows that are typed into
+    // (name, password, port). Before, only View (Tab) went across. The cursor lands on the same map: a level row on its
+    // place in the rotation, a rotation row on its level.
+    auto go_col = [&](int c) {
+      if (c == pm_col_) return;
+      if (c == 1) {
+        if (pm_col_ == 2 && pm_rot_row_ < n) pm_lv_row_ = pm_order_[size_t(pm_rot_row_)];
+        pm_lv_row_ = std::max(pm_lv_row_, 0);
+      }
+      if (c == 2 && pm_col_ == 1 && pm_lv_row_ >= 0) {
+        const auto it = std::find(pm_order_.begin(), pm_order_.end(), pm_lv_row_);
+        pm_rot_row_ = it != pm_order_.end() ? int(it - pm_order_.begin()) : std::min(pm_rot_row_, n - 1);
+      }
+      pm_col_ = c, pm_grab_ = false, pm_slide_edit_ = -1;
+      REXLOG_INFO("BF private match: the pad in the {} column", c == 0 ? "settings" : c == 1 ? "levels" : "rotation");
+    };
+    if (!editing) {
+      const bool typed_row = pm_col_ == 0 && pm_tab_ == 0 && (pm_row_ == kPmName || pm_row_ == kPmPassText || pm_row_ == kPmPort);
+      if (typed_row && in.right) go_col(1), in.right = false;
+      else if (pm_col_ == 1 && pm_lv_row_ >= 0 && (in.left || in.right)) go_col(in.left ? 0 : 2), in.left = in.right = false;
+      else if (pm_col_ == 2 && !pm_grab_ && in.left) go_col(1), in.left = false;
     }
     if (PmTyping()) {  // the keyboard types straight into the row (as the browser's address)
       ImGuiContext& g = *ImGui::GetCurrentContext();
@@ -3067,7 +3106,8 @@
       }
     }
     auto change = [&](int row, int step) {
-      if (row == kPmTickets) pm_tickets_ = PmStep(kPmTicketSteps, int(std::size(kPmTicketSteps)), pm_tickets_, step);
+      if (row == kPmTickets)
+        pm_tickets_ = kPmTicketSteps[std::clamp(PmTicketAt(pm_tickets_) + step, 0, int(std::size(kPmTicketSteps)) - 1)];
       if (row == kPmTimeLimit) pm_time_limit_ = PmStep(kPmTimeSteps, int(std::size(kPmTimeSteps)), pm_time_limit_, step);
       if (row == kPmBots) pm_bots_ = std::clamp(pm_bots_ + step, 0, 24);
       if (row == kPmTick) {
@@ -3289,9 +3329,7 @@
           const float u0 = unit_text(pm_tickets_ ? "A TEAM" : pm_mode_ == 2 ? "EACH MAP'S" : "MAP'S OWN", right, mid, sel);
           const float b0 = value_box(pm_tickets_ ? std::to_string(pm_tickets_) : pm_mode_ == 1 ? "100" : pm_mode_ == 0 ? "130" : "OWN",
                                      u0 - st(8), mid, sel, false, false);
-          int at = 0;
-          for (int k = 0; k < int(std::size(kPmTicketSteps)); ++k)
-            if (kPmTicketSteps[k] <= pm_tickets_) at = k;
+          const int at = PmTicketAt(pm_tickets_);
           const float s = track(i, float(at) / float(std::size(kPmTicketSteps) - 1), b0 - st(118), b0 - st(12), mid, sel, false);
           if (s >= 0) {
             const int pick = kPmTicketSteps[int(std::lround(s * float(std::size(kPmTicketSteps) - 1)))];
@@ -3645,13 +3683,14 @@
 
     // ---- the on screen keys over the middle and the right while the name or the password is typed
     if (pm_edit_ >= 0) PrivateMatchKeys(d, st, pa, ImVec2(rb.x, vb.y), ekeys);
-    // A (not the keyboard's Enter) on the name or the password opens the on screen keys.
-    if (pm_col_ == 0 && in.accept && !accept_from_key_ && (pm_row_ == kPmName || pm_row_ == kPmPassText)) {
+    // A (not the keyboard's Enter) on the name, the password or the port opens the on screen keys.
+    if (pm_col_ == 0 && pm_tab_ == 0 && in.accept && !accept_from_key_ &&
+        (pm_row_ == kPmName || pm_row_ == kPmPassText || (pm_row_ == kPmPort && !pm_upnp_))) {
       PmEditOpen(pm_row_);
       in.accept = false;
     }
-    // Enter or A on a slider's row opens its box for typing (left and right step it).
-    if (pm_col_ == 0 && in.accept && pm_tab_ == 1 && PmSlideRow(pm_row_) && !(pm_row_ == kPmDayLen && !pm_dn_)) {
+    // Enter on a slider's row opens its box for typing (left and right step it; a controller's A steps it too).
+    if (pm_col_ == 0 && in.accept && accept_from_key_ && pm_tab_ == 1 && PmSlideRow(pm_row_) && !(pm_row_ == kPmDayLen && !pm_dn_)) {
       pm_slide_edit_ = pm_row_, pm_slide_text_.clear(), in.accept = false;
     }
     if (clicked >= 0 && clicked == pm_drag_) clicked = -1;  // the click that started a slider's drag
@@ -3662,7 +3701,8 @@
       change(clicked, 1);
     }
     if (in.back) {
-      if (pm_tab_ == 1) set_tab(0);  // the Weather tab: back to Match
+      if (pm_col_ != 0) go_col(0);   // the levels or the rotation: back to the settings (it used to leave the page)
+      else if (pm_tab_ == 1) set_tab(0);  // the Weather tab: back to Match
       else BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
     }
   }
@@ -3671,16 +3711,16 @@
   // the copy being typed (the password in stars unless shown), the keys under it. `k`: this frame's presses.
   void PrivateMatchKeys(ImDrawList* d, const Stage& st, ImVec2 a, ImVec2 b, const Input& k) {
     const kit::Fonts& f = kit::GetFonts();
-    const bool name = pm_edit_ == kPmName;
+    const bool name = pm_edit_ == kPmName, port = pm_edit_ == kPmPort;
     d->AddRectFilled(a, b, IM_COL32(13, 15, 11, 255));  // opaque: the picture's chip showed through the heading
     d->AddRect(a, b, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
     const float x = a.x + st(30), w = b.x - a.x - st(60);
     kit::GameText(d, kit::GameFont::kHeadlineMedium, st(19), ImVec2(x, a.y + st(18)), kit::kCream,
-                  name ? "SERVER NAME" : "PASSWORD");
+                  name ? "SERVER NAME" : port ? "PORT" : "PASSWORD");
     const ImVec2 n0(x, a.y + st(48)), n1(x + w, a.y + st(92));
     d->AddRectFilled(n0, n1, kit::kPaperLight);
     d->AddRect(n0, n1, kit::kGreen, 0, 0, st(3));
-    const std::string shown = name ? pm_edit_text_ : PmPassShown(pm_edit_text_);
+    const std::string shown = name || port ? pm_edit_text_ : PmPassShown(pm_edit_text_);
     const std::string count = std::to_string(pm_edit_text_.size()) + " / " + std::to_string(PmMost(pm_edit_));
     const float count_w = kit::TextWidth(f.typed, st(12), count);
     d->PushClipRect(n0, ImVec2(n1.x - count_w - st(24), n1.y), true);
@@ -3692,8 +3732,9 @@
     d->PopClipRect();
     d->AddText(f.typed, st(12), ImVec2(n1.x - st(12) - count_w, n0.y + st(15)), kit::kInkFaint, count.c_str());
     kit::Spaced(d, f.typed, st(8), ImVec2(x, n1.y + st(9)), kit::kKhakiDim,
-                name ? "UP TO 32 LETTERS, DIGITS, SPACES OR SIGNS. LEFT EMPTY, IT IS YOUR NAME'S MATCH."
-                     : pm_pass_shown_ ? "UP TO 24 LETTERS, DIGITS OR SIGNS, NO SPACES. Y HIDES IT."
+                name   ? "UP TO 32 LETTERS, DIGITS, SPACES OR SIGNS. LEFT EMPTY, IT IS YOUR NAME'S MATCH."
+                : port ? "1024 TO 65535, THE DIGITS ONLY. 18300 UNLESS YOU WANT ANOTHER."
+                : pm_pass_shown_ ? "UP TO 24 LETTERS, DIGITS OR SIGNS, NO SPACES. Y HIDES IT."
                                       : "UP TO 24 LETTERS, DIGITS OR SIGNS, NO SPACES. Y SHOWS IT.",
                 st(1.5f));
     // The keys, as the soldier name's: their width is ten keys (36 each, 4.5 apart).
@@ -3705,7 +3746,7 @@
     std::string& text = pm_edit_text_;
     if (clicked >= 0) {
       const OnKey& key = OnKeys(name)[size_t(clicked)];
-      if (key.kind != 0 || name) REXLOG_INFO("BF private match: on screen key {}", key.label);  // not the password's
+      if (key.kind != 0 || name || port) REXLOG_INFO("BF private match: on screen key {}", key.label);  // not the password's
       if (key.kind == 0) {
         char c = key.ch;
         if (std::isalpha(static_cast<unsigned char>(c)))

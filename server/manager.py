@@ -106,6 +106,27 @@ def server_size(value):
     if n <= 24:
         return max(2, n)
     return next((size for size in SERVER_SIZES if size >= n), SERVER_SIZES[-1])
+
+
+# Tickets (TekRantGaming, 24 Nov 2026: bigger servers "would run pretty quick, because more players equals more death
+# equals more ticket drop ... automatic ticket scaling based on what the server's running at ... But it shouldn't take
+# away the ability for the server owner to then customize it"). server.json `tickets`: "auto" (the default) scales the
+# map's own count (130, Coral Sea 100) to the server's size past 24 players, in the game (bf/src/match_rules.cpp
+# AutoTickets); "map" keeps the map's own at any size; a number (1 to 9999) is each team's count on every map.
+def server_tickets(value):
+    if value in (None, '', 'auto', 0, '0'):
+        return 'auto'
+    if value in ('map', -1, '-1'):
+        return 'map'
+    n = int(value)
+    return min(9999, n) if n > 0 else 'auto'
+
+
+def tickets_flag(tickets):
+    """The game's --bf_match_tickets: 0 automatic, -1 the map's own, else the count."""
+    return 0 if tickets == 'auto' else -1 if tickets == 'map' else int(tickets)
+
+
 # The dedicated game's own socket: UDP 1003 on its loopback address; Linux moves ports under 1024 up by 30000
 # (bf/src/socket_fixes.cpp HostBindPort).
 GAME_PORT = 1003 if WINDOWS else 31003
@@ -503,8 +524,8 @@ def game_installed():
 
 def new_server(name, port):
     return {'name': name, 'description': '', 'maps': [k for k, _, _ in MAPS], 'round_end_delay': 45, 'listed': True,
-            'night': False, 'port': port, 'max_players': DEFAULT_SIZE, 'bots': 0, 'autostart': True, 'tick': 0,
-            'team_balance': True, 'balance_gap': 2, 'balance_min_players': 4, 'balance_delay': 20,
+            'night': False, 'port': port, 'max_players': DEFAULT_SIZE, 'bots': 0, 'tickets': 'auto', 'autostart': True,
+            'tick': 0, 'team_balance': True, 'balance_gap': 2, 'balance_min_players': 4, 'balance_delay': 20,
             'balance_block_stacking': True,
             # The server's world (gmhost.py's World; 14 Nov 2026): its clock and weather, per cent where it says, and
             # the player IDs who may change them in game.
@@ -593,6 +614,8 @@ def clean_config(raw):
         # places free for joining players and has bots leave as players join).
         with contextlib.suppress(TypeError, ValueError):
             entry['bots'] = max(0, min(entry['max_players'], int(s.get('bots') or 0)))
+        with contextlib.suppress(TypeError, ValueError):
+            entry['tickets'] = server_tickets(s.get('tickets'))
         entry['listed'] = s.get('listed') is not False
         entry['night'] = s.get('night') is True
         entry['day_night'] = s.get('day_night') is True
@@ -1051,7 +1074,9 @@ class Manager:
                 '--server', '--cl=-dedicated -level ' + MAP_LEVEL[maps[0]], '--bf_map_rotation=' + ','.join(maps),
                 '--bf_round_end_delay=%d' % s['round_end_delay'],
                 # Its size: the game's own cap (Game.MaxPlayerCount) is raised to it past 64, and its bots fill to it.
-                '--bf_gm_max_players=%d' % s['max_players']]
+                '--bf_gm_max_players=%d' % s['max_players'],
+                # Each team's tickets: automatic (scaled to the size above), the map's own, or the owner's count.
+                '--bf_match_tickets=%d' % tickets_flag(s.get('tickets', 'auto'))]
         # Its bots, when it has any (none: the flag left out, so BF_SERVER_GAME_ARGS below may still give some).
         if s['bots']:
             game.append('--bf_bots=%d' % s['bots'])

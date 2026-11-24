@@ -317,7 +317,8 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
            {"--bf_world_cloud_height", number(o.cloud_height)},
            {"--bf_world_dynamic_storm", o.dynamic_storm ? "true" : "false"},
            {"--bf_world_storm_type", std::to_string(std::clamp(o.storm_type, 0, 1))},  // D224
-           {"--bf_match_tickets", std::to_string(std::clamp(o.tickets, 0, 9999))},
+           // The page's "map's own" (0) is the level's own count, never scaled (-1; match_rules.cpp).
+           {"--bf_match_tickets", o.tickets > 0 ? std::to_string(std::min(o.tickets, 9999)) : std::string("-1")},
            {"--bf_match_time_limit", std::to_string(std::clamp(o.time_limit, 0, 600))},
            {"--bf_world_admin_key", admin_key},
            {"--bf_gm_status_file", (dir / "status.json").string(), true},

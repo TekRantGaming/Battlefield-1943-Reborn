@@ -112,6 +112,10 @@ TekRantGaming, 20 Nov 2026: "Drop 128 for now".
   `bots` field (0 to the size) is how many bots play; they keep 2 places free and leave as players join. The edit form
   has Players (adding 32 and 64) and Bots (No bots, Up to 8 / 16 / 22 / 30 / 46, Fill the server). The manager passes
   `--bf_gm_max_players=<size>` to the game, and `--bf_bots=<n>` when there are bots.
+- **Tickets (24 Nov 2026):** a team loses a ticket each time one of its soldiers dies, so on a bigger server the map's
+  own count ran out sooner. server.json `tickets` is `"auto"` by default: the game scales the map's own count to the
+  size past 24 (175 at 32, 345 at 64; Coral Sea 135 and 265). The owner can pick the map's own (`"map"`) or a count;
+  the edit form's Automatic choice follows the Players choice. Details: BOTS-AND-CUSTOM-MATCH.md, Automatic tickets.
 - **Air Superiority:** bots sit Coral Sea out, since they cannot fly, and come back on the next map (`bots.cpp`
   SitsOut). The edit form says so on a server with bots and Coral Sea.
 - **Players' game:** the job scheduler's pool is 512 (`bf_job_slots`, `frame_rate.cpp`; section 2a).

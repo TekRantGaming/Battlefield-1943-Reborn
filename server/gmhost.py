@@ -1077,6 +1077,7 @@ class World:
         self.night_ops = False
         self.round, self.progress, self.stage = None, 0.0, -1  # Night Ops: the round's build (match)
         self.held = set()  # Night Ops: what an admin set this round (NIGHT_OPS_HELD), which the build leaves alone
+        self.tickets = 0  # each team's tickets at the round's start, from match.txt; 0: the level's own (read_match)
         self.ramp_from = time.monotonic()
         self.pings = {}  # a joined player's name -> (their ping in ms, when they said it): the scoreboards' ping
 
@@ -1226,14 +1227,22 @@ class World:
         """Night Ops: the round and its tickets from the server's match.txt (match_rules.cpp writes it each second it
         changes), read at most every `every` seconds: on players' asks too, not only the 5 s heartbeat, so a new round's
         clear night reaches their games within a second of its load (TekRantGaming, 20 Nov 2026: the last round's storm
-        was seen and heard at the next one's start)."""
+        was seen and heard at the next one's start).
+
+        Every server (24 Nov 2026): the third value is each team's tickets at the round's start (automatic tickets
+        scaled to the server's size, or the owner's count; match_rules.cpp), for the players' HUD ticket bars."""
         now = time.monotonic()
-        if not self.night_ops or not self.match_file or now - self.match_read < every:
+        if not self.match_file or now - self.match_read < every:
             return
         self.match_read = now
         try:
             with open(self.match_file, encoding='utf-8') as f:
                 parts = f.read().split()
+            if len(parts) >= 3:
+                tickets = max(0, min(0xFFFF, int(parts[2])))
+                if tickets != self.tickets:
+                    self.host.note('world: each team starts the round with %d tickets' % tickets)
+                    self.tickets = tickets
             if len(parts) >= 2:
                 self.match(int(parts[0]), float(parts[1]))
         except (OSError, ValueError):
@@ -1370,6 +1379,11 @@ class World:
                                          (4 if self.night_ops else 0) | (8 if self.held else 0)]) + struct.pack(
                 '>8f2d', self.hour, self.day_minutes, self.cover, self.rate, self.weather, self.fog, self.ground_fog,
                 self.wind, self.seconds, self.evolve) + struct.pack('>f', self.cloud_height)
+            # Then as the game's own host sends them (gm_host.cpp, 19 Nov 2026; a game from before reads none): the
+            # dynamic storm (off: this host has none), and the match's rules: each team's tickets at the round's start
+            # (0 the level's own; the HUD's ticket bars, 24 Nov 2026), the time limit in minutes (0: not told) and the
+            # round's seconds left (-1: none shown).
+            reply += struct.pack('>BHHf', 0, self.tickets, 0, -1.0)
             self.host.transport.sendto(reply, addr)
             if flags & 4:
                 self.host.transport.sendto(self.ping_list(), addr)
