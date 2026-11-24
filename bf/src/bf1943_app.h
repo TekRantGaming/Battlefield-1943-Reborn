@@ -59,6 +59,7 @@ void HideServerWindows();                                                // serv
 void CreatePerfOverlay(rex::ui::ImGuiDrawer* drawer);                    // perf_overlay.cpp
 void CreateCommsOverlay(rex::ui::ImGuiDrawer* drawer);                  // comms_ui.cpp
 void CreateWorldAdminPanel(rex::ui::ImGuiDrawer* drawer);               // world_sync.cpp: the match admin's panel (F9)
+void CreateUiHider(rex::ui::ImGuiDrawer* drawer);  // free_cam.cpp: the hidden HUD and UI (made last: drawn last)
 void CreateSpawnMouseOverlay(rex::ui::ImGuiDrawer* drawer);             // flash_mouse.cpp
 void CreateGraphicsPanel(rex::ui::ImGuiDrawer* drawer, rex::ui::Window* window);  // f8_panel.cpp
 void InstallHudGlyphs();                                                     // hud_glyphs.cpp
@@ -378,6 +379,7 @@ class Bf1943App : public rex::ReXApp {
     if (!REXCVAR_GET(server)) bf1943::CreateWorldAdminPanel(drawer);  // F9, a match's admin (world_sync.cpp)
     if (!REXCVAR_GET(server)) bf1943::CreateSpawnMouseOverlay(drawer);  // the deploy screen's pointer
     if (!REXCVAR_GET(server)) bf1943::CreateGraphicsPanel(drawer, window());  // F8 (f8_panel.cpp)
+    if (!REXCVAR_GET(server)) bf1943::CreateUiHider(drawer);  // last of our overlays: it hides them (free_cam.cpp)
     if (!REXCVAR_GET(server)) bf1943::InstallHudGlyphs();  // the game's prompts in the chosen style (hud_glyphs.cpp)
     if (!REXCVAR_GET(server)) bf1943::InstallSharpText(paths_.game_data_root);  // the game's text sharper (sharp_text.cpp)
     if (!REXCVAR_GET(server)) bf1943::InstallVehicleBinds();  // each vehicle kind's keys (vehicle_binds.cpp)

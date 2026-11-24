@@ -50,6 +50,7 @@
 #include <rex/ui/window_listener.h>
 
 #include "comms.h"
+#include "free_cam.h"
 
 REXCVAR_DEFINE_BOOL(bf_look, true, "BF1943/Controls",
                     "Camera turning: true every frame (our look system), false 30 times a second as on the Xbox 360");
@@ -327,6 +328,7 @@ class Listener : public rex::ui::WindowInputListener {
     // A move of two counts or more is the player's (a hand resting on the mouse jitters by one): the HUD's prompts
     // show keys (game_menu.cpp NoteMatchDevice).
     if (std::fabs(e.dx()) + std::fabs(e.dy()) >= 2.0f) bf1943::NoteMatchDevice(true);
+    if (bf1943::freecam::TakeMouse(e.dx(), e.dy())) return;  // the admin's free camera looks (free_cam.cpp)
     std::lock_guard lock(g.mutex);
     g.raw_dx += e.dx();
     g.raw_dy += e.dy();
