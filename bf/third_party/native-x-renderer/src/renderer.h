@@ -43,7 +43,11 @@ void NightModels(const NightModelLamps* models, uint32_t count);
 void NightRooms(const NightRoom* rooms, uint32_t count);  // D222
 void NightVehicleSeated(bool seated);
 void SetMapArea(float x, float z, float reach);            // D208, D213
+void SetStormPattern(const StormPattern& pattern);         // D228
 void SetPlayerGroups(const float* xz, uint32_t count);     // D208
+void SetFogMovers(const FogMover* movers, uint32_t count);  // D231
+void FogBlast(const float position[3], float radius, float strength);
+void FogShot(const float from[3], const float to[3], float strength);
 // The stored pipelines made at start (D134).
 void StorageProgress(uint32_t* queued, uint32_t* done, uint32_t* loading, uint32_t* finished);
 void SetGameAspectBox(bool on);

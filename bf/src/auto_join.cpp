@@ -70,6 +70,8 @@ void NoteLevelChange();                                          // modern_mode.
 void WeatherRoundOver();     // weather_audio.cpp: between two rounds the weather is silent, and a new round's
 void WeatherLevelLoading();  // world is taken at once (D221)
 void WeatherLevelIn();
+void SkinMatchRoundOver();   // fov.cpp: the electric skin's unlock, a full match under a hurricane
+void SkinMatchNewLevel();
 #if defined(BF_DEV_TOOLS)
 extern std::atomic<float> g_dev_camera[3];                       // look.cpp: the local camera's position
 extern std::atomic<float> g_dev_view_pos[3];                     // dev_matscan.cpp: the rendered camera's
@@ -811,9 +813,9 @@ REX_HOOK_RAW(sub_8243BB70) {
     // winner) and, in a match, the next level's load (playerRoleReady, as on a join's load: runs endnames10, sb_round3,
     // m0472b, the last a change of map with no round's end).
     if (bf1943::g.stage == bf1943::Stage::kInGame && bf1943::g.seen_ready) {
-      if (name == "WinningTeamIsSet") bf1943::WeatherRoundOver();
+      if (name == "WinningTeamIsSet") bf1943::WeatherRoundOver(), bf1943::SkinMatchRoundOver();
       if (name == "playerRoleReady" && std::chrono::steady_clock::now() - bf1943::g.ready_at > std::chrono::seconds(10))
-        bf1943::WeatherLevelLoading();
+        bf1943::WeatherLevelLoading(), bf1943::SkinMatchNewLevel();
     }
     if (name == "gameIsReady" && bf1943::g.seen_loading) {
       const auto now = std::chrono::steady_clock::now();
@@ -1426,6 +1428,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   const bool seated = bf1943::LocalSeated(base);
   native_x_renderer::NightVehicleSeated(seated);  // D178: a vehicle's lamps are on while someone is in it
   native_x_renderer::SetEyeOnFoot(!seated && bf1943::LocalOnFoot());  // D193: the storm shakes the view only on foot
+  native_x_renderer::SetEyeInWorld(seated || bf1943::LocalOnFoot());  // the sea splashes only on a living player's view
   bf1943::comms::NoteInWorld(seated || bf1943::LocalOnFoot());  // voice goes out only from the world
   bf1943::comms::ReadTeam(base, bf1943::LevelLoaded());  // team and squad chat (comms.cpp), the deploy screen too
   bf1943::CapturePointsTick(base, bf1943::LevelLoaded());  // the flags' letters and the pause menu's map

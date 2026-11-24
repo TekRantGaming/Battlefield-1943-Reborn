@@ -16,9 +16,12 @@ struct Settings {
   float weather = 0.0f;        // 0 fair to 1 a storm: overcast, mist, far rain shafts, lightning
   float fog = 0.0f;            // the distance fog, 0 to 1
   float ground_fog = 0.0f;     // the ground fog, 0 to 1
+  float ground_fog_height = 0.5f;   // the surface fog's depth, metres (21 Nov 2026)
+  float ground_fog_sparse = 0.7f;   // how sparse its patches are, 0 everywhere to 1 a few
   float wind = 0.3f;           // 0 calm to 1 a gale: how far the rain leans
   float cloud_height = 450.0f; // the cloud base over the sea, metres
   bool dynamic_storm = false;  // the host builds a storm over the match and eases it (it sets the weather)
+  int storm_type = 0;          // D224: 0 a thunderstorm, 1 a hurricane (NativeXRenderer's storm.h StormType)
 };
 
 // The server joined ("ip:port", its host's port; "": none). From the menu's join.

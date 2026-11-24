@@ -316,6 +316,7 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
            {"--bf_world_wind", number(o.wind)},
            {"--bf_world_cloud_height", number(o.cloud_height)},
            {"--bf_world_dynamic_storm", o.dynamic_storm ? "true" : "false"},
+           {"--bf_world_storm_type", std::to_string(std::clamp(o.storm_type, 0, 1))},  // D224
            {"--bf_match_tickets", std::to_string(std::clamp(o.tickets, 0, 9999))},
            {"--bf_match_time_limit", std::to_string(std::clamp(o.time_limit, 0, 600))},
            {"--bf_world_admin_key", admin_key},

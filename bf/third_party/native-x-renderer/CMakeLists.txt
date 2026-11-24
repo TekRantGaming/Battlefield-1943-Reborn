@@ -140,7 +140,11 @@ add_library(native_x_renderer STATIC
     src/fsr.cpp
     src/dof.cpp
     src/shadows.cpp
+    src/fluid.cpp
+    src/ground_fog.cpp
+    src/cloud_mass.cpp
     src/sky.cpp
+    src/weapon_export.cpp
     src/weapon_skin.cpp
     src/motion_blur.cpp
     src/taa.cpp

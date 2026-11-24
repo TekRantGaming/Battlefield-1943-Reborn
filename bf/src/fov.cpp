@@ -27,6 +27,7 @@
 #include <rex/logging.h>
 #include <set>
 #include <vector>
+#include <cstdlib>
 #include <mutex>
 #include <map>
 #include <atomic>
@@ -303,6 +304,9 @@ REXCVAR_DEFINE_BOOL(bf_smg_sights_no_crosshair, true, "BF1943",
 REXCVAR_DEFINE_BOOL(bf_skin_electric, false, "BF1943",
                     "Weapon skins: the electric skin on your own Thompson and Type 100 (only you see it). Off until "
                     "unlocked (UnlockElectricSkin); on to test it");
+REXCVAR_DEFINE_STRING(bf_skin_equipped, "none", "BF1943",
+                      "Weapon skins: the unlocked skin that is worn, chosen on the main menu's Unlockables screen "
+                      "(none, electric). A skin shows only while it is both unlocked and equipped");
 REXCVAR_DEFINE_BOOL(bf_smg_sight_tune, false, "BF1943", "Iron Sight: line the SMG's sights up with the keyboard while aiming (arrows, Page Up/Down, number pad)");
 namespace {
 std::mutex g_tune_mutex;
@@ -350,14 +354,71 @@ std::string SmgSightTuneText() {
 }
 // Reborn's weapon skins (the renderer's weapon_skin.h). The electric skin, the first unlockable (TekRantGaming, 21 Nov
 // 2026), worn by the player's own Thompson and Type 100: only this game draws it, on its first person weapon; nothing
-// is sent to the server, so no other player sees it. To be unlocked by being struck by lightning in Night Ops' storm;
-// until then bf_skin_electric is the switch (off).
+// is sent to the server, so no other player sees it. Unlocked by playing a full match under a hurricane (SkinMatch
+// below; the user, 23 Nov 2026: "Remove the lightning strike requirement. It should just be playing a full match with
+// the hurricane storm"); bf_skin_electric is the switch (off until then). Unlocked is not worn (the user, 22 Nov 2026: "commit weapon skin
+// as an unlock, and only shows if equipped from main menu's unlock screen"): it shows while bf_skin_equipped names
+// it, which the main menu's Unlockables screen sets (game_menu_launcher.inc, UnlockablesPage).
 void UnlockElectricSkin() {
   if (REXCVAR_GET(bf_skin_electric)) return;
   rex::cvar::SetFlagByName("bf_skin_electric", "true");
   REXLOG_INFO("BF weapon skins: the electric skin unlocked");
   std::lock_guard lock(g_tune_mutex);  // saved with the menu's settings (SmgSightTakeSave)
   g_tune_save_name = "bf_skin_electric", g_tune_save_value = "true";
+}
+// The electric skin's unlock: a full match under a hurricane. A match counts when this game was in it from near its
+// start to its end (the game's WinningTeamIsSet), the match's storm was a hurricane all that time, and the storm did
+// come in (the weather reached half). "From near its start": at least kSkinMatchSeconds played, and, where the host
+// tells a time limit, joined within two minutes of the round's start. BF_DEV_SKIN_MATCH_SECONDS=<s> (tests): another
+// least time.
+namespace {
+constexpr double kSkinMatchSeconds = 300.0;
+struct SkinMatch {
+  std::mutex mutex;
+  bool on = false, hurricane = false, stormy = false, late = false;
+  std::chrono::steady_clock::time_point since{}, last{};
+} g_skin_match;
+}  // namespace
+// world_sync.cpp, with each answer of the match's host (about once a second).
+void SkinMatchSample(int storm_type, float weather, int time_limit, float time_left) {
+  if (REXCVAR_GET(bf_skin_electric)) return;
+  std::lock_guard lock(g_skin_match.mutex);
+  auto& m = g_skin_match;
+  const auto now = std::chrono::steady_clock::now();
+  if (!m.on || now - m.last > std::chrono::seconds(10)) {  // a match joined, or a new level
+    m.on = true, m.since = now, m.hurricane = true, m.stormy = false;
+    m.late = time_limit > 0 && time_left >= 0 && time_left < float(time_limit) * 60.0f - 120.0f;
+    REXLOG_INFO("BF weapon skins: a match counted from now for the electric skin ({}{})",
+                storm_type == 1 ? "a hurricane" : "no hurricane", m.late ? ", joined late" : "");
+  }
+  m.last = now;
+  if (storm_type != 1) m.hurricane = false;
+  if (weather >= 0.5f) m.stormy = true;
+}
+// auto_join.cpp: the next level is loading or in.
+void SkinMatchNewLevel() {
+  std::lock_guard lock(g_skin_match.mutex);
+  g_skin_match.on = false;
+}
+// auto_join.cpp: the round's end.
+void SkinMatchRoundOver() {
+  if (REXCVAR_GET(bf_skin_electric)) return;
+  bool earned = false;
+  {
+    std::lock_guard lock(g_skin_match.mutex);
+    auto& m = g_skin_match;
+    if (!m.on) return;
+    m.on = false;
+    double least = kSkinMatchSeconds;
+    if (const char* env = std::getenv("BF_DEV_SKIN_MATCH_SECONDS")) least = std::atof(env);
+    const double played = std::chrono::duration<double>(std::chrono::steady_clock::now() - m.since).count();
+    earned = m.hurricane && m.stormy && !m.late && played >= least;
+    REXLOG_INFO("BF weapon skins: the round is over after {:.0f} s here: hurricane throughout {}, the storm came in {}, "
+                "joined late {}: {}",
+                played, m.hurricane ? "yes" : "no", m.stormy ? "yes" : "no", m.late ? "yes" : "no",
+                earned ? "the electric skin is earned" : "not earned");
+  }
+  if (earned) UnlockElectricSkin();
 }
 bool SmgSightTakeSave(std::string& name, std::string& value) {
   std::lock_guard lock(g_tune_mutex);
@@ -452,7 +513,8 @@ void AdsDepthOfField(uint8_t* base, uint32_t data, double blend) {
   native_x_renderer::SetAdsBlend(float(blend));
 }
 // The skin the held weapon wears, told to the renderer each frame (it holds it a quarter second): the electric one
-// on the Thompson ("thompson") and the Type 100 ("nambu100") while bf_skin_electric is on.
+// on the Thompson ("thompson") and the Type 100 ("nambu100") while it is unlocked (bf_skin_electric) and equipped
+// (bf_skin_equipped).
 void WeaponSkin(uint8_t* base, uint32_t data) {
   static uint32_t last_data = 0;
   static bool skinnable = false;
@@ -460,12 +522,16 @@ void WeaponSkin(uint8_t* base, uint32_t data) {
     last_data = data;
     std::string lower = WeaponName(base, data);
     for (char& ch : lower) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+    native_x_renderer::NoteHeldWeapon(lower.c_str());  // (a developer's weapon export names its folders by it)
     skinnable = lower == "thompson" || lower == "nambu100";
+    // (The Type 100's magazine goes out to its left, the Thompson's down: the skin's lightning strike runs down it.)
+    if (skinnable) native_x_renderer::SetWeaponSkinMagazine(lower == "nambu100" ? 1 : 0);
     if (REXCVAR_GET(bf_skin_electric))
       REXLOG_INFO("BF weapon skins: holding {} ({})", lower.empty() ? "a weapon without a name" : lower,
-                  skinnable ? "the electric skin" : "no skin");
+                  !skinnable ? "no skin"
+                  : REXCVAR_GET(bf_skin_equipped) == "electric" ? "the electric skin" : "the electric skin unlocked, not equipped");
   }
-  if (skinnable && REXCVAR_GET(bf_skin_electric)) native_x_renderer::SetWeaponSkin(1);
+  if (skinnable && REXCVAR_GET(bf_skin_electric) && REXCVAR_GET(bf_skin_equipped) == "electric") native_x_renderer::SetWeaponSkin(1);
 }
 void SmgSights(uint8_t* base, uint32_t data, double blend, double fov_degrees) {
   if (!REXCVAR_GET(bf_smg_sights)) return;

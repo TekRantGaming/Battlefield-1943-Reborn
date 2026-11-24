@@ -225,6 +225,8 @@ void main() {
 
 // D193: the player is on foot (SetEyeOnFoot; true until told otherwise).
 std::atomic<bool> g_eye_on_foot{true};
+// The view is the player's own, alive in the world (SetEyeInWorld; true until told otherwise).
+std::atomic<bool> g_eye_in_world{true};
 
 // What both pixel shaders share: the constants, the ray of a view coordinate, and the sky's colour (Beachhead's
 // sky_color.gdshaderinc: the gradient, the sun, at night the stars and the moon, the cirrus).
@@ -259,6 +261,16 @@ layout(std140, set = 0, binding = 0) uniform SkyConstants {
   vec4 storm_a;              // D208: the hurricane (storm.h): its centre (x, z), its eye's radius and its rain shield's
   vec4 storm_b;              // its strength, its bands' turn, 1 while there is one, its volutus (D211)
   vec4 layers;               // D211: x the altocumulus's cover, y its brightness; z the clouds' shadows on (D214)
+  vec4 storm_c;              // D229: the storm's clouds from the fluid: x on, y the density's gain, z the volume's width in rain shields, w the eye's opening
+  vec4 ground_w;             // D231: the ground fog pushed about: xy its field's corner in the world (x, z), z 1 / its size, w 1 with one
+  vec4 surf;                 // D231: the surface fog: x its density (1/m), y its depth (m), z how sparse (the noise's level its patches begin at), w 1 with it
+  vec4 surf_b;               // x how high over the sea it reaches (m): low ground only
+  vec4 terr_scale, terr_offset, terr_uv;  // D231: the terrain: world = (grid.x, height, grid.y) * scale + offset; uv = grid * uv.xy + uv.zw
+  vec4 terr;                 // x its heightmap's size, y how its texels are read, z 1 with one
+  vec4 mass_w;               // D232: the clouds' mass as particles: xy its grid's corner in the world (x, z), z 1 / its size, w 1 with one
+  vec4 mass_b;               // x the rain under its gathered mass at its most (the match's weather's)
+  vec4 wake_seg[48];         // D234: the planes' wakes: each piece's ends in the world (xyz) and how long ago (w), a then b
+  vec4 wake_n;               // x how many pieces
   vec4 rooms[192];           // D222: per room (kMaxRooms) the world to its space (three rows), its half size and lift (w), its box on the view (0 to 1), its roof's slopes (xy)
   vec4 room_info;            // D222: x how many rooms; y 1 to tint them
 };
@@ -353,12 +365,15 @@ vec3 sky_color(vec3 rd) {
   // degrees up, so a storm a few kilometres off did not show. Toward the storm, over the angle its dense part takes,
   // its towers at the eyewall (3 km tall as it forms, 10 km at full strength; the anvil's flat top): dark blue-grey
   // in the sky's own colours, the top lit, the foot in the haze. Only while the eye is outside the dense part.
-  if (storm_b.z > 0.5 && rd.y > -0.02) {
+  // A thunderstorm's only since D234: a hurricane's deck is drawn by the clouds themselves now, low and wide, and this
+  // dome painted behind it showed under the deck's middle as dark blocks of streaks (runs st_final_storm, rp_a; with
+  // the far rain shafts off, run rp_b, the same; gone without it, run d234v).
+  if (storm_b.z > 0.5 && storm_b.z < 1.5 && rd.y > -0.02) {
     vec2 to = storm_a.xy - eye.xz;
     float dist = length(to);
     float dense = storm_a.w * 0.75;
     if (dist > dense * 0.9) {
-      float edge = max(dist - 1.8 * storm_a.z, 400.0);  // to the eyewall, where the towers stand
+      float edge = max(dist - 1.1 * storm_a.z, 400.0);  // to the eyewall, where the towers stand (D226: 1.8 eyes before)
       vec2 dir = normalize(rd.xz + vec2(1e-5));
       float off = acos(clamp(dot(dir, to / dist), -1.0, 1.0));
       float span = asin(clamp(dense / dist, 0.0, 1.0));
@@ -380,10 +395,22 @@ vec3 sky_color(vec3 rd) {
           vec3 dark = base * mix(0.32, 0.5, body) * vec3(0.85, 0.92, 1.05);
           vec3 lit = horizon_color.rgb * 1.05;
           vec3 wall = mix(dark, lit, smoothstep(0.75, 1.0, h) * (0.4 + 0.6 * body));
+          // (D225: its foot a curtain of rain, not a flat slab: falling streaks, lighter and hazier toward the horizon,
+          // so under a near deck, where only its lowest degrees show, it reads as rain beyond, run stypec1.)
+          float shafts = texture(weatherTex, vec2(az * 24.0, el * 1.5 + 0.13)).r;
+          float foot = 1.0 - smoothstep(0.0, 0.08, el);
+          wall = mix(wall, mix(fog_color.rgb, base * 0.6, 0.35 + 0.4 * shafts), foot * 0.75);
           wall *= 1.0 - 0.9 * night_amount;
-          float amount = storm_b.x * smoothstep(1.0, 0.85, across) * smoothstep(top, top * 0.93, el);
+          // (D225: its sides fade over 40% of its width, 15% before; and it shows only out from under the storm, from
+          // its rain shield's edge: under the shield's deck only a strip of it showed at the horizon, a flat dark slab
+          // with hard ends, run stypeb0.)
+          float amount = storm_b.x * smoothstep(1.0, 0.6, across) * smoothstep(top, top * 0.93, el);
+          // (D226: none from near the cloud base up: drawn as from the ground, it stood from a plane over the clouds
+          // as a dark slab out of the deck, run hurrup_a; up there the clouds below show the storm themselves.)
+          float base_h = cloud.z * max(misc.z, 1e-3);
+          amount *= 1.0 - smoothstep(base_h * 0.7, base_h * 1.05, eye_world.y - eye_world.w);
           float haze = 1.0 - exp(-edge / 30000.0);
-          sky = mix(sky, mix(wall, fog_color.rgb, haze * 0.8), amount * smoothstep(dense * 0.9, dense * 1.2, dist));
+          sky = mix(sky, mix(wall, fog_color.rgb, haze * 0.8), amount * smoothstep(storm_a.w * 0.95, storm_a.w * 1.35, dist));
         }
       }
     }
@@ -409,6 +436,9 @@ constexpr const char* kCloudBindings = R"(
 layout(set = 0, binding = 2) uniform sampler3D shapeTex;
 layout(set = 0, binding = 3) uniform sampler3D detailTex;
 layout(set = 0, binding = 7) uniform sampler2D cloudDepthTex;  // the view's depth (full size), for the hidden rays
+layout(set = 0, binding = 8) uniform sampler2D stormCloudTex;  // D229: the storm's flow map from the fluid
+layout(set = 0, binding = 10) uniform sampler2D cloudMassTex;  // D232: the clouds' mass as particles (cloud_mass.h)
+layout(set = 0, binding = 9) uniform sampler2D stormConvTex;   // D229: its convection
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec4 out_where;
@@ -460,17 +490,92 @@ float cloud_density(vec3 p, vec3 cam, bool cheap) {
   wp += band * vec2(7300.0, 4100.0);
   vec2 wm = texture(weatherTex, wp / weather_scale).rg;
   float cover = clamp(coverage * mix(0.6 + wm.r * 0.8, (0.2 + wm.r * 1.6) * 0.66, lay), 0.0, 1.0);
-  // D208: the hurricane's cloud where it is: a whole deck under its strength, its layers merged into one.
-  float storm = storm_at(p.xz * max(misc.z, 1e-3), storm_a, storm_b);
+  // D208: the storm's cloud where it is: a whole deck under its strength, its layers merged into one. D226: by its
+  // look (storm.h storm_look: a hurricane's dense core, its bands and their gaps), and none in a hurricane's eye.
+  vec2 storm_p = p.xz * max(misc.z, 1e-3);
+  float storm = storm_look(storm_p, storm_a, storm_b);
+  // D229: the storm made of the sky's own clouds (renderer.cpp StepStormClouds): where the fluid's air has carried them
+  // from (its flow map, storm_c.z rain shields across round the storm's centre, nothing at its edges), the weather map
+  // and the shape read there, so the clouds coming in are pulled round into the storm; its two phases blended (b's
+  // share flow_w). Its convection, times the storm's strength, in place of the drawn shape.
+  vec2 flow_a = vec2(0.0), flow_b = vec2(0.0);
+  float flow_w = 0.0;
+  bool flowing = false;
+  if (storm_c.x > 0.5) {
+    vec2 suv = (storm_p - storm_a.xy) / (storm_a.w * storm_c.z) + 0.5;
+    float in_field = 1.0 - smoothstep(0.4, 0.48, max(abs(suv.x - 0.5), abs(suv.y - 0.5)));
+    vec4 flow = textureLod(stormCloudTex, clamp(suv, 0.0, 1.0), 0.0) * (in_field * storm_a.w / (1000.0 * max(misc.z, 1e-3)));
+    flow_a = flow.xy, flow_b = flow.zw, flow_w = 1.0 - storm_c.y;
+    flowing = in_field > 0.0;
+    // (The weather map as carried, the lowest band's, baked by the fluid with both phases blended: one read here
+    // instead of two at the flowed places in every sample of the march.)
+    vec4 conv = textureLod(stormConvTex, clamp(suv, 0.0, 1.0), 0.0);
+    if (band < 0.5) {
+      wm = mix(wm, conv.gb, in_field);
+      cover = clamp(coverage * mix(0.6 + wm.r * 0.8, (0.2 + wm.r * 1.6) * 0.66, lay), 0.0, 1.0);
+    }
+    storm = clamp(conv.r, 0.0, 1.0) * in_field * storm_b.x;
+  }
+  // D232: the clouds' mass as particles (cloud_mass.h; a developer's first slice): how many of its tracers are here
+  // makes the sky's own clouds here more or less (the weather map's cover, the lowest band's): at rest (a half) as
+  // they are, gathered they thicken and tower, drawn away they thin and clear. Nothing changes outside its grid.
+  // The storm is the clouds it has gathered ("Can we have the storm just build FROM the clouds, instead of it being
+  // it's own thing?"): with the mass, its drawn look (D226) and the fluid's convection (D229) are not laid over the
+  // sky; where the mass is well over what the sky has at rest, that is the storm's cloud (a whole deck, towering),
+  // and its eye is where the tracers do not go, not a drawn one.
+  float in_mass = 0.0;
+  if (mass_w.w > 0.5) {
+    vec2 muv = (storm_p - mass_w.xy) * mass_w.z;
+    vec2 medge = min(muv, 1.0 - muv);
+    in_mass = smoothstep(0.0, 0.06, min(medge.x, medge.y));
+    if (in_mass > 0.0) {
+      float mass = clamp(textureLod(cloudMassTex, muv, 0.0).r, 0.0, 1.0);
+      if (band < 0.5) {
+        wm.r = mix(wm.r, clamp(wm.r * (0.25 + 1.5 * mass) + (mass - 0.5) * 0.5, 0.0, 1.0), in_mass);
+        cover = clamp(coverage * mix(0.6 + wm.r * 0.8, (0.2 + wm.r * 1.6) * 0.66, lay), 0.0, 1.0);
+      }
+      float gathered = smoothstep(0.74, 0.98, mass);
+      // (A hurricane's gathered cloud in spiral bands, as its drawn look has them (storm.h storm_look): the mass alone
+      // is an even disc, and from above or outside an even disc is a drum, not a storm turning.)
+      if (storm_b.z > 1.5 && storm_b.z < 2.5) {
+        vec2 sd = storm_p - storm_a.xy;
+        float sr = length(sd), swall = 1.25 * storm_a.z;
+        float sband = 0.5 + 0.5 * cos(2.0 * atan(sd.y, sd.x + 1e-4) - 5.5 * log(max(sr, swall) / swall) - storm_b.y);
+        float score = 1.0 - smoothstep(0.30 * storm_a.w, 0.46 * storm_a.w, sr);
+        gathered *= max(score, mix(0.42, 1.0, smoothstep(0.20, 0.95, sband)));
+      }
+      storm = mix(storm, gathered, in_mass);
+    }
+  }
   cover = mix(cover, 1.0, 0.92 * storm);
+  // (taken off the density at its end; D229: with the fluid, as far as its eye has opened)
+  // (D234, the user, 23 Nov 2026: "The eye of the hurricane looks covered. It should be a clear hole to the sky": a
+  // thirtieth of the density left there was still a whole layer's depth of cloud, opaque from above and below. None.)
+  float eye_clear = 1.0 - storm_eye(storm_p, storm_a, storm_b) * (storm_c.x > 0.5 ? storm_c.w : 1.0) * (1.0 - in_mass);
   lay *= 1.0 - storm;
   // D211: in the storm's bands the low clouds tower (cumulonimbus: the tallest kind, the whole layer's depth).
   float storm_type = smoothstep(0.2, 0.7, storm);
   float local_type = clamp(cloud_type + (wm.g - 0.5) * 0.8 + (wm.r - 0.5) * 0.6, 0.0, 1.0);
-  local_type = mix(local_type, 1.0, storm_type);
+  // (D234: a hurricane's clouds round its eye on the deck's foot too. The storm's cloud is cleared in the eye a little
+  // further out than the eye clears the sky's own, so a ring of the ordinary low clouds, on their own base 400 m under
+  // the storm's, hung under the deck round the eye, sunlit down it: from outside a bright lump under the storm's middle
+  // (the user, 23 Nov 2026: "The underside of the center of the storm protrudes like a nipple"; runs rp_a, d234v3).)
+  float round_eye = storm_b.z > 1.5 && storm_b.z < 2.5
+      ? 1.0 - smoothstep(1.2, 1.8, length(storm_p - storm_a.xy) / max(storm_a.z, 1.0)) : 0.0;
+  local_type = mix(local_type, 1.0, max(storm_type, round_eye));
   float local_base = base_altitude + local_type * local_type * 400.0;
   local_base += (vnoise(wp / 3200.0 + 17.0) - 0.5) * mix(300.0, 0.0, lay);
   float local_thick = thickness * mix(0.3, 1.0, smoothstep(0.3, 0.9, local_type));
+  // A hurricane is low and wide (the user, 23 Nov 2026: "The storm is too tall, which results in it looking like a
+  // giant cylinder vs a swirling hurricane"): a level-sized storm a kilometre or two across filled the layer's whole
+  // depth, 2.8 km, taller than it was wide. Its cloud is no deeper than three tenths of its rain shield's radius at
+  // the eye's wall, and under half of that at its edge: a disc that rises to the wall, as the real one's deck does.
+  float hurricane = storm_b.z > 1.5 && storm_b.z < 2.5 ? 1.0 : 0.0;
+  if (hurricane > 0.5 && (storm > 0.0 || round_eye > 0.0)) {  // (D234: round its eye as well: no taller than the wall)
+    float flat_h = clamp(0.30 * storm_a.w / max(misc.z, 1e-3), 220.0, thickness);
+    flat_h *= mix(1.0, 0.45, smoothstep(0.25, 0.95, length(storm_p - storm_a.xy) / max(storm_a.w, 1.0)));
+    local_thick = mix(local_thick, min(local_thick, flat_h), max(storm_type, round_eye));
+  }
   // The bands' own heights and depths only where there are bands: times nothing (lay 0, as with the layer's depth and
   // kind now) they change nothing, and their two noises were worked out for every sample (the Night Ops performance
   // pass, 20 Nov 2026). gale.w 1: the old way.
@@ -485,9 +590,24 @@ float cloud_density(vec3 p, vec3 cam, bool cheap) {
   float above = alt - local_base;
   float h = -1.0;
   if (gale.z > 0.5 || (above >= 0.0 && above <= local_thick * 1.001)) {
-    vec4 fs = textureLod(shapeTex, vec3(wp.x, local_base + evolve * 40.0, wp.y) / shape_scale, 2.0);
+    vec4 fs = textureLod(shapeTex, vec3(wp.x + flow_a.x, local_base + evolve * 40.0, wp.y + flow_a.y) / shape_scale, 2.0);
+    if (flowing)  // (D229)
+      fs = mix(fs, textureLod(shapeTex, vec3(wp.x + flow_b.x, local_base + evolve * 40.0, wp.y + flow_b.y) / shape_scale, 2.0),
+               flow_w);
     float foot = clamp((fs.r - (1.0 - cover)) / max(cover, 1e-3), 0.0, 1.0);
     local_thick *= mix(0.32, 1.0, pow(foot, mix(0.6, 0.95, lay)));
+    // (D234: a hurricane's deck heaped, not a plateau: under a whole cover every column reached the cap and its top was
+    // one flat grey shelf from above, run st_form1. Its columns' heights by the shape at their foot and by how much of
+    // the storm's cloud the air has gathered there, so its bands stand up out of the deck.)
+    if (hurricane > 0.5 && storm > 0.0) {
+      local_thick *= mix(1.0, clamp(0.2 + 0.95 * fs.r, 0.3, 1.0) * mix(0.55, 1.0, smoothstep(0.3, 0.9, storm)), storm_type);
+      // (Turrets on it: under a whole cover every sample up to the column's top is cloud, so the deck's top is its
+      // columns' heights, and by the shape at 9000 those change slowly: round the eye, where the storm is whole, it was
+      // one smooth lit surface from above, a disc of icing (runs st_eye1, d234v). Their heights by the shape at a
+      // quarter of that scale too.)
+      float turret = textureLod(shapeTex, vec3(wp.x + flow_a.x, local_base * 0.5, wp.y + flow_a.y) / 2200.0, 1.0).r;
+      local_thick *= mix(1.0, mix(0.6, 1.08, smoothstep(0.25, 0.8, turret)), storm_type);
+    }
     h = above / local_thick;
   }
   float low = 0.0;
@@ -505,14 +625,21 @@ float cloud_density(vec3 p, vec3 cam, bool cheap) {
   }
   if (can_show) {
     vec3 sp = vec3(wp.x, p.y + evolve * 40.0, wp.y) / shape_scale;
-    vec4 s = textureLod(shapeTex, sp + vec3(0.0, 0.0, evolve * 0.002), 0.0);
+    vec4 s = textureLod(shapeTex, sp + vec3(flow_a.x / shape_scale, 0.0, flow_a.y / shape_scale + evolve * 0.002), 0.0);
+    // (D229: the two phases' shapes blended, their contrast kept: an even blend of two noises is flatter than either.)
+    if (flowing) {
+      vec4 sb = textureLod(shapeTex, sp + vec3(flow_b.x / shape_scale, 0.0, flow_b.y / shape_scale + evolve * 0.002), 0.0);
+      float keep = inversesqrt(flow_w * flow_w + (1.0 - flow_w) * (1.0 - flow_w));
+      s = clamp((mix(s, sb, flow_w) - 0.5) * keep + 0.5, 0.0, 1.0);
+    }
     float wfbm = s.g * 0.625 + s.b * 0.25 + s.a * 0.125;
     float base = remap(s.r, wfbm - 1.0, 1.0, 0.0, 1.0);
     base *= shape_most;
     float c = remap(base, 1.0 - cover, 1.0, 0.0, 1.0);
     c = clamp(c * (1.0 + 0.3 * lay), 0.0, 1.0);
     if (c > 0.0 && !cheap) {
-      vec3 d = textureLod(detailTex, vec3(wp.x, p.y, wp.y) / detail_scale + evolve * 0.01, 0.0).rgb;
+      vec2 dw = wp + mix(flow_a, flow_b, flow_w);  // (D229)
+      vec3 d = textureLod(detailTex, vec3(dw.x, p.y, dw.y) / detail_scale + evolve * 0.01, 0.0).rgb;
       float dfbm = d.r * 0.625 + d.g * 0.25 + d.b * 0.125;
       float erode = mix(dfbm, 1.0 - dfbm, clamp(h * 4.0, 0.0, 1.0));
       c = remap(c, erode * 0.7 * (1.0 - 0.25 * lay), 1.0, 0.0, 1.0);
@@ -520,14 +647,25 @@ float cloud_density(vec3 p, vec3 cam, bool cheap) {
     if (!cheap) c = clamp(c * mix(2.2, 1.0, lay), 0.0, 1.0);  // crisp silhouettes in fair weather
     // D217: under the storm a whole deck, its noise only its underside's texture (at 75% between the bands the cover
     // alone left broken cumulus and blue sky, run stormsky1): filled in from 30% of its strength, whole by 70%.
-    c = mix(c, max(c, 0.55 + 0.45 * base), smoothstep(0.3, 0.7, storm) * smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(0.8, 1.0, h)));
+    // Seen from outside (the user, 23 Nov 2026: "Yes, fix its look"; runs cstorm4_in, cstorm4_out): filled so through
+    // 8 to 80% of the layer's whole depth wherever the storm was over 0.3, it stood as a pale slab with straight sides
+    // and a flat top. The fill is the storm's deck, the lowest fifth or so of the layer; it reaches higher only toward
+    // the storm's core, as far up as the shape noise has it there (a heaped top, not a lid), and thins out to its
+    // top. Over it the cloud is the tall kind's own shape and erosion, as anywhere. From below it is the same deck.
+    float core = smoothstep(0.55, 0.95, storm);
+    // (A hurricane's deck, already low: filled through most of its own depth.)
+    float fill_top = mix(mix(0.22, 0.62, hurricane), 0.86, core * (0.45 + 0.55 * s.r));
+    float fill = smoothstep(0.3, 0.7, storm) * smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(fill_top * 0.62, fill_top, h));
+    c = mix(c, max(c, 0.55 + 0.45 * base), fill);
     low = max(c, 0.0);
   }
   // D211: the volutus, a roll cloud along the storm's gust front (the user: "Cloud generation should match photoreal
   // topical clouds too, including volutus clouds"): a long horizontal tube low in the layer just outside the rain
   // shield, its cross-section 450 of the layer's units round, broken here and there along its length and eroded at its
-  // edges, while the storm comes in (storm_b.w).
-  if (storm_b.w > 0.0 && storm_b.z > 0.5) {
+  // edges, while the storm comes in (storm_b.w). A thunderstorm's only (D234): round a hurricane it was a whole ring
+  // at the rain shield's edge, seen from above a smooth white arc drawn round the storm (runs st_eye1, st_form1); a
+  // roll cloud is a gust front's, and a hurricane's edge is its outer bands.
+  if (storm_b.w > 0.0 && storm_b.z > 0.5 && storm_b.z < 1.5) {
     float ws = max(misc.z, 1e-3);
     vec2 rel = p.xz * ws - storm_a.xy;
     float ring = (storm_a.w * 1.05) / ws;
@@ -545,7 +683,9 @@ float cloud_density(vec3 p, vec3 cam, bool cheap) {
       low = max(low, clamp(roll * 1.6, 0.0, 1.0) * storm_b.w);
     }
   }
-  return low * drift.w * (1.0 + 0.9 * storm);
+  // D226: none in a hurricane's eye. (Taken off the cover instead, the cover near nothing there, the GPU was lost
+  // on the AMD driver as the level loaded, runs hurrup_b, hurrup_b2; bisected, runs bisect_a and bisect_b.)
+  return low * drift.w * (1.0 + 0.9 * storm) * eye_clear;
 }
 )";
 constexpr const char* kCloudPS = R"(
@@ -572,6 +712,65 @@ bool cloud_shell(vec3 cam, vec3 rd, out float t0, out float t1) {
   }
   t0 = max(t0, 0.0);
   return t1 > t0;
+}
+// D234: the planes' wakes (the user, 23 Nov 2026: "if a plane were to fly through a cloud, it should punch out the
+// other side pulling a short wisp trail like it realistically would"). Pieces of their paths (renderer.cpp WakeInputs)
+// carve a hole along them, 28 m round growing a metre a second, held 15 s and closing by 45 s; and for half a
+// minute the cloud a plane came out of is drawn out after it past the far side as a tongue that thins. Which pieces a
+// pixel's ray passes near is found once (a bit each), so the march's samples look at none of them unless it does.
+// (28 m and a metre a second: 22 m and half a metre were hardly seen from outside a cloud, run wk2.)
+float wake_radius(float age) { return 28.0 + 1.0 * age; }
+uint wake_mask(vec3 cam, vec3 rd, float world_scale) {
+  uint mask = 0u;
+  int n = min(int(wake_n.x + 0.5), 24);
+  for (int i = 0; i < n; ++i) {
+    vec4 wa = wake_seg[i * 2], wb = wake_seg[i * 2 + 1];
+    vec3 sea = vec3(0.0, eye_world.w, 0.0);  // (the layer's heights are over the sea's)
+    vec3 a = (wa.xyz - sea) / world_scale, ab = (wb.xyz - sea) / world_scale - a, w0 = cam - a;
+    float aa = max(dot(ab, ab), 1e-6), bb = dot(rd, ab), dd = dot(rd, w0), ee = dot(ab, w0);
+    float den = aa - bb * bb;
+    float s = den > 1e-6 ? clamp((ee - bb * dd) / den, 0.0, 1.0) : 0.0;
+    float t = max(dot(a + ab * s - cam, rd), 0.0);
+    s = clamp(dot(cam + rd * t - a, ab) / aa, 0.0, 1.0);
+    vec3 dv = cam + rd * t - (a + ab * s);
+    float reach = (wake_radius(max(wa.w, wb.w)) * 1.3 + 30.0) / world_scale;
+    if (dot(dv, dv) < reach * reach) {
+      mask |= 1u << uint(i);
+    }
+  }
+  return mask;
+}
+float wake_density(vec3 p, vec3 cam, uint mask, float world_scale) {
+  float keep = 1.0, tongue = 0.0;
+  vec3 pull = vec3(0.0);
+  int n = min(int(wake_n.x + 0.5), 24);
+  for (int i = 0; i < n; ++i) {
+    if ((mask & (1u << uint(i))) == 0u) continue;
+    vec4 wa = wake_seg[i * 2], wb = wake_seg[i * 2 + 1];
+    vec3 sea = vec3(0.0, eye_world.w, 0.0);
+    vec3 a = (wa.xyz - sea) / world_scale, ab = (wb.xyz - sea) / world_scale - a;
+    float aa = max(dot(ab, ab), 1e-6);
+    float s = clamp(dot(p - a, ab) / aa, 0.0, 1.0);
+    float r = length(p - a - ab * s) * world_scale;
+    float age = mix(wa.w, wb.w, s);
+    // (Its edge torn, not a bored tube: a perfectly round tunnel with smooth walls, run st_wake3. Torn by the detail's
+    // own 3D noise at two scales: a 2D noise with the height added in layered it every 13 m, and from outside the hole's
+    // walls stood in ribs like contour lines, runs wk4, wk5.)
+    vec3 q = p * world_scale;
+    float torn = textureLod(detailTex, q / 45.0, 0.0).r * 0.65 + textureLod(detailTex, q / 17.0 + 0.37, 0.0).g * 0.35;
+    float rad = wake_radius(age) * (0.6 + 0.8 * torn);
+    keep = min(keep, mix(smoothstep(0.55 * rad, 1.15 * rad, r), 1.0, smoothstep(15.0, 45.0, age)));
+    float g = exp(-(r * r) / (0.6 * rad * rad)) * (1.0 - smoothstep(4.0, 30.0, age));
+    if (g > tongue) {
+      tongue = g;
+      pull = ab * inversesqrt(aa) * (40.0 + 3.0 * age) / world_scale;
+    }
+  }
+  float d = cloud_density(p, cam, false);
+  float here = d * keep;
+  // (Only out of the cloud: inside it the hole stays a hole.)
+  if (tongue > 0.01 && d < 0.05) here += cloud_density(p - pull, cam, false) * 0.7 * tongue * (1.0 - d / 0.05);
+  return here;
 }
 void main() {
   // The layer is marched at its own scale (Beachhead's), the eye and the distances taken into it: in the world it is
@@ -631,6 +830,7 @@ void main() {
   float near_d = max(cloud_density(cam, cam, true), cloud_density(cam + rd * 40.0, cam, true));
   float inside = smoothstep(0.0, 0.08, near_d);
   float extinction = mix(outside_extinction, interior_extinction, inside);
+  uint wakes = wake_n.x > 0.5 ? wake_mask(cam, rd, world_scale) : 0u;  // D234
   // Each pixel's march starts elsewhere within a step, another place each frame (the golden ratio spreads a pixel's
   // starts evenly over the step): the frames blended (the resolve) smooth the grain away.
   float t = t0 + (inside > 0.01 ? min(dt, 12.0) * 0.5 : dt * fract(ign(vec2(texel) + 0.5) + 0.618034 * misc.x));
@@ -646,7 +846,11 @@ void main() {
     if (t > t1) break;
     vec3 p = cam + rd * t;
     float ray_step = inside > 0.01 && t < 192.0 ? min(dt, 12.0) : dt;
-    float d = cloud_density(p, cam, false);
+    // (D234: no finer steps near a wake. Steps of 12 m there, all or nothing, drew the reach's edge as a seam, and even
+    // eased in by how near the ray passes, clouds marched that finely stood in ribs like contour lines among the soft
+    // ones round them (runs wk2 to wk6). The hole is wider now than the march's steps and their start is dithered
+    // each frame, so the frames blended find it.)
+    float d = wakes != 0u ? wake_density(p, cam, wakes, world_scale) : cloud_density(p, cam, false);  // (D234)
     if (d > 0.002) {
       float rel = altitude(p, cam) - base_altitude;
       // The light's way toward the sun or the moon: five steps of 80 m through the uneroded density.
@@ -673,14 +877,30 @@ void main() {
       }
       float surface = mix(0.5, 1.35, facing);
       vec3 light = key_col * ms * mix(1.0, powder, 0.45) * 0.8 * surface + amb + moon_light.rgb * (0.4 + 0.6 * h);
-      // The lightning: a light inside the layer, falling off around it.
-      if (flash.w > 0.0) {
-        vec3 dp = p - flash.xyz / world_scale;
-        light += vec3(0.72, 0.8, 1.0) * flash.w * 14.0 / (1.0 + dot(dp, dp) / (800.0 * 800.0));
-      }
       // Thin wisps warm white, dense cores blue-grey.
       float dn = smoothstep(0.15, 1.0, d / max(drift.w, 1e-3));
       light *= mix(vec3(1.0), mix(vec3(1.0, 0.97, 0.91), vec3(0.6, 0.66, 0.76), dn), 0.8);
+      // D223: the storm's clouds dark, nearly black, blue-grey (the user, 19 Nov 2026: "Storm clouds should look dark,
+      // almost black/blue/grey"): where the storm is strong (its strength there, 0.35 to 0.85), the denser the darker,
+      // down to about a third of the light, the bases the darkest.
+      float st = storm_look(p.xz * world_scale, storm_a, storm_b);  // (D226: the bands' look)
+      float dark = smoothstep(0.35, 0.85, st) * (0.45 + 0.55 * dn) * (1.0 - 0.35 * h);
+      // (D234: dark under and inside, where the deck hides the sun; its sunlit top white, as a hurricane is from above:
+      // darkened through its whole depth it was a grey disc sunk in the white cloud round it, run st_form1.)
+      dark *= smoothstep(15.0, 150.0, od);
+      light *= mix(vec3(1.0), vec3(0.2, 0.235, 0.3), dark * 0.85);
+      // The lightning: a light inside the layer, in the bolt's colour (D223: "Lightning should light up clouds with its
+      // color, and illuminate them from inside"): a wide glow and a bright core round where it flashes, stronger in the
+      // denser cloud, which it fills. After the storm's darkening, so the dark clouds light up.
+      if (flash.w > 0.0) {
+        vec3 dp = p - flash.xyz / world_scale;
+        float r2 = dot(dp, dp);
+        // (Softer and wider than first tried: a bright core 240 across lit a ball the flat base and top of an even deck
+        // cut into a rounded box, run stypeb1. The cloud's own density now shapes it: its billows lit, its thin parts
+        // less.)
+        float glow = 14.0 / (1.0 + r2 / (900.0 * 900.0)) + 20.0 * exp(-r2 / (520.0 * 520.0));
+        light += vec3(0.64, 0.7, 1.0) * flash.w * glow * (0.25 + 1.1 * dn);
+      }
       float a = exp(-d * extinction * ray_step);
       float w = trans * (1.0 - a);
       scatter += light * w;
@@ -701,6 +921,7 @@ void main() {
   // (Only from under the layer: in it and over it the clouds are all around and below.)
   float low = mix(smoothstep(0.0, 0.07, rd.y), 1.0, smoothstep(cloud.z - 150.0, cloud.z, cam.y));
   out_color = vec4(scatter * low, mix(1.0, trans, low));
+  if (wake_n.y > 0.5 && wakes != 0u) out_color.r += 0.4;  // (D234, NXR_WAKE_DEBUG=1: the rays that pass near a wake)
   // Where the cloud lies along the ray, in the world's kilometres: its mean distance, half its extent (a slab's, from
   // its spread) and its beginning; each times how much cloud there is, so that blending them stays right.
   float mean_km = t_eff * 1e-3;
@@ -890,6 +1111,40 @@ vec3 ViewRay(vec2 px) {
 constexpr const char* kFogClouds = R"(
 layout(set = 0, binding = 8) uniform sampler3D shapeTex;
 layout(set = 0, binding = 9) uniform sampler3D detailTex;
+// D221: the clouds as laid over the view this frame (CloudsOver, before the fog): their shadows are kept off them.
+layout(set = 0, binding = 10) uniform sampler2D overCloudTex;
+layout(set = 0, binding = 11) uniform sampler2D overWhereTex;
+layout(set = 0, binding = 12) uniform sampler2D stormCloudTex;  // D229: the storm's flow map from the fluid
+layout(set = 0, binding = 13) uniform sampler2D stormConvTex;   // D229: its convection
+layout(set = 0, binding = 14) uniform sampler2D groundTex;      // D231: the ground fog pushed about (b: how much is there)
+layout(set = 0, binding = 15) uniform sampler2DArray heightTex; // D231: the terrain's heightmap (grass.cpp reads it so)
+layout(set = 0, binding = 16) uniform sampler2D cloudMassTex;   // D232: the clouds' mass as particles (cloud_mass.h)
+// How much of the clouds' mass is over a place of the world (a half at rest; outside its grid, at rest).
+float MassAt(vec2 xz) {
+  vec2 muv = (xz - mass_w.xy) * mass_w.z;
+  vec2 medge = min(muv, 1.0 - muv);
+  return mix(0.5, clamp(textureLod(cloudMassTex, muv, 0.0).r, 0.0, 1.0), smoothstep(0.0, 0.06, min(medge.x, medge.y)));
+}
+float TerrainTexel(ivec2 p) {
+  float n = terr.x;
+  vec2 uv = (vec2(clamp(p, ivec2(0), ivec2(int(n) - 1))) + 0.5) / n;
+  float h = textureLod(heightTex, vec3(uv, 0.0), 0.0).r;
+  if (terr.y == 1.0) return float(packHalf2x16(vec2(h, 0.0)) & 0xFFFFu) / 65535.0;
+  if (terr.y == 2.0) {
+    float b = round(h * 32767.0);
+    return (b < 0.0 ? b + 65536.0 : b) / 65535.0;
+  }
+  return h;
+}
+float TerrainHeight(vec2 xz) {
+  vec2 g = (xz - terr_offset.xz) / terr_scale.xz;
+  vec2 t = (g * terr_uv.xy + terr_uv.zw) * terr.x - 0.5;
+  ivec2 i = ivec2(floor(t));
+  vec2 f = t - vec2(i);
+  float a = mix(TerrainTexel(i), TerrainTexel(i + ivec2(1, 0)), f.x);
+  float b = mix(TerrainTexel(i + ivec2(0, 1)), TerrainTexel(i + ivec2(1, 1)), f.x);
+  return mix(a, b, f.y) * terr_scale.y + terr_offset.y;
+}
 )";
 constexpr const char* kFogPS = R"(
 float ign(vec2 px) { return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715)))); }
@@ -971,6 +1226,15 @@ void main() {
   float sea = eye_world.w;
   float eye_h = eye_world.y - sea;
   int debug = int(view.w + 0.5);
+  // D232: the rain is the clouds' (the user, 21 Nov 2026: "Could we do this for the rain, lightning and the wetness
+  // shaders too? I want weather to feel as real as possible"): with the clouds' mass, it rains here as much as the
+  // mass is gathered over the eye (none under the sky at rest, all of the match's rain under a storm's cloud), and the
+  // far shafts hang under the gathered mass; without it, as the weather here says.
+  float rain_now = fog_b.w, shafts_now = fog_b.y;
+  if (mass_w.w > 0.5) {
+    rain_now = mass_b.x * smoothstep(0.74, 0.96, MassAt(eye_world.xz));
+    shafts_now = mass_b.x;
+  }
   if (debug == 4) {  // the distance: red every 10 m, green every 100 m, blue every 1000 m
     out_color = vec4(nothing ? vec3(0.0) : vec3(fract(L / 10.0), fract(L / 100.0), fract(L / 1000.0)) * view.z, 0.0);
     return;
@@ -1035,28 +1299,119 @@ void main() {
     }
   }
 
+  // D231: the surface fog (the user, 21 Nov 2026: "surface fog ... thick and shin-high, like a bog or swamp. much like
+  // it does on islands in real life. Sparsely covering and moving slowly over terrain and water surface"; "more wispy
+  // like in The Division"; "should also be elevation based"; pushed about by what moves through it, ground_fog.h).
+  // A low layer of billows on the ground or the water under what is seen: the terrain's height there (its heightmap,
+  // "use the heightmap of the terrain"), or the sea's where the ground is under it. What stands on the terrain (a
+  // wall, a hull, a roof) has the fog only as far up it as the layer goes. The
+  // ray's last stretch, from where it comes into the layer down to what is seen (14 m of it at the most), in six
+  // steps: at each the clouds' own noise volumes at a few metres' scale (the shape's billows, worn by the detail's
+  // wisps), thick at the ground and breaking up toward the layer's top (twice its set depth), drifting a third of a
+  // metre a second and slowly turning over. In patches (surf.z how sparse), low ground only (thinning from 40% of
+  // surf_b.x metres over the sea, none above it), times how much of it the field holds there. Its light: the haze's,
+  // darker in its depths than at its tops. Within 300 m.
+  float surf_through = 1.0, surf_lit = 0.0;  // what shows through it, and its own light (of the haze's)
+  if (surf.w > 0.5 && terr.z > 0.5 && !nothing && seen > 1.2 && seen < 300.0) {
+    float ground_y = TerrainHeight(P.xz);
+    if (fog_b.z > 0.5) ground_y = max(ground_y, sea);
+    float over = max(P.y - ground_y, 0.0);
+    float deep = surf.y * 2.0;
+    float low_ground = fog_b.z > 0.5 ? 1.0 - smoothstep(surf_b.x * 0.4, surf_b.x, ground_y - sea) : 1.0;
+    if (over < deep && low_ground > 0.0) {
+      vec2 slow = drift.xy * 0.05;
+      vec2 at = P.xz + slow;
+      float lumps = textureLod(weatherTex, at / 260.0, 0.0).r * 0.7 + textureLod(weatherTex, at / 41.0 + 0.37, 0.0).g * 0.3;
+      float sparse = smoothstep(surf.z, surf.z + 0.22, lumps);
+      vec2 guv = (P.xz - ground_w.xy) * ground_w.z;
+      vec2 edge = min(guv, 1.0 - guv);
+      float pushed = ground_w.w > 0.5
+          ? mix(1.0, min(textureLod(groundTex, guv, 0.0).b, 2.0), smoothstep(0.0, 0.08, min(edge.x, edge.y))) : 1.0;
+      float amount = sparse * pushed * low_ground * (1.0 - smoothstep(200.0, 300.0, seen));
+      if (amount > 0.002) {
+        // Wisps, not a blanket (the user's picture of The Division's ground fog, 21 Nov 2026): thin enough that its
+        // billows show (seen straight down through a billow's middle about two thirds hidden at the most set, a veil
+        // between them), clumps of a few metres standing higher than the mist between, each sample lit by how high in
+        // its clump it is (bright tops, dim depths), summed from the eye's side so the near billows hide the far ones.
+        // Far off the noise is read coarser (no shimmer).
+        float climb = max(abs(rd.y), 0.04);
+        float len = min((deep - over) / climb, 9.0);
+        const int ns = 8;
+        float ds = len / float(ns);
+        float turn = eye.w * 0.03;
+        float coarse = max(0.5, 2.5 * smoothstep(50.0, 220.0, seen));
+        float through = 1.0, lit = 0.0;
+        for (int i = ns - 1; i >= 0; --i) {  // from the eye's side down to what is seen
+          // (Each sample moved by a third of a step at the most from the middle of its own: less grain.)
+          float along = len * (float(i) + 0.5 + (dither - 0.5) * 0.65) / float(ns);
+          vec3 X = P - rd * along;
+          float hn = (over + along * climb) / deep;  // 0 at the ground, 1 at the layer's top
+          vec3 q = vec3(X.x + slow.x, hn * deep * 2.2 + turn, X.z + slow.y);
+          float clump = textureLod(shapeTex, vec3(q.x, turn * 0.6, q.z) / 34.0, coarse).r;
+          float billow = textureLod(shapeTex, q / 8.0, coarse).r;
+          float wisp = textureLod(detailTex, q / 1.9 + vec3(0.0, turn, 0.0), coarse).r;
+          float stands = mix(0.3, 1.0, smoothstep(0.38, 0.72, clump));  // how high the fog stands here, of the layer
+          float hl = hn / stands;
+          float d = (billow * 0.75 + clump * 0.55) * 1.9 - 0.88 - hl * 0.75;
+          d -= (1.0 - wisp) * 0.38 * (0.25 + hl);
+          d = smoothstep(0.0, 0.4, d);
+          float part = 1.0 - exp(-surf.x * d * amount * ds);
+          lit += through * part * mix(0.38, 1.2, clamp(hl, 0.0, 1.0)) * (1.0 - 0.2 * d);
+          through *= 1.0 - part;
+        }
+        surf_through = through;
+        surf_lit = lit;
+      }
+    }
+  }
+  // D231 (native_x_renderer_sky_debug 13): the ground fog alone: red how much it hides (1 - exp(-tau)), green its
+  // density's setting times 10, blue 1 where the sea's height is not known.
+  if (debug == 13) {
+    out_color = vec4(vec3(1.0 - surf_through, surf.x * 0.1, fog_b.z > 0.5 ? 0.0 : 1.0) * view.z, 0.0);
+    return;
+  }
   // The rain shafts: under the thicker cloud (the clouds' own map), from the cloud base down, slanted by the wind.
   float tau_rain = 0.0;
-  if (fog_b.y > 0.0 && (fog_off & 16) == 0) {
+  if (shafts_now > 0.0 && (fog_off & 16) == 0) {
     float base = cloud.z;
     float t_end = min(L, 16000.0);
     if (rd.y > 1e-4) t_end = min(t_end, (base + 200.0 - eye_h) / rd.y);
     const float t_start = 500.0;
-    if (t_end > t_start && eye_h < base) {
+    // With the clouds' mass the shafts hang under the storm alone, a kilometre or two across: twenty steps through
+    // 16 km (800 m each) put it down as a few dark blocks (runs cstorm4_in, cstorm4_out). Marched only where the ray
+    // is inside the storm's rain shield and a little round it (a cylinder round its centre); a ray that misses it
+    // has no shaft.
+    float t_from = t_start;
+    if (mass_w.w > 0.5 && storm_b.z > 0.5) {
+      vec2 off = eye_world.xz - storm_a.xy;
+      float reach = storm_a.w * 1.15;
+      float aa = dot(rd.xz, rd.xz), bb = dot(off, rd.xz), cc = dot(off, off) - reach * reach;
+      float disc = bb * bb - aa * cc;
+      if (aa > 1e-8 && disc > 0.0) {
+        float root = sqrt(disc);
+        t_from = max(t_from, (-bb - root) / aa);
+        t_end = min(t_end, (-bb + root) / aa);
+      } else {
+        t_end = t_from;
+      }
+    }
+    if (t_end > t_from && eye_h < base) {
       const int n = 20;
-      float dt = (t_end - t_start) / float(n);
-      float t = t_start + dt * dither;
-      float edge = mix(0.74, 0.44, fog_b.y);
+      float dt = (t_end - t_from) / float(n);
+      float t = t_from + dt * dither;
+      float edge = mix(0.74, 0.44, shafts_now);
       vec2 along = normalize(vec2(6.0, 3.0));
       for (int i = 0; i < n; ++i) {
         float a = eye_h + rd.y * t;
         vec2 wp = eye.xz + rd.xz * t + drift.xy - along * (base - a) * (0.1 + rain.x);
         float cell = smoothstep(edge, edge + 0.1, texture(weatherTex, wp / 40000.0).r);
+        // D232: with the clouds' mass, the shafts hang under where it is gathered (the rain is the clouds').
+        if (mass_w.w > 0.5) cell = smoothstep(0.74, 0.96, MassAt(eye_world.xz + rd.xz * t));
         float streak = 0.5 + 0.5 * texture(weatherTex, wp / 1700.0).r;
         float under = 1.0 - smoothstep(base - 350.0, base + 150.0, a);
         // (Its streaks' look up skipped where the step adds nothing cost more than it saved: the gradients it then needs
         // at every step, for the same texture level. Measured on four maps, 20 Nov 2026.)
-        tau_rain += 0.0007 * fog_b.y * cell * streak * under * dt * smoothstep(t_start, t_start + 700.0, t);
+        tau_rain += 0.0007 * shafts_now * cell * streak * under * dt * smoothstep(t_start, t_start + 700.0, t);
         t += dt;
       }
     }
@@ -1090,8 +1445,8 @@ void main() {
   // one in the picture (the ground there, and whether a drop has just landed on it).
   vec3 rain_light = vec3(0.0);
   float wet = 1.0, streaks = 0.0;
-  if (fog_b.w > 0.0 && (fog_off & 32) == 0) {
-    float amount = fog_b.w, tsec = eye.w;
+  if (rain_now > 0.0 && (fog_off & 32) == 0) {
+    float amount = rain_now, tsec = eye.w;
     // (With most of the lightning's light again, now that a flash is one smooth swell: unlit, the streaks went dark
     // against the lit scene for the flash's half second and came back after it, as if the rain stopped and began
     // again: runs fl0 and fl1.)
@@ -1403,6 +1758,14 @@ void main() {
   // The low layer nearest, the haze behind it, the far rain behind both.
   vec3 light = low * (1.0 - t_low) + t_low * (haze * (1.0 - t_fog) + t_fog * rain_far * (1.0 - t_rain));
   float shows = t_low * t_fog * t_rain;
+  {  // D231: the surface fog, under the rest (it lies at the far end of the ray)
+    // (Its light: the haze's, a little of the sun's own toward the sun by day.)
+    vec3 own = (low + sun_color.rgb * sun_dir.w * (1.0 - night_amount) * 0.3) * surf_lit +
+               sun_color.rgb * sun_dir.w * (1.0 - night_amount) * 0.06 * (1.0 - surf_through) *
+                                    pow(max(sun_cos, 0.0), 6.0);
+    light += shows * own;
+    shows *= surf_through;
+  }
   // D192: the bolt (Sky::FillBolt lays its pieces out in the view's pixels): a white-hot core in a blue glow (Beachhead's
   // bolt shader), hidden where the view's depth is nearer, seen through the haze between.
   vec3 bolt_light = vec3(0.0);
@@ -1463,20 +1826,37 @@ void main() {
       }
       // (D215: darker, the user: "Let's make cloud shadow darker than that please", "Darker still", then "That's a
       // little too dark": 6.0 and 0.91, between 4.5 and 0.88 (the ground 21% darker) and 7.5 and 0.93 (34%);
-      // D214's 2.2 and 0.75 (9%). Then "A bit darker": 6.75 and 0.92, about 31%.)
-      float through = exp(-od * 6.75);
+      // D214's 2.2 and 0.75 (9%). Then "A bit darker": 6.75 and 0.92, about 31%. D221: "cloud shadows are still
+      // too dark", 19 Nov 2026, seen from over the clouds: 5.0 and 0.89, about 24%.)
+      float through = exp(-od * 5.0);
       // Under the weather's overcast there is little direct sun left to take (the sun's light 75% down at full
       // weather, Fill): the shadows' most falls to 15% of it as the weather here closes in (D217: under a 100% storm
       // the tank and the ground were left nearly black, runs vwet1 and vwet2).
       float direct = 1.0 - 0.85 * smoothstep(0.3, 0.9, layers.w);
-      cloud_shade = mix(1.0, through, 0.92 * direct * smoothstep(0.05, 0.12, ls.y));
+      cloud_shade = mix(1.0, through, 0.89 * direct * smoothstep(0.05, 0.12, ls.y));
     }
   }
+  float keep = shows * wet * (1.0 + (0.45 + 0.35 * smoothstep(0.75, 1.0, rain_now)) * streaks) * (1.0 - sea_f);
+  // D221: the clouds laid over the ground before this pass (CloudsOver) are not in their own shadow (from over the
+  // clouds the shadows showed on the clouds' tops, the user's picture of 19 Nov 2026): what they added (as that pass
+  // works it out) is given back the share the shadow took, so only the ground through them is darkened.
+  vec3 cloud_back = vec3(0.0);
+  if (layers.z > 1.5 && cloud_shade < 1.0) {
+    vec2 uv = gl_FragCoord.xy / view.xy;
+    vec4 oc = textureLod(overCloudTex, uv, 0.0), ow = textureLod(overWhereTex, uv, 0.0);
+    if (1.0 - oc.a >= 0.004 && ow.z >= 1e-3) {
+      float km = seen * 1e-3;
+      float mean = ow.x / ow.z, half_km = ow.y / ow.z, first = ow.w / ow.z;
+      float before = km <= first ? 0.0 : smoothstep(max(mean - half_km, first), mean + half_km, km);
+      cloud_back = oc.rgb * before * view.z * keep * (1.0 - cloud_shade);
+    }
+  }
+  // (D222, upstream's: the buildings' rooms lifted at night, with this pass.)
   float room_seen = 0.0, room_left = 0.0;
   float room = !nothing && room_info.x > 0.5 ? RoomLift(P, facing, room_seen, room_left) : 1.0;
   vec3 room_tint = room_info.y > 0.5 ? (vec3(0.0, 0.25, 0.0) * room_seen + vec3(0.3, 0.0, 0.0) * room_left) * view.z : vec3(0.0);
-  out_color = vec4((light + rain_light + bolt_light) * view.z + sea_refl * sea_f * shows + room_tint,
-                   shows * wet * (1.0 + (0.45 + 0.35 * smoothstep(0.75, 1.0, fog_b.w)) * streaks) * (1.0 - sea_f) * cloud_shade * room);
+  out_color = vec4((light + rain_light + bolt_light) * view.z + sea_refl * sea_f * shows + cloud_back + room_tint,
+                   keep * cloud_shade * room);
 }
 )";
 // The view's lowest heights, for the sea's (Sky::ReadSea): each pixel of the small target the lowest of 4 x 4 places of
@@ -1606,7 +1986,7 @@ void main() {
   if (drift.x > 0.0) {
     vec2 c = 0.5 * view.xy, d = px - c;
     float ca = cos(drift.y), sa = sin(drift.y);
-    d = vec2(ca * d.x - sa * d.y, sa * d.x + ca * d.y) / (1.0 + drift.x * (0.0016 * view.x / view.y + 0.004));
+    d = vec2(ca * d.x - sa * d.y, sa * d.x + ca * d.y) / (1.0 + drift.x);  // (D222: drift.x the margin itself)
     from = c + d + drift.zw * view.y;
   }
   vec2 at = clamp(from + bend * 0.035 * view.y, vec2(0.5), view.xy - 0.5);
@@ -1873,9 +2253,46 @@ void main() {
 }
 )";
 
+// Every texel read of the sky's shaders stays inside its texture (D230). A read at a place worked out in floats
+// (the rain's kick-up eight pixels under a pixel, the reflection's march, a place that came out as not a number:
+// the kick-up's loop left on `q.y < 0.0 || q.y >= view.y`, which a NaN passes) went outside it, which Vulkan
+// leaves undefined without robust image access: the cause of the AMD driver's "GPU page fault", a read far
+// from any bound memory, inside the fog pass, in storms. NXR_SKY_FETCH_RAW=1 (a developer's): as before.
+std::string WithSafeFetch(const std::string& source) {
+  static const bool raw_fetch = [] {
+    const char* v = std::getenv("NXR_SKY_FETCH_RAW");
+    return v && *v == '1';
+  }();
+  std::string text = source;
+  if (!raw_fetch && text.rfind("#version", 0) == 0) {
+    const size_t eol = text.find('\n');
+    if (eol != std::string::npos)
+      text.insert(eol + 1, "#define texelFetch(t, p, l) texelFetch(t, clamp(ivec2(p), ivec2(0), textureSize(t, l) - 1), l)\n");
+  }
+  return text;
+}
+
 RefCntAutoPtr<IShader> MakeShader(IRenderDevice* device, SHADER_TYPE type, const std::string& source, const char* name) {
   RefCntAutoPtr<IShader> shader;
-  std::vector<uint32_t> spirv = CompileGlsl(type == SHADER_TYPE_VERTEX ? GlslStage::kVertex : GlslStage::kPixel, source, name);
+  // NXR_SKY_DEFINES=A,B (a developer's, for bisecting the shaders): #define A and B after the #version line.
+  std::string text = source;
+  static const std::string defines = [] {
+    const char* v = std::getenv("NXR_SKY_DEFINES");
+    std::string out;
+    for (std::string rest = v ? v : ""; !rest.empty();) {
+      const size_t comma = rest.find(',');
+      const std::string one = rest.substr(0, comma);
+      if (!one.empty()) out += "#define " + one + "\n";
+      rest = comma == std::string::npos ? "" : rest.substr(comma + 1);
+    }
+    return out;
+  }();
+  if (!defines.empty() && text.rfind("#version", 0) == 0) {
+    const size_t eol = text.find('\n');
+    if (eol != std::string::npos) text.insert(eol + 1, defines);
+  }
+  if (type == SHADER_TYPE_PIXEL) text = WithSafeFetch(text);
+  std::vector<uint32_t> spirv = CompileGlsl(type == SHADER_TYPE_VERTEX ? GlslStage::kVertex : GlslStage::kPixel, text, name);
   if (spirv.empty()) return shader;
   ShaderCreateInfo info;
   info.Desc.Name = name;
@@ -1920,6 +2337,15 @@ struct SkyConstantBlock {
   float gale[4];  // D194
   float storm_a[4], storm_b[4];  // D208
   float layers[4];               // D211
+  float storm_c[4];              // D229
+  float ground_w[4];             // D231
+  float surf[4];                 // D231
+  float surf_b[4];
+  float terr_scale[4], terr_offset[4], terr_uv[4], terr[4];  // D231
+  float mass_w[4];  // D232
+  float mass_b[4];
+  float wake_seg[Sky::Inputs::kWakeSegments * 2][4];  // D234
+  float wake_n[4];
   float rooms[kMaxRooms * kRoomRows][4];  // D222: per room the world to its space (three rows), its half size and lift, its box on the view, its roof
   float room_info[4];             // D222: x how many rooms; y 1 to tint them (the developer's view)
 };
@@ -2087,12 +2513,17 @@ bool Sky::WetCopy(IDeviceContext* context, ITextureView* from, ITexture* to, flo
   return true;
 }
 
+static double WallSeconds() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+constexpr double kShoveLength = 1.6;  // D222: a shove's length, seconds
+
 bool Sky::Lens(IDeviceContext* context, ITexture* color, uint32_t width, uint32_t height, bool drops,
                const GlassInputs* glass) {
   if (!color || !width || !height || !Ready()) return false;
   const bool glassy = glass && glass->mask && glass->world_depth && glass->view_depth &&
                       last_fill_.size() == sizeof(SkyConstantBlock);
-  if ((!drops || lens_wet() < 0.01f) && sway_ < 0.005f && edge_ < 0.005f && !glassy) return false;
+  if ((!drops || lens_wet() < 0.01f) && sway_ < 0.005f && edge_ < 0.005f && !glassy && !shoving()) return false;
   const bool depthy = glass && glass->world_depth && glass->view_depth;  // D195
   const TextureDesc& desc = color->GetDesc();
   if (!lens_pso_ || lens_format_ != desc.Format) {
@@ -2193,11 +2624,28 @@ bool Sky::Lens(IDeviceContext* context, ITexture* color, uint32_t width, uint32_
     const float jy = float(0.5 * std::sin(t * 37.0 + 0.7) + 0.3 * std::sin(t * 73.0 + 2.9) + 0.2 * std::sin(t * 97.0 + 0.4));
     const float jr = float(0.6 * std::sin(t * 47.0 + 1.9) + 0.4 * std::sin(t * 83.0 + 0.2));
     const float s = sway_ * buffet;
-    k.drift[0] = sway_;
+    const float aspect = float(width) / float(std::max(height, 1u));
+    // drift.x: how much larger the picture is drawn so its corners stay filled (the most the shakes can move it).
+    k.drift[0] = sway_ * (0.0016f * aspect + 0.004f);
     k.misc[3] = edge_;  // D194
     k.drift[1] = s * 0.0016f * jr;
     k.drift[2] = s * 0.0016f * jx;
     k.drift[3] = s * 0.0016f * jy;
+    // D222: a close strike's shove: a push of up to 1.1% of the view's height away from it (the picture moved the
+    // other way), swinging back at 2 Hz and settling within about a second, a little down and a little turned with
+    // it, and the thunder's rumble on it (11 Hz, gone in half a second).
+    const double ts = t - shove_start_;
+    if (shove_amp_ > 0.0f && ts >= 0.0 && ts < kShoveLength) {
+      const float e = float(std::exp(-ts * 3.0)) * float(std::min(1.0, (kShoveLength - ts) / 0.2));
+      const float tau = 6.2831853f;
+      const float swing = float(std::sin(tau * 2.0 * ts)) * e;
+      const float rumble = float(std::sin(tau * 11.0 * ts) * std::exp(-ts * 6.0)) * 0.18f;
+      const float a = 0.011f * shove_amp_;
+      k.drift[2] += -shove_side_ * a * (swing + rumble);
+      k.drift[3] += a * 0.45f * (float(std::sin(tau * 2.0 * ts + 0.6)) * e + rumble);
+      k.drift[1] += shove_side_ * 0.007f * shove_amp_ * float(std::sin(tau * 1.6 * ts + 0.3)) * e;
+      k.drift[0] += e * (2.0f * a * 1.2f + 2.0f * a * 0.45f * 1.2f + 0.007f * shove_amp_ * aspect);
+    }
   }
   {
     void* data = nullptr;
@@ -2251,6 +2699,13 @@ std::atomic<bool> g_storm_sway{true};
 }
 void SetStormSway(bool on) { g_storm_sway.store(on, std::memory_order_relaxed); }
 void SetEyeOnFoot(bool on_foot) { g_eye_on_foot.store(on_foot, std::memory_order_relaxed); }
+void SetEyeInWorld(bool in_world) { g_eye_in_world.store(in_world, std::memory_order_relaxed); }
+// When a first person weapon was last drawn (DrawPath: a draw with the weapon's own projection): the steady clock's
+// count. A soldier on foot who is alive holds something; the camera of his death does not.
+std::atomic<int64_t> g_first_person_weapon_at{0};
+void NoteFirstPersonWeaponDrawn() {
+  g_first_person_weapon_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
+}
 namespace {
 std::atomic<bool> g_sea_reflection{true};
 }
@@ -2282,6 +2737,8 @@ StrikeWorld StrikeContext() {
   return g_strike;
 }
 
+// D232: the strikes by the clouds' mass (renderer.cpp tells): where a storm's gathered cloud is, not its drawn look.
+std::atomic<bool> g_strike_by_mass{false};
 bool FlashInSlot(int64_t s, double period, float storm, SlotFlash& f) {
   uint64_t state = 0x1943ull ^ (uint64_t(s) * 0x9e3779b97f4a7c15ull);
   if (Uniform(state) > 0.65f + 0.35f * storm) return false;
@@ -2321,12 +2778,24 @@ bool FlashInSlot(int64_t s, double period, float storm, SlotFlash& f) {
     else {
       // D213: in the storm itself (a level-sized storm: placed in the 4 km square and kept only under the storm, most
       // strikes were lost): within its rain shield, the same draws.
-      const float rr = w.storm.radius * std::sqrt(Uniform(state)), ra = Uniform(state) * 6.2831853f;
+      float rr = w.storm.radius * std::sqrt(Uniform(state));
+      const float ra = Uniform(state) * 6.2831853f;
+      // D232: with the clouds' mass, where its tracers come to rest (cloud_mass.cpp: between the eye's wall and the
+      // rain shield's edge, more of them far in): the strikes come from the thickest cloud, the wall's. The same draw.
+      const bool by_mass = g_strike_by_mass.load(std::memory_order_relaxed);
+      if (by_mass) {
+        const float wall = std::max(1.25f * w.storm.eye, 0.12f * w.storm.radius);
+        const float u01 = rr / std::max(w.storm.radius, 1.0f);
+        rr = Lerp(wall, 0.95f * w.storm.radius, std::pow(u01 * u01, 1.4f));
+      }
       ox = w.storm.cx + std::sin(ra) * rr - w.square[0];
       oz = w.storm.cz + std::cos(ra) * rr - w.square[1];
     }
     const float here = storm::At(w.storm, w.square[0] + ox, w.square[1] + oz);
-    if (keep > storm::Smooth(0.3f, 0.7f, here)) return false;
+    // (With the clouds' mass a strike in the storm is kept: it was put where the cloud is. Near the players: as before.)
+    if (!(g_strike_by_mass.load(std::memory_order_relaxed) && !(w.count > 0 && near_group < 0.3f)) &&
+        keep > storm::Smooth(0.3f, 0.7f, here))
+      return false;
     f.angle = std::atan2(ox, oz);
     f.far = std::max(std::sqrt(ox * ox + oz * oz), 1.0f);
   }
@@ -2473,6 +2942,7 @@ void SetStrikeWorld(const storm::Storm& storm, float square_x, float square_z) {
   std::lock_guard lock(g_strike_mutex);
   g_strike.storm = storm, g_strike.square[0] = square_x, g_strike.square[1] = square_z;
 }
+void SetStrikeByMass(bool on) { g_strike_by_mass.store(on, std::memory_order_relaxed); }
 void SetStrikeGroups(const float* xz, uint32_t count) {
   std::lock_guard lock(g_strike_mutex);
   g_strike.count = int(std::min<uint32_t>(xz ? count : 0, 8));
@@ -2492,6 +2962,7 @@ uint32_t LightningStrikes(double from, double to, float weather, LightningStrike
     o.at = f.at;
     o.x = std::sin(f.angle) * f.far, o.z = std::cos(f.angle) * f.far;
     o.strokes = f.strokes;
+    o.bolt = f.bolt;  // D225
     float sum = 0.0f;
     for (int k = 0; k < f.strokes; ++k) sum += f.amp[k];
     o.strength = std::min(1.0f, sum / 2.0f);
@@ -2587,14 +3058,14 @@ SkyLight SkyLightAt(double hour_in, float weather) {
 
 int TestSkyShaders() {
   return int(CompileGlsl(GlslStage::kVertex, kVS, "sky VS").empty()) +
-         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + storm::kGlsl + kCloudBindings + kCloudShared + kCloudPS, "sky clouds PS").empty()) +
-         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kResolvePS, "sky clouds resolve PS").empty()) +
-         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kSkyPS, "sky PS").empty()) +
-         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kOverPS, "sky clouds over PS").empty()) +
-         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kFogShared + kFogClouds + storm::kGlsl + kCloudShared + kFogPS, "sky fog PS").empty()) +
-         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kFogShared + kSeaPS, "sky sea PS").empty()) +
-         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kLensPS, "sky lens PS").empty()) +
-         int(CompileGlsl(GlslStage::kPixel, std::string(kCommon) + kWetPS, "sky wet PS").empty());
+         int(CompileGlsl(GlslStage::kPixel, WithSafeFetch(std::string(kCommon) + storm::kGlsl + kCloudBindings + kCloudShared + kCloudPS), "sky clouds PS").empty()) +
+         int(CompileGlsl(GlslStage::kPixel, WithSafeFetch(std::string(kCommon) + kResolvePS), "sky clouds resolve PS").empty()) +
+         int(CompileGlsl(GlslStage::kPixel, WithSafeFetch(std::string(kCommon) + kSkyPS), "sky PS").empty()) +
+         int(CompileGlsl(GlslStage::kPixel, WithSafeFetch(std::string(kCommon) + kOverPS), "sky clouds over PS").empty()) +
+         int(CompileGlsl(GlslStage::kPixel, WithSafeFetch(std::string(kCommon) + kFogShared + kFogClouds + storm::kGlsl + kCloudShared + kFogPS), "sky fog PS").empty()) +
+         int(CompileGlsl(GlslStage::kPixel, WithSafeFetch(std::string(kCommon) + kFogShared + kSeaPS), "sky sea PS").empty()) +
+         int(CompileGlsl(GlslStage::kPixel, WithSafeFetch(std::string(kCommon) + kLensPS), "sky lens PS").empty()) +
+         int(CompileGlsl(GlslStage::kPixel, WithSafeFetch(std::string(kCommon) + kWetPS), "sky wet PS").empty());
 }
 
 Sky::~Sky() {
@@ -2805,8 +3276,49 @@ void Sky::FillBolt(const Inputs& in, SkyConstantBlock& k, float weather, float s
   k.bolt_box[2] = std::min(box[2], w), k.bolt_box[3] = std::min(box[3], h);
   if (seed != said_bolt_) {
     said_bolt_ = seed;
-    REXLOG_INFO("[native_x_renderer] sky: a lightning bolt {:.0f} m off, {} of its {} pieces in view", dist, n,
-                pieces.size());
+    // (Its place in the world too: to see where the strikes land against the storm's centre and its cloud.)
+    REXLOG_INFO("[native_x_renderer] sky: a lightning bolt {:.0f} m off, {} of its {} pieces in view, at {:.0f} {:.0f}", dist, n,
+                pieces.size(), x, z);
+  }
+}
+
+// D222: a close strike shoves the view (the user, 19 Nov 2026: "When lightning strikes close to the player camera, it
+// should harshly shake the camera, but not too fast. It should feel like a slight shove against the player model"):
+// a bolt within 600 m (full within 120 m), when its thunder gets here (343 m/s). The shove itself is the lens pass's
+// (Lens): one strong push away from the strike that swings back and settles in about a second, with the thunder's
+// rumble on it. Only with the storm's shake on (native_x_renderer_storm_sway).
+bool Sky::shoving() const {
+  const double t = WallSeconds() - shove_start_;
+  return t > -3.0 && t < kShoveLength && shove_amp_ > 0.0f;
+}
+void Sky::WatchShove(const Inputs& in) {
+  if (!g_lightning.load(std::memory_order_relaxed) || !g_storm_sway.load(std::memory_order_relaxed) || in.seconds < 0.0)
+    return;
+  const float weather = std::max(in.match_weather, std::clamp(in.weather, 0.0f, 1.0f));  // (as Fill's strikes)
+  const float storm = Smooth(0.6f, 0.95f, weather);
+  if (storm <= 0.0f) return;
+  const double period = Lerp(16.0f, 5.0f, storm);
+  const int64_t slot = int64_t(in.seconds / period);
+  for (int64_t s = slot; s >= slot - 1 && s >= 0; --s) {
+    SlotFlash f;
+    if (!FlashInSlot(s, period, storm, f) || !f.bolt) continue;
+    const double since = in.seconds - f.at;
+    if (since < 0.0 || since > 2.5 || f.at == shove_strike_) continue;
+    const float x = std::round(in.eye[0] / 4000.0f) * 4000.0f + std::sin(f.angle) * f.far;
+    const float z = std::round(in.eye[2] / 4000.0f) * 4000.0f + std::cos(f.angle) * f.far;
+    const float dx = in.eye[0] - x, dz = in.eye[2] - z;
+    const float up = sea_known_ ? std::max(0.0f, in.eye[1] - sea_) : 0.0f;
+    const float d = std::sqrt(dx * dx + dz * dz + up * up);
+    if (d >= 600.0f) continue;
+    shove_strike_ = f.at;
+    shove_amp_ = 1.0f - Smooth(120.0f, 600.0f, d);
+    shove_start_ = WallSeconds() + std::max(0.0, double(d) / 343.0 - since);
+    // Away from the strike, across the view (the view's right: the first row of its world-to-clip transform).
+    const float rx = in.forward[0][0], rz = in.forward[0][2];
+    shove_side_ = dx * rx + dz * rz >= 0.0f ? 1.0f : -1.0f;
+    REXLOG_INFO("[native_x_renderer] sky: a strike {:.0f} m off shoves the view ({:.2f}, to the {}) in {:.2f} s", d,
+                shove_amp_, shove_side_ > 0.0f ? "right" : "left", shove_start_ - WallSeconds());
+    return;
   }
 }
 
@@ -2853,6 +3365,30 @@ void Sky::Fill(const Inputs& in, SkyConstantBlock& k) {
   k.layers[0] = 0.22f + 0.3f * Smooth(0.1f, 0.6f, in.weather_outside), k.layers[1] = 1.0f - 0.35f * weather;
   k.layers[2] = g_cloud_shadows.load(std::memory_order_relaxed) ? 1.0f : 0.0f;  // D214: the clouds' shadows
   k.layers[3] = weather;  // D217: the weather here, for the clouds' shadows under an overcast
+  for (int i = 0; i < 4; ++i) k.storm_c[i] = in.storm_cloud && in.storm_conv ? in.storm_c[i] : 0.0f;  // D229
+  {  // D234
+    const int n = std::clamp(in.wake_count, 0, Sky::Inputs::kWakeSegments);
+    for (int i = 0; i < n; ++i)
+      for (int c = 0; c < 4; ++c) k.wake_seg[i * 2][c] = in.wake[i][c], k.wake_seg[i * 2 + 1][c] = in.wake[i][4 + c];
+    k.wake_n[0] = float(n);
+    static const bool wake_debug = [] {
+      const char* v = std::getenv("NXR_WAKE_DEBUG");
+      return v && *v == '1';
+    }();
+    k.wake_n[1] = wake_debug ? 1.0f : 0.0f;
+  }
+  if (in.cloud_mass && in.cloud_mass_size > 0.0f)  // D232
+    k.mass_w[0] = in.cloud_mass_origin[0], k.mass_w[1] = in.cloud_mass_origin[1], k.mass_w[2] = 1.0f / in.cloud_mass_size,
+    k.mass_w[3] = 1.0f;
+  k.mass_b[0] = Smooth(0.45f, 0.9f, std::max(in.match_weather, weather));
+  if (in.terrain && in.terrain_size > 0.0f) {  // D231
+    std::memcpy(k.terr_scale, in.terrain_scale, sizeof(k.terr_scale));
+    std::memcpy(k.terr_offset, in.terrain_offset, sizeof(k.terr_offset));
+    std::memcpy(k.terr_uv, in.terrain_uv, sizeof(k.terr_uv));
+    k.terr[0] = in.terrain_size, k.terr[1] = in.terrain_decode, k.terr[2] = 1.0f;
+  }
+  if (in.ground && in.ground_size > 0.0f)  // D231
+    k.ground_w[0] = in.ground_origin[0], k.ground_w[1] = in.ground_origin[1], k.ground_w[2] = 1.0f / in.ground_size, k.ground_w[3] = 1.0f;
   StoreLinear(k.moon_color, kMoon, 0.0f);
   StoreLinear(k.moon_light, kMoon, 0.0f);
   for (int i = 0; i < 3; ++i) k.moon_light[i] *= moon_energy * 0.3f;
@@ -2888,9 +3424,11 @@ void Sky::Fill(const Inputs& in, SkyConstantBlock& k) {
   const float scale = std::clamp(in.cloud_height, 100.0f, 3000.0f) / k.cloud[2];
   k.misc[2] = scale;
   k.drift[0] = float(std::fmod(in.seconds * 6.0, 50400.0)), k.drift[1] = float(std::fmod(in.seconds * 3.0, 50400.0));
+  cloud_drift_[0] = k.drift[0], cloud_drift_[1] = k.drift[1], cloud_scale_ = scale, cloud_known_ = true;  // D229
   // How the clouds form and change: Beachhead's forming clock (atmosphere_view.gd's _evolve: 1 a second at its
   // 100% cloud generation speed), kept by the renderer at the rate set (renderer.cpp, World).
   k.drift[2] = float(std::fmod(in.evolve, 1000.0)), k.drift[3] = 1.0f + 0.8f * outside;
+  cloud_coverage_ = k.cloud[0], cloud_evolve_ = k.drift[2];  // D234
 
   // The fog. The distance fog's setting squared, to a sight of about 1 km at its most; the storm's mist adds to it
   // and brings a low layer of its own. The ground fog: to 28 m over the sea, a sight of about 60 m in its patches
@@ -2906,8 +3444,19 @@ void Sky::Fill(const Inputs& in, SkyConstantBlock& k) {
   // at the eye's height), lower (to 12 m) and everywhere (the shader fills its patches in and lays it on the ground).
   const float gale = Smooth(0.75f, 1.0f, weather);
   k.gale[0] = gale;
-  k.fog_a[2] = ground * ground * 0.06f + mist * 0.0035f + gale * 0.022f;
-  k.fog_a[3] = Lerp(Lerp(28.0f, 60.0f, mist * (1.0f - ground)), 12.0f, gale);
+  // D231: the ground fog is the surface fog now (the sheet in the shader), no longer a share of this layer, which
+  // is the storm's mist alone. The sheet: as deep as set (shin high: half a metre), seen straight down through it
+  // hiding by 3 times the setting's square whatever its depth (thick at its most), and as sparse as set (from
+  // everywhere to a few small patches: the level of its noise, which is 0.5 on average, where its patches begin).
+  k.fog_a[2] = mist * 0.0035f + gale * 0.022f;
+  k.fog_a[3] = Lerp(Lerp(28.0f, 60.0f, mist), 12.0f, gale);
+  if (ground > 0.001f) {
+    const float deep = std::clamp(in.ground_fog_height, 0.2f, 5.0f);
+    // (Its density: thin enough for the billows to show, sky.cpp's shader.)
+    k.surf[0] = 3.2f * ground * ground / deep, k.surf[1] = deep;
+    k.surf_b[0] = std::clamp(in.ground_fog_reach, 1.0f, 500.0f);
+    k.surf[2] = Lerp(0.05f, 0.72f, std::clamp(in.ground_fog_sparse, 0.0f, 1.0f)), k.surf[3] = 1.0f;
+  }
   k.fog_b[0] = in.depth_near;
   k.fog_b[1] = Smooth(0.45f, 0.9f, weather);
   k.fog_b[2] = sea_known_ ? 1.0f : 0.0f;
@@ -2998,6 +3547,8 @@ void Sky::ReadSea(IDeviceContext* context) {
 }
 
 bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
+  const bool clouds_over = clouds_over_;  // D221
+  clouds_over_ = false;
   if (!in.color || !in.depth_srv || !in.width || !in.height || !Ready()) return false;
   const TextureDesc& color = in.color->GetDesc();
   SamplerDesc repeat, point;
@@ -3018,7 +3569,14 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
                                        {SHADER_TYPE_PIXEL, "seaAfterTex", point},
                                        {SHADER_TYPE_PIXEL, "seaFloorTex", point},
                                        {SHADER_TYPE_PIXEL, "shapeTex", repeat},   // D214
-                                       {SHADER_TYPE_PIXEL, "detailTex", repeat}};
+                                       {SHADER_TYPE_PIXEL, "detailTex", repeat},
+                                       {SHADER_TYPE_PIXEL, "overCloudTex", clamp_linear},  // D221
+                                       {SHADER_TYPE_PIXEL, "overWhereTex", clamp_linear},
+                                       {SHADER_TYPE_PIXEL, "stormCloudTex", clamp_linear},  // D229
+                                       {SHADER_TYPE_PIXEL, "stormConvTex", clamp_linear},
+                                       {SHADER_TYPE_PIXEL, "groundTex", clamp_linear},  // D231
+                                       {SHADER_TYPE_PIXEL, "heightTex", point},
+                                       {SHADER_TYPE_PIXEL, "cloudMassTex", clamp_linear}};  // D232
     GraphicsPipelineStateCreateInfo info;
     info.PSODesc.Name = name;
     info.PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
@@ -3038,7 +3596,7 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
     info.pPS = ps;
     info.PSODesc.ResourceLayout.DefaultVariableType = SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC;
     info.PSODesc.ResourceLayout.ImmutableSamplers = samplers;
-    info.PSODesc.ResourceLayout.NumImmutableSamplers = 9;
+    info.PSODesc.ResourceLayout.NumImmutableSamplers = 16;
     device_->CreateGraphicsPipelineState(info, &pso);
     if (pso) pso->CreateShaderResourceBinding(&srb, true);
   };
@@ -3100,6 +3658,10 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   SkyConstantBlock k{};
   Fill(in, k);
   k.bolt[3] = (in.old_rain_order ? 4.0f : 0.0f) + float(in.fog_parts_off);  // BF_FOG_AB, BF_FOG_PARTS (tests)
+  // D221: 2 when the clouds were laid over the view this frame (their textures bound below).
+  // (D229: laid this frame, the textures it laid still the clouds' own.)
+  const bool over_known = clouds_over && clouds_over_frame_ == frames_ && over_tex_[0] && over_tex_[1];
+  if (k.layers[2] > 0.5f && over_known) k.layers[2] = 2.0f;
   k.room_info[0] = float(PackRooms(in, k));  // D222
   k.room_info[1] = in.room_debug ? 1.0f : 0.0f;
   k.room_info[2] = FogWanted(in) ? 0.0f : 1.0f;  // drawn for the rooms alone
@@ -3133,6 +3695,7 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
       const float edge_aim = g_storm_sway.load(std::memory_order_relaxed) && eye_open_ ? storm : 0.0f;
       edge_ += std::clamp(edge_aim - edge_, -dt / 0.5f, dt / 2.0f);
       static bool shaking = false;
+      WatchShove(in);  // D222
       if ((sway_ > 0.5f) != shaking) {
         shaking = !shaking;
         REXLOG_INFO("[native_x_renderer] sky: the storm's shake {} (on foot {}, in the open {})", shaking ? "on" : "off",
@@ -3145,11 +3708,56 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
     // Water splashed on it (sky.h): by the eye's height over the sea and how fast it moves along the ground.
     splash_wet_ = std::max(0.0f, splash_wet_ - dt / splash_dry_);
     if (splash_wet_ <= 0.0f) splash_peak_ = 0.0f;
-    if (sea_known_ && last_eye_valid_ && dt > 0.0f) {
+    // Only the player's own eye, alive in the world, and not on the frames round a cut of the camera (the user, 22 Nov
+    // 2026: "Why does it show the water splash on screen and wetness on gun when you die to respawn": the camera of
+    // a death, of the deploy screen or of a change of team is not an eye in the sea, wherever it is put). The view
+    // must have been the player's for three quarters of a second, and not have jumped (3 m in a frame, or 80 m/s).
+    static float steady = 0.0f;
+    {
+      const float jx = in.eye[0] - last_eye_[0], jy = in.eye[1] - last_eye_[1], jz = in.eye[2] - last_eye_[2];
+      const float jump = last_eye_valid_ ? std::sqrt(jx * jx + jy * jy + jz * jz) : 1e9f;
+      const bool cut = jump > std::max(3.0f, 80.0f * dt);
+      steady = g_eye_in_world.load(std::memory_order_relaxed) && !cut ? steady + dt : 0.0f;
+      if (sea_known_ && steady < 0.75f && in.eye[1] - sea_ < 0.3f && in.eye[1] - sea_ > -30.0f) {
+        static auto said_at = std::chrono::steady_clock::now() - std::chrono::seconds(60);
+        if (std::chrono::steady_clock::now() - said_at > std::chrono::seconds(2)) {
+          said_at = std::chrono::steady_clock::now();
+          REXLOG_INFO("[native_x_renderer] sky: no splash from a camera that is not the player's eye in the world (in the world {}, "
+                      "moved {:.1f} m this frame, {:.1f} m over the sea)",
+                      g_eye_in_world.load(std::memory_order_relaxed), std::min(jump, 99999.0f), in.eye[1] - sea_);
+        }
+      }
+    }
+    // NXR_SPLASH_ANY_CAMERA=1 (a developer's check): as it was, any camera's place taken for the eye's.
+    static const bool any_camera = [] {
+      const char* v = std::getenv("NXR_SPLASH_ANY_CAMERA");
+      return v && *v == '1';
+    }();
+    // And on foot, only an eye that holds a weapon: run skin48_old, the splash came 1.4 s after a death on the American
+    // airfield, the game still calling the player on foot and the view steady: the dying camera lies on the ground,
+    // and with no sea in sight the "sea" is the lowest flat ground seen, the airfield itself.
+    const double since_weapon =
+        double(std::chrono::steady_clock::now().time_since_epoch().count() - g_first_person_weapon_at.load(std::memory_order_relaxed)) *
+        double(std::chrono::steady_clock::period::num) / double(std::chrono::steady_clock::period::den);
+    const bool living = !g_eye_on_foot.load(std::memory_order_relaxed) || since_weapon < 0.5;
+    if (sea_known_ && steady >= 0.75f && !living && in.eye[1] - sea_ < 0.3f && in.eye[1] - sea_ > -30.0f) {
+      static auto said_at = std::chrono::steady_clock::now() - std::chrono::seconds(60);
+      if (std::chrono::steady_clock::now() - said_at > std::chrono::seconds(2)) {
+        said_at = std::chrono::steady_clock::now();
+        REXLOG_INFO("[native_x_renderer] sky: no splash on a view that holds no weapon ({:.1f} m over the sea at {:.1f}; a weapon was "
+                    "last drawn {:.1f} s ago)",
+                    in.eye[1] - sea_, sea_, std::min(since_weapon, 9999.0));
+      }
+    }
+    if (sea_known_ && last_eye_valid_ && dt > 0.0f && ((steady >= 0.75f && living) || any_camera)) {
       const float over = in.eye[1] - sea_;
       const float dx = in.eye[0] - last_eye_[0], dz = in.eye[2] - last_eye_[2];
       const float speed = std::sqrt(dx * dx + dz * dz) / dt;
       if (over < 0.3f && over > -30.0f) {
+        if (splash_wet_ < 0.9f)
+          REXLOG_INFO("[native_x_renderer] sky: the sea splashes on the view ({:.1f} m over the sea at {:.1f}; in the world {}, the view "
+                      "steady for {:.2f} s)",
+                      over, sea_, g_eye_in_world.load(std::memory_order_relaxed), steady);
         splash_wet_ = splash_peak_ = 1.0f, splash_dry_ = 5.0f;
       } else if (over < 1.1f && speed > 1.5f && speed < 40.0f && splash_wet_ < 0.6f) {
         splash_wet_ = splash_peak_ = 0.6f, splash_dry_ = 3.0f / 0.6f;
@@ -3251,6 +3859,23 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   }
   if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "shapeTex")) v->Set(shape_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));  // D214
   if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "detailTex")) v->Set(detail_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
+  if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "stormCloudTex")) v->Set(StormCloudView(in));  // D229
+  if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "stormConvTex")) v->Set(StormCloudView(in, true));
+  if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "cloudMassTex"))  // D232
+    v->Set(in.cloud_mass && in.cloud_mass_size > 0.0f ? in.cloud_mass : StormCloudView(in));
+  if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "heightTex"))  // D231 (the cover's empty layers without one)
+    v->Set(in.terrain && in.terrain_size > 0.0f ? in.terrain : no_cover_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
+  if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "groundTex")) {  // D231 (a black texel without one)
+    if (in.ground && in.ground_size > 0.0f) v->Set(in.ground);
+    else if (no_scene_) v->Set(no_scene_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
+  }
+  {  // D221: the clouds as laid over the view (a black texel when they were not)
+    ITextureView* none = no_scene_ ? no_scene_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
+    ITextureView* oc = over_known ? over_tex_[0]->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : none;
+    ITextureView* ow = over_known ? over_tex_[1]->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : none;
+    if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "overCloudTex"); v && oc) v->Set(oc);
+    if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "overWhereTex"); v && ow) v->Set(ow);
+  }
   // BF_FOG_CHECK=1 (tests): every 60th fog pass drawn twice from the same picture, this way and the old way (bolt.w's
   // 4: the rain's cover, the shafts' streaks and the ground fog's patches looked up for every pixel and step), the
   // two read back and compared: the pixels that differ and by how much.
@@ -3324,6 +3949,39 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
     REXLOG_INFO("[native_x_renderer] sky: fog check: {}x{} format {}, rain {:.2f}: {} pixels differ, by {} at most (a byte)",
                 in.width, in.height, int(cd.Format), k.fog_b[3], differ, most);
   }
+  return true;
+}
+
+// D229: the storm's clouds from the fluid, or a texel of nothing while there are none (storm_c.x then says off).
+ITextureView* Sky::StormCloudView(const Inputs& in, bool conv) {
+  if (in.storm_cloud && in.storm_conv) return conv ? in.storm_conv : in.storm_cloud;
+  if (!no_storm_cloud_) {
+    TextureDesc d;
+    d.Name = "NativeXRenderer sky no storm cloud";
+    d.Type = RESOURCE_DIM_TEX_2D;
+    d.Width = d.Height = 1;
+    d.Format = TEX_FORMAT_RGBA8_UNORM;
+    d.Usage = USAGE_IMMUTABLE;
+    d.BindFlags = BIND_SHADER_RESOURCE;
+    const uint8_t zero[4] = {};
+    TextureSubResData sub{zero, 4};
+    TextureData data(&sub, 1);
+    device_->CreateTexture(d, &data, &no_storm_cloud_);
+  }
+  return no_storm_cloud_ ? no_storm_cloud_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
+}
+
+bool Sky::CloudMap(ITextureView** weather, float drift[2], float* scale) const {
+  if (!cloud_known_ || !weather_) return false;
+  *weather = weather_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+  drift[0] = cloud_drift_[0], drift[1] = cloud_drift_[1];
+  *scale = cloud_scale_;
+  return true;
+}
+bool Sky::CloudShape(ITextureView** shape, float* coverage, float* evolve) const {
+  if (!cloud_known_ || !shape_) return false;
+  *shape = shape_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+  *coverage = cloud_coverage_, *evolve = cloud_evolve_;
   return true;
 }
 
@@ -3403,6 +4061,26 @@ bool Sky::CloudsOver(IDeviceContext* context, const Inputs& in) {
   attribs.NumVertices = 3;
   context->Draw(attribs);
   context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+  clouds_over_ = true;  // D221
+  // D229: the two copied for the fog (sampled only: never a target).
+  clouds_over_frame_ = frames_;
+  ITexture* laid[2] = {history_[history_now_], where_history_[history_now_]};
+  for (int i = 0; i < 2; ++i) {
+    const TextureDesc& ld = laid[i]->GetDesc();
+    if (!over_tex_[i] || over_tex_[i]->GetDesc().Width != ld.Width || over_tex_[i]->GetDesc().Height != ld.Height ||
+        over_tex_[i]->GetDesc().Format != ld.Format) {
+      over_tex_[i].Release();
+      TextureDesc cd = ld;
+      cd.Name = i == 0 ? "NativeXRenderer sky clouds over, the fog's" : "NativeXRenderer sky clouds over, where, the fog's";
+      cd.BindFlags = BIND_SHADER_RESOURCE;
+      device_->CreateTexture(cd, nullptr, &over_tex_[i]);
+    }
+    if (over_tex_[i]) {
+      CopyTextureAttribs copy(laid[i], RESOURCE_STATE_TRANSITION_MODE_TRANSITION, over_tex_[i],
+                              RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->CopyTexture(copy);
+    }
+  }
   return true;
 }
 
@@ -3441,9 +4119,12 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
     ImmutableSamplerDesc samplers[] = {{SHADER_TYPE_PIXEL, "shapeTex", repeat},
                                        {SHADER_TYPE_PIXEL, "detailTex", repeat},
                                        {SHADER_TYPE_PIXEL, "weatherTex", repeat},
-                                       {SHADER_TYPE_PIXEL, "cloudDepthTex", point}};
+                                       {SHADER_TYPE_PIXEL, "cloudDepthTex", point},
+                                       {SHADER_TYPE_PIXEL, "stormCloudTex", clamp},  // D229
+                                       {SHADER_TYPE_PIXEL, "stormConvTex", clamp},
+                                       {SHADER_TYPE_PIXEL, "cloudMassTex", clamp}};  // D232
     targets = 2;
-    pipeline("NativeXRenderer sky clouds", cloud_ps_, TEX_FORMAT_RGBA16_FLOAT, samplers, 4, cloud_pso_, cloud_srb_);
+    pipeline("NativeXRenderer sky clouds", cloud_ps_, TEX_FORMAT_RGBA16_FLOAT, samplers, 7, cloud_pso_, cloud_srb_);
   }
   if (!resolve_pso_) {
     ImmutableSamplerDesc samplers[] = {{SHADER_TYPE_PIXEL, "weatherTex", repeat},
@@ -3500,6 +4181,13 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
       failed_ = true;
       return false;
     }
+    // D229: cleared as they are made, so no pass ever reads one never written (on the AMD driver an unwritten target's
+    // compression data is undefined).
+    for (ITexture* t : {clouds_.RawPtr(), history_[0].RawPtr(), history_[1].RawPtr(), where_.RawPtr(),
+                        where_history_[0].RawPtr(), where_history_[1].RawPtr()}) {
+      const float zero[4] = {};
+      context->ClearRenderTarget(t->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), zero, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    }
   }
 
   SkyConstantBlock k{};
@@ -3523,6 +4211,10 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
     std::memcpy(cloud_eye_, in.eye, sizeof(cloud_eye_));
     cloud_eye_valid_ = true;
     k.misc[3] = std::clamp(0.1f + moved / 20.0f, 0.1f, 0.6f);
+    // D223: while lightning lights the clouds and for a little after, most of this frame (with a tenth, a flash of a
+    // fifth of a second hardly showed in them before it was gone).
+    if (k.flash[3] > 0.003f) cloud_flash_at_ = in.seconds;
+    if (in.seconds >= cloud_flash_at_ && in.seconds - cloud_flash_at_ < 0.6) k.misc[3] = std::max(k.misc[3], 0.8f);
   }
   {
     void* data = nullptr;
@@ -3567,6 +4259,9 @@ bool Sky::Apply(IDeviceContext* context, const Inputs& in) {
     set(cloud_srb_, "detailTex", detail_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
     set(cloud_srb_, "weatherTex", weather_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
     set(cloud_srb_, "cloudDepthTex", in.depth_srv);
+    set(cloud_srb_, "stormCloudTex", StormCloudView(in));  // D229
+    set(cloud_srb_, "stormConvTex", StormCloudView(in, true));
+    set(cloud_srb_, "cloudMassTex", in.cloud_mass && in.cloud_mass_size > 0.0f ? in.cloud_mass : StormCloudView(in));  // D232
     renderer::SkySectionBegin(0);
     draw2(clouds_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET), where_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET),
           in.checker_clouds ? (cw + 1) / 2 : cw, ch, cloud_pso_, cloud_srb_);

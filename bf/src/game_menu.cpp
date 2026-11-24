@@ -591,6 +591,7 @@ enum class Page {
   kIntro,  // the startup cards with the logo music (IntroPage), at every launch
   kStats,  // our Stats & Awards (StatsPage), from the main menu
   kAchievements,  // our Achievements (AchievementsPage), from the main menu
+  kUnlockables,   // our Unlockables (UnlockablesPage), from the main menu: what is unlocked, and worn or not
   kLeaderboards,  // our Leaderboards (LeaderboardsPage), from the main menu and the pause
   kFriends,  // our Join Match With Friends (FriendsPage), from the main menu
   kScoreboard,  // our Scoreboard (ScoreboardPage), from the pause
@@ -1275,6 +1276,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         case Page::kIntro: IntroPage(d, io, in); break;
         case Page::kStats: StatsPage(d, io, in); break;
         case Page::kAchievements: AchievementsPage(d, io, in); break;
+        case Page::kUnlockables: UnlockablesPage(d, io, in); break;
         case Page::kLeaderboards: LeaderboardsPage(d, io, in); break;
         case Page::kFriends: FriendsPage(d, io, in); break;
         case Page::kScoreboard: ScoreboardPage(d, io, in); break;
@@ -4390,9 +4392,15 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "bf_menu_sounds_volume", 0, 100, 5, Percent, 100));
     // The achievement popup and its chime (achievement_toast.h).
     rows.push_back(Toggle("Achievements", "Achievement popups",
-                          "A note at the top right and a short chime when you unlock an achievement. "
-                          "Your own sounds\\achievement.wav in the game's user folder plays in place of the chime.",
+                          "A note at the top right when you unlock an achievement, with a short chime unless "
+                          "Achievement sound is off.",
                           "bf_achievement_popups"));
+    // (The user, 23 Nov 2026: "Add an option to toggle the Achievement sound".)
+    rows.push_back(Toggle("Achievements", "Achievement sound",
+                          "The chime that plays with an achievement's popup. Off: the popup alone, silent. "
+                          "Your own sounds\\achievement.wav in the game's user folder plays in place of the chime. "
+                          "Applies at once.",
+                          "bf_achievement_sound"));
     rows.push_back(Slider("Achievements", "Achievement sound volume", "How loud the achievement chime is. 0 is silent.",
                           "bf_achievement_volume", 0, 100, 5, Percent, 80));
     // The rest of the game's own Sound page (its master, music and dialogue volumes are the rows above).
@@ -5552,6 +5560,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       else if (w == "bfrb") PressBf({0x0200}), Passing(0x0200);
       else if (w == "bflb") PressBf({0x0100}), Passing(0x0100);
       else if (w == "bfy") PressBf({0x8000}), Passing(0x8000);  // in play: the next weapon (the wetness's tests)
+      // (The left stick right or left on BF's spawn screen: its kit choice, as BF_SPAWN_PRESSES' lsr and lsl.)
+      else if (w == "bflsr") PressBf({0x0400}), Passing(0x0400);
+      else if (w == "bflsl") PressBf({0x0800}), Passing(0x0800);
 #if defined(BF_DEV_TOOLS)
       else if (w == "changeteam") ChangeTeamNow();  // the other team's hands and weapons (the wetness's tests)
 #endif

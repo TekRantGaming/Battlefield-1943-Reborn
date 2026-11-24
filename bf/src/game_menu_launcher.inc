@@ -2165,7 +2165,7 @@
     switch (clicked) {
       case 0: return Play();
       case 1: return OpenBrowser();
-      case 2: return;  // Unlockables: nothing yet (TekRantGaming, 8 Nov)
+      case 2: page_ = Page::kUnlockables; return;
       case 3: page_ = Page::kSettings, from_home_ = true, tab_ = 0, row_ = 0, scroll_ = 0, sub_ = kSubNone; return;
       case 4: return UpdateNow();
       case 5: page_ = Page::kReport; return;
@@ -2548,7 +2548,9 @@
                        kPmMode = 23, kPmRotation = 24, kPmTickets = 25, kPmTimeLimit = 26, kPmStorm = 27,
                        kPmRotOn = 28, kPmRotAll = 29, kPmRotMap = 30 /* to 33, a map each */, kPmRotBack = 34,
                        // 21 Nov 2026, the page of its own: Weather and time (the Weather tab's switch).
-                       kPmWeatherOn = 35, kPmRows = 36;
+                       kPmWeatherOn = 35,
+                       // D224 (20 Nov 2026): the storm's type, in the Weather tab's rows.
+                       kPmStormType = 36, kPmRows = 37;
   // The game modes. Each map has one in the game's data (its level holds that mode's objects and no other's: Wake
   // Island, Guadalcanal and Iwo Jima Conquest, Coral Sea Air Superiority), so the mode chooses the maps that play it.
   static constexpr const char* kPmModeNames[] = {"CONQUEST", "AIR SUPERIORITY", "ALL MODES"};
@@ -2561,6 +2563,8 @@
   int pm_tickets_ = 0;         // each team's tickets; 0: the map's own
   int pm_time_limit_ = 0;      // minutes; 0: none, the round ends on tickets only
   bool pm_storm_ = false;      // the dynamic storm
+  int pm_storm_type_ = 0;      // D224: kPmStormTypeNames
+  static constexpr const char* kPmStormTypeNames[] = {"STORM", "HURRICANE"};
   bool pm_maps_view_ = false;  // the rail shows the rotation's rows
   // The rail scrolls when its rows are more than it holds: the selection kept in view, the wheel over it.
   float pm_scroll_ = 0;
@@ -2776,6 +2780,7 @@
     pm_tickets_ = std::clamp(std::atoi(settings_.Get("private_match_tickets", "0").c_str()), 0, 9999);
     pm_time_limit_ = std::clamp(std::atoi(settings_.Get("private_match_time_limit", "0").c_str()), 0, 600);
     pm_storm_ = settings_.Get("private_match_dynamic_storm", "0") == "1";
+    pm_storm_type_ = std::clamp(std::atoi(settings_.Get("private_match_storm_type", "0").c_str()), 0, 1);
     pm_maps_view_ = false;
     if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 60;
     pm_edit_ = -1;  // the on screen keys never left open from an earlier visit
@@ -2822,6 +2827,7 @@
     settings_.values["private_match_tickets"] = std::to_string(pm_tickets_);
     settings_.values["private_match_time_limit"] = std::to_string(pm_time_limit_);
     settings_.values["private_match_dynamic_storm"] = pm_storm_ ? "1" : "0";
+    settings_.values["private_match_storm_type"] = std::to_string(pm_storm_type_);
     settings_.values["private_match_password_on"] = pm_pass_on_ ? "1" : "0";
     settings_.values["private_match_password"] = pm_pass_;
     settings_.values["private_match_day_night"] = pm_dn_ ? "1" : "0";
@@ -2853,6 +2859,7 @@
     PmFitOrder();
     for (int m : PmMatchMaps()) o.maps.push_back(kPmMapKeys[m]);
     o.tickets = pm_tickets_, o.time_limit = pm_time_limit_, o.dynamic_storm = pm_weather_on_ && pm_storm_;
+    o.storm_type = pm_weather_on_ ? pm_storm_type_ : 0;
     o.upnp = pm_upnp_;
     // The test launcher (tools	est_progression.py: the test_progression setting, its own backend on this PC's
     // loopback) already answers sign-in, matchmaking and the server list on the ports a LAN match's own backend
@@ -2922,9 +2929,9 @@
     }
     pm_hosting_ = true, pm_joining_ = false, pm_started_at_ = ImGui::GetTime(), pm_read_at_ = -100;
     pm_status_ = {};
-    REXLOG_INFO("BF private match: hosting ({}, {}; tickets {}, time limit {} min, dynamic storm {})", PmHeadline(),
-                kPmModeNames[pm_mode_], pm_tickets_ ? std::to_string(pm_tickets_) : std::string("the map's own"),
-                pm_time_limit_, pm_storm_ ? "on" : "off");
+    REXLOG_INFO("BF private match: hosting ({}, {}; tickets {}, time limit {} min, dynamic storm {}, storm type {})",
+                PmHeadline(), kPmModeNames[pm_mode_], pm_tickets_ ? std::to_string(pm_tickets_) : std::string("the map's own"),
+                pm_time_limit_, pm_storm_ ? "on" : "off", kPmStormTypeNames[pm_storm_type_]);
   }
 
   void EndPrivateMatch() {
@@ -3007,6 +3014,7 @@
       case kPmCloudHeight: return "CLOUD HEIGHT";
       case kPmWeather: return "WEATHER";
       case kPmStorm: return "DYNAMIC STORM";
+      case kPmStormType: return "STORM TYPE";
       case kPmWind: return "WIND";
       case kPmFog: return "DISTANCE FOG";
       case kPmGroundFog: return "GROUND FOG";
@@ -3065,6 +3073,10 @@
       case kPmStorm:
         return "On, the weather builds from the Weather setting to a full storm over each round and eases again (over the match time, "
                "else over half an hour). The wind goes with it unless set apart.";
+      case kPmStormType:
+        return "What the weather builds where it is strong: a thunderstorm (towering clouds, heavy rain and lightning over one "
+               "stretch of the map), or a hurricane (a calm eye, its wall and spiral rain bands). Both come in from the sea as the "
+               "weather rises and cover the map at 100%.";
       case kPmWind: return "From calm to a gale: the stronger the wind, the further the rain leans. Follows the weather until set apart.";
       case kPmFog: return "A haze that hides what is far: at 100% the sight is about a kilometre.";
       case kPmGroundFog: return "A low layer of fog over the sea and the shore, in patches that drift.";
@@ -3206,7 +3218,7 @@
       if (!pm_upnp_) order.push_back(kPmPort);
       order.push_back(kPmWeatherOn);
     } else {
-      order = {kPmTime, kPmDayNight, kPmDayLen, kPmCloud, kPmRate, kPmCloudHeight, kPmWeather, kPmStorm, kPmWind, kPmFog, kPmGroundFog};
+      order = {kPmTime, kPmDayNight, kPmDayLen, kPmCloud, kPmRate, kPmCloudHeight, kPmWeather, kPmStormType, kPmStorm, kPmWind, kPmFog, kPmGroundFog};
     }
     if (std::find(order.begin(), order.end(), pm_row_) == order.end()) pm_row_ = pm_tab_ == 0 && pm_row_ == kPmPort ? kPmUpnp : order.front();
     const int at_row = int(std::find(order.begin(), order.end(), pm_row_) - order.begin());
@@ -3283,6 +3295,7 @@
         REXLOG_INFO("BF private match: Weather and time {}", pm_weather_on_ ? "on: the Weather tab" : "off: the map's usual afternoon");
       }
       if (row == kPmStorm) pm_storm_ = !pm_storm_;
+      if (row == kPmStormType) pm_storm_type_ = (pm_storm_type_ + 2 + step) % 2;
       if (row == kPmDayNight) {
         pm_dn_ = !pm_dn_;
         if (pm_dn_ && pm_daylen_ == 0) pm_daylen_ = 24;  // the time passes: a day of 24 minutes unless set
@@ -3629,12 +3642,17 @@
       number = 1;
       for (const int i : order) {
         if (i == kPmTime || i == kPmDayNight || i == kPmDayLen) continue;
-        const float h = st(35);
+        const float h = st(31);  // (nine rows under the dial since the storm's type, D224: 35 each ran past the column)
         const bool sel = row_frame(i, h);
         const float mid = y + h * 0.5f;
         number_title(i, mid, sel, st(14));
         if (i == kPmStorm) {
           draw_switch(pm_storm_, mid, sel, right);
+        } else if (i == kPmStormType) {
+          std::string v = kPmStormTypeNames[pm_storm_type_];
+          if (sel) v = "<  " + v + "  >";
+          const float vw = kit::SpacedWidth(f.typed, st(7.5f), v, st(1.5f));
+          kit::Spaced(d, f.typed, st(7.5f), ImVec2(right - vw, mid - st(5)), sel ? kit::kInk : kit::kKhaki, v, st(1.5f));
         } else {
           const PmSlide s = PmSlideOf(i);
           const bool typing = pm_slide_edit_ == i;
@@ -4505,6 +4523,55 @@
       OpenUrl(url);
     }
     if (in.back) page_ = Page::kHome;
+  }
+
+  // ---- Unlockables: what the player has unlocked, and whether it is worn (the user, 22 Nov 2026: "commit weapon skin
+  // as an unlock, and only shows if equipped from main menu's unlock screen"). One so far: the Electric weapon skin
+  // (fov.cpp: bf_skin_electric unlocked, bf_skin_equipped worn). Locked, it says how it is unlocked and cannot be
+  // equipped; unlocked, A equips it or takes it off, saved with the settings.
+  void UnlockablesPage(ImDrawList* d, ImGuiIO& io, Input in) {
+    NotePage("unlockables");
+    const Stage st = StageOf(io);
+    const kit::Fonts& f = kit::GetFonts();
+    MenuBackdrop(d, io.DisplaySize, st);
+    kit::Heading(d, st(44), st.P(40, 22), kit::kCream, "UNLOCKABLES", st(2));
+    const bool unlocked = Truthy(Cvar("bf_skin_electric"));
+    const bool equipped = unlocked && Cvar("bf_skin_equipped") == "electric";
+    const ImVec2 a = st.P(40, 96), b = st.P(1240, 268);
+    const bool hover = ImGui::IsMouseHoveringRect(a, b);
+    kit::Paper(d, a, b, st.u, false);
+    d->AddRect(ImVec2(a.x - st(3), a.y - st(3)), ImVec2(b.x + st(3), b.y + st(3)), unlocked ? kit::kGreenBright : kit::kKhakiDim, 0, 0,
+               st(4));
+    // Its swatch: the skin's own colours (dark metal, gold wood) and a stroke of its lightning.
+    const ImVec2 c0(a.x + st(18), a.y + st(18)), c1(c0.x + st(136), c0.y + st(136));
+    d->AddRectFilled(c0, c1, IM_COL32(22, 26, 36, 255));
+    d->AddRectFilled(ImVec2(c0.x, c0.y + st(92)), c1, IM_COL32(196, 150, 52, 255));
+    const ImVec2 bolt[] = {ImVec2(c0.x + st(84), c0.y + st(10)), ImVec2(c0.x + st(54), c0.y + st(52)), ImVec2(c0.x + st(76), c0.y + st(56)),
+                           ImVec2(c0.x + st(46), c0.y + st(104))};
+    d->AddPolyline(bolt, 4, unlocked ? IM_COL32(170, 214, 255, 255) : IM_COL32(110, 118, 132, 255), 0, st(4));
+    const float tx = c1.x + st(22);
+    kit::Spaced(d, f.typed, st(13), ImVec2(tx, a.y + st(22)), kit::kInkFaint, "WEAPON SKIN", st(2));
+    d->AddText(f.ui, st(34), ImVec2(tx, a.y + st(38)), kit::kInk, "Electric");
+    d->AddText(f.ui, st(17), ImVec2(tx, a.y + st(84)), IM_COL32(61, 59, 49, 255),
+               "For your Thompson and Type 100: dark metal, gold wood, and a storm of smoke and lightning round the gun.");
+    d->AddText(f.ui, st(15), ImVec2(tx, a.y + st(112)), IM_COL32(61, 59, 49, 255),
+               unlocked ? "Unlocked. Only your own game draws it: other players do not see it yet."
+                        : "Locked. To unlock it: play a full match under a hurricane.");
+    const char* state = equipped ? "EQUIPPED" : unlocked ? "NOT EQUIPPED" : "LOCKED";
+    const float sw = kit::SpacedWidth(f.stencil, st(26), state, st(2));
+    kit::Spaced(d, f.stencil, st(26), ImVec2(b.x - st(24) - sw, a.y + st(24)), equipped ? kit::kGreenDark : kit::kStamp, state, st(2));
+    std::vector<Cue> cues;
+    if (unlocked) cues.push_back({kit::Button::kA, equipped ? "TAKE OFF" : "EQUIP"});
+    cues.push_back({kit::Button::kB, "BACK"});
+    Prompts(d, st, st.P(40, 720 - 18 - 36), cues, in, 15);
+    if (kit::WatermarkOn()) kit::Stamp(d, st.P(1240 - 118, 18 + 30), st.u, -5, 0.8f);
+    if (unlocked && (in.accept || (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)))) {
+      const char* now = equipped ? "none" : "electric";
+      rex::cvar::SetFlagByName("bf_skin_equipped", now);
+      SetSetting("cvar.bf_skin_equipped", now);
+      REXLOG_INFO("BF weapon skins: the electric skin {}", equipped ? "taken off" : "equipped");
+    }
+    if (in.back) BackToMenu(kRowUnlockables, 3);
   }
 
   // ---- Report an issue: the form that files on GitHub is game_menu_report.inc (ReportPage).

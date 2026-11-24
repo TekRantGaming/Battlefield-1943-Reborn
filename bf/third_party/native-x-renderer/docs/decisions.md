@@ -6863,3 +6863,343 @@ round screen and the load (the storm stood at about -20 dB RMS before it). The h
 the load and was taken at once ("weather 100% to 0%, clouds 90% to 15%, fog 50% to 0%"); the new round's first frame
 (shot_104 in both) a clear starry night, the rifle dry, no storm line after; only the light breeze heard (-76 dB).
 Run rsnap3, a regular server's round change (its weather unchanged): no jump taken, the next round as before.
+
+## D224 — The storm's type: a thunderstorm by default, the hurricane chosen (2026-11-20, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 20 Nov 2026: "Let's also make the Hurricane and storm-type that can be selected, but by default we
+just run the regular storm in the same localized fashion. I want to add more storm types later too." Since D208 the
+match's weather was always a hurricane (an eye, its wall, spiral rain bands).
+
+**What:**
+- storm.h: `StormType` (kStorm 0, kHurricane 1, kStormTypes), `StormTypeName`, a type in `Storm` and in `Of()`. Every
+  type is placed and sized by the weather as D208 and D213 have it (out at sea from 25%, over the level at 100%, never
+  bigger than it), so the weather's percentage means the same whatever the type. Each type is its own case in `At()`
+  and in the GLSL's `storm_at`: a new type is a number, its name and its two cases.
+- kStorm, the default: a thunderstorm, one cell with no eye (the eye's radius 0, so the storm's towers seen from
+  outside, D212, stand at its middle): full strength out to 0.55 of its rain shield, fading to its edge, with heavier
+  cells in it (three lobes that drift round with the clock), never under 0.8 of full inside the core. The towers, the
+  anvil, the volutus (D211), the lightning (placed in its rain shield and kept by its strength, D213) are the same as
+  the hurricane's.
+- kHurricane: D208's model unchanged.
+- The clouds' constants: storm_b.z is 1 plus the type while there is a storm (0 none); every `> 0.5` test of it stays.
+- The match's world (gm_host.cpp `bf_world_storm_type`, 0; world_sync.cpp; the public `WorldState::storm_type`): a byte
+  last in both the "BF43WRLD" ask and the "BF43WRLR" answer. A game or host from before it sends and reads none, so it
+  means a thunderstorm; the server package's gmhost.py sends none, so its servers (Night Ops too) have the
+  thunderstorm, sized and placed as the hurricane was.
+- Custom Match: Weather and time > Storm type (STORM, HURRICANE; `private_match_storm_type`, passed as
+  `--bf_world_storm_type`). The F9 panel: a last row, Storm type (Storm, Hurricane). Tests:
+  `native_x_renderer_storm_type` with `native_x_renderer_world_own`.
+
+**Tested** (dev build, hosted LAN matches on Guadalcanal at 15 h, weather 75%; runs stype0, stype1): the host took
+the type from Custom Match ("storm type storm", "storm type hurricane" in its log), each player's game drew it ("a storm
+centred at 529, 767 ... its eye 0 m, its rain shield 872 m"; the hurricane's eye 78 m), no shader errors. Not tested:
+the F9 row switching it in a running match, a dedicated server with the flag.
+
+## D225 — Thunder by what struck and how far; the storm's wall only out from under it (2026-11-20, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 20 Nov 2026: "why is none of the other audio variants playing for distant thunder or lightning
+too? I only hear the same lightning audio, and its the one meant for lightning strikes being extremely close to the
+player." Since D213 the storm is the level's size, so every strike falls within about 1.5 km; the thresholds of D184
+and D207 (a close crack within 1.5 km, a distant strike to 5 km, the clouds beyond) gave every one the close crack
+(runs stype0, stype1, stypeb0, stypeb1, merge20_smoke: 27 strikes 507 to 1409 m off, all Lightning_strike-close.mp3;
+one at 3.3 km, before the level's middle was known, the distant one). And a view from just inside the storm's rain
+shield (stypeb0, stypeb1) showed its wall (D212) as a flat dark slab at the horizon with hard ends.
+
+**What:**
+- The public `LightningStrike` says whether it is a bolt to the ground (`bolt`, FlashInSlot's). weather_audio.cpp: a
+  flash inside the clouds plays the clouds' rumble (Lightning_clouds.mp3; 1.5 overhead to 0.5 at 3 km); a bolt within
+  350 m the close crack (3.5 at 150 m to 2.8 at 350 m: D208's startling one, near the players); a bolt further off the
+  distant strike (Lightning_strike-distant.mp3; 2.2 at 350 m to 0.8 at 3 km). The delay is the sound's time as before.
+- The storm's wall seen from outside (sky.cpp, D212): shown only out from under the storm, fading in from its rain
+  shield's edge to 1.35 times it (was: outside its dense part, three quarters of the shield, where its deck still hid
+  all but a strip of it), its sides fading over 40% of its width (15%).
+- Its foot a curtain of rain: falling streaks, lighter and hazier toward the horizon (under a near deck only its
+  lowest degrees show; as a flat dark slab they read as nothing, run stypec1). And none from near the cloud base up
+  (0.7 to 1.05 of the base's height over the sea): drawn as from the ground, from a camera 2.7 km up it stood out of
+  the cloud deck as a dark rectangular column (run hurrup_a); up there the clouds below show the storm.
+- D223's lightning inside the clouds (still uncommitted, with D221 to D223): softer and wider (a glow 900 across and a core of 520,
+  14 and 20; was 800 and 240, 14 and 55), shaped by the cloud's density (0.25 to 1.35 of it): the bright core 240
+  across lit a ball that the flat base and top of an even deck cut into a rounded box (run stypeb1).
+
+## D226 — The hurricane as one is seen from above: a clear eye, a dense core, open spiral bands (2026-11-20, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 20 Nov 2026: "The Hurricane shape also looks like a nipple, or a puckered anus... Can we make that
+more realistic?" Since D213 sized the storm to the level, D208's eye (0.09 of the rain shield) was about 80 m across
+at 90% weather on Guadalcanal, smaller than one of the clouds; its strength rose over 1.8 eyes like a cone, and the
+cloud deck followed it into a funnel with the level's own cumulus left inside.
+
+**What** (storm.h, sky.cpp):
+- The eye 0.18 of the rain shield. Where it rains (At, storm_at): calm inside 0.85 of the eye (0.12 of the storm),
+  full by 1.25 of it; the central dense overcast full out to 0.4 of the shield; then two spiral bands, open (about 20
+  degrees) and anticlockwise, at least 0.75 between them as D213 has it, so at 100% the level stays covered.
+- The clouds' own look (`storm_look`, GLSL): the eyewall rising steeply (0.85 to 1.05 of the eye), the central dense
+  overcast whole out to 0.38 of the shield, the bands with clearer gaps between them (a quarter of the cloud there);
+  and `storm_eye`: the cover taken away inside the eye, so it is clear sky to the sea. The cloud's cover, its layers,
+  its density and its kind (the towers) follow the look; D223's dark storm clouds too. A thunderstorm's look is its
+  strength (D224).
+- The storm's towers seen from outside (D212) stand at the new eyewall (1.1 eyes).
+
+## D227 — A GPU particle fluid: threejs-particle-fluids' air and tracers as GLSL compute passes (2026-11-20, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 20 Nov 2026: the hurricane should "look and spin like a real hurricane", form from spinning clouds,
+"controlled particle-based fluid dynamics into the clouds" with planes pushing the cloud and leaving wispy trails, the
+ground fog particle based too, from "a system we could incorporate ... threejs-particle-fluids. We just need to make
+sure it stays performant." The plan, step 1 of 6: `source/.handoff/FLUID-WEATHER-PLAN.md` (not in git).
+
+**What** (`src/fluid.h`, `src/fluid.cpp`; MIT notice: `THIRD_PARTY_NOTICES.md`): `FluidSim`, in 2D (x and z) or 3D.
+One step: forces and the prediction (gravity, a pull toward a low fading past a reach, swirl round it, a Coriolis term,
+drag; in 2D an updraft that takes the air reaching the centre out of the layer and returns it at a source radius, the
+overturning that the Coriolis term turns into spin); a spatial hash grid (each particle's cell hashed into a table of
+twice the particles, counted with atomics, one 256 wide workgroup's scan, a scatter) and neighbour lists (up to 64,
+each bucket visited once); the density constraint as in the library (XPBD's lambda, only against compression, a
+relaxation of a share of the gradient norm at rest), its corrections at most a quarter of h an iteration; velocities
+from the solved positions, at most `max_speed`; vorticity confinement and XSPH viscosity; tracers emitted at up to 16
+emitters into a ring of slots and carried by the air's interpolated velocity until their life is over; their density
+splatted trilinearly with fixed point atomics into an R32F volume. Every pass is followed by a UAV barrier on the
+buffers. The rest density is the kernel summed over a lattice at the rest spacing (mass 1). The 18 storage buffers are
+bound as plain ones (`SHADER_VARIABLE_FLAG_NO_DYNAMIC_BUFFERS`): as Diligent's default dynamic storage buffers the
+pipelines passed the AMD driver's limit of 8 (run fluid1). GPU time per step in the log every 300 steps;
+`LogState` (a developer's, it waits for the GPU) logs the particles' and tracers' state.
+
+**Test** (`NXR_FLUID_TEST=1`, a developer's: a 2D storm of 16,384 particles 24 m apart in a 4 km square, 32,768
+tracers fed on a ring at 1.2 km, 30 steps a second, its density over the picture's top left corner):
+- run fluid2: 0.26 ms of GPU time a step on the RX 7900 XTX (3 density iterations; the longest 0.4 to 0.65 ms).
+- runs fluid2 to fluid4: still tracers; fluid4's state: the air at 7 to 13 m/s, the first step throwing particles at
+  650 m/s (the relaxation near nothing on a slightly packed start), and the tracers' ring reused every 11 s (96 a step
+  into 32,768 slots) before they could go anywhere. Then a relaxation of 0.2 of the norm, the correction and speed
+  caps, 16 tracers a step: run fluid5, the air at about 6 m/s, nothing not finite, the tracers living their 60 s and
+  their plumes bending into commas. A few particles still at the 120 m/s cap; the storm's own tuning is step 3.
+
+## D228 — A storm's real radar as its pattern: Hurricane Michael baked eye-centred (2026-11-20, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 20 Nov 2026: "The hurricane shape should look and spin like a real hurricane. Use real recorded
+weather radar data to base storms from." Michael chosen by the user (a compact Category 5 at landfall, a clear eye and
+tight bands, well covered by coastal radars); the fluid weather plan's step 2.
+
+**What:**
+- `tools/storm_bake.py`: from the Iowa Environmental Mesonet's archive of the NWS NEXRAD composite reflectivity (n0q,
+  0.005 degrees a pixel; public domain), twelve frames, 17:00 to 17:55 UTC on 10 Oct 2018 (27 MB, not in git). Each
+  frame: the eye found (the clear disc inside the brightest ring of the smoothed field), the frame re-centred on it out
+  to 150 km, 256 x 256, north up; the sectors past the radars' reach (no or weak echo, under 10 dBZ, joined to the
+  disc's rim, widened 4 pixels) filled from the storm turned about its eye, half a turn (its two main bands lie on each
+  other) else a quarter; 15 to 55 dBZ as 0 to 255. (Filled from the nearest bearing with data instead, the gap's own
+  dark edge was copied in and the sectors stayed black: bakes 2 and 3.) The eyes found track the storm north-north-east
+  at about 29 km/h, at 30.0 N 85.5 W at 17:30 UTC: the landfall's place and time.
+- `bf/data/weather/storms/michael_2018.bin` (786,464 bytes; README beside it): "BFSTORM1", sizes, the eye's radius in
+  pixels (8.4), km a pixel (1.17), minutes between frames (5), the frames.
+- The game reads it at the start (`bf/src/storm_patterns.cpp`) and hands it to the renderer
+  (`native_x_renderer::SetStormPattern`), which makes it a 2D array texture (R8, a layer a frame) on its thread.
+- `DebugTextureView` (`src/fluid.h`): a developer's view of a 3D volume's slice or an array's layer over a corner of
+  the picture; the fluid's density view uses it too. `NXR_STORM_PATTERN_DEBUG=1` shows the pattern, a frame a second.
+
+**Tested:** run pattern1 (dev build, Guadalcanal): the game read the pattern, the renderer made its texture ("12
+frames of 256x256 ... made"), and the view showed it beside the fluid test. Not yet used by the clouds: that is step 3.
+
+## D229 — The storm made of the sky's own clouds: a flow map carried by the fluid (2026-11-20, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 20 Nov 2026: "The volumetric clouds and sky should be part of this PBF system, right? That way when
+a storm forms, it forms FROM the clouds, pulling them in." The first try (tracers placed by the radar pattern and
+splatted into a density the clouds read, run fstorm2) drew a smooth grey disc with a hole: the specks mixed into an
+even field and the clouds lost their shapes to D217's deck fill. A cloud-cover field carried by the air (run fstorm3f)
+showed nothing either: at this scale the sky's weather map is almost flat, and the clouds' shapes come from the 3D
+shape noise, which did not move.
+
+**What** (fluid.h/.cpp, renderer.cpp `StepStormClouds`, sky.cpp `cloud_density`):
+- `FluidSim::Config::cloud_dims` (2D only): the air's velocity splatted onto a grid (a tent of 1.5 cells, fixed point
+  atomics) and resolved; a flow map (RGBA32F, 256 x 256) carried along it each step (semi-Lagrangian, a midpoint trace
+  back): two phases, each the offset back to where the air at a point was when its phase began. A phase starts again
+  every 90 s, the two half a period apart, each with no share as it does, so what they carry moves with the air and is
+  never stretched past a phase.
+- The convection (RGBA16F, r): carried too and drawn toward the storm's pattern (D228) over 20 s: scattered cells
+  blended by the organisation into Michael's radar, its radius to a power so the radar's eye is the storm's (0.18 of
+  the shield) and its outer bands fall inside the shield (in place of a zoom that showed only its solid core). Its g
+  and b: the sky's weather map read where the flow map says, both phases blended (baked here so the march reads it
+  once).
+- The storm's sim is the same 16,384 particles in the storm's own frame (its shield 1,000 units); no tracers. 0.25
+  ms a step on the RX 7900 XTX (all of it: the air, the grid and both fields).
+- The clouds (`cloud_density`): inside the field (2.8 shields across round the storm, fading at its edge) the weather
+  map is the carried one and the shape noise, its foot and the detail are read at the flowed places, the two phases'
+  shapes blended with their contrast kept (an even blend of two noises is flatter than either); the convection is
+  the storm's strength there in place of D226's drawn look. Outside the field, nothing changes. `storm_c` carries the
+  field's on, phase a's share, its width and how open the eye is; `native_x_renderer_fluid_storm` off: D226's drawn
+  storm.
+- The fog pass's clouds-over textures (D221) are now copies the fog owns, stamped with the frame they were laid in,
+  and new cloud targets are cleared as they are made. These were meant to fix a device loss (a GPU page fault, a read,
+  in the level's first seconds, storm runs since D226), and do not: the clean runs that seemed to show it (bis_noback,
+  bis_noread, fix_c, fstorm7) were chance; runs above90 to above90c and sp_off1 to 3 lost the device with them in. The
+  fault's address is one no object made after the device was ever bound to (the binding report, below). Open.
+- Diagnosis aids: `NXR_DEVICE_FAULT=1` (device.cpp: VK_EXT_device_fault, a lost device's report in the log; it said
+  "GPU page fault detected", a read; with it VK_EXT_device_address_binding_report, every memory bind kept and the
+  fault's address looked up in them); `NXR_SKY_DEFINES=A,B` (the sky's shaders compiled with those #defines, for
+  bisects); `NXR_STORM_FLUID_DEBUG=1` (the convection and the flow map, a checkerboard as carried, over the picture);
+  `NXR_STORM_FLUID_LOG=1` (the particles' state every 10 s); `NXR_STORM_FLOW_SPEED` (the flow's speed, for tuning).
+
+**Tested:** run fstorm7 (dev build, Guadalcanal, hurricane at 90%, 150 s): the flow map wound into a spiral round
+the eye, the convection in Michael's rings across the shield. The device loss above still happens in most storm runs.
+Not yet seen from over the clouds, nor a storm building up.
+
+## D230 — Every texel read of the sky's shaders stays inside its texture: the storm's device loss (2026-11-20, Claude for Battlefield 1943 Reborn)
+
+**Why:** most storm runs lost the GPU on the AMD driver (RX 7900 XTX) within the level's first seconds (D229's open
+item): "GPU page fault detected", a read at about 0x2282_xxxxxx to 0x228A_xxxxxx, far from every reported memory bind,
+and by the breadcrumbs (VK_AMD_buffer_marker) always inside the fog pass ("fog and rain"). Ruled out before by
+batches: the cloud shadows, the fluid, the recorder thread, the OBS layer, the cloud march's changes, the sea's
+reflection, lightning; the race check found nothing.
+
+**Cause:** the fog pass reads texels at places worked out in floats with nothing keeping them inside the texture:
+the rain's kick-up reads the depth eight pixels under the pixel with no check at all, its loop leaves on
+`q.y < 0.0 || q.y >= view.y`, which a place that is not a number passes, and the reflection's march reads at
+`ivec2(uv * view.xy)` for a `uv` up to 1. Vulkan leaves a `texelFetch` outside the texture undefined without robust
+image access; an integer made of a NaN is as far outside as a place can be. Which of the reads it was is not
+established: all of them are held now.
+
+**What:** `WithSafeFetch` (sky.cpp) puts one line after `#version` in every pixel shader of the sky:
+`#define texelFetch(t, p, l) texelFetch(t, clamp(ivec2(p), ivec2(0), textureSize(t, l) - 1), l)`. All 23 reads of the
+sky, clouds, fog, sea, lens and wetness passes go through it, and any added later. `NXR_SKY_FETCH_RAW=1` (a
+developer's) compiles them as before. The shader test (`NXR_SHADER_TEST=1`) compiles what the game compiles.
+
+**Tested** (dev build, Wake Island, hurricane at 90% from above, 60 s, lightning off, `NXR_DEVICE_FAULT=1`; two
+batches): with it 0 of 12 runs lost the device (d230fix_1 to 4, d230fixb_1 to 8); the same build with
+`NXR_SKY_FETCH_RAW=1` lost it in 3 of 6 (d230raw_1, d230rawb_1, d230rawb_3: the same fault, "fog and rain" in
+progress). The shader test: 0 failed. Not tested: other maps and storm types, long sessions, lightning on, other
+GPUs. The other passes' `texelFetch` (night.h, dof.cpp, taa.cpp and the rest) are as they were.
+
+## D231 — The ground fog as a surface fog that is pushed about (2026-11-21, Claude for Battlefield 1943 Reborn; in progress)
+
+**Why:** the user, 21 Nov 2026: "low-cost, close to the ground fog that can be pushed around by any dynamic object,
+bullet shots, explosions, vehicles, characters, wind and rain, but regenerates itself"; "surface fog ... thick and
+shin-high, like a bog or swamp"; "more wispy like in The Division"; "should also be elevation based"; "it shouldn't flow
+through objects, but around them"; "use the heightmap of the terrain".
+
+**What:** the ground fog setting is no longer a share of the tall haze layer (that is the storm's mist alone now). It
+is a low layer of billows on the terrain or the sea (sky.cpp, the fog pass): the ground's height from the terrain's
+heightmap (grass.h's TerrainFrame, kept for it), eight steps through the clouds' own noise volumes, lit by height, in
+patches (sparseness), low ground only (to 14 m over the sea). `ground_fog.h`: a field round the eye (256 x 256 over
+192 m, stepped at 60 Hz) carries how much of it is where: moved by what the game says moves (tick_blend.cpp's part
+trees and skinned roots, `SetFogMovers`), holed where the player's own shots strike (recoil.cpp, `FogShot`), steered
+round what stands 25 cm to 1.8 m over the terrain (a map marked from the view's depth), back to rest in about 12 s.
+Settings: density (the old ground fog), `ground_fog_height` (0.2 to 5 m, 0.5) and `ground_fog_sparse` (0 to 1, 0.7), in
+the match's world (gm_host.cpp, world_sync.cpp: two floats appended to the packets), the F9 menu and cvars.
+
+**Tested** (dev build, Wake Island, on foot; runs gfog_1 to gfog_16): no device lost in any; the shader test 0 failed.
+Seen in screenshots: the fog on the terrain only and off walls and vehicles (gfog_11), a path walked through it
+(gfog_9, gfog_14), a hole where a burst strikes that fills again in seconds (gfog_16). **Not done or not tested:** its
+GPU time; water; night with the new look; the other players' shots and explosions (no hook gives their places); the
+Custom Match screen and server/gmhost.py do not have the two new settings; fog flowing round an object in motion.
+
+## D232 — The clouds' mass as particles, the same in every game (2026-11-21, Claude for Battlefield 1943 Reborn; a developer's first slice, off by default)
+
+**Why:** the user, 21 Nov 2026: "You positive we couldn't make our clouds part of the particle system with the
+storm?"; the Vortex Plume of threejs-particle-fluids as the model; "The simulation should be stepped at 60 Hz"; LOD
+("Lower more static at distance, more particles at close"); "so the client's clouds and fog are in sync".
+
+**What:** `cloud_mass.h` (`native_x_renderer_cloud_particles`, off): 131,072 tracers over 24 km round the eye are the
+clouds' mass; their count in a 256 x 256 grid, blurred and eased, is read by cloud_density in place of the weather
+map's cover. A tracer keeps no state: its birth is a hash of its 1.5 km square of the world, its number and the turn
+of its life by the match's clouds' clock, and it has gone with the clouds' wind and round and into the storm for its
+age: every game works out the same ones. The far, coarse level only (20 Hz, no fluid). The storm's fluid and the fog
+step at 60 Hz. The fog's gusts go by the match's clock.
+
+**Tested:** two separate runs' cloud decks at the same moment differ by 0.8 (mean grey level of 255; 3.3 between shots
+8 s apart, 6 to 7 against other skies: runs cmass_d1, cmass_d2); no device lost. **Not good yet:** with it on the deck
+is thin scraps and stretched streaks, not clouds (the user: "The clouds don't look anything like clouds yet"). Not
+measured: its GPU time. Not built: the near level (the air as a fluid round the player, a plane's wake).
+
+## D233 — The electric weapon skin, ours: on the gun's own mesh, a spiral of smoke with lightning in it (2026-11-22, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 21 and 22 Nov 2026, of the skin that came with the merge: "There's a weird texture ... looks really
+bad"; "Let's get rid of the repaint entirely, and do our own"; "Can you make it a reactive skin on the model? it looks
+like screenspace"; "keep the vortex locked to the weapon model"; "Reloading should also make a cool lightning effect
+when the new magazine is inserted that electrifies the weapon"; "make sure the clouds never obstruct the weapon's
+ironsights"; "more of a uniform spiral around both guns"; "commit weapon skin as an unlock, and only shows if equipped
+from main menu's unlock screen".
+
+**What:** `weapon_skin.cpp`. The Thompson's and the Type 100's colour texture is copied with dark metal and gold wood
+(its alpha marks the wood). The gun's own draws are kept and drawn again (`DrawPath::KeepSkinDraw`, `DrawSkinOver`:
+the motion pass's copy of the vertex shader, depth equal) into a target of the depth's size with the storm's light
+by the texture's own coordinates, so the lightning lies on the model. The gun's place is from its bones (the body's
+and the magazine's, `kGuns`), moved as the Iron Sight option moves the gun's picture (`WeaponLayerMoveNow`). Round
+it, 512 puffs of smoke as sprites in two bands fed in a third of the way along the gun, a turn and a fifth to the
+muzzle on either gun, a third slower along than at first, settling 4 mm off the gun's own section there (`kShape`, 12
+stretches a gun, from the exported models); lit from within by five bolts that are not drawn (a stroke, then a glow
+of a third of a second). A new magazine going in (its bone back within 8 mm after 4 cm out) runs a charge over the
+gun. While aiming the top of the gun and the sight picture are kept clear. By night the overlay goes on after the
+night pass. Shown only while unlocked (`bf_skin_electric`) and equipped (`bf_skin_equipped`), set on the main menu's
+new Unlockables screen (`UnlockablesPage`). `weapon_export.cpp` (a developer's, `NXR_INTERNAL_TOOLS`,
+`NXR_WEAPON_EXPORT=<folder>`): the first person weapons' meshes, bones and textures written out, for this and for
+skins to come; what it writes is the game's own art and stays out of the repository.
+
+**Tested** (dev build, Wake Island, 3440 x 1440, RX 7900 XTX; runs skin37 to skin51, unlock_*): the offline shader test
+0 failed; no device lost. Its GPU time 0.04 ms for the texture (0.08 on the Type 100) and 0.13 ms for the overlay.
+Seen in screenshots: both guns by day at rest, in a reload and aiming with Iron Sight; a flash in the smoke by night
+at its real timing (skin40_real); the Unlockables screen locked, equipped and taken off; a match with it unlocked and
+not equipped (no skin) and equipped (skin). **Not done or not tested:** (since 23 Nov 2026 it is unlocked by
+playing a full match under a hurricane: bf/src/fov.cpp SkinMatch); other players do not see it (planned: the
+skin's number in the relay's state, the third person gun's draws matched by their texture); its motion was judged
+from stills only; night and aiming were not run again after the last changes to the spiral; the plain Zoom In aim.
+Tried and dropped on the way, each on the user's word: a fluid's density volume marched round the gun (0.2 to 0.8 ms,
+"blobs of snow"), six-way lit sprites baked here.
+
+## D234 — The hurricane grown from the sky's own clouds, its eye clear, and the planes' wakes (2026-11-23, Claude for Battlefield 1943 Reborn; in progress)
+
+**Why:** the user, 23 Nov 2026: "be like PBF so the hurricane can be built from those clouds actually swirling and
+forming together"; "The eye of the hurricane looks covered. It should be a clear hole to the sky"; "The storm is too
+tall, which results in it looking like a giant cylinder vs a swirling hurricane"; "if a plane were to fly through a
+cloud, it should punch out the other side pulling a short wisp trail like it realistically would". Step 3 of the fluid
+weather plan (D229) drew its convection toward Michael's radar pattern in 20 s, so the spiral was a picture the fluid
+barely moved: from above the shape stayed put while the texture slid.
+
+**What:** fluid.cpp's cloud pass: the convection's r is a cloud amount carried by the fluid that lasts (no phases). It
+grows, in about 12 s and faster at the eyewall, out of the clouds the sky has where the air brought them from (the
+sky's shape volume, bound through `Sky::CloudShape` and `FluidSim::SetCloudShape`, cut by the sky's cover), lets go
+over about 30 s while carried on round, so its trails are wound into arms; it gathers where the flow converges and is
+cleared in the eye as it opens. The radar's pattern only scales how readily it grows (0.72 to 1.27). A level starts
+with no storm cloud: it forms over the first minute or two. sky.cpp: the eye's density is cleared fully (it kept 3%,
+still opaque over the layer's depth), and storm.h's rain floor in the eye (0.12) is gone, in `At()` and `storm_at`
+both. A hurricane's deck is low and wide (no deeper than 0.3 of its rain shield's radius at the wall, under half that
+at its edge), its columns heaped by the shape noise and the gathered amount, in the drawn look's spiral bands, filled
+through most of its depth; the storm darkening only where the deck hides the sun, so its top is white. With the
+clouds' mass (D232) the rain shafts are marched only inside the storm's rain shield. The wakes: renderer.cpp
+`WakeInputs` cuts the paths of the camera (moving 35 to 400 m/s) and of the ground fog's movers with a plane's radius
+(within 110 m) into 150 m pieces while in the clouds' heights, kept 45 s, the newest 24, the piece still being flown
+among them (`Sky::Inputs::wake`, the uniforms `wake_seg`, `wake_n`). The cloud shader finds once a pixel which pieces
+its ray passes near; only samples in that span read `wake_density`, at 12 m steps: a hole with a torn edge, 22 m
+across plus 0.5 m a second, held 15 s and closed by 45 s, and for 30 s a tongue of the cloud drawn out past the far
+side where there was none. `NXR_WAKE_DEBUG=1` tints the rays near a wake red.
+
+**Tested** (dev build, Guadalcanal, 3440 x 1440, RX 7900 XTX; runs st_form1, st_eye1, st_final_storm, st_wake3,
+st_fair_after): no device lost; the offline shader test 0 failed. Seen: three arms merging into one spiral round the
+eye between 60 and 140 s (from above); down through the eye to the sea, and blue sky inside the eyewall from the
+ground at its centre; a tunnel along a flight path from inside a cloud (before the torn edge). The fluid step 0.24 to
+0.27 ms (as D229); the wakes about 0.07 ms with 16 pieces (rough); fair weather looks as before (no before shot
+taken; by the code every change is gated on a hurricane, its eye or a wake). **Not done or not tested:** the centre
+round the eye reads as a smooth disc; D211's roll cloud draws a hard white arc round the storm from above; from the
+side far off it is a low grey bank; the storm forming as the match's weather rises (only a fixed 90% from the level's
+start); a wake's groove seen from above, the wisp tongue, a plane flown by the player, other players' planes beyond
+110 m (no feed for them); the wakes' cost from a pilot's seat; the blocky rain patch near the horizon in the default
+mode (its far shafts are 20 steps over long distances, not held to the storm's cylinder as with the mass).
+
+**Then, the same day** (the user: "The underside of the center of the storm protrudes like a nipple"; runs rp_a, rp_b,
+d234v to d234v4, dev build, Guadalcanal, a hurricane at 90%): the far "blocky rain patch" was not rain (the same with
+the far shafts off, run rp_b) but D212's storm wall, a dome painted on the sky behind the storm, now a thunderstorm's
+only: a hurricane's deck is drawn by the clouds. The protrusion was a ring of the ordinary low clouds round the eye (the
+storm's cloud is cleared a little further out than the eye clears the sky's), on their own base 400 m under the storm's
+and sunlit down the eye: the clouds within 1.8 eyes of the centre now take the storm's base and the hurricane's height
+cap. D211's volutus is a thunderstorm's only (round a hurricane, a smooth white ring at the shield's edge from above).
+The smooth disc round the eye: its columns' heights also by the shape at a quarter of its scale (turrets), so from above
+it has texture. Tried and dropped: the cover lowered over the deck's upper part and the fill's top worn by the noise (no
+change seen), and the eyewall's rain in the fog pass to hide the eye (that pass does not run outside the storm; inside
+it a grey wall). Seen: side and top views after; the offline shader test 0 failed; no device lost. **Not checked:** the
+turrets' GPU time; a thunderstorm after these; the ground view inside the storm (a grey wall in runs d234v3 and d234v4
+alike, the D194 storm mist or the camera's pitch, not looked into); still open from above: the wake, the far side view.
+
+**The wake from outside** (runs wk1 to wk8, fair weather, cover 40 to 60%): `NXR_WAKE_TEST=x,y,z,dx,dy,dz,speed,after,seconds`
+flies a plane that is not drawn along a straight line (a mover, as a near plane is), so its wake can be watched from
+anywhere. Seen from about a kilometre (with `NXR_WAKE_DEBUG=1` to find it): the 12 m steps near a wake drew the reach's
+edge as a seam and, eased in, the finely marched clouds stood in ribs like contour lines; the finer steps are gone (the
+hole is now 28 m round growing a metre a second, wider than the march's steps, whose start is dithered each frame), and
+its edge is torn by the detail's 3D noise (a 2D noise with the height added layered it). The ribs are gone (run wk7).
+**Not seen:** the hole itself from outside (the path ran inside the cumulus: buried in cloud, as in life); the tunnel
+from inside again since the finer steps went (the camera at 1,000 m was over the cloud tops, run wk8); the wisp
+tongue; other players' planes beyond 110 m. Found on the way, not from this work by the code: in fair weather, hard
+kinked creases round flat shelves of cloud seen from above (runs wk2 to wk4, the same place with the plane higher).

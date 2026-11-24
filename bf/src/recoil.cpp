@@ -23,6 +23,8 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 
+#include <native_x_renderer/native_x_renderer.h>
+
 REXCVAR_DEFINE_BOOL(bf_smooth_recoil, true, "BF1943",
                     "The weapon's recoil kick eases back on every frame instead of in the game's 30 Hz steps");
 
@@ -43,8 +45,39 @@ float LoadF(const uint8_t* base, uint32_t a) {
   return f;
 }
 
+// The player's own shots, for the ground fog (NativeXRenderer's D231: "shoot holes through it", the user, 21 Nov
+// 2026): the camera asks the getters about its own firing object every frame, and a shot puts that object's cooldown
+// back up to its interval; each time it has risen, a shot: told to the renderer as a line from the eye along the view,
+// 70 m. (The other players' shots are not known here.)
+void NoteOwnShot(const uint8_t* base, uint32_t firing) {
+  static uint32_t last_firing = 0;
+  static float last_cooldown = 0.0f;
+  if (!firing) return;
+  const float cooldown = LoadF(base, firing + 0x68);
+  const bool shot = firing == last_firing && cooldown > last_cooldown + 1e-4f && cooldown < 10.0f;
+  last_firing = firing, last_cooldown = cooldown;
+  if (!shot) return;
+  float eye[3], right[3], forward[3];
+  double age = 0.0;
+  if (!native_x_renderer::ListenerView(eye, right, forward, &age) || age > 0.5) return;
+  // (Each a little off the view's line, as the bullets are: about a degree, so a burst leaves holes side by side.)
+  static uint32_t seed = 0x9E3779B9u;
+  auto spread = [&] {
+    seed = seed * 1664525u + 1013904223u;
+    return (float(seed >> 8) / float(1u << 24) - 0.5f) * 0.035f;
+  };
+  const float side = spread(), up = spread();
+  float way[3];
+  for (int c = 0; c < 3; ++c) way[c] = forward[c] + right[c] * side;
+  way[1] += up;
+  const float to[3] = {eye[0] + way[0] * 120.0f, eye[1] + way[1] * 120.0f, eye[2] + way[2] * 120.0f};
+  native_x_renderer::FogShot(eye, to, 6.0f);
+  native_x_renderer::WeaponSkinShot();  // (a reactive weapon skin: the electric skin's storm is stirred up)
+}
+
 // The getter's answer resampled at this frame.
 void Resample(PPCContext& ctx, const uint8_t* base, uint32_t firing) {
+  NoteOwnShot(base, firing);
   if (!REXCVAR_GET(bf_smooth_recoil) || !firing || ctx.f1.f64 == 0.0) return;
   const double cooldown = LoadF(base, firing + 0x68);
   const int64_t tick = g_tick_us.load(std::memory_order_relaxed);

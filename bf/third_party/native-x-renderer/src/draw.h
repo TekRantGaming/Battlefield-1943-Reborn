@@ -33,6 +33,7 @@
 #include "DeviceContext.h"
 #include "internal.h"
 #include "RefCntAutoPtr.hpp"
+#include "Sampler.h"
 #include "TextureView.h"
 #include "camera_vote.h"
 #include "gtao.h"
@@ -192,6 +193,9 @@ class DrawPath {
   void SetWetCopy(Diligent::ITextureView* original, Diligent::ITextureView* copy);
   float wet_count() const { return wet_count_; }
   float wet_show() const { return wet_show_; }
+  // The first person weapon's view's projection, as its last draw had it (the weapon skin's particles; 0: none yet).
+  float weapon_px() const { return weapon_px_; }
+  float weapon_py() const { return weapon_py_; }
   int wet_tint() const { return wet_tint_; }
   // The hash of the pixel shader a draw with this program will use (0: none), before the draw is made.
   uint64_t PixelShaderHash(const StateTracker::Program& program);
@@ -337,6 +341,10 @@ class DrawPath {
   // `depth`'s (the depth-stencil view of the main view's depth target), over the camera's motion. Returns
   // how many were drawn. Binds its own targets (the next draw binds its own again).
   uint32_t DrawObjectMotion(Diligent::ITextureView* motion, Diligent::ITextureView* depth);
+  // The player's weapon skin's light on the gun's own mesh (weapon_skin.h): this frame's skinned draws of the first
+  // person weapon drawn again into `target` (cleared to nothing first; the depth's size), with their own vertex
+  // shader and the skin's pixel shader, where their depth is what `depth` holds. The count. Binds its own targets.
+  uint32_t DrawSkinOver(Diligent::ITextureView* target, Diligent::ITextureView* depth);
   // D191: the window glass's draws of this frame drawn again into `mask` (R32 float, cleared to 0 by the caller): each
   // pixel the nearest pane's depth, untested (the reflection's pass tests it against the world's depth). The count.
   uint32_t DrawGlassMask(Diligent::ITextureView* mask, bool sea = false, Diligent::ITextureView* depth = nullptr);
@@ -421,6 +429,10 @@ class DrawPath {
                       const Diligent::Viewport& viewport, const Diligent::Rect& scissor, const PipelineState& state);
   // Keeps a draw that moved for DrawObjectMotion (D48).
   struct MotionDraw;
+  struct SkinDraw;
+  void KeepSkinDraw(rex::graphics::SpirvShader& vertex_shader, uint64_t vertex_modification, const PipelineState& state,
+                    const Diligent::Viewport& viewport, const Diligent::Rect& scissor, Diligent::IBuffer* index_buffer,
+                    uint64_t index_offset, Diligent::VALUE_TYPE index_type, uint32_t vertex_count);
   void KeepGlassDraw(rex::graphics::SpirvShader& vertex_shader, uint64_t vertex_modification, const PipelineState& state,
                      const Diligent::Viewport& viewport, const Diligent::Rect& scissor, Diligent::IBuffer* index_buffer,
                      uint64_t index_offset, Diligent::VALUE_TYPE index_type, uint32_t vertex_count, bool sea = false);
@@ -694,6 +706,7 @@ class DrawPath {
   const std::vector<uint32_t>* wet_models_ = nullptr;  // D217
   uint32_t weapon_constants_ = 0;  // how many float constants the weapon's draw's vertex shader takes (bones: many)
   float world_py_ = 0.0f;
+  float weapon_px_ = 0.0f, weapon_py_ = 0.0f;
   uint64_t world_py_frame_ = ~uint64_t(0);
   void ClassifyWeapon(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, float z_min, float z_max);
   bool shadow_map_pending_ = false;  // this draw's pixel shader samples it with the world's transforms
@@ -721,6 +734,24 @@ class DrawPath {
   std::vector<uint8_t> vertex_constants_;  // this draw's vertex shader float constants, packed
   std::vector<uint8_t> vertex_registers_;  // the registers they come from
   std::vector<MotionDraw> motion_draws_;
+  // The weapon skin's mesh pass (DrawSkinOver): this draw's skinned copy (SkinView; null: not a skinned draw), the
+  // draws kept and their constants, its pixel shader and its texture's sampler.
+  Diligent::IDeviceObject* skin_tex_now_ = nullptr;
+  // NXR_SKIN_3P_LOG=1 (a developer's, for the skin on other players' guns): the first person gun's colour texture's
+  // place in the game's memory, and whether this draw (not the first person weapon's) has a texture from there.
+  uint32_t skin_gun_address_ = 0;
+  bool skin_3p_hit_ = false;
+  // A developer's weapon export (weapon_export.h): this draw's pixel shader's textures as the game has them.
+  struct ExportTexture {
+    uint32_t fetch;
+    Diligent::IDeviceObject* view;
+  };
+  std::vector<ExportTexture> export_textures_;
+  std::vector<SkinDraw> skin_draws_, recorder_skin_done_;
+  std::vector<uint8_t> skin_data_;
+  Diligent::RefCntAutoPtr<Diligent::IShader> skin_over_shader_;
+  Diligent::RefCntAutoPtr<Diligent::ISampler> skin_sampler_;
+  bool skin_over_failed_ = false;
   std::vector<uint8_t> motion_data_;  // their constants
   // Kept between draws, as the SDK does: some fields are written only when they apply.
   rex::graphics::SpirvShaderTranslator::SystemConstants system_constants_{};

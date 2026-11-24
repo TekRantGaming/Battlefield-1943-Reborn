@@ -30,6 +30,8 @@
 
 // Settings > Audio: the popups and the chime's volume.
 REXCVAR_DEFINE_BOOL(bf_achievement_popups, true, "BF1943/Audio", "A popup and a chime when the game unlocks an achievement");
+REXCVAR_DEFINE_BOOL(bf_achievement_sound, true, "BF1943/Audio",
+                    "The chime with an achievement's popup (off: the popup alone, silent)");
 REXCVAR_DEFINE_DOUBLE(bf_achievement_volume, 80.0, "BF1943/Audio", "How loud the achievement chime is, 0 to 100 (%)");
 
 namespace bf1943 {
@@ -429,6 +431,8 @@ void SetAchievementUserDir(const fs::path& user_dir) {
 }
 
 void PlayAchievementSound() {
+  // (The user, 23 Nov 2026: "Add an option to toggle the Achievement sound": the popup without its chime.)
+  if (!REXCVAR_GET(bf_achievement_sound)) return;
   const int volume = int(std::clamp(REXCVAR_GET(bf_achievement_volume), 0.0, 100.0) + 0.5);
   if (volume <= 0) return;
   // SDL's audio, as the menu sounds (game_music.cpp): a stream of its own, replaced by the next chime.

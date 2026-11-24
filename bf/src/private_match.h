@@ -27,6 +27,7 @@ struct PrivateMatchOptions {
   float time = 16.0f, day_minutes = 0.0f, cloud_cover = 0.35f, cloud_rate = 0.33f, weather = 0.0f, fog = 0.0f, ground_fog = 0.0f, wind = 0.3f;
   float cloud_height = 450.0f;  // metres
   bool dynamic_storm = false;  // the weather builds to a storm over each round and eases again
+  int storm_type = 0;          // D224: 0 a thunderstorm, 1 a hurricane
   // The match's rules (match_rules.cpp): each team's tickets (0: the map's own) and a round's time limit in minutes
   // (0: none; a round then ends only when a team has no tickets left).
   int tickets = 0, time_limit = 0;
