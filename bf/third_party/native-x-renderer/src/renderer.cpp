@@ -456,7 +456,11 @@ std::vector<NightRoom> g_night_rooms_render;
 uint64_t g_night_rooms_render_version = 0;
 std::vector<uint32_t> g_room_intact_counts;
 std::vector<uint64_t> g_room_seen;
-std::vector<float> g_room_weight;  // D222: each room's light coming in or going (0 to 1, a thirtieth a frame)
+std::vector<float> g_room_weight;  // D222: each room's light coming in or going (0 to 1; in an eighth a frame, out a thirtieth)
+// D222: the frames each room's standing part has been missing while its place was in view (kRoomMissing or more: not
+// standing; a room not yet seen starts there).
+std::vector<uint32_t> g_room_missing;
+constexpr uint32_t kRoomMissing = 180;
 uint64_t g_room_frame = 0;
 uint32_t g_room_matches = 0;  // since the last log line
 void NoteIntactPart(uint32_t index_count, const float* places, uint32_t n) {
@@ -3666,17 +3670,63 @@ void ApplyFog() {
     g_night_rooms_frame.clear();
     uint32_t down = 0;
     if (g_fog_in.room_amount > 0.001f) {
-      // A room whose building has a standing part is lit while that was drawn at its place in the last 600 frames
-      // (the game culls a part out of view; a destroyed house's roof is never drawn again). Its light comes and goes
-      // over half a second, not at once. (24 Nov 2026: no more "or while the eye is in it": walking in and out of a
-      // ruin's door switched its light on and off, which TekRantGaming saw as flicker when moving.)
+      // A room whose building has a standing part is lit unless that part has been missing from its place for
+      // kRoomMissing frames while its place was in view: the game culls a part out of view, so a roof above the top of
+      // the picture says nothing, while a destroyed house's roof is never drawn again. Its light comes and goes over
+      // half a second, not at once. (24 Nov 2026: no more "or while the eye is in it": walking in and out of a ruin's
+      // door switched its light on and off, which TekRantGaming saw as flicker when moving. And TekRantGaming, the same
+      // day: "when the building is damaged so that a section of the wall then becomes missing. If I'm walking outside,
+      // I can see flickering between the indoor lighting and outdoor lighting": the lights went off 600 frames after
+      // the roof went out of view, as it does walking beside a wall, and the inside showed through the hole; run
+      // rooms_bots2.)
       if (g_room_weight.size() != g_night_rooms_render.size()) g_room_weight.assign(g_night_rooms_render.size(), 0.0f);
+      if (g_room_missing.size() != g_night_rooms_render.size()) g_room_missing.assign(g_night_rooms_render.size(), kRoomMissing);
+      // Whether a room's top (where its building's roof is: its middle and four points toward its corners) is in the
+      // view, well inside its edges and within 200 m, so the game would draw a standing roof.
+      const auto top_in_view = [](const NightRoom& r) {
+        const Sky::Inputs& f = g_fog_in;
+        if (std::abs(f.to_ndc[0]) < 1e-6f || std::abs(f.to_ndc[1]) < 1e-6f) return false;
+        static const float kAt[5][2] = {{0.0f, 0.0f}, {0.8f, 0.8f}, {-0.8f, 0.8f}, {0.8f, -0.8f}, {-0.8f, -0.8f}};
+        for (const auto& at : kAt) {
+          const float l[3] = {at[0] * r.half[0],
+                              r.half[1] - r.slope[0] * std::abs(at[0] * r.half[0]) - r.slope[1] * std::abs(at[1] * r.half[2]) + 0.3f,
+                              at[1] * r.half[2]};
+          float d[3];
+          for (int a = 0; a < 3; ++a)
+            d[a] = r.centre[a] + r.to_local[0][a] * l[0] + r.to_local[1][a] * l[1] + r.to_local[2][a] * l[2] - f.eye[a];
+          if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 200.0f * 200.0f) continue;
+          float clip[3];
+          for (int row = 0; row < 3; ++row) clip[row] = f.forward[row][0] * d[0] + f.forward[row][1] * d[1] + f.forward[row][2] * d[2];
+          if (clip[2] < 1.0f) continue;
+          const float u = (clip[0] / clip[2] - f.to_ndc[2]) / f.to_ndc[0], v = (clip[1] / clip[2] - f.to_ndc[3]) / f.to_ndc[1];
+          if (u > 0.05f && u < 0.95f && v > 0.05f && v < 0.95f) return true;
+        }
+        return false;
+      };
       for (size_t i = 0; i < g_night_rooms_render.size(); ++i) {
         const NightRoom& r = g_night_rooms_render[i];
         bool live = !r.intact[0] && !r.intact[1];
-        if (!live && i < g_room_seen.size()) live = g_room_seen[i] && g_room_frame - g_room_seen[i] <= 600;
+        if (!live) {
+          uint32_t& missing = g_room_missing[i];
+          if (i < g_room_seen.size() && g_room_seen[i] && g_room_frame - g_room_seen[i] <= 1)
+            missing = 0;
+          else if (missing < kRoomMissing && top_in_view(r))
+            ++missing;
+          live = missing < kRoomMissing;
+        }
         float& w = g_room_weight[i];
-        w = std::clamp(w + (live ? 1.0f : -1.0f) / 30.0f, 0.0f, 1.0f);
+        // With the developer's view (native_x_renderer_night_rooms_debug): each room's light going on or off, logged.
+        if (g_fog_in.room_debug && (live ? w <= 0.0f : w >= 1.0f)) {
+          static uint32_t said = 0;
+          if (said++ < 400)
+            REXLOG_INFO("[native_x_renderer] night rooms (D222): room {} at {:.1f} {:.1f} {:.1f} {} at frame {} (its part "
+                        "last seen {} frames ago, missing in view {})", i, r.building[0], r.building[1], r.building[2],
+                        live ? "on" : "off", g_room_frame,
+                        i < g_room_seen.size() && g_room_seen[i] ? g_room_frame - g_room_seen[i] : 0, g_room_missing[i]);
+        }
+        // In over 8 frames, out over 30: a room whose roof was hidden behind another building (the game draws no part
+        // it cannot see, run rooms_bots3) comes back as it comes into view without a slow brightening.
+        w = std::clamp(w + (live ? 1.0f / 8.0f : -1.0f / 30.0f), 0.0f, 1.0f);
         if (w > 0.0f) {
           NightRoom lit = r;
           lit.lift = 1.0f + (std::max(r.lift, 1.0f) - 1.0f) * w * w * (3.0f - 2.0f * w);
@@ -5004,6 +5054,7 @@ void ExecutePresent(const Command& c) {
       g_night_rooms_render = g_night_rooms;
       g_room_seen.assign(g_night_rooms_render.size(), 0);
       g_room_weight.assign(g_night_rooms_render.size(), 0.0f);
+      g_room_missing.assign(g_night_rooms_render.size(), kRoomMissing);
       g_room_intact_counts.clear();
       for (const NightRoom& r : g_night_rooms_render)
         for (uint32_t c : r.intact)
