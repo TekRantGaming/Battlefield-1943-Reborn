@@ -477,8 +477,9 @@ struct NightRoom {
   // A pitched roof's underside: the top falls this much a metre from the middle along the room's x and z (0: flat).
   float slope[2] = {};
   // A part the game draws only while the building stands (its roof), by its draws' index counts (two levels of
-  // detail; 0 none): the room is lit only while that part was drawn at the building's place `building` (its placed
-  // position) in the last seconds, or the eye is in the room, so a destroyed house's rubble is not lit. All 0: always.
+  // detail; 0 none): the room is lit unless that part has been missing from the building's place `building` (its
+  // placed position) for a few seconds while that place was in view, so a destroyed house's rubble is not lit. All 0:
+  // always.
   uint32_t intact[2] = {};
   float building[3] = {};
 };
