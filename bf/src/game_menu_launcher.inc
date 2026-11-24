@@ -976,6 +976,7 @@
     name_error_.clear();
     TagBegin();  // the clan tag box (game_menu_clan.inc)
     code_mode_ = false, acct_show_code_ = false;
+    NpBegin();  // the page's own state (game_menu_account.inc)
     if (!acct_busy_.load()) acct_message_.clear();
     if (settings_.Get("player_name_refused", "") == "1") name_error_ = "Your soldier name is not allowed. Choose a new one.";
     if (page_ != Page::kName) name_from_ = page_;
@@ -1129,6 +1130,11 @@
     if (!NameCommit()) return;  // the name line says why
     std::string code = settings_.Get("account_code", "");
     if (account::NormalizeCode(code).empty()) code = account::NewCode();
+#if defined(BF_DEV_TOOLS)
+    // BF_DEV_EXAMPLE_CODE=1 (tests on a test backend only): the example code the page's pictures may show, never a real one.
+    if (const char* v = std::getenv("BF_DEV_EXAMPLE_CODE"); v && *v == '1' && settings_.Get("account_code", "").empty())
+      code = "ABCDEFGHJKMNPQRSTVWX";
+#endif
     if (code.empty()) return AccountMessage("This PC gave no random numbers for a code. Try again.", true);
     char id[9];
     std::snprintf(id, sizeof(id), "%08X", OnlinePlayerId());
@@ -1185,15 +1191,24 @@
     }
     acct_busy_ = false;
     if (!r.answered) {
+      // The name is saved; the switch goes off, so Save goes on without protection (the page says so).
+      np_pending_save_ = false;
+      if (!r.recover) np_protect_ = false;
       REXLOG_WARN("BF account: no answer from the backend ({}){}", r.recover ? "recovery" : "protect",
                   r.why.empty() ? std::string() : ": " + r.why);
-      return AccountMessage(r.why == "lan" ? "Names are protected by the online service of the Reborn servers, not by a "
-                                             "LAN server."
-                                           : "No answer from the online service. Try again in a moment.",
+      if (r.recover)
+        return AccountMessage(r.why == "lan" ? "A recovery code needs the Reborn servers, not a LAN server."
+                                             : "No answer from the Reborn servers. Nothing is lost: try again in a moment.",
+                              true);
+      return AccountMessage(r.why == "lan" ? "Names are protected by the Reborn servers, not by a LAN server. Your name is saved: "
+                                             "Save again goes on without protection."
+                                           : "No answer from the Reborn servers. Your name is saved: Save again goes on without "
+                                             "protection (protect it later from EDIT on Home), or switch it on and try again.",
                             true);
     }
     if (!r.recover) {
       if (!r.ok) {
+        np_pending_save_ = false;
         REXLOG_INFO("BF account: protecting {} refused: {}", r.name, r.why);
         return AccountMessage(r.why == "taken"    ? "That name is protected by another player. Choose another one."
                               : r.why == "team_name" ? "That name is kept for the Battlefield 1943 Reborn team. Choose "
@@ -1215,6 +1230,17 @@
       acct_show_code_ = first;
       REXLOG_INFO("BF account: {} is protected{}", r.name, first ? " (a new account)" : " (the account moved to it)");
       SendLeaderboard("the name protected");  // the totals so far go to the account
+      // A new code: its card in the rail, shown once, with the tick before Continue (game_menu_account.inc). A protection
+      // moved to the new name keeps its code: Save goes on at once.
+      if (first) {
+        np_card_ = 1, np_ticked_ = false;
+        REXLOG_INFO("BF name page: the recovery code's card (shown once)");
+        return AccountMessage("", false);
+      }
+      if (np_pending_save_ && page_ == Page::kName) {
+        NpFinish();
+        return AccountMessage("", false);
+      }
       return AccountMessage(first ? "Your name is protected. Keep the recovery code above: it is also saved in your "
                                     "game's user folder as \"BF1943 Reborn recovery code.txt\"."
                                   : "Your protected name is now " + r.name + ". Your recovery code stays the same.",
@@ -1307,56 +1333,6 @@
     name_error_.clear();
     acct_show_code_ = false;
     if (on) AccountMessage("", false);
-  }
-  // The name protection box on the name page, `w` wide from `at`; its height.
-  float AccountBox(ImDrawList* d, const Stage& st, ImVec2 at, float w) {
-    const kit::Fonts& f = kit::GetFonts();
-    const float x = at.x;
-    float y = at.y;
-    const bool prot = NameProtected();
-    const bool same = name_text_ == settings_.Get("player_name", "");
-    const char* chip = code_mode_ ? "RECOVERY"
-                       : prot     ? "PROTECTED"
-                       : acct_online_ == 3 && same ? "TEAM NAME"
-                       : acct_online_ == 2 && same ? "ANOTHER PLAYER'S"
-                                                   : "NOT PROTECTED";
-    kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, "NAME PROTECTION", st(2));
-    const float cw = kit::TextWidth(f.typed, st(13), chip) + st(16);
-    d->AddRectFilled(ImVec2(x + w - cw, y - st(3)), ImVec2(x + w, y + st(17)),
-                     prot && !code_mode_ ? kit::kGreen : chip[0] == 'A' || chip[0] == 'T' ? kit::kRed : kit::kInkFaint);
-    d->AddText(f.typed, st(13), ImVec2(x + w - cw + st(8), y), IM_COL32(255, 255, 255, 255), chip);
-    y += st(26);
-    std::string body;
-    if (code_mode_)
-      body = "Type the recovery code of your protected name (20 letters and numbers). Your name and your progress come "
-             "back to this PC.";
-    else if (!AccountOnline())
-      body = "Protecting a name needs the online service.";
-    else if (prot)
-      body = "Only you can use " + settings_.Get("player_name", "") +
-             " online, and your rank and stats are kept on our server. Your recovery code brings them to another PC.";
-    else if (!settings_.Get("account_code", "").empty() && !settings_.Get("account_name", "").empty())
-      body = "Your protected name is " + settings_.Get("account_name", "") + ". Protect this name instead to move it here.";
-    else if (acct_online_ == 3 && same)
-      body = "This name is kept for the Battlefield 1943 Reborn team: nobody else can play under it or a name like it. "
-             "Online you play as Soldier for now. Choose a name of your own.";
-    else if (acct_online_ == 2 && same)
-      body = "Another player protected this name: online you play as it with a number. Choose another name.";
-    else
-      body = "Protect your name so nobody else can use it online, and keep your rank and stats on our server. No email "
-             "and no password: you get a recovery code.";
-    y += kit::Wrapped(d, f.ui, st(16), ImVec2(x, y), kit::kInkSoft, body.c_str(), w) + st(6);
-    if (acct_show_code_ && prot && !code_mode_) {
-      const std::string code = "RECOVERY CODE   " + account::FormatCode(settings_.Get("account_code", ""));
-      d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(34)), kit::kPaperLight);
-      d->AddText(f.typed, st(20), ImVec2(x + st(10), y + st(7)), kit::kInk, code.c_str());
-      y += st(40);
-    }
-    if (!acct_message_.empty()) {
-      y += kit::Wrapped(d, f.typed, st(13), ImVec2(x, y), acct_message_bad_ ? kit::kRed : kit::kGreenDark,
-                        acct_message_.c_str(), w);
-    }
-    return y - at.y;
   }
 #if defined(BF_DEV_TOOLS)
   // Tests (a background window gets no typing): whether the game window's text input is on (the SDK starts SDL's text
@@ -1465,194 +1441,6 @@
     if (in.accept) clicked = key;
     return clicked;
   }
-  void AccountPage(ImDrawList* d, ImGuiIO& io, Input in) {
-    NotePage("account");
-    const Stage st = StageOf(io);
-    const kit::Fonts& f = kit::GetFonts();
-    Chrome(d, io, st, name_setup_ ? 2 : 0, SceneBehind() ? 0.82f : 0);
-    // The keyboard's own typing (always, as typed), and the pad on the keys after A. The window gets typed characters
-    // only while ImGui asks for text input (the SDK starts SDL's text input from ImGui's IME data, which only ImGui's
-    // own text fields set): this page asks for it every frame, or no key typed anything (TekRantGaming, 8 Nov).
-    {
-      ImGuiContext& g = *ImGui::GetCurrentContext();
-      g.PlatformImeData.WantTextInput = true;
-      g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
-    }
-    if (io.InputQueueCharacters.Size > 0 && !typed_logged_) {
-      typed_logged_ = true;
-      REXLOG_INFO("BF launcher: the keyboard typed on the name page");
-    }
-    for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
-      const ImWchar ch = io.InputQueueCharacters[i];
-      if (code_mode_) {
-        if (ch < 128) CodeType(char(ch)), name_keys_ = false;
-        continue;
-      }
-      if (tag_mode_) {  // the clan tag box has the typing (game_menu_clan.inc)
-        if (ch < 128) TagType(char(ch), true), name_keys_ = false;
-        continue;
-      }
-      if (ch == player_name::kTmCodePoint) {  // Alt+0153, or a keyboard layout's own TM
-        NameTypeTm();
-        name_keys_ = false;
-      } else if (ch < 128 && NameChar(char(ch)) && player_name::CanType(name_text_)) {
-        name_text_ += char(ch);
-        name_error_.clear(), name_caps_ = false;
-        name_keys_ = false;  // a real keyboard types: the on screen keys close, so its Enter saves
-      }
-    }
-    // Ctrl+V or Shift+Insert (paste_keys.h): the clipboard into the box with the typing; a right click on a box offers
-    // PASTE and CLEAR (game_menu_clan.inc BoxMenu).
-    if (paste::Pressed()) NamePaste(paste::Text(), "keys");
-    if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) NameDelete();
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab) && !code_mode_) NameRandom();
-    // Protect your name: X (F2) protects the saved name or shows its recovery code; LB (F3) types a recovery code.
-    const bool protect_key = ImGui::IsKeyPressed(ImGuiKey_F2, false), code_key = ImGui::IsKeyPressed(ImGuiKey_F3, false);
-    const char* x_label = code_mode_ ? nullptr
-                          : NameProtected() && name_text_ == settings_.Get("player_name", "")
-                              ? (acct_show_code_ ? "Hide code" : "Show code")
-                              : "Protect name";
-    std::vector<Cue> prompts;
-    if (name_keys_) {
-      prompts = {{kit::Button::kA, "Type"}, {kit::Button::kX, "Delete", "Backspace"},
-                 {kit::Button::kStart, name_setup_ ? "Save and continue" : "Save", "Enter", true},
-                 {kit::Button::kB, "Done typing", "Esc"}};
-    } else if (device_ == Device::kKeyboard) {
-      // The keyboard types straight into the name: no Edit (its Enter saves).
-      prompts = {{kit::Button::kY, "Random name", "Tab"},
-                 {kit::Button::kStart, name_setup_ ? "Save and continue" : "Save", "Enter", true}};
-      if (!name_setup_ && !name_required_) prompts.push_back({kit::Button::kB, "Back", "Esc"});
-    } else {
-      prompts = {{kit::Button::kA, "Edit name", "Enter"}, {kit::Button::kY, "Random name", "Tab"},
-                 {kit::Button::kStart, name_setup_ ? "Save and continue" : "Save", "Enter", true}};
-      if (!name_setup_ && !name_required_) prompts.push_back({kit::Button::kB, "Back", "Esc"});
-    }
-    if (code_mode_ && !name_keys_) {
-      prompts = {{kit::Button::kStart, "Use code", "Enter", true}, {kit::Button::kB, "Cancel", "Esc"}};
-      if (device_ != Device::kKeyboard) prompts.insert(prompts.begin(), {kit::Button::kA, "Type code", "Enter"});
-    } else if (code_mode_) {
-      prompts[2].label = "Use code";
-    }
-    if (!name_keys_ && x_label && AccountOnline()) {
-      prompts.push_back({kit::Button::kX, x_label, "F2"});
-      if (!NameProtected()) prompts.push_back({kit::Button::kLB, "Recovery code", "F3"});
-    }
-    if (!code_mode_) prompts.push_back({kit::Button::kRB, tag_mode_ ? "Soldier name" : "Clan tag", "F4"});
-    Prompts(d, st, st.P(120, 720 - 30 - 42), prompts, in);
-    // Enter here is the keyboard's after the merge with the controller (MergeInput), not the raw key: Steam's desktop
-    // layout gives a controller's A as Enter too, which saved an empty name instead of opening the keys. With the on
-    // screen keys open, Enter types the key under the cursor like A (Start saves).
-    const bool enter = in.accept && accept_from_key_;
-    if (in.accept || in.start || in.back || in.x || in.y)
-      REXLOG_INFO("BF launcher: name page {} from the {}{}",
-                  in.accept ? "A" : in.start ? "Start" : in.back ? "B" : in.x ? "X" : "Y",
-                  in.accept && accept_from_key_ ? "keyboard" : device_ == Device::kPad ? "controller" : "keyboard or mouse",
-                  name_keys_ ? " (keys open)" : "");
-    const ImVec2 a = st.P(120, 96), b = st.P(820, 640);
-    {
-      kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.5f);
-      kit::Paper(d, a, b, st.u, false);
-      const float x = a.x + st(40), w = st(620);
-      float y = a.y + st(32);
-      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
-                  name_setup_ ? "STEP 2 OF 8 \xC2\xB7 ACCOUNT" : "ACCOUNT", st(2));
-      y += st(24);
-      kit::Heading(d, st(52), ImVec2(x, y), kit::kInk, code_mode_ ? "USE A RECOVERY CODE" : "CHOOSE YOUR SOLDIER NAME", st(2), w);
-      y += st(64);
-      y += kit::Wrapped(d, f.ui, st(18), ImVec2(x, y), kit::kInkSoft,
-                        code_mode_ ? "The code you were given when you protected your name. Spaces and dashes do not "
-                                     "matter."
-                        : signed_in_once_ && !name_setup_
-                            ? "This is the name other players see on the scoreboard and in the server list, from your "
-                              "next start. If someone on a server already uses it, a number is added for that server."
-                            : "This is the name other players see on the scoreboard and in the server list. If someone "
-                              "on a server already uses it, a number is added for that server.",
-                        w) +
-           st(20);
-      NameFields(d, st, x, y, w);  // the clan tag and soldier name boxes, or the recovery code's (game_menu_clan.inc)
-      {
-        const std::string& error = !name_error_.empty() ? name_error_ : code_mode_ ? name_error_ : tag_refusal_;
-        d->AddText(f.typed, st(14), ImVec2(x, y), error.empty() ? kit::kInkFaint : kit::kRed,
-                   error.empty() ? NameFieldHint() : error.c_str());
-      }
-      y += st(30);
-      if (!code_mode_) {
-        d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(56)), kit::kPaperDim);
-        d->AddText(f.ui, st(20), ImVec2(x + st(14), y + st(5)), kit::kInk, RankLine().c_str());
-        d->AddText(f.typed, st(14), ImVec2(x + st(14), y + st(33)), kit::kInkFaint, "Your rank grows as you play.");
-        y += st(68);
-      }
-      AccountBox(d, st, ImVec2(x, y), w);
-    }
-    const std::vector<OnKey>& kOnKeys = OnKeys(false, !code_mode_);
-    int clicked = OnScreenKeys(d, st, st.P(846, 150), in, name_key_, name_keys_, name_caps_, false,
-                               "With a keyboard, just type. With a controller, move onto these keys with the D-pad or A.",
-                               !code_mode_);
-    StampCorner(d, st);
-    const bool pad_accept = in.accept && !enter;
-    if (name_keys_) {
-      if (in.x) NameDelete();
-      if (in.back) name_keys_ = false, in.back = false;
-    } else if (pad_accept || in.up || in.down || in.left || in.right) {
-      // A, or a direction (the D-pad or the stick), goes onto the keys (TekRantGaming, 9 Nov: the D-pad did nothing here).
-      name_keys_ = true;
-    }
-    if (clicked >= 0) {
-      const OnKey& key = kOnKeys[clicked];
-      REXLOG_INFO("BF launcher: on screen key {}", key.label);
-      if (key.kind == 0) {
-        NameType(key.ch);
-      } else if (key.kind == 1) {
-        NameDelete();
-      } else if (key.kind == 2) {
-        name_caps_ = !name_caps_;
-      } else if (key.kind == 4) {
-        NameTypeTm();
-      } else {
-        NameSave();
-        return;
-      }
-    }
-    if (!name_keys_ && in.y && !code_mode_) NameRandom();
-    if (!code_mode_ && (in.next_tab || ImGui::IsKeyPressed(ImGuiKey_F4, false))) TagSwitch(!tag_mode_);  // clan tag box
-    if ((!name_keys_ && in.x) || protect_key) {
-      if (code_mode_) {
-      } else if (NameProtected() && name_text_ == settings_.Get("player_name", "")) {
-        acct_show_code_ = !acct_show_code_;
-      } else {
-        ProtectName();
-      }
-    }
-    if (((!name_keys_ && in.prev_tab) || code_key) && !code_mode_ && !NameProtected() && AccountOnline()) BeginCodeMode(true);
-    if (in.back && code_mode_ && !name_keys_) {
-      BeginCodeMode(false);
-      return;
-    }
-    // Enter with no name yet (too short to save) opens the keys, as A does: Steam's Enter for a controller's A can come
-    // just before the A itself, which the merge then drops.
-    if (enter && !name_keys_ && name_text_.size() < 3) {
-      name_keys_ = true;
-    } else if (in.start || (enter && !name_keys_)) {
-      NameSave();
-      return;
-    }
-    if (in.back && !name_setup_ && !name_required_) page_ = name_from_;
-#if defined(BF_DEV_TOOLS)
-    // BF_DEV_NAME=<name> (tests): typed for the player 5 s after the page first shows, then saved.
-    static double dev_at = -1;
-    if (dev_at < 0) dev_at = ImGui::GetTime();
-    if (const char* v = std::getenv("BF_DEV_NAME"); v && *v && ImGui::GetTime() - dev_at > 5.0) {
-      dev_at = 1e30;
-      name_text_ = player_name::Clean(v);
-      if (const char* t = std::getenv("BF_DEV_TAG")) {  // BF_DEV_TAG=<tag>: the clan tag box too ("-": emptied)
-        tag_text_.clear();
-        for (const char* c = t; *c && *c != '-'; ++c) tag_text_ += *c;
-      }
-      NameSave();
-    }
-#endif
-  }
-
   // The rank: a first version from the player's own time in matches (Settings file, "match_seconds"), until a stats
   // service keeps the game's own score. The ranks of the US Marines the game's soldiers wear.
   static constexpr const char* kRanks[] = {
