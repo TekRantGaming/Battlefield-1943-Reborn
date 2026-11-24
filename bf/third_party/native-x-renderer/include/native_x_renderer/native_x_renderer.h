@@ -449,6 +449,26 @@ struct NightModelLamps {
   uint32_t lamp_count = 0;
 };
 void NightModels(const NightModelLamps* models, uint32_t count);
+// D222: the rooms of the level's buildings (TekRantGaming, 23 Nov 2026: at night "the insides of buildings are far too
+// dark"). The game lights a room by the sky's light alone (its baked occlusion takes most of it), and at night that
+// is nearly nothing. What lies inside a room is drawn `lift` times as bright at full night, before the game's bloom
+// and exposure, so the room keeps its own colours and shading. A room is a box in its own space: the world to it by
+// three rows (x, y, z; the fourth float of each the offset), its middle at 0, its half size `half`: the inside faces
+// of its walls, floor and ceiling. Copied (count 0: none).
+struct NightRoom {
+  float to_local[3][4] = {};
+  float half[3] = {};
+  float lift = 3.0f;
+  float centre[3] = {};  // its middle in the world (to choose the nearest)
+  // A pitched roof's underside: the top falls this much a metre from the middle along the room's x and z (0: flat).
+  float slope[2] = {};
+  // A part the game draws only while the building stands (its roof), by its draws' index counts (two levels of
+  // detail; 0 none): the room is lit only while that part was drawn at the building's place `building` (its placed
+  // position) in the last seconds, or the eye is in the room, so a destroyed house's rubble is not lit. All 0: always.
+  uint32_t intact[2] = {};
+  float building[3] = {};
+};
+void NightRooms(const NightRoom* rooms, uint32_t count);
 // D178: the models' lamps are lit only on a model someone is in: the player's own while the game says the player sits
 // in a vehicle (the model nearest the camera), any other while it drives.
 void NightVehicleSeated(bool seated);

@@ -301,6 +301,13 @@ class DrawPath {
     model_lamp_counts_ = index_counts;
     model_lamp_report_ = report;
   }
+  // D222: the parts drawn only while a building stands (its roof), by their draws' index counts (sorted): a main view
+  // draw that writes depth with one of them reports the places of the rigid matrices among its vertex shader's
+  // constants c16 to c47 (at most 4, x y z each) to `report`; null: none.
+  void SetIntactParts(const std::vector<uint32_t>* index_counts, void (*report)(uint32_t, const float*, uint32_t)) {
+    intact_counts_ = index_counts;
+    intact_report_ = report;
+  }
   // The vote of the main view's draws since the last call (column form: last clip = r x this clip), and starts the
   // next. False when no draw offered one. The winner is also kept for DrawObjectMotion (D120).
   bool TakeCameraVote(Mat4d& reprojection, uint32_t& votes, uint32_t& offers) {
@@ -592,6 +599,8 @@ class DrawPath {
   bool projection_vote_ = false;
   const std::vector<uint32_t>* model_lamp_counts_ = nullptr;  // D163
   void (*model_lamp_report_)(uint32_t, const Mat4d&) = nullptr;
+  const std::vector<uint32_t>* intact_counts_ = nullptr;  // D222
+  void (*intact_report_)(uint32_t, const float*, uint32_t) = nullptr;
   TerrainFrame* terrain_ = nullptr;  // the grass prototype's (grass.h)
   std::vector<std::pair<GtaoProjection, uint32_t>> projections_;
   std::vector<std::pair<float, float>> projection_ranges_;  // each candidate's viewport depth range (its first draw's)

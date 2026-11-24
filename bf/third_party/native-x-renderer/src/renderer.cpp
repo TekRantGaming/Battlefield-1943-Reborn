@@ -165,6 +165,12 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_sky_light, true, "NativeXRenderer",
 REXCVAR_DEFINE_BOOL(native_x_renderer_sky_sun_moves, true, "NativeXRenderer",
                     "With the sky's light on the ground, the light's direction and the game's shadows turn with the "
                     "sky's sun and moon");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_night_rooms, 1.0, "NativeXRenderer",
+                      "D222: how much of the night's light in the buildings' rooms (NightRooms) is drawn, 0 none to 2 "
+                      "twice the tuned lift");
+REXCVAR_DEFINE_BOOL(native_x_renderer_night_rooms_debug, false, "NativeXRenderer",
+                    "Developer: D222's rooms tinted green where their light is drawn, red where a wall's outside face "
+                    "is left out");
 REXCVAR_DEFINE_INT32(native_x_renderer_sky_debug, 0, "NativeXRenderer",
                      "Developer: 1 paints the pixels the sky takes in one flat colour; 4 the fog's distances in "
                      "bands, 5 its heights over the sea; 7 to 10 the sea's reflection (D204)");
@@ -415,6 +421,32 @@ std::atomic<bool> g_night_lamps_present{false};
 // index counts for the draw path, and this frame's draws of them (index count, world-view-projection).
 std::vector<NightModelLamps> g_night_models;
 uint64_t g_night_models_version = 0;
+// D222: the rooms of the level's buildings (NightRooms, under the lamps' lock, and its version), and the fog pass's
+// copy of them. The render thread's: the rooms as last copied, the index counts of their buildings' standing parts
+// (sorted, for the draw path), and the frame each room's standing part was last drawn at its building.
+std::vector<NightRoom> g_night_rooms;
+uint64_t g_night_rooms_version = 0;
+std::vector<NightRoom> g_night_rooms_frame;
+std::vector<NightRoom> g_night_rooms_render;
+uint64_t g_night_rooms_render_version = 0;
+std::vector<uint32_t> g_room_intact_counts;
+std::vector<uint64_t> g_room_seen;
+uint64_t g_room_frame = 0;
+uint32_t g_room_matches = 0;  // since the last log line
+void NoteIntactPart(uint32_t index_count, const float* places, uint32_t n) {
+  for (size_t i = 0; i < g_night_rooms_render.size(); ++i) {
+    const NightRoom& r = g_night_rooms_render[i];
+    if (r.intact[0] != index_count && r.intact[1] != index_count) continue;
+    for (uint32_t k = 0; k < n; ++k) {
+      const float dx = places[k * 3] - r.building[0], dy = places[k * 3 + 1] - r.building[1], dz = places[k * 3 + 2] - r.building[2];
+      if (dx * dx + dy * dy + dz * dz < 0.75f * 0.75f) {
+        g_room_seen[i] = g_room_frame;
+        ++g_room_matches;
+        break;
+      }
+    }
+  }
+}
 std::vector<NightModelLamps> g_night_models_render;
 std::vector<uint32_t> g_night_model_counts;
 uint64_t g_night_models_render_version = 0;
@@ -1798,6 +1830,11 @@ void ExecuteDraw(const Command& c) {
                             ? &g_night_model_counts
                             : nullptr,
                         &ReportNightModelDraw);
+  // D222: the buildings' standing parts, while the rooms may be lit.
+  g_draw->SetIntactParts(g_scene_view && !g_room_intact_counts.empty() && g_cycle_dark.load(std::memory_order_relaxed) > 0.0f
+                             ? &g_room_intact_counts
+                             : nullptr,
+                         &NoteIntactPart);
   std::array<DrawPath::Copy, 2> copies;
   for (uint32_t i = 0; i < c.copy_count; ++i) {
     copies[i] = {c.copies[i].address, c.data.data() + c.copies[i].offset, c.copies[i].size};
@@ -2975,6 +3012,49 @@ void ApplyFog() {
     static const int kOff[5] = {0, 8, 16, 32, 64};
     g_fog_in.fog_parts_off = fog_parts ? kOff[(g_device->frames_presented() / 600) % 5] : 0;
   }
+  {
+    // D222: the buildings' rooms, as bright as the cycle is dark (none by day) and as the player's setting says.
+    // BF_NIGHT_ROOMS_AB=1 (tests): with them and without by turns, 600 frames each.
+    static const bool rooms_ab = [] {
+      const char* v = std::getenv("BF_NIGHT_ROOMS_AB");
+      return v && *v == '1';
+    }();
+    const float amount = float(std::clamp(REXCVAR_GET(native_x_renderer_night_rooms), 0.0, 2.0)) *
+                         g_cycle_dark.load(std::memory_order_relaxed);
+    g_fog_in.room_amount = rooms_ab && AbPhase() == 1 ? 0.0f : amount;
+    g_fog_in.room_debug = REXCVAR_GET(native_x_renderer_night_rooms_debug);
+    g_night_rooms_frame.clear();
+    uint32_t down = 0;
+    if (g_fog_in.room_amount > 0.001f) {
+      // A room whose building has a standing part is lit while that was drawn at its place in the last 600 frames
+      // (the game culls a part out of view; a destroyed house's roof is never drawn again), or while the eye is in it.
+      for (size_t i = 0; i < g_night_rooms_render.size(); ++i) {
+        const NightRoom& r = g_night_rooms_render[i];
+        bool live = !r.intact[0] && !r.intact[1];
+        if (!live && i < g_room_seen.size()) live = g_room_seen[i] && g_room_frame - g_room_seen[i] <= 600;
+        if (!live) {
+          bool in = true;
+          for (int a = 0; a < 3 && in; ++a) {
+            const float q = r.to_local[a][0] * g_fog_in.eye[0] + r.to_local[a][1] * g_fog_in.eye[1] +
+                            r.to_local[a][2] * g_fog_in.eye[2] + r.to_local[a][3];
+            in = std::abs(q) <= r.half[a] + 0.5f;
+          }
+          live = in;
+        }
+        if (live) g_night_rooms_frame.push_back(r);
+        else ++down;
+      }
+    }
+    static uint64_t said_at = 0;
+    if (g_room_frame >= said_at + 3600 && !g_night_rooms_render.empty()) {
+      said_at = g_room_frame;
+      REXLOG_INFO("[native_x_renderer] night rooms (D222): {} of {} live ({} not seen standing), {} standing parts matched "
+                  "since the last line", g_night_rooms_frame.size(), g_night_rooms_render.size(), down, g_room_matches);
+      g_room_matches = 0;
+    }
+    g_fog_in.rooms = g_night_rooms_frame.data();
+    g_fog_in.room_count = uint32_t(g_night_rooms_frame.size());
+  }
   const bool drawn = Timed(SectionTimers::kFog, [&] { return g_own_sky.Fog(g_device->context(), g_fog_in); });
   if (drawn || over) g_draw->TargetsChanged();
   static bool said = false;
@@ -4143,7 +4223,20 @@ void ExecutePresent(const Command& c) {
         g_night_model_counts.push_back(m.matrix_register);
       }
     }
+    // D222: the rooms, and their buildings' standing parts for the draw path.
+    if (g_night_rooms_render_version != g_night_rooms_version) {
+      g_night_rooms_render_version = g_night_rooms_version;
+      g_night_rooms_render = g_night_rooms;
+      g_room_seen.assign(g_night_rooms_render.size(), 0);
+      g_room_intact_counts.clear();
+      for (const NightRoom& r : g_night_rooms_render)
+        for (uint32_t c : r.intact)
+          if (c) g_room_intact_counts.push_back(c);
+      std::sort(g_room_intact_counts.begin(), g_room_intact_counts.end());
+      g_room_intact_counts.erase(std::unique(g_room_intact_counts.begin(), g_room_intact_counts.end()), g_room_intact_counts.end());
+    }
   }
+  g_room_frame = g_device->frames_presented() + 1;  // (the next frame's draws come with this number)
   if (g_temporal) g_upscaler.NextFrame();
   if (!g_device->UpdateSize()) {
     // Minimized: the frame drawn but not shown is still ended (D125). Returning without it left every frame's work
@@ -5133,6 +5226,13 @@ void NightModels(const NightModelLamps* models, uint32_t count) {
   else g_night_models.clear();
   ++g_night_models_version;
   REXLOG_INFO("[native_x_renderer] night: {} models with lamps (D163)", g_night_models.size());
+}
+void NightRooms(const NightRoom* rooms, uint32_t count) {
+  std::lock_guard lock(g_night_lamps_mutex);
+  if (rooms && count) g_night_rooms.assign(rooms, rooms + count);
+  else g_night_rooms.clear();
+  ++g_night_rooms_version;
+  REXLOG_INFO("[native_x_renderer] night: {} rooms of the level's buildings (D222)", g_night_rooms.size());
 }
 
 void SetWorldState(const WorldState& state) {
