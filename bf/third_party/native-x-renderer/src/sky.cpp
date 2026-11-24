@@ -1159,9 +1159,10 @@ float haze_depth(float a, float H, float h0, float dy, float L) {
 // D222: the buildings' rooms at night (TekRantGaming, 23 Nov 2026: "the insides of buildings are far too dark"): what
 // is inside a room is drawn brighter, the scene's own colour times the room's lift (its share of the fog pass's alpha,
 // which keeps the scene by what shows through the fog). Inside: within the box of the inside faces of its walls, floor
-// and ceiling (a pitched roof's underside falls from the ridge toward the walls). Near a face (15 cm either side) not
-// what faces clearly out, so the inside of a wall is lit and its outside (a hangar's sheet metal is 4 cm) is not, nor the
-// roof on top. Returns the lift (1: none); `seen` how much of a room this is, `left` how much a face near one left out.
+// and ceiling (a pitched roof's underside falls from the ridge toward the walls), less a margin, fading in from there.
+// Returns the lift (1: none); `seen` how much of a room this is, `left` how much the fade toward the walls takes off.
+const float kRoomInset = 0.15;  // metres the light stops short of a room's walls and ceiling
+const float kRoomFade = 0.6;    // metres over which it comes in from there
 float RoomLift(vec3 P, vec3 facing, out float seen, out float left) {
   float room = 1.0;
   seen = 0.0, left = 0.0;
@@ -1175,20 +1176,15 @@ float RoomLift(vec3 P, vec3 facing, out float seen, out float left) {
     vec3 q = vec3(dot(r0.xyz, P) + r0.w, dot(r1.xyz, P) + r1.w, dot(r2.xyz, P) + r2.w);
     vec3 out_by = abs(q) - hl.xyz;  // over 0: beyond the inside face on that axis
     if (q.y > 0.0) out_by.y = q.y - (hl.y - roof.x * abs(q.x) - roof.y * abs(q.z));
-    float worst = max(out_by.x, max(out_by.y, out_by.z));
-    if (worst > 0.15) continue;
-    float k = 1.0;
-    if (worst > -0.05) {
-      // The nearest face, and which way into the room is there.
-      vec3 axis = out_by.x >= out_by.y && out_by.x >= out_by.z ? r0.xyz : out_by.y >= out_by.z ? r1.xyz : r2.xyz;
-      float side = out_by.x >= out_by.y && out_by.x >= out_by.z ? q.x : out_by.y >= out_by.z ? q.y : q.z;
-      float into = dot(facing, -sign(side) * axis);
-      if (isnan(into)) into = 0.0;  // (no facing where the depth's neighbours are one point)
-      // (Only what faces clearly out is left out: at a room's own corners the facing from the depth's neighbours
-      // mixes two walls, and run rooms_dbg1's corners came out as dark lines when inward facing was asked for.)
-      k = smoothstep(-0.45, -0.15, into) * (1.0 - smoothstep(0.06, 0.15, worst));
-      left = max(left, (1.0 - k) * step(worst, 0.06));
-    }
+    // (24 Nov 2026, TekRantGaming: "the box needs to be reduced on all buildings a little as the light can bleed into
+    // the texture or bleed into the outside of the building", and it flickered as the eye moved.) The light stops
+    // kRoomInset short of the walls and the ceiling and fades in over kRoomFade, so no wall, outside face or roof is
+    // ever lifted, whatever way it faces: no facing test (the facing from the depth's neighbours shimmered at edges).
+    // The floor keeps its 15 cm under the box (it is the box's bottom face, and the walls' fade bounds it).
+    float edge = max(max(out_by.x, out_by.z), q.y > 0.0 ? out_by.y : -1e3) + kRoomInset;
+    if (edge >= 0.0 || (q.y < 0.0 && out_by.y > 0.15)) continue;
+    float k = smoothstep(0.0, kRoomFade, -edge);
+    left = max(left, 1.0 - k);
     if (k * (hl.w - 1.0) > (room - 1.0)) room = 1.0 + k * (hl.w - 1.0);
     seen = max(seen, k);
   }
