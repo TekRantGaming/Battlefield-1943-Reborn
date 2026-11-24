@@ -39,8 +39,9 @@
                        "passenger's seat and the stationary guns. Ground vehicles: driving a tank or a jeep. Air "
                        "vehicles: flying a plane. Boats: driving a landing boat. Each starts as the infantry's were."
                      : "Whose keys the bindings below are. Infantry: on foot, and in a gunner's or a passenger's seat and "
-                       "the stationary guns. Ground vehicles: driving a tank or a jeep. Air vehicles: flying a plane. "
-                       "Boats: driving a landing boat. Each starts as the infantry's keys were.",
+                       "the stationary guns. Ground vehicles: driving a tank or a jeep. Air vehicles: flying a plane "
+                       "(its pitch, yaw and roll rows also take the mouse's movement). Boats: driving a landing boat. "
+                       "Each starts as the infantry's keys were.",
                  {}};
     for (int s = 0; s < bf1943::kBindSetCount; ++s) r.options.push_back(bf1943::BindSetName(s));
     r.index = std::clamp(bind_set_, 0, int(bf1943::kBindSetCount) - 1);
@@ -194,11 +195,12 @@
   }
 
   // ---- Plane flight (TekRantGaming, 23 Nov 2026: "a option for keybinds for the plane for kbm remap of pitch yaw and
-  // roll to keboard and mouse"): the six ways a plane turns, each its own row on the keyboard and mouse page (and in
-  // the pause's Controls), with a box for the mouse's movement and the bindings' two keys and two mouse buttons. They
-  // are the settings that fly a plane already, only gathered and named by what they do: the keys are the Air vehicles
-  // set's right stick (pitch, roll) and left stick left and right (the rudder), vehicle_binds.cpp; the mouse's box is
-  // what bf_plane_mouse_x and _y fly with the two Invert flight settings (plane_mouse.cpp). So the defaults are today's
+  // roll to keboard and mouse"): the six ways a plane turns, each its own row in the bindings' Air vehicles tab (its
+  // own section until 24 Nov 2026, FlightInBindings), with a box for the mouse's movement and the bindings' two keys
+  // and two mouse buttons. They are the settings that fly a plane already, only gathered and named by what they do:
+  // the keys are the Air vehicles set's right stick (pitch, roll) and left stick left and right (the rudder),
+  // vehicle_binds.cpp; the mouse's box is what bf_plane_mouse_x and _y fly with the two Invert flight settings
+  // (plane_mouse.cpp). So the defaults are today's
   // (I and K pitch, J and L roll, A and D yaw, the mouse's left and right roll, its forward and back pitch) and
   // nothing changes for anyone who leaves them. A key or mouse button that something else in a plane also uses is
   // marked, and the help card says what with.
@@ -432,6 +434,19 @@
     };
     rows.push_back(reset);
   }
+  // TekRantGaming, 24 Nov 2026: "The brand new plane keybinds we have currently are in their own section. Move them
+  // into the overall bindings section." On the Air vehicles tab of the bindings (the keyboard's page and the pause's
+  // Keyboard bindings) the six flight rows, then their Clashes row, take the place of that set's own pitch, yaw and
+  // roll rows (the same settings: FlightKeyCvar), where the first of them would be. True when `infantry` is one of
+  // them (its row is the flight rows' now); `shown` keeps them to once.
+  bool FlightInBindings(int set, const char* infantry, std::vector<SettingRow>& rows, const char* section, bool& shown) {
+    if (set != bf1943::kBindAir) return false;
+    bool flight = false;
+    for (const FlightAction& a : kFlightActions) flight = flight || std::string_view(infantry) == a.bind;
+    if (!flight) return false;
+    if (!shown) FlightRows(rows, section), shown = true;
+    return true;
+  }
 
   // ---- the rows of each device's page
   // ControlsRows' rows (its Mapping rows are left out while the settings page draws, controls_buttons_), each given
@@ -440,11 +455,9 @@
     const std::string& n = r.name;
     const bool invert = n.rfind("Invert", 0) == 0;
     if (r.section == "Input") return device == 1 && n == "Keyboard & mouse" ? "" : "Input";
-    // The mouse's plane rows go with the flight rows (their own section: FlightRows makes the ones ControlsRows has).
-    const bool plane = n.find("in planes") != std::string::npos || n.find("flight") != std::string::npos ||
-                       n == "Plane mouse sensitivity";
-    if (r.section == "Plane flight") return "";
-    if (r.section == "Keyboard & mouse") return device != 0 ? "" : plane ? "Plane flight" : invert ? "Invert" : "Mouse";
+    // The mouse's plane rows (its axes and sensitivity in Mouse, the flight inverts in Invert) since 24 Nov 2026: the
+    // flight rows themselves are in Bindings, the Air vehicles tab (KeyboardBindRows).
+    if (r.section == "Keyboard & mouse") return device != 0 ? "" : invert ? "Invert" : "Mouse";
     if (r.section == "Controller") {
       if (device != 1) return "";
       if (invert || n == "Left stick" || n == "Camera horizontal") return "Invert";
@@ -480,11 +493,6 @@
       for (const char* s : kKeyboardSections) sorted(s);
     else
       for (const char* s : kPadSections) sorted(s);
-    if (device == 0) {  // Plane flight: its six rows and their clashes, the mouse's plane rows, its reset
-      FlightRows(rows, "Plane flight");
-      sorted("Plane flight");
-      FlightResetRow(rows, "Plane flight");
-    }
     if (device == 0) KeyboardBindRows(rows);
     else PadButtonRows(rows);
     for (const SettingRow& r : all)  // the keys while playing (F2, the performance metrics) on both
@@ -499,8 +507,10 @@
     EnsureWheelBindable();
     rows.push_back(BindSetRow("Bindings"));
     const int set = std::clamp(bind_set_, 0, int(bf1943::kBindSetCount) - 1);
+    bool flight_shown = false;
     for (const auto& [infantry, label] : kBindActions) {
       if (!bf1943::BindInSet(set, infantry)) continue;
+      if (FlightInBindings(set, infantry, rows, "Bindings", flight_shown)) continue;
       const std::string cvar = bf1943::BindCvar(set, infantry);
       SettingRow r{"Bindings", bf1943::BindLabel(set, infantry, label),
                    "Two keys and two mouse buttons for each action: any of them does it. Click a slot (or A on it), "
@@ -534,6 +544,7 @@
       REXLOG_INFO("BF settings: the {} keys and mouse buttons back to their defaults", bf1943::BindSetName(set));
     };
     rows.push_back(reset);
+    if (set == bf1943::kBindAir) FlightResetRow(rows, "Bindings");
   }
 
   // The controller's page: each button action's button, in a box as the keys' (its glyph; 18 Nov 2026). A click on
@@ -954,7 +965,7 @@
             }
           }
         }
-      } else if (r.section == "Mouse" || r.section == "Invert" || r.section == "Plane flight") {
+      } else if (r.section == "Mouse" || r.section == "Invert") {
         lit.mouse_all = true;
       }
       return lit;

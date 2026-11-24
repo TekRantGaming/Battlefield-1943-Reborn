@@ -4510,7 +4510,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       SettingRow vinv = Toggle("Keyboard & mouse", "Invert vehicle",
                                "Inverts the mouse's up and down for a tank's gun, mounted machine guns, AA guns and "
                                "looking around in a vehicle. Normal: up aims up, as on foot. Not planes: they have "
-                               "their own (Plane flight).",
+                               "their own (Invert flight, Invert Free-Look in planes).",
                                "bf_mouse_invert_y_vehicle", "Normal", "Inverted");
       if (!mnk || !Truthy(Cvar("mnk_mouse"))) vinv.disabled = true, vinv.note = mnk_note;
       rows.push_back(vinv);
@@ -4556,9 +4556,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         if (!mnk || !Truthy(Cvar("mnk_mouse"))) r->disabled = true, r->note = mnk_note;
         rows.push_back(*r);
       }
-      // The flight rows (game_menu_controls.inc) for the pause's list; the device page makes its own.
-      FlightRows(rows, "Plane flight");
-      FlightResetRow(rows, "Plane flight");
+      // The flight rows (game_menu_controls.inc FlightRows) are in the bindings' Air vehicles tab since 24 Nov 2026.
     }
     rows.push_back(Slider("Controller", "Camera sensitivity",
                           "How fast the right stick turns the camera and moves your aim.", "bf_camera_sensitivity", 25,
@@ -4718,8 +4716,15 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     rows.push_back(BindSetRow("Bindings"));
     const int set = std::clamp(bind_set_, 0, int(bf1943::kBindSetCount) - 1);
     int index = 1;
+    bool flight_shown = false;
     for (const auto& [infantry, label] : kBinds) {
       if (!bf1943::BindInSet(set, infantry)) continue;
+      // The Air vehicles tab: the flight rows in place of its pitch, yaw and roll (their first box the mouse's
+      // movement in place of the controller's stick; game_menu_controls.inc FlightInBindings).
+      if (FlightInBindings(set, infantry, rows, "Bindings", flight_shown)) {
+        index = int(rows.size());
+        continue;
+      }
       const std::string cvar = bf1943::BindCvar(set, infantry);
       SettingRow r{"Bindings", bf1943::BindLabel(set, infantry, label),
                    "The controller's button, two keys and two mouse buttons for each action: any of them does it. "
@@ -4774,6 +4779,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       ResetPadButtons(set);
     };
     rows.push_back(reset);
+    if (set == bf1943::kBindAir) FlightResetRow(rows, "Reset");
     return rows;
   }
 

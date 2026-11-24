@@ -103,6 +103,7 @@
     scroll_ = std::clamp(scroll_, 0.0f, std::max(0.0f, total - view));
     d->PushClipRect(ImVec2(pa.x, top), ImVec2(pb.x, list_bottom), true);
     std::string section;
+    bool five = false;  // the section has five-box bindings (the flight rows): its four-box rows line up with them
     const float x0 = pa.x, x1 = pb.x, tx0 = pa.x + st(18), tx1 = pb.x - st(18), size = st(13);
     for (int i = 0; i < count; ++i) {
       const SettingRow& it = rows[size_t(i)];
@@ -115,17 +116,24 @@
         d->AddLine(ImVec2(tx0, y_row - st(3)), ImVec2(tx1, y_row - st(3)), kit::kRule, 1.0f);
         // The columns' names over the section, from its first binding (the "Keys for" or "Buttons for" row of a
         // vehicle kind comes before them, 18 Nov 2026).
+        // The first box's name: the first five-box row's (the flight rows' MOUSE MOVE in the keyboard page's Air
+        // vehicles tab, 24 Nov 2026), else CONTROLLER (the pause's combined list).
         const SettingRow* first = nullptr;
-        for (int j = i; j < count && rows[size_t(j)].section == section && !first; ++j)
-          if (!rows[size_t(j)].slots.empty()) first = &rows[size_t(j)];
+        const SettingRow* first_five = nullptr;
+        for (int j = i; j < count && rows[size_t(j)].section == section; ++j) {
+          const SettingRow& rj = rows[size_t(j)];
+          if (!rj.slots.empty() && !first) first = &rj;
+          if (rj.slots.size() == 5 && !rj.pad_glyphs && !first_five) first_five = &rj;
+        }
+        five = first_five != nullptr;
         if (first && first->pad_glyphs) {  // the controller's column (its one box)
           kit::Spaced(d, f.typed, st(8), ImVec2(tx1 - st(130), y_row - sh + st(9)), kit::kInkSection, "CONTROLLER", st(2));
         } else if (first) {  // the bindings' columns: two keys, two mouse buttons
           const float bw = st(66), gap = st(6), pair = st(14);
           const float mouse_x = tx1 - 2 * bw - gap, keys_x = mouse_x - pair - 2 * bw - gap;
-          if (first->slots.size() == 5)
+          if (first_five)
             kit::Spaced(d, f.typed, st(7), ImVec2(keys_x - 2 * pair - bw, y_row - sh + st(10)), kit::kInkSection,
-                        first->slot_header.empty() ? "CONTROLLER" : first->slot_header.c_str(), st(1.2f));
+                        first_five->slot_header.empty() ? "CONTROLLER" : first_five->slot_header.c_str(), st(1.2f));
           kit::Spaced(d, f.typed, st(8), ImVec2(keys_x, y_row - sh + st(9)), kit::kInkSection, "KEYBOARD", st(2));
           kit::Spaced(d, f.typed, st(8), ImVec2(mouse_x, y_row - sh + st(9)), kit::kInkSection, "MOUSE", st(2));
         }
@@ -267,7 +275,7 @@
         // A binding: its four slots as boxes (13 Nov 2026). A click on one, or A on the one left and right are on,
         // makes it wait for a press; the waiting one is red.
         const int n = int(it.slots.size());
-        const float bw = it.pad_glyphs ? st(130) : n == 5 ? st(66) : st(82), gap = st(6), pair = st(14);
+        const float bw = it.pad_glyphs ? st(130) : n == 5 || five ? st(66) : st(82), gap = st(6), pair = st(14);
         for (int k = 0; k < n; ++k) {
           // from the right: the mouse's pair, the keyboard's pair, and (five slots) the controller's one
           const int from_right = n - 1 - k;
