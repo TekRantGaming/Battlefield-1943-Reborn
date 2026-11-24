@@ -11,6 +11,7 @@
 // keyboard (arrows, Enter, Esc) and the mouse.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cctype>
@@ -6141,6 +6142,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
 #include "game_menu_launcher.inc"
 #include "game_menu_clan.inc"
+#include "game_menu_account.inc"  // the soldier name page (P2: one page and a briefing)
 #include "game_menu_home.inc"
 #include "game_menu_news.inc"
 #include "game_menu_tutorial.inc"  // the first start's video tutorial (the news' video player)
