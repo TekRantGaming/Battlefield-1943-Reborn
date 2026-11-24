@@ -76,6 +76,7 @@
 #include <rex/ui/imgui_dialog.h>
 
 #include "comms.h"
+#include "free_cam.h"
 #include "launcher_kit.h"
 
 namespace bf1943 {
@@ -412,7 +413,7 @@ void StartOnce() {
 
 // Where the panel's rows are (in the 720 high stage's units `u`): its top, a row's height (as high as fit the screen
 // with the title and the help below, 44 at most), and a row's track under its label.
-constexpr int kPanelRows = 14;
+constexpr int kPanelRows = 16;
 struct Layout {
   float y0, rh, track;
 };
@@ -552,6 +553,7 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
     // The dynamic storm (19 Nov 2026): a switch, as the first row.
     float storm = edit_.dynamic_storm ? 1.0f : 0.0f;
     float storm_type = float(edit_.storm_type);  // D224: a choice, last
+    float free_cam = freecam::Wanted() ? 1.0f : 0.0f, hide_ui = freecam::HideUi() ? 1.0f : 0.0f;
     const Settings before = edit_;
     // Every slider moves in steps of one (18 Nov 2026: "stepped by 1pt each, with time stepped at 1pt for each
     // second"): a percent, a minute of a day's length, a metre of the cloud base, and a second of the time of day (the
@@ -578,10 +580,15 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
          "On, the weather builds to a storm over the match and eases again (shown live above). Weather moved: off."},
         {"Storm type", &storm_type, 0, 1, 1,
          "What the weather builds: a thunderstorm, or a hurricane with its eye and spiral rain bands."},
+        // 24 Nov 2026 (free_cam.cpp): this game's own, not the match's: only the admin sees them.
+        {"Free camera", &free_cam, 0, 1, 1,
+         "Sticks fly and look, A up, B down, LT faster, RT slower, L3 fast, LB/RB speed, Y HUD, Back off. Only yours."},
+        {"Hide HUD and UI", &hide_ui, 0, 1, 1,
+         "The HUD and every on-screen element hidden while this panel is closed (Y in the free camera). Only yours."},
     };
-    constexpr int kStormRow = 12, kTypeRow = 13;  // (10 and 11: the heights, in metres)
+    constexpr int kStormRow = 12, kTypeRow = 13, kFreeCamRow = 14, kHideRow = 15;  // (10 and 11: the heights, in metres)
     static_assert(std::size(rows) == kPanelRows);
-    auto is_switch = [&](int i) { return i == 0 || i == kStormRow || i == kTypeRow; };
+    auto is_switch = [&](int i) { return i == 0 || i == kStormRow || i == kTypeRow || i >= kFreeCamRow; };
     // A value put on its row's steps: whole seconds, percents, minutes or metres.
     auto snap = [](const Row& r, float v) {
       if (r.step == kSecond) return std::min(std::round(v * 3600.0f) / 3600.0f, kLastHour);
@@ -591,7 +598,7 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
     // ImGui's clip would be its hidden 400 by 400 default window's, and most of the panel would not see the mouse.
     auto over = [](ImVec2 a, ImVec2 b) { return ImGui::IsMouseHoveringRect(a, b, false); };
     const int count = int(std::size(rows));
-    // Rows as high as fit the screen (24 Nov 2026: fourteen rows of 44 reached past its foot), 44 at most.
+    // Rows as high as fit the screen (24 Nov 2026: sixteen rows of 44 reached past its foot), 44 at most.
     const Layout lay = PanelLayout(u);
     const float w = 420 * u, x0 = 16 * u, x1 = x0 + w, y0 = lay.y0, rh = lay.rh;
     const float y1 = y0 + 48 * u + rh * count + 64 * u;
@@ -714,8 +721,10 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
         const float steps = is_switch(i) ? 1.0f : key_shift ? (i == 1 ? 60.0f : 10.0f) : 1.0f;
         v = snap(r, std::clamp(snap(r, v) + key_step * steps * r.step, r.lo, std::max(r.hi, v)));
       }
-      if (v != *r.value) *r.value = v, changed = true;
+      if (v != *r.value) *r.value = v, changed = changed || i < kFreeCamRow;  // the last two are not the match's
     }
+    if ((free_cam > 0.5f) != freecam::Wanted()) freecam::Set(free_cam > 0.5f);
+    if ((hide_ui > 0.5f) != freecam::HideUi()) freecam::SetHideUi(hide_ui > 0.5f);
     // The first row: on, the clock runs at the length it had (24 minutes if none); off, it stands. A change of the
     // time or of a day's length gives the match its clock's light.
     if ((passes > 0.5f) != passed) {

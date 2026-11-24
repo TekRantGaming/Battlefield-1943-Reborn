@@ -42,6 +42,7 @@
 #include <rex/ppc/context.h>
 
 #include "capture_points.h"
+#include "free_cam.h"
 
 namespace bf1943 {
 bool InMatch();
@@ -50,7 +51,7 @@ bool InMatch();
 namespace {
 
 constexpr float kPi = 3.14159265f;
-uint32_t g_client = 0;
+uint32_t ClientNow() { return bf1943::freecam::Client(); }
 
 uint32_t Load32(const uint8_t* base, uint32_t at) {
   uint32_t v;
@@ -236,14 +237,7 @@ void ExplodeInView(V3 place, V3 look) {
 
 }  // namespace
 
-// The client's start (sub_8224FB50, r3 the client): its free camera made; the client kept for the mode switch.
-REX_EXTERN(__imp__sub_8224FB50);
-REX_HOOK_RAW(sub_8224FB50) {
-  const uint32_t client = ctx.r3.u32;
-  __imp__sub_8224FB50(ctx, base);
-  g_client = client;
-}
-
+// The client (its start hook is the admin's free camera's since 24 Nov 2026, free_cam.cpp: one hook, every build).
 REX_EXTERN(sub_82254B28);  // the client's camera mode switch
 
 namespace bf1943 {
@@ -259,7 +253,7 @@ void BenchFreeCam(PPCContext& ctx, uint8_t* base, bool hidden) {
   }();
   (void)configured;
   const Config& cfg = g_cfg;
-  if (cfg.at < 0 || !g_client) return;
+  if (cfg.at < 0 || !ClientNow()) return;
   using Clock = std::chrono::steady_clock;
   static Clock::time_point joined{}, flying{};
   static bool on = false;
@@ -289,7 +283,7 @@ void BenchFreeCam(PPCContext& ctx, uint8_t* base, bool hidden) {
   }
   if (hidden) return;
   if (!joined.time_since_epoch().count()) joined = now;
-  const uint32_t camera = Load32(base, g_client + 0xA4);
+  const uint32_t camera = Load32(base, ClientNow() + 0xA4);
   if (!camera) return;
   if (!on) {
     if (std::chrono::duration<double>(now - joined).count() < cfg.at) return;
@@ -346,7 +340,7 @@ void BenchFreeCam(PPCContext& ctx, uint8_t* base, bool hidden) {
       handed = Dot(Cross(u, f), r) >= 0 ? 1.f : -1.f;
     }
     PPCContext call = ctx;
-    call.r3.u64 = g_client;
+    call.r3.u64 = ClientNow();
     call.r4.u64 = 1;
     sub_82254B28(call, base);
     view_ready = PrepareView();

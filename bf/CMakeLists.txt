@@ -87,6 +87,7 @@ set(BF1943_SOURCES
     src/comms_ui.cpp
     src/storm_patterns.cpp
     src/world_sync.cpp
+    src/free_cam.cpp
     src/voice_mute.cpp
     src/voice_mute_icon.cpp
     src/scoreboard_ping.cpp

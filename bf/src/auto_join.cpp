@@ -39,6 +39,7 @@
 #include "voice_mute.h"
 #include "comms.h"
 #include "flash_spawn.h"
+#include "free_cam.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -1444,6 +1445,8 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   bf1943::SharpTextTick();        // sharp_text.cpp: the HUD's sharper copies drawn or not
   bf1943::SquadColorsTick(base);  // squad_colors.cpp: the squad's icons a brighter green
   if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4, seated);
+  // The admin's free camera (free_cam.cpp, F9): while it flies it takes the pad and the game gets an empty one.
+  bf1943::freecam::Pad(ctx, base, p + 4, !hidden);
   // Capture native navigation before the mouse helper adds any kit/button pulses.
   const auto nav_axis = [&](int at) { return std::abs(int(int16_t(p[at] << 8 | p[at + 1]))) > 4915; };
   const bool spawn_navigation = (uint16_t(p[4] << 8 | p[5]) & 0xB01F) != 0 ||

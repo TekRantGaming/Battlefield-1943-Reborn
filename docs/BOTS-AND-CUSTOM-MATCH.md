@@ -365,7 +365,12 @@ Wind, Cloud height and, last, **Dynamic storm** (a switch). The mouse works on e
 typed in, and the arrows step it. The panel has no bot, ticket or match time controls. The storm switch works only
 where the match's host is the game's own (Custom Match). The switch and the host taking it were not tested (D209).
 
-On a Night Ops server the panel's title bar holds **Back to Night Ops (N)** (24 Nov 2026; see WEATHER-AND-SKY.md).
+Two more rows (24 Nov 2026, `bf/src/free_cam.cpp`) are the admin's own, not the match's: **Free camera** flies the view
+anywhere, through everything, while the soldier stands where he was (controller: left stick flies along the view, right
+stick looks, A up, B down, LT faster, RT slower and finer, L3 fast on or off, LB and RB the base speed, Y hides the HUD,
+Back ends it; the keyboard's bindings and the mouse work too), and **Hide HUD and UI** hides the game's HUD and every
+overlay of ours while the panel and our menus are closed, in first person as well. On a Night Ops server the title bar
+holds **Back to Night Ops (N)** (see WEATHER-AND-SKY.md).
 
 ## Known gaps
 
@@ -464,6 +469,7 @@ Reported by the player on 19 Nov 2026 and not yet fixed or not yet confirmed fix
 | `BF_DEV_TICKETS=<after s>[,<offset hex>,<value>]` | developer | Logs the ticket counters; can set them to end a round on demand. |
 | `BF_DEV_WORLD_PANEL=<seconds>` | developer | Opens the F9 panel by itself in a test run. |
 | `BF_DEV_WORLD_PANEL_TIME`, `BF_DEV_WORLD_PANEL_BACK=<s>` | developer | The time that test types; its click on Back to Night Ops. |
+| `BF_DEV_FREE_CAM=<s>`, `BF_DEV_FREE_CAM_SCRIPT` | developer | The free camera on in a test run, flown by a scripted pad (free_cam.cpp). |
 
 - `BF_HOST_LAN_AT_START=1` makes the game host a LAN Custom Match from its saved choices as it starts (the game also
   uses it to restart into a LAN host).
