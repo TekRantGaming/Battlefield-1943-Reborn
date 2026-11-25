@@ -63,6 +63,10 @@ if (-not $crtDir) { throw "no Visual C++ redistributable folder (VC\Redist\MSVC\
 function Copy-Licences([string]$dest) {
     $l = Join-Path $dest "licences"
     New-Item -ItemType Directory -Force $l | Out-Null
+    # The port's own licence (25 Nov 2026): GPL 3 only, its section 7 permission, and the MIT notice for the code before.
+    Copy-Item (Join-Path $root "LICENSE") (Join-Path $l "Battlefield 1943 Reborn (GNU GPL 3).txt")
+    Copy-Item (Join-Path $root "LICENSE-EXCEPTION.md") (Join-Path $l "Battlefield 1943 Reborn (licence and additional permission).md")
+    Copy-Item (Join-Path $root "LICENSE-MIT-EARLIER.md") (Join-Path $l "Battlefield 1943 Reborn (MIT, before 25 Nov 2026).md")
     Copy-Item (Join-Path $nxr "LICENSE") (Join-Path $l "NativeXRenderer.txt")
     Copy-Item (Join-Path $nxr "THIRD_PARTY_NOTICES.md") (Join-Path $l "NativeXRenderer third party notices.md")
     foreach ($p in @(@("diligent-core\License.txt", "DiligentCore.txt"), @("diligent-core\ThirdParty\SPIRV-Cross\LICENSE", "SPIRV-Cross.txt"),
