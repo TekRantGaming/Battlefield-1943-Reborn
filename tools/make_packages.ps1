@@ -188,6 +188,9 @@ Settings: our menu (Settings). Crash and hang reports go to user\crashes. Licenc
 If Windows says "rexruntime.dll is either not designed to run on Windows or it contains an error" (Bad Image,
 0xc0e90002), Windows 11's Smart App Control has not cleared this build's files yet. It is not a broken download.
 "@
+# RecompLauncher's file (the repository's recomplauncher.json) beside bf1943.exe: how the launcher installs, sets up and
+# starts the game. The player's download only, never a server package.
+Copy-Item (Join-Path $root "recomplauncher.json") $c
 
 # ---- the server downloads (SERVERS-PLAN.md section 7): the community package for everyone (its servers only in the
 # Community list; the main backend is the official one, $OnlineHost), and with -Official the private one for TekRantGaming
