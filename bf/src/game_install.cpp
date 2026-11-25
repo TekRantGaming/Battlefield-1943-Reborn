@@ -218,10 +218,12 @@ bool Extract(const fs::path& package, const fs::path& out, Progress& progress) {
   progress.total = total;
   std::error_code ec;
   fs::create_directories(out, ec);
+  const fs::path part = out / "default.xex.part";
+  fs::remove(part, ec);  // left by a run cut short
   std::vector<uint8_t> block(kBlock);
   uint64_t bad = 0;
-  // Paths by the package's own entry order (a parent comes before its children); default.xex written last, so an
-  // install cut short is never taken for a finished one.
+  // Paths by the package's own entry order (a parent comes before its children); default.xex written last, as
+  // default.xex.part renamed once every block is checked, so an install cut short is never taken for a finished one.
   const std::vector<Stfs::Entry>& original = entries;
   std::vector<fs::path> paths(original.size());
   for (size_t i = 0; i < original.size(); ++i) {
@@ -234,7 +236,7 @@ bool Extract(const fs::path& package, const fs::path& out, Progress& progress) {
   std::stable_partition(order.begin(), order.end(), [&](size_t i) { return original[i].name != "default.xex"; });
   for (size_t i : order) {
     const auto& e = original[i];
-    const fs::path dest = out / paths[i];
+    const fs::path dest = paths[i] == "default.xex" ? part : out / paths[i];
     if (e.dir) {
       fs::create_directories(dest, ec);
       continue;
@@ -258,8 +260,13 @@ bool Extract(const fs::path& package, const fs::path& out, Progress& progress) {
     if (!o) return fail("Cannot write " + paths[i].string() + " (is the disk full?).");
   }
   if (bad) {
+    fs::remove(part, ec);
     fs::remove(out / "default.xex", ec);
     return fail("The package is damaged: " + std::to_string(bad) + " blocks do not match their checksums.");
+  }
+  if (fs::exists(part, ec)) {
+    fs::rename(part, out / "default.xex", ec);
+    if (ec) return fail("Cannot write default.xex (" + ec.message() + ").");
   }
   REXLOG_INFO("BF install: {} files, {} MB from {} into {}", original.size(), total >> 20, package.filename().string(),
               out.string());
@@ -285,12 +292,14 @@ REXCVAR_DEFINE_BOOL(install_progress, false, "BF1943",
 
 namespace bf1943::install {
 namespace {
-// A game folder the player picked (default.xex, or the folder with it) copied into `out`, default.xex last, so a copy
-// cut short is never taken for a finished one.
+// A game folder the player picked (default.xex, or the folder with it) copied into `out`, default.xex last, as
+// default.xex.part renamed once it is all there, so a copy cut short is never taken for a finished one.
 template <class Line>
 int CopyGame(const fs::path& from, const fs::path& out, Line line) {
   std::error_code ec;
+  const fs::path part = out / "default.xex.part";
   fs::remove(out / "default.xex", ec);
+  fs::remove(part, ec);  // left by a run cut short
   std::vector<fs::path> files;
   uint64_t total = 0, done = 0;
   for (auto it = fs::recursive_directory_iterator(from, ec); !ec && it != fs::recursive_directory_iterator();
@@ -310,13 +319,21 @@ int CopyGame(const fs::path& from, const fs::path& out, Line line) {
     const int percent = total ? int(done * 100 / total) : 0;
     if (percent != shown) line(percent / 100.0, "Copying the game from your folder"), shown = percent;
     fs::create_directories((out / rel).parent_path(), ec);
-    if (!ec) fs::copy_file(from / rel, out / rel, fs::copy_options::overwrite_existing, ec);
+    const fs::path to = rel == "default.xex" ? part : out / rel;
+    if (!ec) fs::copy_file(from / rel, to, fs::copy_options::overwrite_existing, ec);
     if (ec) {
-      fs::remove(out / "default.xex", ec);
+      fs::remove(part, ec);
       std::printf("error: Cannot write %s (is the folder writable and the disk not full?).\n", rel.string().c_str());
       return 1;
     }
     done += fs::file_size(from / rel, ec);
+  }
+  fs::rename(part, out / "default.xex", ec);
+  if (ec) {
+    const std::string why = ec.message();
+    fs::remove(part, ec);
+    std::printf("error: Cannot write default.xex (%s).\n", why.c_str());
+    return 1;
   }
   line(1, "The game is installed");
   std::printf("installed: %s\n", out.string().c_str());
