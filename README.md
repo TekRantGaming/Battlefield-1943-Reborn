@@ -19,7 +19,7 @@ Reborn servers and community servers, and the options of a modern PC release.
 ![Players](https://img.shields.io/badge/players-24%20a%20server-5b7a8c?style=flat-square&labelColor=1d2016)
 ![Status](https://img.shields.io/badge/status-alpha%20playtest-b33a2b?style=flat-square&labelColor=1d2016)
 
-<a href="https://recomplauncher.com/game/battlefield-1943-reborn"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="44"></picture></a>
+<a href="https://recomplauncher.com/game/battlefield-1943-reborn"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
 
 <br><br>
 
