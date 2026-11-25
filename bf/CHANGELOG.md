@@ -6,7 +6,8 @@
 - **General bug fixes.**
 
 **Thanks**
-- To Dickson Wu from SEAL & CertiK, for reporting an issue to us privately.
+- To Dickson Wu ([@DicksonWu654](https://github.com/DicksonWu654)) from SEAL & CertiK, for reporting an issue to us
+  privately.
 
 The known issues of 0.4.7.4, below, still apply.
 
