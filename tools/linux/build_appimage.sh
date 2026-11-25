@@ -36,6 +36,9 @@ for lib in librexruntime.so librexgpu-bfnative.so; do
 done
 for d in data fonts glyphs; do cp -a "$B/$d" "$A/usr/bin/"; done
 [ -d "$LICENCES" ] && cp -a "$LICENCES" "$A/usr/bin/licences" || echo "warning: no licences folder at $LICENCES"
+# The port's own licence from the source tree (25 Nov 2026): GPL 3 only, its section 7 permission, the earlier MIT notice.
+mkdir -p "$A/usr/bin/licences"
+for f in LICENSE LICENSE-EXCEPTION.md LICENSE-MIT-EARLIER.md; do [ -f "$WT/$f" ] && cp "$WT/$f" "$A/usr/bin/licences/"; done
 # Runtime settings, as the Windows download's bf1943.toml: the official main backend.
 printf '# Battlefield 1943 Reborn: runtime settings. Your own settings are in user/bf1943-settings.txt beside the AppImage.\nbf_online_host = "%s"\n' \
   "$ONLINE_HOST" > "$A/usr/bin/bf1943.toml"
