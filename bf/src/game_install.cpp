@@ -272,12 +272,23 @@ bool Extract(const fs::path& package, const fs::path& out, Progress& progress) {
 // ---- the server package's install, without a window: bf1943.exe --install_game=<package or folder>
 // [--game_data_root=<folder>]. Progress and the result on stdout (server_setup.ps1 reads them); the exit code is 0
 // when the game is installed.
+#include <chrono>
 #include <rex/cvar.h>
 REXCVAR_DEFINE_STRING(install_game, "", "BF1943",
                       "Install the game from this package (or a folder holding it) into the game folder, then exit");
+// RecompLauncher's setup step (recomplauncher.json prepare): with --install_game, "progress <0 to 1> <text>" lines on
+// stdout while it installs, and a game already in the game folder is kept. Off: --install_game as before.
+REXCVAR_DEFINE_BOOL(install_progress, false, "BF1943",
+                    "With --install_game: print progress lines as it installs, and keep a game already installed");
 
 namespace bf1943::install {
 int InstallFromCommandLine(const std::filesystem::path& game_dir) {
+  const bool lines = REXCVAR_GET(install_progress);
+  auto line = [](double at, const char* text) {
+    std::printf("progress %.3f %s\n", at, text);
+    std::fflush(stdout);
+  };
+  if (lines) line(0, "Checking your package");
   const Source source = Inspect(REXCVAR_GET(install_game));
   if (!source.ok) {
     std::printf("error: %s\n", source.error.c_str());
@@ -287,8 +298,31 @@ int InstallFromCommandLine(const std::filesystem::path& game_dir) {
     std::printf("installed: %s\n", source.path.string().c_str());
     return 0;
   }
+  if (lines && Installed(game_dir) && !OtherGame(game_dir)) {
+    line(1, "Already installed");
+    std::printf("installed: %s\n", game_dir.string().c_str());
+    return 0;
+  }
   Progress progress;
-  std::thread([&] { Extract(source.path, game_dir, progress); }).join();
+  std::atomic<bool> ended{false};
+  std::thread worker([&] {
+    Extract(source.path, game_dir, progress);
+    ended = true;
+  });
+  if (lines) {
+    int shown = -1;
+    while (!ended) {
+      const uint64_t total = progress.total, done = progress.done;
+      const int percent = total ? int(done * 100 / total) : 0;
+      if (percent != shown) {
+        line(percent / 100.0, "Installing the game from your package");
+        shown = percent;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+  }
+  worker.join();
+  if (lines && !progress.failed) line(1, "The game is installed");
   if (progress.failed) {
     std::printf("error: %s\n", progress.error.c_str());
     return 1;
