@@ -339,6 +339,9 @@ void SetStormSway(bool on);
 // D190: the sea's reflection of the renderer's own, in the fog pass (native_x_renderer_reflections).
 void SetSeaReflection(bool on);
 bool SeaReflection();
+// D238: the haze over the far world and the sea carried on to the horizon (native_x_renderer_horizon_haze).
+void SetHorizonHaze(bool on);
+bool HorizonHaze();
 
 // The developer's shader check (aa.cpp's TestUtilityShaders): how many of its shaders failed to compile.
 int TestSkyShaders();

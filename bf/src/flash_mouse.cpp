@@ -83,6 +83,7 @@ struct State {
   int spawn = -1;  // its spawn point index, as last told
   int icons_logged = 0;
   Clock::time_point said_at{};  // the screen last told the game its kit or spawn point (it does while it is up)
+  Clock::time_point round_over_at{};  // the round's end (SpawnMouseRoundOver): its scoreboard is not the deploy screen
   // A spawn point asked for by a click: its number, and the steps toward it (the pad hook makes them).
   int want = -1, want_steps = 0, want_toggles = 0, want_count = 1, want_from = -2;
   bool want_down = true;
@@ -158,15 +159,11 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
     const float ox = (io.DisplaySize.x - 1280.0f * s) * 0.5f, oy = (io.DisplaySize.y - 720.0f * s) * 0.5f;
     const float mx = (io.MousePos.x - ox) / s, my = (io.MousePos.y - oy) / s;
     const bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
-    auto outline = [&](const Box& b) {
-      dl->AddRect(ImVec2(ox + b.x0 * s, oy + b.y0 * s), ImVec2(ox + b.x1 * s, oy + b.y1 * s),
-                  IM_COL32(255, 236, 170, 220), 3.0f * s, 0, 2.5f * s);
-    };
+    // No highlights drawn (the user, 24 Nov 2026: "Let's do away with the overlay highlights now that we have proper
+    // mouse clickable buttons for each screen"; one stood over the end of round scoreboard): the clicks only.
     std::lock_guard lock(g.mutex);
     for (int card = 0; card < 3; ++card) {
       if (!kKitCards[card].Has(mx, my)) continue;
-      outline(kKitCards[card]);
       if (!click) break;
       CancelSpawnSelection();
       const int want = kKitOfCard[card];
@@ -190,12 +187,6 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
     for (const auto& b : buttons) {
       const Stroke& k = b.stroke;
       if (!k.Has(mx, my)) continue;
-      // The highlight is the stroke's own outline: a warm wash over it and an edge round it.
-      ImVec2 outline_points[16];
-      const int n = std::min(k.count, 16);
-      for (int i = 0; i < n; ++i) outline_points[i] = ImVec2(ox + k.points[i].x * s, oy + k.points[i].y * s);
-      dl->AddConvexPolyFilled(outline_points, n, IM_COL32(255, 236, 170, 46));
-      dl->AddPolyline(outline_points, n, IM_COL32(255, 236, 170, 230), ImDrawFlags_Closed, 2.0f * s);
       if (click) {
         CancelSpawnSelection();
         Queue({b.button});
@@ -210,7 +201,6 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
       const auto markers = direct ? SpawnMouseMarkers() : std::vector<SpawnMouseMarker>{};
       const CapturePoint* near_point = nullptr;
       float best = kPointReach * kPointReach;
-      ImVec2 at{};
       for (const CapturePoint& p : points) {
         ImVec2 m;
         if (direct) {
@@ -223,12 +213,7 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
           m = OnMap(p.x, p.z);
         }
         const float d2 = (m.x - mx) * (m.x - mx) + (m.y - my) * (m.y - my);
-        if (d2 < best && kMap.Has(m.x, m.y)) best = d2, near_point = &p, at = m;
-      }
-      if (near_point) {
-        const ImVec2 c(ox + at.x * s, oy + at.y * s);
-        dl->AddCircle(c, 17.0f * s, IM_COL32(0, 0, 0, 170), 32, 4.5f * s);
-        dl->AddCircle(c, 17.0f * s, IM_COL32(255, 236, 170, 235), 32, 2.5f * s);
+        if (d2 < best && kMap.Has(m.x, m.y)) best = d2, near_point = &p;
       }
       if (click) {
         if (REXCVAR_GET(bf_spawn_mouse_direct)) {
@@ -279,6 +264,11 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
 }  // namespace
 
 bool SpawnMouseActive() { return g_active.load(std::memory_order_relaxed); }
+// auto_join.cpp: the round is over (WinningTeamIsSet).
+void SpawnMouseRoundOver() {
+  std::lock_guard lock(g.mutex);
+  g.round_over_at = Clock::now();
+}
 
 // From the pad hook (auto_join.cpp), at each of the game's pad reads: whether the deploy screen may be up (a level is
 // loaded, the player is in no seat and not on foot, our own menu is closed), and the pad as the game will read it
@@ -297,7 +287,10 @@ void SpawnMousePad(uint8_t* gamepad, bool allowed, bool out_of_world) {
   // the mouse is stuck with mouse look on the spawn screen"). Else: out of the world for 0.7 s without a break (a
   // moment between two seats is not the deploy screen).
   const bool talking = allowed && REXCVAR_GET(bf_spawn_mouse) && now - g.said_at < std::chrono::milliseconds(2500);
-  const bool active = talking || (on && now - g.since > std::chrono::milliseconds(700));
+  // After the round's end the soldier is out of the world under the scoreboard too: then only the screen's own word
+  // (talking) frees the pointer, so a click on the scoreboard is not taken as the deploy screen's buttons.
+  const bool after_round = g.round_over_at > g.said_at;
+  const bool active = talking || (on && !after_round && now - g.since > std::chrono::milliseconds(700));
   if (active != g.active) {
     g.active = active;
     g_active.store(active, std::memory_order_relaxed);

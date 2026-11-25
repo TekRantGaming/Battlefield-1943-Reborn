@@ -1039,7 +1039,6 @@ struct OwnSnapshot {
   float rows[4][3] = {};  // the base world transform: right, up, forward, position
   int parts = 0;
   uint64_t tick = 0;
-  uint32_t tree = 0;  // its tree's address (g_trees), for the plane's bomb view (vehicle_views.cpp)
 };
 std::mutex g_own_mutex;
 OwnSnapshot g_own;
@@ -1051,7 +1050,6 @@ void PublishOwnVehicleLocked(uint64_t tick) {
   const bool seat = g.seat_entity && g.seat.have && tick - g.seat.seen_tick <= 2;
   const Track* ref = seat ? &g.seat : g.camera.have ? &g.camera : nullptr;
   const TreeTrack* best = nullptr;
-  uint32_t best_tree = 0;
   // From the camera: a plane's chase camera sits 9 to 19.4 m behind it (run 12 Nov 16:51), so 6 m lost it in flight.
   const double reach = seat ? 6.0 : 25.0;
   double best_d2 = reach * reach;
@@ -1070,13 +1068,12 @@ void PublishOwnVehicleLocked(uint64_t tick) {
         d2 += d * d;
       }
       if (d2 < 30.0 * 30.0 && n_near < 8) nearby[n_near++] = {int(t.count) - 1, t.base.own_score, std::sqrt(d2)};
-      if (int(t.count) - 1 >= 8 && d2 < best_d2) best_d2 = d2, best = &t, best_tree = tree;
+      if (int(t.count) - 1 >= 8 && d2 < best_d2) best_d2 = d2, best = &t;
     }
   }
   OwnSnapshot s;
   if (best) {
     s.valid = true, s.scored = best->base.own_score >= 2, s.parts = int(best->count) - 1, s.tick = tick;
-    s.tree = best_tree;
     std::memcpy(s.rows, best->cur[0].m, sizeof(s.rows));
   }
   {
@@ -2490,8 +2487,6 @@ namespace bf1943 {
 bool VehicleFreeLook(double& yaw, double& pitch);   // look.cpp
 int FirstPersonView();  // fov.cpp: 1 first person, 0 an outside view, -1 not known
 bool TurretViewOffset(double& yaw, double& pitch);  // vehicle_mouse.cpp
-bool BombViewActive();  // vehicle_views.cpp
-bool PlaneSeatNow();    // vehicle_views.cpp
 bool TankFreeLook();    // vehicle_views.cpp: free look is held in a tank's outside view
 }  // namespace bf1943
 
@@ -2591,79 +2586,12 @@ Xf FreeLookTurn(const Xf& in, double yaw, double pitch) {
   return out;
 }
 
-// The plane's bomb view (vehicle_views.cpp: V after the chase view): the air raid bomber's "Bomb sight" camera
-// (mitchell_bomber.dbx and sally_bomber_plane.dbx, a StaticCameraData: its rows (1, 0, 0), (0, 0.707, 0.707),
-// (0, -0.707, 0.707), looking ahead and 45 degrees down, field of view 55), on the plane the player flies. The bomber
-// has it at (0, -0.25, 0.84) in its glazed nose, with a cockpit mesh of its own round it; a fighter's outside views
-// draw the plane from outside, so the eye is put ahead of the propeller, where nothing of the plane is in sight (under
-// the belly it was below the carrier's deck with the plane parked there: run vw_plane3).
-constexpr double kBombSightCos = 0.70710678118654752;
-constexpr double kBombEye[3] = {0.0, 0.0, 6.0};  // in the plane's own rows: across, up, ahead (metres)
-
-// The game's camera rows against the plane's body rows (a camera's are right, up, back: fov.cpp), each +1 or -1:
-// learnt in the plane's first person view, whose camera has the body's own rotation (corsair.dbx "Camera 1stP Pilot",
-// rows the identity; run vw_plane2: -1 and -1), and that guess until then.
-std::atomic<int> g_cam_sign0{-1}, g_cam_sign2{-1};
-std::atomic<bool> g_cam_signs_learnt{false};
 // How far the game's vehicle view is from the vehicle's root, in metres (vehicle_views.cpp's free look in a tank: the
 // game's own first person answer is yes in the Sherman's chase view too, run vw_tank2), -1 not known; and when (steady
 // clock nanoseconds).
 std::atomic<float> g_view_reach{-1.0f};
 std::atomic<int64_t> g_view_reach_at{0};
 
-void Unit(const float in[3], double out[3]) {
-  const double l = std::sqrt(double(in[0]) * in[0] + double(in[1]) * in[1] + double(in[2]) * in[2]);
-  for (int c = 0; c < 3; ++c) out[c] = l > 1e-6 ? in[c] / l : 0.0;
-}
-double Dot3(const double a[3], const double b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
-
-// Under g.mutex: the local player's vehicle's root carried to this frame's phase `f`, as its camera is (the tree's
-// last two ticks); false when it is not known.
-bool OwnRootAt(double f, Xf& out) {
-  uint32_t tree = 0;
-  {
-    std::lock_guard lock(bf1943::g_own_mutex);
-    if (!bf1943::g_own.valid || bf1943::ClientTicks() - bf1943::g_own.tick > 4) return false;
-    tree = bf1943::g_own.tree;
-  }
-  const auto it = g_trees.find(tree);
-  if (it == g_trees.end() || it->second.cur.empty()) return false;
-  const TreeTrack& t = it->second;
-  if (!(t.step && !t.prev.empty() && Blend(t.prev[0], t.cur[0], f, out))) out = t.cur[0];
-  return true;
-}
-
-// Under g.mutex, in a plane's seat: the game's view `view` against the plane's root `root`: the signs, learnt in its
-// first person view.
-void NotePlaneView(const Xf& view, const Xf& root) {
-  if (bf1943::FirstPersonView() != 1) return;
-  double v0[3], v2[3], b0[3], b2[3];
-  Unit(view.m[0], v0), Unit(view.m[2], v2), Unit(root.m[0], b0), Unit(root.m[2], b2);
-  const double d0 = Dot3(v0, b0), d2 = Dot3(v2, b2);
-  if (!(std::fabs(d0) > 0.95 && std::fabs(d2) > 0.95)) return;
-  const int s0 = d0 > 0 ? 1 : -1, s2 = d2 > 0 ? 1 : -1;
-  const bool was = g_cam_signs_learnt.exchange(true);
-  const int o0 = g_cam_sign0.exchange(s0), o2 = g_cam_sign2.exchange(s2);
-  if (!was || o0 != s0 || o2 != s2)
-    REXLOG_INFO("BF plane views: the camera's rows against the plane's: across {}, ahead {} (first person view)", s0,
-                s2);
-}
-
-// The bomb view on the plane's root `root`, with the game's view `view`'s fourth words.
-Xf BombView(const Xf& view, const Xf& root) {
-  double b[3][3];
-  for (int r = 0; r < 3; ++r) Unit(root.m[r], b[r]);
-  // The sight's rows in the plane's: across, up tilted ahead, ahead tilted down.
-  const double local[3][3] = {{1, 0, 0}, {0, kBombSightCos, kBombSightCos}, {0, -kBombSightCos, kBombSightCos}};
-  const double sign[3] = {double(g_cam_sign0.load()), 1.0, double(g_cam_sign2.load())};
-  Xf out = view;
-  for (int r = 0; r < 3; ++r)
-    for (int c = 0; c < 3; ++c)
-      out.m[r][c] = float(sign[r] * (local[r][0] * b[0][c] + local[r][1] * b[1][c] + local[r][2] * b[2][c]));
-  for (int c = 0; c < 3; ++c)
-    out.m[3][c] = float(root.m[3][c] + kBombEye[0] * b[0][c] + kBombEye[1] * b[1][c] + kBombEye[2] * b[2][c]);
-  return out;
-}
 // Under g.mutex: how far the game's view `view` is from the vehicle's root, published for vehicle_views.cpp.
 void NoteViewReach(const Xf& view) {
   float reach = -1.0f;
@@ -2747,15 +2675,8 @@ REX_HOOK_RAW(sub_82583348) {
       g.camera_shown = out, g.camera_shown_valid = blend;
       // Vehicle free look (look.cpp): only the view handed to the renderer is turned; the manager's own camera (sound,
       // effects, the parts placed around it) stays the game's.
-      // In a plane: the bomb view in place of the game's chase view (vehicle_views.cpp).
       NoteViewReach(now_xf);
-      Xf root;
-      const bool plane = bf1943::PlaneSeatNow() && OwnRootAt(f, root);
-      if (plane) NotePlaneView(now_xf, root);
-      // The bomb view has no free look (the user, 18 Nov 2026).
-      if (plane && bf1943::BombViewActive()) {
-        if (const uint32_t c = Copy(base, BombView(blend ? out : now_xf, root))) copy = c;
-      } else if (free_look) {
+      if (free_look) {
         const Xf turned = FreeLookTurn(blend ? out : now_xf, free_yaw, free_pitch);
         if (const uint32_t c = Copy(base, turned)) copy = c;
       }

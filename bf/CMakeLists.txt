@@ -110,6 +110,7 @@ set(BF1943_SOURCES
     src/start_failure.cpp
     src/changelog.cpp
     src/fov.cpp
+    src/shadow_sun.cpp
     src/vehicle_camera.cpp
     src/vehicle_views.cpp
     src/tick_blend.cpp

@@ -7203,3 +7203,389 @@ its edge is torn by the detail's 3D noise (a 2D noise with the height added laye
 from inside again since the finer steps went (the camera at 1,000 m was over the cloud tops, run wk8); the wisp
 tongue; other players' planes beyond 110 m. Found on the way, not from this work by the code: in fair weather, hard
 kinked creases round flat shelves of cloud seen from above (runs wk2 to wk4, the same place with the plane higher).
+
+## D235 — The clouds' shadows half as dark; the shapes on the sea looked into (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+The user, 24 Nov 2026 (relayed, with a screenshot on foot by a beach looking out to sea): "Object shadows are still
+dislocating themselves (seen over the water here). These shadows might be screen-space, which is why they dislodge and
+move with the player camera", then "It specifically happens at later times of day and when flying a plane", "this
+has been happening even before we built soft shadows into the game", and "Cloud shadows are also far too dark, and
+should be about 50% light than they currently are".
+
+**What** (sky.cpp, the fog's pass): the share of the scene the clouds' shadow takes halved, 0.89 to 0.445 (D221's
+light through the clouds, exp(-5 x density), unchanged): about 12% darker under a cloud instead of about 24%, the
+shadows' shapes and edges as they were.
+
+**Looked into, not fixed** (dev build, the user's own graphics and weather settings, Guadalcanal at 17:30, a developer
+camera gliding 40 to 80 m over the coast and the sea, BF_DEV_CAMERA_GLIDE):
+- The dark shapes on the water in the glide were the clouds' shadows, drawn out by the low sun: the same with the sun's
+  turn off (`--native_x_renderer_sky_sun_moves=false`, run sea_f_noturn) and with the shadow pass' casters clipped
+  (sea_f_clip) as with neither (sea_f_base).
+- The shadow pass already clips its casters' depth (a log line said so): no caster lies flattened on the map's near
+  plane, the first suspect.
+- The fog's pass has depth over all of the sea to the horizon (its distance view, `native_x_renderer_sky_debug=4`, run
+  sea_dbg): the clouds' shadows on the water are worked out at the sea's surface everywhere, not in patches. A change
+  that assumed patches (shadows where the depth held nothing) was tried and taken out.
+- Not reproduced: the user's own view on foot (blocky dark shapes near the sun's glitter, moving with the camera).
+  Next: the user's map, hour and place; the clouds' shadows off for a frame of it (`native_x_renderer_cloud_shadows`).
+
+**Test runs:** the shared test profile (`runs\vtmpl\user`) still had `shaders_prepared_for = 0.4.7.1` while the dev
+build is 0.4.7.4: every test run was a first start after an update, started the game behind the shader page and could
+not host its LAN match ("The LAN match could not be started"). Set to 0.4.7.4 (not in git).
+
+## D237 — No Sherman headlights on Japanese soldiers: the tank's farthest level of detail left out of the lamp models (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+The user, 24 Nov 2026: "Bots also occasionally still have vehicle headlights when running around as infantry", with a
+screenshot on Guadalcanal at night (an enemy bot on foot through a sniper scope; two lamp glows and two pools of light
+on the ground, no vehicle) and "We were not near a vehicle, no".
+
+**Why:** a model's lamps (D163, D177) are placed on any output-sized draw whose index count is one of the models' and
+whose matrix in the model's register is rigid, and lit while it moves (D178). Every mesh part in every level's files
+(`*.res`, each part's name followed by its triangle count) was read for the twelve counts: eleven belong to their own
+vehicle only (and its depth-only twin), but 7416, the Sherman's farthest level of detail, is also the Japanese
+infantry's nearest head (Jap_Infantry_Mesh's HeadShape_head and Jap_Rifleman_Mesh's Jap_Head1, 2472 triangles). A
+running Japanese soldier drawn near the camera matched it, and when the bone matrix in c26 happened to be a clean
+rotation, the Sherman's two headlights were placed on him and lit.
+
+**What** (night_lamps.cpp): the Sherman's lamps on its levels of detail 0 and 1 only (29745, 14685 indices). A far
+Sherman (its lamps reach 30 m) shows none.
+
+**Ruled out first:** a tank's depth-only twin (same count) placing lamps elsewhere: at the Wake Island airfield at night
+with every vehicle's lamps forced on (NXR_VEHICLE_LAMPS_ON), the same three vehicles' lamps, at the same places,
+with and without draws that write no colour (runs lamp_before, lamp_after).
+
+**Not tested:** the fix in a match with a Japanese soldier near the camera at night (the bots stayed away from the
+test camera); both builds pass.
+
+## D239 — The game's shadows cast from the sky's sun at their source; the turn only as a fallback (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 24 Nov 2026, of building shadows as the camera moves: "You see those shadows on building flicker
+in and out though, right!?" With the day and night cycle, D181 turned the game's shadow cascades to the sky's sun
+after the game had built them. The game still chose what casts shadows, and fitted its cascades, for its own fixed
+sun (on Wake Island its shadows fall from 63.4 degrees up, its light from 35); turned, a cascade's box no longer
+held every caster that throws a shadow into view, so buildings' shadows came and went with the camera. D218 had
+already faded the turn out from high up for the same reason.
+
+**Found** (research, runs sun_find1, sun_early1 to 3, sun_view1, sun_src1 and 2): the game's shadow setup,
+sub_825E1DB0 (once a frame), hands sub_82620D20 (r3 the rotation it builds, r4 a vector; called from 0x825E1FE0) its
+shadow ray, from the sun to the ground: on Wake Island 0.4454 -0.8945 -0.0391. Written over before the call, the game
+builds its cascades and culls its casters for that ray (sun_src2: with the ray turned by 90 degrees, a pole's shadow
+on the airfield went away, and the game's own cascade transforms followed). Writing the game's light direction or the
+12 KB block it is copied from (0x20010150, by 825EE600) changed nothing.
+
+**What:**
+- `bf/src/shadow_sun.cpp` hooks sub_82620D20; called from the shadow setup (the link register inside 0x825E1DB0 to
+  0x825E2830), it reads the game's ray and writes the one `native_x_renderer::ShadowSourceDirection` gives back,
+  logged once ("BF shadows: the game's shadow ray ... given the sky's sun's ... (D239)").
+- `ShadowSourceDirection` (draw.cpp) keeps D181's rule for where the shadows fall: the game's shadow direction moved
+  by the sky's sun's change from the game's own light (its elevation held between 40 and 75 degrees, steeper as the sun
+  stands high), the azimuth by the same difference. The sky's sun and the game's light come from the last frame's
+  LatchShadowTurn; with no day cycle (the light not turned), no game light seen yet, or
+  `native_x_renderer_sun_source` false, it returns false and the game's ray is left alone.
+- LatchShadowTurn turns nothing while the source was fed in the last 500 ms; the game's cascades already fall from
+  the sky's sun, and the turn's direction is set to it for the receivers' light. When the feed stops (a dedicated
+  server has no renderer; the cvar off), D181's turn with D205's pivot and D218's fade comes back as before.
+- `native_x_renderer_sun_source` (default true): off, the old turn (for comparison).
+
+**Tested:** Wake Island at dusk, a camera gliding on foot height through the airfield and along the cliffs, the
+source on and off (runs sun_glide_true, sun_glide_false): the hook fed every frame after the first (the turn's own
+log never came again), the game's 63.4 degree ray replaced by the sky's sun's 40 degree one.
+All four maps at 8:48, three parked views 250 to 500 m up, the source on and off (runs ss_true_*, ss_false_*): fed on
+every map (the sky's sun's ray 75 degrees up), no shapes on the sea, the two alike within 0.2% of the pixels (from up
+there a building's shadow is a few pixels). The Iwo Jima run with the source off lost its
+device on a swap chain's re-creation after a 10 s stall (the old path, not this change). Not measured: the flicker
+frame by frame on foot (the user's test); a real plane in flight; night and storms.
+
+## D238 — The horizon: no grey wall; the sea fades into the sky, the far clouds and the far world in the haze (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+The user, 24 Nov 2026, with a screenshot of a hard line between the sea and the sky: "We really need to make our
+horizon blend neatly like the SDK renderer does, but for all times of day"; then "Any way we can get rid of the grey
+wall at the horizon, so we can make it look like infinite sea against the color of the sky like the original skybox
+does with haze?" and "I noticed the distant fog only fills the skybox, it does not actually fill the level's world".
+
+**Why:** three things stood at the horizon. The far cloud deck, tens of kilometres off and squeezed into a band just
+over the horizon, was drawn whole: a flat grey-lavender sheet on the pale far sea (run hz2_on_1050, zoomed). The sky's
+lowest colour was the haze's grey (fog_color) at any weather. And with the fog setting at 0 nothing hazed anything: the
+sea the deck sees is mostly within a kilometre or two (its drawn edge met the sky in a line), and the far world kept
+its colours under a hazy sky. With no fog, ground fog over 0, weather or reflections the fog pass did not run at all.
+
+**What:**
+- The sky pass: a cloud fades into the sky behind it by its distance, taken as 1.5 km up (exp(-d / 30 km): a tenth
+  gone overhead, half 20 km off, all of it at the horizon).
+- `low_haze()` (the shared sky code): the sky at and under the horizon is the horizon's own colour times 1.06 on a
+  clear day, the haze's grey only as there is haze (1 - exp(-1500 fog_a.x): the fog setting, the weather's mist).
+- The fog pass, at its end (`native_x_renderer_horizon_haze`, default true; bit 128 of the fog parts off): everything
+  drawn is hazed toward the sky as the sky pass draws it just over the horizon that way (`low_haze` with the sun's and
+  the moon's glow), by haze_depth with 1/6000 per metre from 400 m and a 1200 m scale height (a tenth at 1 km, a
+  quarter at 2, half at 5; less up high). The sea's last degree under the horizon (what lies on its plane, or nothing
+  past its draws: not islands or ships) fades into that sky whatever its distance, as a skybox's painted haze.
+- Past the sea's draws, under the horizon, the colour of the farthest sea drawn below on the screen (steps toward
+  where the view looks lower, then halved; only when what is found lies on the sea's plane), with the pass's own fog
+  and rain over it: the sea goes on to the horizon. The scene copy (D190's) is made for it whenever the pass runs.
+- `FogWanted` is true with the haze on, so the pass runs with every setting at 0 (its cost: one full-view pass and the
+  scene copy, which ran only with fog or ground fog set before).
+
+**Tested:** Wake Island's carrier deck, the user's settings (fog 0, ground fog 10%), 10:30, 17:30 and 21:00 (runs
+hz2_off_*, hz3_on_*, hz4_on_*). Before: the grey sheet of far cloud over a bright cyan sea at 10:30, the sea's edge a
+line at every hour. After: the far clouds melt into the haze, the sea fades into the sky's colour at the horizon
+(lavender-blue by day, lilac into pink at dusk, dark blue at night), the far carrier and the island keep their colours.
+Not seen: from a plane in flight; in a storm; the cost measured.
+
+## D240 — The sea reflects the hour's sky without the renderer's reflections too (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+The user, 24 Nov 2026: "Can the water's color be adjusted to reflect time of day as well, without needing to have
+SSR enabled (which is a bit bugged)?" and "Is it possible to replace the waters cube map with one of our sky, like
+SSR one does?"
+
+**Why:** without `native_x_renderer_reflections` every map's sea shaders reflected the game's day sky cube map (their
+outdoorLightReflectionEnvmap, and Wake Island's and Coral Sea's own at fetch 6), only dimmed for the hour (D182): a
+blue day's sky in the sea at dusk and at night. D190's small cube of the renderer's sky stood in for it only with the
+reflections on.
+
+**What:** `native_x_renderer_sea_sky` (default true): with the renderer's sky on, SeaSkyView gives the sea's shaders
+D190's cube (the hour's zenith and horizon as shown) for every cube map they take, not only fetch 6, and the sea's
+specular w is no longer dimmed for the hour but taken at 0.6 (whole, the sea by day was a pale glare of the horizon's
+colour: run hz_after_1050). With the reflections on, as before (none of the cube in the sea; the fog pass reflects).
+
+**Tested:** Wake Island's carrier deck at 10:30, 17:30 and 21:00, the same build with it on and off (runs hz_after_*,
+hz_nosea_*): at dusk the sea lilac under the pink sky (dark teal without), at night darker (8 19 41 to 1 7 26 in the
+near sea), by day at 0.6 a lighter blue (runs hz4_on_*). Not seen: the other maps' seas; SSR on (unchanged code path).
+
+## D241 — The ground's relief lit by a lower sun while the sky's stands high: the tyre ruts back (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** the report (relayed): "certain terrain texture layers, like the vehicle tracks, disappear from the player
+camera view"; the user: Wake Island, flags E and C. RenderDoc on both renderers at flag C (runs rd_ours, rd6_sdk): the
+SDK's frame and ours draw the ground there with byte-identical textures, the same samplers and the same pixel shader
+constants but one, the light direction (c1: the SDK the game's -0.816 0.574 0.072, 35 degrees up; ours the sky's sun,
+65 degrees up at 10:30, turned 82.5 degrees round). The ruts are relief in the ground's normal maps, drawn for the
+game's fixed low sun; under a high sun a rut's two sides are lit almost alike (their difference goes with the cosine of
+the sun's height, against the flat ground's sine: a third as visible at 65 degrees as at 35). With the game's light
+(NXR_GAME_LIGHT=1, a dev switch kept local) ours showed the same crisp ruts (gamelight3_none). Ruled out on the way: missing draws
+(the CPU-built track strips pass their depth test, 40 of 40 vertices; the terrain's dirt map at 0xd400000 is black in
+the SDK too, loading screen leftovers in a 64 texel strip), texture content, samplers, the dynamic strips (where bots
+drove). A hosted custom match forces day and night on (game_menu.cpp ApplyServerLook), whatever the cvar says.
+
+**What:**
+- `tools/ground_shaders.py` reads the game's shader constant tables (as light_constants.py) and writes
+  `bf_ground.inc`: the pixel shaders that draw the ground, the terrain's (they sample `sampler_heightmap`, 240) and the
+  ground patches' (generic `sampler_Texture<n>` samplers and `sampler_OcclusionTexture` only, 90; no shader samples the
+  occlusion map with named samplers, so props are not taken). 330 of 1,098.
+- ApplyOutdoorLight: for those shaders, while the sky's sun stands higher than the game's own light (its elevation,
+  25 to 50 degrees, else 35), the light direction is lowered toward it at the sun's own azimuth, halfway by default
+  (`native_x_renderer_ground_relief_strength`, 0.5), and the key colour made stronger by sin(true) / sin(lowered), so
+  flat ground is lit as before. `native_x_renderer_ground_relief` (default true) turns it off. Shadows stay the sky's.
+- Halfway, not the whole way: the whole way the terrain's own slopes turned from the sun went much darker (a 30 degree
+  slope's light a quarter of the sky's at 65 degrees; Guadalcanal's cliff black-streaked, Iwo Jima's beach slope 10%
+  darker, runs rel1_true, rel2_true). Halfway: the ruts' contrast 1.8 times the sky's sun's, such slopes about 30% less.
+
+**Tested:** flag C at 10:50 (relief_false_none, relief_true_none, relh_none): the ruts visible again, the ground's mean
+brightness 188.3 off and 187.2 on. Guadalcanal and Iwo Jima tours at 10:50, off, half, whole (rel1_*, rel2_*, relh1,
+relh2): the lower half of the view within 5% at half. Not tested: Coral Sea, mornings and evenings (below the game's
+height nothing changes), a match played through.
+
+## D242 — The horizon: a pale blue sky over the sea, and the sea's fade found by the level's water (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 24 Nov 2026: "can we get rid of the grey band on the sky box at the horizon, so the water and the sky
+blend better at that point?", then with a screenshot: "this greyness behind the clouds on the sky. The sky transitions
+from bottom to top, grey to blue". Two things after D238: the sky palette's clear-day horizon colour was a grey
+lavender (0.6 0.66 0.76, its red as its green, darker than the blue above it) filling the sky's lowest 17 degrees; and
+D238's fade of the sea's last degree into that sky did not run where the eye is low. It found the sea by the distance to
+the sea's plane (97% of it), and the sea's height was learned as the lowest flat ground in sight: Iwo Jima 4.4 m for the
+game's water drawn at 5.3 (an eye a few metres up then sees its sea at 70% of the plane's distance), Wake Island's
+flag C 233.4 m (the airfield; the sea is at 215). The bright sea ran up to a duller sky in a hard line (run rel2_false).
+
+**What** (sky.cpp):
+- The sea's height is the level's water when it is known (`native_grass_water_level`, from the level's water mesh as
+  it loads; else learned as before): Wake Island 215.00 m, Iwo Jima 5.30.
+- The fog pass finds the sea by height: within 1 m of that level (its waves), in the fade and in the search for the
+  farthest sea past the sea's draws (3 m faded a carrier's waterline into a pale seam, run hzi_sun). The fade covers the
+  sea's last two degrees under the horizon (one was a few pixels).
+- kHorizon, a clear day's horizon, 0.6 0.75 0.96: a pale sky blue, red under green (dusk and night mix their own over
+  it as before).
+
+**Tested:** Iwo Jima's beach at 10:50 and dusk (hzi_sun, hzi2, hzi_dusk, hzi3_dusk): the hard line gone, the sea fading
+up into the sky. Wake Island's beach at 10:50 (hzw_sun, hzw2, hzw3): the sky from pale to deep blue, no grey behind the
+far clouds, the sea's far band meeting it in a pale glow. Not seen: SSR on, a storm, from a plane, Guadalcanal and
+Coral Sea.
+
+## D243 — The terrain's tyre-track pass is not the sky's haze; the verify report lists what no draw call stands for (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 24 Nov 2026: "The tire marks aren't flattening, they pop in and out of existence", then side by side
+at Wake Island's flag A: "all the tire tracks are perfect in the SDK renderer", and "I now fear our renderer is missing
+far more things than just this issue". RenderDoc at flag A (runs rdA_sdk, rdA_ours): the SDK draws eight blended
+terrain draws over the sand (index counts 180 to 3249, premultiplied alpha, no depth write) that ours never drew.
+
+**The audit** (`native_x_renderer_verify`, observer.cpp): its report now groups, by vertex and pixel shader, index
+count and targets, the draw packets the GPU ran that no Direct3D draw call stands for, and the recorded command
+buffers' draws the tracker did not replay. At flag A over two frames (run audA2): 806 of 874 ring draw packets matched
+to a draw call, all with the rebuilt state; the 68 others the library's own rectangles (prim 8, 3 vertices: clears,
+resolves, the bloom chain's steps); the recorded buffers' 1008 not replayed all single points with a depth-only pixel
+shader. No class of geometry is lost between the game and the renderer.
+
+**The cause:** the own sky's rule (D179) skipped pixel shader 0365AC9437C0240E as "a haze of 588 and 180 vertices
+blended over what is there", seen before the dome in the sky's runs. The game's constant table says otherwise: the
+outdoor light, the sun's shadow map, `sampler_heightmap`, six textures (the tyre tread among them) and the dynamic
+mask's tile and indirection maps: the terrain's tyre-track pass, the eight draws. 38DEA3BE39271907, "Guadalcanal's
+haze", samples three generic textures as Wake Island's track strips do (617653D17C0D6DD5).
+
+**What:** neither is skipped any more (draw.cpp); the dome's shaders still are. Ours now draws the eight with the
+SDK's index counts (run dlA).
+
+**Also found** (not changed here): at flag A the tracks seen in the SDK are mostly the ground's own relief under the
+game's low sun (D241): with the game's light (NXR_GAME_LIGHT, a dev switch kept local) ours shows them; with the day
+and night's sun at 10:50, even with D241 at half, the sand road is plain; at 16:00 they show faintly.
+
+**Tested:** flag A before and after (runs popA, popA_d243, dlA, dlA_sdk); Guadalcanal at night (gnight_d243): the
+renderer's night sky, no daylit haze back. Not tested: Iwo Jima and Coral Sea's sky with the change.
+
+## D244 — The ground lit from the game's own sun while the day and night's stands higher (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** after D241 (the relief lit by a lower sun, half way) the tyre tracks at Wake Island's flags A and C still
+showed faintly at 10:30; with the game's own light (NXR_GAME_LIGHT, a dev switch) they showed as in the SDK. The user
+was shown half (D241), "full height" (the sun lowered the whole way: black blotches over the sand at 10:30) and the
+game's sun at 8:48, 10:30, 16:00 and dusk at both flags (runs cmp_*), and chose "Yes, game's sun"; then, shown that it
+darkens whole hills on Iwo Jima and Coral Sea (a beach hill from 134 to 71, a slope to 53: runs gs2_game, gs3_game) and
+a half way version for the terrain: "I liked the hills dark, it looks closer to the SDK renderer".
+
+**What** (draw.cpp, ApplyOutdoorLight): for the ground's shaders (bf_ground.inc, now with each one's kind: 1 the
+terrain's, 2 a ground patch's; tools/ground_shaders.py) and the tyre-track passes (D243: 0365AC9437C0240E and
+0A7847F161DA00A7, the same samplers on another level), while the sky's sun stands higher than the game's light, the
+light comes from the game's own direction, blended in over 15 degrees above its height (dawn and dusk keep the hour's),
+the key colour raised by as much as flat ground lost (sin of the hour's height over the new one's), so flat ground is as
+bright as the hour. `native_x_renderer_ground_relief_game_sun` (default true; off: D241's half way lowering),
+`native_x_renderer_ground_relief_game_sun_weight` (patches and tracks, 1) and `..._terrain_weight` (the terrain, 1;
+0.5 kept hills within a tenth, runs gs2_w05, gs3_w05). Shadows and everything else keep the sky's sun.
+
+**Tested:** flags A and C at four hours (cmp_*), the four maps' tours at 10:30. Not tested: a match played through.
+
+## D245 — The sea lit as the game lights it, as bright as the hour (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user: "Now we just need to tune the water color closer to the SDK look at the same time of day too", then
+"I thought we already agreed on the game's sun for this". Wake Island's open sea from flag A at 10:30, parked the same in
+both renderers (runs sea4_w_sdk, sea4_w_ours): mid sea SDK (18, 76, 109), ours (71, 125, 191); just under the horizon
+(36, 135, 165) and (158, 235, 254). With the game's painted sky reflected instead of the hour's (sea_sky off) ours was
+(49, 103, 152); the horizon haze changed nothing (sea2_seasky0, sea2_haze0). Iwo Jima's sea draws green in the SDK (its
+bug), so Wake is the reference.
+
+**What** (draw.cpp): `native_x_renderer_sea_game_light` (default true): the sea's shaders keep the game's own light
+direction and light colours (sky, ground, sun, its specular), all scaled by one factor, the hour's sun's brightness (its
+key colour's luminance, at most 1), and reflect the game's own painted sky dimmed for the hour (SkyReflectionLeft;
+SeaSkyView no longer replaces it).
+
+**Tested:** the same view at 10:30 (run seaG_sun): mid sea (44, 89, 131), near (18, 74, 120) against the SDK's (9, 65,
+105); dusk deep navy, night dark (seaG_dusk, seaG_night). Not tested: the other maps' seas against the SDK (Iwo Jima's is
+broken there), SSR on.
+
+## D246 — The sea's fade into the sky only far out (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, with screenshots of a beach from eye height: "water just now has this weird translucent layer over
+objects and terrain at eye-level". D242 took as sea, for the fade of its last two degrees into the sky, whatever lies
+within 1 m of the water's level; from near that level the band reaches tens of metres out, and the rocks, the beach and
+the obstacles at the waterline took the sky's colour.
+
+**What** (sky.cpp): that fade grows from 300 m to 700 m away; past the sea's draws (nothing drawn) as before.
+
+**Tested:** Iwo Jima's beach at eye height (run eyelvl2): the shore's objects in their own colours, the far sea still
+fading into the sky.
+
+## D247 — Per-draw work that belongs to the frame: a getenv on every lit draw, the outdoor light at every draw (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 24 Nov 2026: "Any improvements we can make to NativeXRenderer? Make it more accurate, efficient,
+etc?" A profile of the renderer's thread (runs nxrp_day and nxrp_storm, Wake Island's camera tour: a sampler of whole
+stacks from outside the game, `.handoff/scripts/tsample`) showed that in busy views the thread, not the GPU, sets the
+frame rate: it worked 4.5 to 7.5 ms a frame, the frame interval followed it, the GPU was at 3 to 4 ms. A quarter of it
+was two kinds of work done for every draw that change only once a frame:
+- **14 to 15 %:** `getenv("NXR_SHADOW_LOG")` in ApplyOutdoorLight (D239's research line), at every lit draw's pixel
+  stage: its "said once" flag only turns true when the variable is set, so while unset the C runtime walked the
+  environment block every time. The same at the lamp models' `NXR_MODEL_LAMP_DUMP` (night).
+- **10.6 % by day, 14.2 % in a storm:** ExecuteDraw's outdoor light: `World()` (a clock, a mutex, the storm), `SkyLightAt`
+  twice, `SkyFlashAt` (the storm again, a mutex), `SkyNoonAzimuth`, the sea sky's colours and a dozen settings, the same
+  for every draw of the frame.
+
+**What:** both environment variables read once (draw.cpp); the outdoor light and the world's flags worked out at the
+frame's first draw and kept for its others (renderer.cpp, keyed on the frames presented). A lightning flash now lights
+a whole frame alike instead of changing within it.
+
+**Tested:** the same two tours before and after (runs nxrp2_day, nxrp2_storm), the windows of 1,000 draws or more: the
+renderer's thread 4.41 → 2.80 ms a frame by day and 4.38 → 2.95 in the storm (median); the frame interval 5.10 → 4.19
+and 4.95 → 4.17 ms (now at the 240 FPS cap in most windows), at 2,000 draws or more 5.84 → 4.53 and 6.63 → 4.62 ms; the
+GPU unchanged (3.0, 3.5 ms); the thread idle 17 → 35 % of the time. The storm's light, rain and mist as before
+(shot_57). What is left: `.handoff/NXR-IMPROVEMENTS.md` (MoveAttached's matrix search per draw, 5 %; the recorder's spin).
+
+## D248 — D154's attached models: a world matrix tested against the recorded cameras first (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** after D247, MoveAttached (D154) was 5 to 6 % of the renderer's thread in Wake Island's camera tour (runs
+nxrp2_day, nxrp2_storm). For every model whose eye is within 25 m, every three consecutive registers that are rigid,
+orthogonal rows (a soldier's bones, every one) got a 4 x 4 inverse (Mat4dInvert, 0.7 to 0.9 %) and FindAttachedMove,
+which takes a lock and reads the clock (0.4 %), and which takes no record whose frame camera is more than 5 mm from the
+eye those rows put in the world: nearly all of them.
+
+**What** (draw.cpp): the 16 records' frame cameras copied once per call (AttachedPositions, one lock), and each triplet's
+eye in the world tested against them first, with FindAttachedMove's own arithmetic and 5 mm; only a triplet near one goes
+on to the rigid rows' checks, the inverse and FindAttachedMove, which still decides as before. The same models move.
+
+**Tested:** the day tour again (run nxrp3_day): Mat4dInvert and FindAttachedMove gone from the thread's profile;
+MoveAttached 6.0 → 5.4 % of its samples, within a single run's noise: the gain is about 1 to 1.5 % of the thread
+(0.04 ms a frame). Not tested in a vehicle: the tank run's soldier never got in (run nxrp3_tank, on foot, 0 moved as
+always on foot). What is left of MoveAttached is the search for the projection block (CameraVote::FindMatrix, about
+2 %); a cache of which shaders have none would skip it, but could miss a frame of a vehicle's sight: not done.
+
+## D249 — What our own rules leave out of the game's frame, logged and checked against the game's constant tables (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** D243 found that the own sky's rule had taken every map's tyre-track pass, and the user wrote "I now fear our
+renderer is missing far more things than just this issue". Draws lost between the game and the renderer are audited
+since D243 (the verify report); the draws the renderer itself leaves out on purpose were not.
+
+**What:**
+- draw.cpp: every distinct draw of the game's that one of our rules leaves out is logged once ("rule skip: <rule>: PS,
+  VS, vertices, target, draws after the sky dome"; at most 300 a run, in every log, players' included). The rules are
+  the own sky's (the dome, Wake Island's tint and painted clouds, the other maps', D201's sky shapes) and the crosshair's
+  while aiming. Nothing else drops a game draw on purpose (the other early returns are failures, already counted).
+- tools/skip_audit.py: those lines (or given hashes) with each pixel shader's samplers and constants from the game's
+  own constant tables, flagged where they are not the sky's (the heightmap, the sun's shadow map or direction, surface
+  maps). D243's tyre-track shader comes out flagged; the other D243 shader as generic samplers to look at.
+- NXR_E20C_LOG and NXR_SKY_SPRITES_NEAR (diagnosis aids, below).
+
+**Found:** the four maps by day and by night, on foot, firing and turning (runs skipa_m0 to m3, 8 runs): 11 pixel
+shaders left out, all sky-like by their tables: the tints and painted clouds (a distortion map, two cloud textures,
+`time`), the dome's two passes (the depth buffer, the half size environment), and D201's catch-all took one variant
+(C7149298A2818B64, the tints' samplers). E20CB2628975A77D, the painted clouds' sprites, is also the effects' particle
+shader (D195), so it was checked further: at the output's size its draws come 2 to 64 draws after the dome, every one
+with one texture, the map's sky sheet (format 59, 2048 x 1024; runs skipe_m0 to m3), and drawn they change nothing
+seen (skipe_m0 against skipc_all); the effects draw with it into the half size effects layer, which the rule leaves. A
+muzzle flash seen in one run with the sprites partly drawn and not in the other was the shot's timing, not the rule.
+No rule takes more than the sky; nothing changed.
+
+**Kept for later:** the audit lines in players' logs show a new map variant or a rule that grew, by name.
+
+## D250 — The recorder woken only while it sleeps (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** item 4 of the profile of 24 Nov 2026 (`.handoff/NXR-IMPROVEMENTS.md`): the recorder's thread (the
+DiligentCore calls, recorder.cpp) was most of a core busy, about half of it its spin before it sleeps (2048 pauses,
+cpu_cores.h), and the renderer's thread, which sets the frame rate in busy views, woke it at every publish
+(`published_.notify_one()`, a call into the system, about 1 % of its samples) whether it slept or spun.
+
+**What:** Publish wakes it only while it sleeps (`consumer_sleeping_`, sequentially consistent with its sleep, as the
+command queue's consumer does). The spin's length stays 2048; `NXR_RECORDER_SPINS=<n>` (a diagnosis aid) sets it.
+
+**Tested:** Wake Island's storm tour on the same build (runs nxrp4_s2048, nxrp4_s256), the windows of 1,000 draws or
+more: the wake gone from the renderer's thread's profile; its time a frame 2.94 ms median (2.95 before, nxrp2_storm),
+the frame interval 4.19 ms (the 240 FPS cap). With 256 pauses the recorder was 45 % busy against 59 %, but the
+renderer's thread waited for it longer (Recorder::Drain 4.7 % of its samples against 3.6 %), the frames the same only
+because they were at the cap: the longer spin stays, the cheaper side for the thread that sets the frame rate.
+
+## D251 — The storm's shake at the picture's own size (2026-11-24, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 24 Nov 2026: "The screen shake from the storm wind should just be a screen shake, but it looks like
+it's warping the perspective too, like lens distortion is being turned on and off constantly." To keep its corners
+filled, D193's shake drew the picture larger by a margin that followed the shake's strength (`sway_`, which follows the
+storm at the eye and the wind's gusts, and goes when cover or a vehicle takes it), and D222's strike shove added up to
+about 5.5 % more, gone within a second. So the view zoomed in and out under the shake: the field of view breathing.
+
+**What:** the lens pass shakes the picture (moved, turned about its middle) at its own size; the few pixels at an edge
+the shake uncovers (about 5 at 3440x1440 in the wind, some 25 at a close strike's peak, under D194's blurred edges) are
+the picture's own, mirrored. `drift.x` only says the shake is on.
+
+**Tested:** Wake Island in a storm on foot, the shake forced on (run shake_d251b, `NXR_SHAKE_TEST`, a local aid):
+the shake on, the lens pass's shader built, no seam at the picture's edges at 3440x1440 under the blurred edges.
+The breathing itself is gone by construction (nothing scales the picture any more); not yet seen by the user.

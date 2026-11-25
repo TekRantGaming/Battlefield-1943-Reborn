@@ -63,6 +63,26 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_keep_pipeline_cache, false, "NativeXRender
                     "Keep DiligentCore's pipeline cache for the whole run (D173). Off: it is let go once the stored "
                     "pipelines are compiled and the cache is saved (the driver's binaries of every stored pipeline, "
                     "tens of MB of system memory); the pipelines new in play are then compiled without it");
+REXCVAR_DEFINE_BOOL(native_x_renderer_sea_game_light, true, "NativeXRenderer",
+                    "D245: the sea lit as the game lights it (its sun's direction, its sky's, ground's and sun's colours, "
+                    "its own painted sky reflected), only as bright as the hour");
+REXCVAR_DEFINE_BOOL(native_x_renderer_ground_relief, true, "NativeXRenderer",
+                    "D241: the ground's relief (tyre ruts, footprints, ripples) lit by a lower sun while the day and "
+                    "night's stands higher than the game's own, as bright on flat ground");
+REXCVAR_DEFINE_BOOL(native_x_renderer_ground_relief_game_sun, true, "NativeXRenderer",
+                    "D241: the ground's relief lit from the game's own sun (its direction too) while the day and night's "
+                    "stands higher, blended in over 15 degrees above the game's height; the brightness stays the hour's");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_ground_relief_game_sun_weight, 1.0, "NativeXRenderer",
+                      "D244: with the game's sun, how far toward its direction the ground patches and tyre tracks are lit "
+                      "(0 the hour's, 1 the game's)");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_ground_relief_terrain_weight, 1.0, "NativeXRenderer",
+                      "D244: with the game's sun, how far toward its direction the terrain itself (its hills too) is lit");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_ground_relief_strength, 0.5, "NativeXRenderer",
+                      "D241: how far down toward the game's own sun the ground's relief is lit (0 the sky's sun, 1 the "
+                      "game's: the ruts as the game shows them, but the slopes turned from the sun much darker)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_sun_source, true, "NativeXRenderer",
+                    "D239: the sky's sun given to the game's own shadow setup (its cascades and what casts shadows follow "
+                    "it) instead of turning its shadows afterwards");
 REXCVAR_DEFINE_BOOL(native_x_renderer_tick_interpolation, false, "NativeXRenderer",
                     "Objects that move in the game's 30 Hz tick drawn between their last two ticks' positions, by the "
                     "time since the last one (D138): in a vehicle, where the camera moves only in the tick, the vehicle "
@@ -773,6 +793,20 @@ bool InlineExtent(std::span<const DrawPath::Copy> copies, uint32_t count, float 
   return out[0] <= out[1];
 }
 
+// D249: every distinct draw of the game's that one of our own rules leaves out (the own sky's, the crosshair's), logged
+// once: the rule, its pixel and vertex shaders, vertex count and target size, so that a rule that takes more than it
+// was meant to shows in any log (D243: the sky's took every map's tyre tracks). tools/skip_audit.py names each pixel
+// shader's samplers and constants from the game's own constant tables and flags those that are not the sky's.
+// The renderer's thread only; at most 300 lines a run.
+void NoteRuleSkip(const char* rule, uint64_t ps, uint64_t vs, uint32_t vertices, uint32_t width, uint32_t height,
+                  uint32_t since_dome) {
+  static std::set<std::tuple<const char*, uint64_t, uint64_t, uint32_t>> seen;
+  if (seen.size() >= 300 || !seen.insert({rule, ps, vs, vertices}).second) return;
+  REXLOG_INFO("[native_x_renderer] rule skip: {}: PS {:016X} VS {:016X}, {} vertices, target {}x{}, {} draws after the "
+              "sky dome (D249)",
+              rule, ps, vs, vertices, width, height, int32_t(since_dome));
+}
+
 }  // namespace
 
 bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const StateTracker::Program& pixel_program,
@@ -1083,7 +1117,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       return false;
   }
   // Battlefield 1943's sky (runs sky4 to skyB, Wake Island, 14 Nov 2026), drawn after the view's opaque draws in
-  // layers: a haze of 588 and 180 vertices blended over what is there (pixel shader 0365AC9437C0240E), the sky dome
+  // layers (what was taken for a haze over it, 0365AC9437C0240E, is the terrain's tyre tracks: D243), the sky dome
   // (8ABF56776060E64C: six draws of 7,000 to 8,000 vertices; E059F66662ECF0A4 draws the same into the half size
   // effects layer, which is laid back over the picture), a tint added over it (471C5A0705715DB7, 240 vertices) and
   // its painted clouds as sprites (E20CB2628975A77D). With a sky of the renderer's own (sky.h) none is drawn; the
@@ -1142,20 +1176,59 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     // draw them (Guadalcanal's tint 1CE8C9384750D860: vertex shader 65BD09519504B2B5, 240 vertices; run gfire1).
     static std::set<std::pair<uint64_t, uint32_t>> sky_shapes;
     static std::set<uint64_t> said_variant;
-    auto sky_shape = [&] {
+    auto note = [&](const char* rule) {  // D249
+      NoteRuleSkip(rule, ps, vs, vertices, targets[0] ? targets[0]->guest_width : 0,
+                   targets[0] ? targets[0]->guest_height : 0, draws_since_dome);
+    };
+    auto sky_shape = [&](const char* rule) {
+      note(rule);
       if (full_size && sky_shapes.size() < 64) sky_shapes.insert({vs, vertices});
       return false;
     };
-    // (38DEA3BE39271907: Guadalcanal's haze, before its dome as Wake's, 234 to 1,500 vertices; run map1_skip.)
-    if (ps == 0x8ABF56776060E64Cull || ps == 0x0365AC9437C0240Eull || ps == 0xE059F66662ECF0A4ull ||
-        ps == 0x38DEA3BE39271907ull)
+    // D243: not 0365AC9437C0240E nor 38DEA3BE39271907, taken for the sky's haze (drawn before the dome, 180 to 1,500
+    // vertices, blended): by the game's own constant tables the first is the terrain's tyre tracks (the outdoor light,
+    // the sun's shadow map, the heightmap, six textures with the tread, the dynamic mask's tile and indirection maps),
+    // the second samples three textures as Wake Island's track strips do (617653D17C0D6DD5). Skipped, every map's tyre
+    // tracks were missing with the renderer's own sky on (the user, 24 Nov 2026: "all the tire tracks are perfect in
+    // the SDK renderer"; RenderDoc at flag A: the SDK's eight blended terrain draws over the sand, ours none).
+    if (ps == 0x8ABF56776060E64Cull || ps == 0xE059F66662ECF0A4ull) {
+      note("the game's sky dome (D179)");
       return false;
+    }
     // 10FA030CD9308DE2: the tint's shader in frames with an effect drawn (a muzzle flash, an explosion: the game then
     // draws this part of its sky with other shaders, runs skyfx_n8): left drawn, the game's own sky and painted clouds
     // came back over the renderer's for as long as the effect ("when shooting and explosions trigger, they hide our sky
     // and show the original sky", the user, 16 Nov 2026).
-    if ((ps == 0x471C5A0705715DB7ull || ps == 0x10FA030CD9308DE2ull || ps == 0xE20CB2628975A77Dull) && full_size) {
-      return sky_shape();
+    // D249: E20CB2628975A77D, the painted clouds' sprites, is also the effects' particle shader (D195), so it was checked:
+    // at the output's size its draws come from 2 to 64 draws after the dome, all with one texture, each map's sky sheet
+    // (format 59, 2048 x 1024; runs skipe_m0 to m3, NXR_E20C_LOG), and drawn they change nothing seen (the effects draw
+    // into the half size effects layer, which this leaves). Passed over wherever they come; NXR_SKY_SPRITES_NEAR=<n> (a
+    // diagnosis aid) passes over only those within n draws after the dome.
+    static const uint32_t sprites_near = [] {
+      const char* v = std::getenv("NXR_SKY_SPRITES_NEAR");
+      return v && *v ? uint32_t(std::atoi(v)) : ~0u;
+    }();
+    // NXR_E20C_LOG=1 (a diagnosis aid, D249): each distinct first texture E20CB2628975A77D draws with at the output's
+    // size, with how many draws after the dome: the clouds' sprites and the effects' textures told apart.
+    static const bool e20c_log = std::getenv("NXR_E20C_LOG") != nullptr;
+    if (e20c_log && ps == 0xE20CB2628975A77Dull && full_size) {
+      if (const uint32_t mask = pixel_shader->GetUsedTextureMaskAfterTranslation()) {
+        const auto f = regs.GetTextureFetch(uint32_t(std::countr_zero(mask)));
+        const uint32_t since = std::min<uint32_t>(draws_since_dome, 999);
+        static std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>> said;
+        if (said.size() < 400 && said.insert({uint32_t(f.format), uint32_t(f.size_2d.width) + 1,
+                                              uint32_t(f.size_2d.height) + 1, uint32_t(f.base_address), since})
+                                     .second)
+          REXLOG_INFO("[native_x_renderer] E20C: texture format {} {}x{} at {:08X}, {} draws after the dome, {} "
+                      "vertices",
+                      uint32_t(f.format), uint32_t(f.size_2d.width) + 1, uint32_t(f.size_2d.height) + 1,
+                      uint32_t(f.base_address), since, vertices);
+      }
+    }
+    if ((ps == 0x471C5A0705715DB7ull || ps == 0x10FA030CD9308DE2ull ||
+         (ps == 0xE20CB2628975A77Dull && draws_since_dome <= sprites_near)) &&
+        full_size) {
+      return sky_shape("Wake Island's sky tint and painted clouds (D179, D201)");
     }
     // Guadalcanal's, Iwo Jima's and Coral Sea's sky (runs map2_night, map3_night, 17 Nov 2026: the game's painted
     // sunset and clouds over the renderer's night): the same dome, but its tint by 1106AB346E573399 (240 vertices)
@@ -1169,7 +1242,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
          ps == 0x062964B870D68445ull ||
          (ps == 0x3206097F1E8CC042ull && vs == 0x63302D0C99305DF8ull)) &&
         full_size) {
-      return sky_shape();
+      return sky_shape("the other maps' sky tint and painted clouds (D179, D201)");
     }
     // D201: any other pixel shader drawing a sky shape (a known tint's or painted clouds' vertex shader and vertex
     // count) into the output sized target within the 24 draws after the dome is the same part of the sky drawn by a
@@ -1180,6 +1253,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         REXLOG_INFO("[native_x_renderer] sky: pixel shader {:016X} draws the sky's shape (vertex shader {:016X}, {} "
                     "vertices) after the dome: passed over as the sky's (D201)",
                     ps, vs, vertices);
+      note("a sky shape after the dome (D201)");
       return false;
     }
   }
@@ -1860,7 +1934,8 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           skin_3p_hit_ = true;
         view = SkinView(stage, binding.fetch_constant, view, *shader, regs);
         view = WetView(stage, binding.fetch_constant, view, *shader, regs);
-        view = SeaSkyView(stage, binding.fetch_constant, view, *shader);
+        view = SeaSkyView(stage, binding.fetch_constant, view, *shader,
+                          binding.dimension == rg::xenos::FetchOpDimension::kCube);
         {  // NXR_WEAPON_LOG=2 (research): 95 s in, each pixel shader's textures with the draw's depth range, once
           static const bool log2 = [] {
             const char* v = std::getenv("NXR_WEAPON_LOG");
@@ -1912,7 +1987,8 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           skin_3p_hit_ = true;
         view = SkinView(stage, binding.fetch_constant, view, *shader, regs);
         view = WetView(stage, binding.fetch_constant, view, *shader, regs);
-        view = SeaSkyView(stage, binding.fetch_constant, view, *shader);
+        view = SeaSkyView(stage, binding.fetch_constant, view, *shader,
+                          binding.dimension == rg::xenos::FetchOpDimension::kCube);
         {  // NXR_WEAPON_LOG=2 (research): 95 s in, each pixel shader's textures with the draw's depth range, once
           static const bool log2 = [] {
             const char* v = std::getenv("NXR_WEAPON_LOG");
@@ -2039,14 +2115,115 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   // offset that centers the target's guest area in its host size.
   const RenderScale& target_scale = sized->scale;
   float scale_x = target_scale.x, scale_y = target_scale.y, offset_x = 0.0f, offset_y = 0.0f;
-  // HideCrosshair: a HUD draw (no depth test) whose first texture is the crosshair sheet is left out.
+  // NXR_XHAIR_LOG=1 (a developer's, 24 Nov 2026: which of the crosshair sheet's draws is the hit marker, sprite 5 at
+  // 180, 2, 32 x 32 on the sheet): each kind of HUD draw from the sheet, once: its vertex layout and first vertices.
+  static const bool xhair_log = [] {
+    const char* v = std::getenv("NXR_XHAIR_LOG");
+    return v && *v == '1';
+  }();
+  if (xhair_log && !state.depth_enable && pixel_shader) {
+    if (const uint32_t mask = pixel_shader->GetUsedTextureMaskAfterTranslation()) {
+      uint32_t first = 0;
+      while (!(mask & (1u << first))) ++first;
+      const auto fetch = regs.GetTextureFetch(first);
+      auto* kernel = rex::system::kernel_state();
+      const auto& bindings = vertex_shader->vertex_bindings();
+      if (uint32_t(fetch.format) == 6 && fetch.size_2d.width + 1 == 256 && fetch.size_2d.height + 1 == 256 && kernel &&
+          kernel->memory() && !bindings.empty()) {
+        const auto& binding = bindings[0];
+        const xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(binding.fetch_constant);
+        const uint8_t* data = kernel->memory()->TranslatePhysical<const uint8_t*>(vf.address << 2);
+        const uint32_t stride = binding.stride_words * 4, count = registers_->values[rg::XE_GPU_REG_VGT_DRAW_INITIATOR] >> 16;
+        std::string layout, verts;
+        for (const auto& attribute : binding.attributes) {
+          const auto& a = attribute.fetch_instr.attributes;
+          layout += fmt::format(" {}@{}", int(a.data_format), a.offset * 4);
+        }
+        for (uint32_t v = 0; v < std::min<uint32_t>(count, 6) && data && stride; ++v) {
+          verts += " [";
+          for (uint32_t w = 0; w < stride / 4 && w < 8; ++w) {
+            uint32_t word;
+            std::memcpy(&word, data + size_t(v) * stride + w * 4, 4);
+            word = rex::byte_swap(word);
+            float f;
+            std::memcpy(&f, &word, 4);
+            const uint16_t hi = uint16_t(word >> 16), lo = uint16_t(word);
+            verts += fmt::format(" {:.4g}|{:04X}.{:04X}", f, hi, lo);
+          }
+          verts += " ]";
+        }
+        // The vertex shader's float constants it uses (the sprite's place on the sheet is a texture matrix there).
+        {
+          const auto& cm = vertex_shader->constant_register_map();
+          int shown = 0;
+          verts += " consts";
+          for (uint32_t r = 0; r < 256 && shown < 16; ++r) {
+            if (!(cm.float_bitmap[r >> 6] & (uint64_t(1) << (r & 63)))) continue;
+            float c[4];
+            std::memcpy(c, &regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X + r * 4], sizeof(c));
+            verts += fmt::format(" c{}=({:.4g} {:.4g} {:.4g} {:.4g})", r, c[0], c[1], c[2], c[3]);
+            ++shown;
+          }
+        }
+        static std::set<std::string> said;
+        const std::string key = fmt::format("{:016X}{:016X}{}{}", vertex_program.hash, pixel_program.hash, count, layout);
+        if (said.size() < 64 && said.insert(key + verts.substr(0, 60)).second)
+          REXLOG_INFO("[native_x_renderer] crosshair sheet draw: vs {:016X} ps {:016X} {} vertices, stride {}, layout{}:{}",
+                      vertex_program.hash, pixel_program.hash, count, stride, layout, verts);
+      }
+    }
+  }
+  // HideCrosshair: a HUD draw (no depth test) whose first texture is the crosshair sheet is left out, but for the hit
+  // marker (the user, 24 Nov 2026: "we also hide the hit marker. We need to keep the hit marker shown"). The sheet's
+  // sprites are quads in the movie's units with no texture coordinates; the vertex shader's c11 and c12 are the
+  // texture matrix (u = c11.x x + c11.w, v = c12.y y + c12.w; run xh2): a quad that lands within the hit marker's
+  // place on the sheet (sprite 5: 180, 2, 32 x 32 pixels; its quad 36 across) is drawn.
   if (!state.depth_enable && pixel_shader &&
       g_hide_crosshair_until.load(std::memory_order_relaxed) > std::chrono::steady_clock::now().time_since_epoch().count()) {
     if (const uint32_t mask = pixel_shader->GetUsedTextureMaskAfterTranslation()) {
       uint32_t first = 0;
       while (!(mask & (1u << first))) ++first;
       const auto fetch = regs.GetTextureFetch(first);
-      if (uint32_t(fetch.format) == 6 && fetch.size_2d.width + 1 == 256 && fetch.size_2d.height + 1 == 256) return false;
+      if (uint32_t(fetch.format) == 6 && fetch.size_2d.width + 1 == 256 && fetch.size_2d.height + 1 == 256) {
+        bool hit_marker = false;
+        auto* kernel = rex::system::kernel_state();
+        const auto& bindings = vertex_shader->vertex_bindings();
+        const uint32_t count = registers_->values[rg::XE_GPU_REG_VGT_DRAW_INITIATOR] >> 16;
+        if (kernel && kernel->memory() && !bindings.empty() && count && count <= 64 && bindings[0].stride_words == 2) {
+          const xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(bindings[0].fetch_constant);
+          const uint8_t* data = kernel->memory()->TranslatePhysical<const uint8_t*>(vf.address << 2);
+          float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+          for (uint32_t v = 0; data && v < count; ++v)
+            for (int i = 0; i < 2; ++i) {
+              uint32_t word;
+              std::memcpy(&word, data + size_t(v) * 8 + i * 4, 4);
+              word = rex::byte_swap(word);
+              float f;
+              std::memcpy(&f, &word, 4);
+              if (std::isfinite(f)) lo[i] = std::min(lo[i], f), hi[i] = std::max(hi[i], f);
+            }
+          float c11[4], c12[4];
+          std::memcpy(c11, &regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X + 11 * 4], sizeof(c11));
+          std::memcpy(c12, &regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X + 12 * 4], sizeof(c12));
+          if (lo[0] <= hi[0] && lo[1] <= hi[1]) {
+            // The quad's corners on the sheet, in its pixels.
+            const float u0 = (c11[0] * lo[0] + c11[3]) * 256.0f, u1 = (c11[0] * hi[0] + c11[3]) * 256.0f;
+            const float v0 = (c12[1] * lo[1] + c12[3]) * 256.0f, v1 = (c12[1] * hi[1] + c12[3]) * 256.0f;
+            const float ul = std::min(u0, u1), ur = std::max(u0, u1), vt = std::min(v0, v1), vb = std::max(v0, v1);
+            hit_marker = ul > 170.0f && ur < 222.0f && vt > -6.0f && vb < 42.0f && ur - ul > 8.0f;
+          }
+        }
+        if (!hit_marker) {
+          NoteRuleSkip("the crosshair while aiming (HideCrosshair)", pixel_shader->ucode_data_hash(),
+                       vertex_shader->ucode_data_hash(), count, 0, 0, ~0u);  // D249
+          return false;
+        }
+        static bool said = false;
+        if (!said) {
+          said = true;
+          REXLOG_INFO("[native_x_renderer] crosshair hidden while aiming: the hit marker drawn");
+        }
+      }
     }
   }
   HudPlace place;
@@ -2476,7 +2653,8 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       float w[12];
       std::memcpy(w, &regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X + first * 4], sizeof(w));
       static int dumped = 0;
-      if (dumped < 2 && std::getenv("NXR_MODEL_LAMP_DUMP")) {
+      static const bool lamp_dump = std::getenv("NXR_MODEL_LAMP_DUMP") != nullptr;  // (read once, D247)
+      if (dumped < 2 && lamp_dump) {
         ++dumped;
         std::string line;
         for (uint32_t r = 0; r < 40; ++r) {
@@ -3312,6 +3490,14 @@ bool FindAttachedMove(const double eye[3], const Mat4d& world_inverse, Mat4d& mo
   }
   return found;
 }
+
+// The records' frame cameras, all 16, taken under the lock once (D248): FindAttachedMove takes no record more than
+// 5 mm from the eye, so a world matrix whose eye is near none of them needs no other check (MoveAttached).
+void AttachedPositions(double out[16][3]) {
+  std::lock_guard lock(g_attached_mutex);
+  for (size_t i = 0; i < g_attached.size(); ++i)
+    for (int c = 0; c < 3; ++c) out[i][c] = g_attached[i].position[c];
+}
 }  // namespace
 
 void RecordAttachedCameraMove(const float* position, const float* move, const float* placed) {
@@ -3371,6 +3557,23 @@ struct LightRegisters {
 constexpr LightRegisters kLightRegisters[] = {
 #include "bf_lights.inc"
 };
+// D241: the pixel shaders that draw the ground, the terrain's and the ground patches' (tools/ground_shaders.py).
+struct GroundEntry {
+  uint64_t hash;
+  uint8_t kind;  // 1 the terrain's (heightmap), 2 a ground patch's
+};
+constexpr GroundEntry kGroundShaders[] = {
+#include "bf_ground.inc"
+};
+// 0: not the ground's; 1: the terrain's; 2: a ground patch's, or the terrain's tyre-track pass (D243: 0365AC9437C0240E
+// and 0A7847F161DA00A7, the same samplers on another level), which the game's own sun lights (D244).
+uint8_t GroundKind(uint64_t hash) {
+  if (hash == 0x0365AC9437C0240Eull || hash == 0x0A7847F161DA00A7ull) return 2;
+  const GroundEntry* end = std::end(kGroundShaders);
+  const GroundEntry* it = std::lower_bound(std::begin(kGroundShaders), end, hash,
+                                           [](const GroundEntry& e, uint64_t h) { return e.hash < h; });
+  return it != end && it->hash == hash ? it->kind : 0;
+}
 // D182: what is left of a reflected day's sky at this hour: the painted sky's factor (the same picture of an
 // afternoon), its luminance; 1 at noon, about 0.09 at night. NXR_SKY_REFLECTION_KEEP=1 (tests): 1, as the game has it.
 float SkyReflectionLeft(const float* painted) {
@@ -3433,10 +3636,75 @@ void DrawPath::SetOutdoorLight(const OutdoorLight& light) {
 // its clip coordinates (the cascade's middle, at the camera's depth of the last frame) C needs nothing of this
 // frame's, and the casters' matrices (C times theirs) and the receivers' (diag C diag^-1 times theirs) stay each
 // other's exactly. The game still chooses what casts shadows for its own sun: what it leaves out casts none.
+// D239: the sky's sun given to the game's own shadow setup (ShadowSourceDirection, the game side's hook): what it needs
+// of the latched light, and until when the game is being fed (the turn then stays off).
+namespace {
+std::mutex g_sun_source_mutex;
+struct SunSource {
+  bool valid = false;
+  double sun_azimuth = 0, sun_elevation = 0, steep = 0, light_azimuth = 0, light_elevation = 0;
+} g_sun_source;
+std::atomic<int64_t> g_sun_source_fed_until{0};
+int64_t SunSourceNow() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}  // namespace
+
+bool ShadowSourceDirection(const float game_ray[3], float out_ray[3]) {
+  SunSource s;
+  {
+    std::lock_guard lock(g_sun_source_mutex);
+    s = g_sun_source;
+  }
+  if (!s.valid) return false;
+  const double kPi = 3.14159265358979;
+  // The game's own shadow ray points from the sun to the ground: its sun is the other way.
+  const double from[3] = {-game_ray[0], -game_ray[1], -game_ray[2]};
+  const double len = std::sqrt(from[0] * from[0] + from[1] * from[1] + from[2] * from[2]);
+  if (!(len > 1e-6)) return false;
+  const double shadow_elevation = std::asin(std::clamp(from[1] / len, -1.0, 1.0));
+  const double shadow_azimuth = std::atan2(from[0], from[2]);
+  // As the turn did (D181): the shadows keep the game's lead over its light, between 40 and 75 degrees up, steep in rain;
+  // round to the sky's sun.
+  double elevation = std::clamp(shadow_elevation + (s.sun_elevation - s.light_elevation), 40.0 * kPi / 180.0, 75.0 * kPi / 180.0);
+  elevation += (80.0 * kPi / 180.0 - elevation) * std::clamp(s.steep, 0.0, 1.0);
+  const double azimuth = shadow_azimuth + std::remainder(s.sun_azimuth - s.light_azimuth, 2.0 * kPi);
+  const double ce = std::cos(elevation);
+  out_ray[0] = float(-ce * std::sin(azimuth));
+  out_ray[1] = float(-std::sin(elevation));
+  out_ray[2] = float(-ce * std::cos(azimuth));
+  g_sun_source_fed_until.store(SunSourceNow() + 500, std::memory_order_relaxed);
+  return true;
+}
+
 void DrawPath::LatchShadowTurn() {
   shadow_turn_.on = false;
   shadow_turn_.dir[3] = 0.0f;  // 1 once the direction is set
   const OutdoorLight& light = outdoor_light_;
+  {  // D239: what the game's shadow setup needs for the sky's sun (ShadowSourceDirection)
+    std::lock_guard lock(g_sun_source_mutex);
+    g_sun_source.valid = light.on && light.turn && game_light_dir_valid_ && REXCVAR_GET(native_x_renderer_sun_source);
+    if (g_sun_source.valid) {
+      const double d[3] = {game_light_dir_[0], game_light_dir_[1], game_light_dir_[2]};
+      const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+      g_sun_source.valid = len > 1e-9;
+      if (g_sun_source.valid) {
+        g_sun_source.light_elevation = std::asin(std::clamp(d[1] / len, -1.0, 1.0));
+        g_sun_source.light_azimuth = std::atan2(d[0], d[2]);
+        g_sun_source.sun_azimuth = light.azimuth, g_sun_source.sun_elevation = light.elevation;
+        g_sun_source.steep = light.steep;
+      }
+    }
+  }
+  // While the game is fed the sky's sun its shadows fall from it already: nothing to turn, only the light's direction.
+  if (light.on && light.turn && SunSourceNow() < g_sun_source_fed_until.load(std::memory_order_relaxed)) {
+    const double ce = std::cos(light.elevation);
+    shadow_turn_.dir[0] = float(ce * std::sin(light.azimuth));
+    shadow_turn_.dir[1] = float(std::sin(light.elevation));
+    shadow_turn_.dir[2] = float(ce * std::cos(light.azimuth));
+    shadow_turn_.dir[3] = 1.0f;
+    return;
+  }
   if (!light.on || !light.turn || !seen_shadow_valid_ || !seen_camera_valid_ || !game_light_dir_valid_) return;
   const double kPi = 3.14159265358979;
   auto angles = [](const double d[3], double& azimuth, double& elevation) {
@@ -3461,6 +3729,15 @@ void DrawPath::LatchShadowTurn() {
   const double game_light[3] = {game_light_dir_[0], game_light_dir_[1], game_light_dir_[2]};
   double shadow_az, shadow_el, light_az, light_el;
   if (!angles(from, shadow_az, shadow_el) || !angles(game_light, light_az, light_el)) return;
+  {  // NXR_SHADOW_LOG: the game's own shadow and light directions, every 600 frames (D239 research)
+    static uint64_t dir_said_at = 0;
+    static const bool log = std::getenv("NXR_SHADOW_LOG") != nullptr;
+    if (log && device_->frames_presented() >= dir_said_at + 600) {
+      dir_said_at = device_->frames_presented();
+      REXLOG_INFO("[native_x_renderer] shadow log: the game's shadows from {:.1f} up, azimuth {:.1f}; its light from {:.1f}, "
+                  "{:.1f}", shadow_el * 57.29578, shadow_az * 57.29578, light_el * 57.29578, light_az * 57.29578);
+    }
+  }
   double turn_az = std::remainder(double(light.azimuth) - light_az, 2.0 * kPi);
   double turn_el = double(light.elevation) - light_el;
   // D218: from 60 to 150 m over the ground or the sea the turn fades out, and higher up the shadows fall as the game
@@ -3790,6 +4067,20 @@ void DrawPath::ApplyOutdoorLight(uint64_t shader_hash, uint32_t stage, const uin
   if (stage && used(r->dir)) {
     std::memcpy(game_light_dir_, &regs[first + (uint32_t(r->dir) << 2)], sizeof(game_light_dir_));
     game_light_dir_valid_ = true;
+    // NXR_SHADOW_LOG: the game's light direction as its shader got it, its bits (research, D239: where the game keeps
+    // it, to give it the sky's sun at the source).
+    // (Read once: getenv walks the environment block, and this runs at every lit draw: 14 % of the renderer's thread
+    // while unset, D247.)
+    static const bool shadow_log = std::getenv("NXR_SHADOW_LOG") != nullptr;
+    static bool said_dir = false;
+    if (!said_dir && shadow_log) {
+      said_dir = true;
+      uint32_t bits[4];
+      std::memcpy(bits, game_light_dir_, sizeof(bits));
+      REXLOG_INFO("[native_x_renderer] shadow log: the game's light direction {:.5f} {:.5f} {:.5f} {:.5f} (bits {:08X} {:08X} "
+                  "{:08X} {:08X})", game_light_dir_[0], game_light_dir_[1], game_light_dir_[2], game_light_dir_[3],
+                  bits[0], bits[1], bits[2], bits[3]);
+    }
   }
   // The cascades' transforms and the camera's place are taken together from one draw (its vertex shader's and its
   // pixel shader's): the first person weapon's are in a space of its own with the camera at 0, and a pair from
@@ -3859,8 +4150,21 @@ void DrawPath::ApplyOutdoorLight(uint64_t shader_hash, uint32_t stage, const uin
     v[0] *= by[0], v[1] *= by[1], v[2] *= by[2];
     std::memcpy(at(reg), v, sizeof(v));
   };
-  scale(r->key, outdoor_light_.key);
-  scale(r->specular, outdoor_light_.key);
+  // D245: the sea as the game lights it (the user, 24 Nov 2026: "tune the water color closer to the SDK look at the
+  // same time of day", then "I thought we already agreed on the game's sun for this"): Wake Island's open sea at 10:30
+  // was (71, 125, 191) under the hour's light and reflected sky, the SDK's (18, 76, 109), and with the game's painted
+  // sky alone (49, 103, 152) (runs sea4_w_ours, sea4_w_sdk, sea2_seasky0). Its light keeps the game's direction and
+  // colours, all scaled by one factor, how bright the hour's sun is (its key colour's luminance, at most 1), and it
+  // reflects the game's own painted sky as dimmed for the hour (SkyReflectionLeft).
+  const bool sea_game = stage && IsSeaShader(shader_hash) && REXCVAR_GET(native_x_renderer_sea_game_light);
+  float sea_by[3] = {1.0f, 1.0f, 1.0f};
+  if (sea_game) {
+    const float* k = outdoor_light_.key;
+    const float g = std::clamp(0.2126f * k[0] + 0.7152f * k[1] + 0.0722f * k[2], 0.0f, 1.0f);
+    sea_by[0] = sea_by[1] = sea_by[2] = g;
+  }
+  scale(r->key, sea_game ? sea_by : outdoor_light_.key);
+  scale(r->specular, sea_game ? sea_by : outdoor_light_.key);
   // Window glass, water and shiny metal reflect a cube map of a day's sky, times the specular constant's w (the
   // user, 17 Nov 2026: "Building windows with glass are reflecting daylight when it's night"): that w dimmed as the
   // game's painted sky is (the same picture of an afternoon), about a tenth of it left at night.
@@ -3873,7 +4177,13 @@ void DrawPath::ApplyOutdoorLight(uint64_t shader_hash, uint32_t stage, const uin
                      shader_hash == 0x2715129AEB1C7AE7ull || shader_hash == 0xED75062BA2E66F5Dull ||
                      shader_hash == 0xC7F420106FAD9628ull || shader_hash == 0xFEFCD04010C7CA86ull ||
                      shader_hash == 0x1139C2856EADF277ull || shader_hash == 0xF819F26C2C47D01Bull;
-    const float was = v[3], by = sea && own_sea_reflection_ ? 0.0f : SkyReflectionLeft(outdoor_light_.painted);
+    // D240: without it, the sea's cube map is the renderer's sky of the hour (SeaSkyView), already as dark as the
+    // hour's sky: not dimmed for the hour, but 0.6 of it (whole, the sea by day was a pale glare of the horizon's
+    // colour: run hz_after_1050).
+    const float was = v[3], by = sea && own_sea_reflection_ ? 0.0f
+                               : sea && sea_game           ? SkyReflectionLeft(outdoor_light_.painted)  // D245
+                               : sea && own_sea_sky_       ? 0.6f
+                                                           : SkyReflectionLeft(outdoor_light_.painted);
     v[3] *= by;
     std::memcpy(at(r->specular), v, sizeof(v));
     static uint64_t said_at = 0;
@@ -3883,12 +4193,68 @@ void DrawPath::ApplyOutdoorLight(uint64_t shader_hash, uint32_t stage, const uin
     }
   }
   wet_shine();
-  scale(r->top, outdoor_light_.sky);
-  scale(r->bottom, outdoor_light_.ground);
-  if (shadow_turn_.dir[3] != 0.0f && used(r->dir)) {
+  scale(r->top, sea_game ? sea_by : outdoor_light_.sky);
+  scale(r->bottom, sea_game ? sea_by : outdoor_light_.ground);
+  if (shadow_turn_.dir[3] != 0.0f && used(r->dir) && !sea_game) {
     float v[4];
     std::memcpy(v, &regs[first + (uint32_t(r->dir) << 2)], sizeof(v));
     v[0] = shadow_turn_.dir[0], v[1] = shadow_turn_.dir[1], v[2] = shadow_turn_.dir[2];
+    // D241: the ground's relief. Its tyre ruts, footprints and ripples are in its normal maps, drawn for the game's
+    // own low sun (Wake Island: 35 degrees up); under the sky's sun at noon (65 degrees at 10:30) they flattened into
+    // soft patches (the report: "certain terrain texture layers, like the vehicle tracks, disappear from the player
+    // camera view"; RenderDoc, 24 Nov 2026: the SDK's frame and ours drew flag C's ground with the same textures,
+    // samplers and constants but this one, and with the game's light ours had the ruts too). The ground's shaders
+    // (the terrain's and the ground patches', bf_ground.inc) get a sun lower toward the game's light, at its own
+    // azimuth, halfway down to it by default (native_x_renderer_ground_relief_strength), and its key colour stronger
+    // by as much as flat ground lost: flat ground is lit as before. Its shadows stay the sky's sun's.
+    const uint8_t ground_kind = stage && used(r->key) && REXCVAR_GET(native_x_renderer_ground_relief) ? GroundKind(shader_hash) : 0;
+    if (ground_kind) {
+      constexpr float kDeg = 0.0174532925f;
+      const float up = std::clamp(v[1], -1.0f, 1.0f), across = std::sqrt(v[0] * v[0] + v[2] * v[2]);
+      float cap = 35.0f * kDeg;
+      if (game_light_dir_valid_)
+        cap = std::clamp(std::asin(std::clamp(game_light_dir_[1], -1.0f, 1.0f)), 25.0f * kDeg, 50.0f * kDeg);
+      const float elevation = std::asin(up);
+      const float strength = std::clamp(float(REXCVAR_GET(native_x_renderer_ground_relief_strength)), 0.0f, 1.0f);
+      // D244: the game's own sun the whole way, the terrain's hills too: their slopes turned from it darker, as in the
+      // SDK (the user, 24 Nov 2026: "I liked the hills dark, it looks closer to the SDK renderer"; half way for the
+      // terrain, native_x_renderer_ground_relief_terrain_weight 0.5, they were a tenth darker, runs gs2_w05, gs3_w05).
+      const bool game_sun = REXCVAR_GET(native_x_renderer_ground_relief_game_sun) && game_light_dir_valid_;
+      if (game_sun && elevation > cap) {
+        // The game's own light that way, blended in over 15 degrees above its height (dawn and dusk keep the hour's),
+        // the key colour stronger by as much as flat ground lost, as below.
+        const float w = std::clamp((elevation - cap) / (15.0f * kDeg), 0.0f, 1.0f) *
+                        std::clamp(float(ground_kind == 2 ? REXCVAR_GET(native_x_renderer_ground_relief_game_sun_weight)
+                                                          : REXCVAR_GET(native_x_renderer_ground_relief_terrain_weight)),
+                                   0.0f, 1.0f);
+        float g[3] = {game_light_dir_[0], game_light_dir_[1], game_light_dir_[2]};
+        const float gl = std::sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+        if (gl > 1e-4f && g[1] / gl > 0.05f) {
+          float d[3];
+          for (int i = 0; i < 3; ++i) d[i] = v[i] + (g[i] / gl - v[i]) * w;
+          const float dl = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+          if (dl > 1e-4f && d[1] / dl > 0.05f) {
+            for (int i = 0; i < 3; ++i) v[i] = d[i] / dl;
+            const float more = up / v[1];
+            float key[4];
+            std::memcpy(key, at(r->key), sizeof(key));
+            key[0] *= more, key[1] *= more, key[2] *= more;
+            std::memcpy(at(r->key), key, sizeof(key));
+          }
+        }
+      } else if (elevation > cap && across > 1e-4f && strength > 0.0f) {
+        // Halfway down by default: the whole way, slopes of the terrain turned from the sun went much darker (a 30
+        // degree slope's light a quarter of the sky's at 65 degrees; runs rel1_true, rel2_true); halfway, 30%
+        // less, and the ruts' contrast 1.8 times the sky's sun's (2.5 the whole way).
+        const float lit = elevation - strength * (elevation - cap);
+        v[0] = v[0] / across * std::cos(lit), v[1] = std::sin(lit), v[2] = v[2] / across * std::cos(lit);
+        const float more = up / std::sin(lit);
+        float key[4];
+        std::memcpy(key, at(r->key), sizeof(key));
+        key[0] *= more, key[1] *= more, key[2] *= more;
+        std::memcpy(at(r->key), key, sizeof(key));
+      }
+    }
     std::memcpy(at(r->dir), v, sizeof(v));
   }
 }
@@ -4130,11 +4496,28 @@ void DrawPath::MoveAttached(const uint32_t* regs, uint32_t first, const uint64_t
   }
   // A world matrix: three consecutive registers out of the projection's, rigid rows with the position in the fourth
   // floats, that put the eye at a recorded camera.
+  // D248: the eye such rows put in the world is tested against the records first, which rejects nearly all of them
+  // (a soldier's bones, every triplet of every model near the eye: their checks, a 4 x 4 inverse, a lock and a clock
+  // read each, were 1.5 to 2 % of the renderer's thread). FindAttachedMove still decides, as before.
+  double recorded[16][3];
+  AttachedPositions(recorded);
   for (uint32_t k = 0; k + 2 < n; ++k) {
     if (numbers[k + 2] != numbers[k] + 2) continue;
     if (k + 2 >= index && k <= index + 3) continue;
     float r[3][4];
     for (int i = 0; i < 3; ++i) std::memcpy(r[i], at(k + i), 16);
+    // As rows of world = W x position (column form), the eye in the world.
+    double world_eye[3];
+    for (int i = 0; i < 3; ++i) world_eye[i] = r[i][0] * eye[0] + r[i][1] * eye[1] + r[i][2] * eye[2] + r[i][3];
+    bool near_record = false;
+    for (const double* p : recorded) {
+      const double dx = world_eye[0] - p[0], dy = world_eye[1] - p[1], dz = world_eye[2] - p[2];
+      if (dx * dx + dy * dy + dz * dz <= 0.005 * 0.005) {
+        near_record = true;
+        break;
+      }
+    }
+    if (!near_record) continue;
     double len[3];
     bool rigid = true;
     for (int i = 0; i < 3 && rigid; ++i) {
@@ -4146,9 +4529,6 @@ void DrawPath::MoveAttached(const uint32_t* regs, uint32_t first, const uint64_t
       return (double(r[i][0]) * r[j][0] + double(r[i][1]) * r[j][1] + double(r[i][2]) * r[j][2]) / (len[i] * len[j]);
     };
     if (std::abs(dot(0, 1)) > 0.05 || std::abs(dot(0, 2)) > 0.05 || std::abs(dot(1, 2)) > 0.05) continue;
-    // As rows of world = W x position (column form), the eye in the world.
-    double world_eye[3];
-    for (int i = 0; i < 3; ++i) world_eye[i] = r[i][0] * eye[0] + r[i][1] * eye[1] + r[i][2] * eye[2] + r[i][3];
     const Mat4d w = {r[0][0], r[0][1], r[0][2], r[0][3], r[1][0], r[1][1], r[1][2], r[1][3],
                      r[2][0], r[2][1], r[2][2], r[2][3], 0.0,     0.0,     0.0,     1.0};
     Mat4d w_inverse;
@@ -4580,8 +4960,11 @@ void DrawPath::SetSeaSky(const float zenith[3], const float horizon[3]) {
 // that cube is a small one of the renderer's sky: its zenith above, its horizon around (both as the view shows them,
 // greyed by the clouds' cover), darker below.
 IDeviceObject* DrawPath::SeaSkyView(uint32_t stage, uint32_t fetch_constant, IDeviceObject* view,
-                                    const rg::SpirvShader& shader) {
-  if (stage != 1 || fetch_constant != 6 || !own_sea_reflection_ || !view || !IsSeaShader(shader.ucode_data_hash()))
+                                    const rg::SpirvShader& shader, bool cube) {
+  // D240: with or without the renderer's own reflection, every cube map the sea's shaders take (the day sky's
+  // outdoorLightReflectionEnvmap of all the maps' seas too) is this one, so the water takes the hour's sky.
+  if (stage != 1 || (fetch_constant != 6 && !cube) || !own_sea_sky_ || !view || !IsSeaShader(shader.ucode_data_hash()) ||
+      REXCVAR_GET(native_x_renderer_sea_game_light))  // D245: the game's own painted sky
     return view;
   constexpr uint32_t n = 4;
   if (!sea_sky_cube_) {

@@ -3629,6 +3629,14 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // Settings; each join sets them (saved, so the menus keep the last match's), and each applies at once. Lightning
   // and Storm shake are the player's own (Graphics > Weather). Night Ops' hour and storm are the server's (gmhost.py).
   void ApplyServerLook(bool on, const char* what) {
+#if defined(BF_DEV_TOOLS)
+    // BF_DEV_KEEP_LOOK=1 (tests): the look settings stay as the command line and the profile gave them, so an A/B run
+    // can turn one off (--native_x_renderer_sky=false was set back on by the hosted match's join, 24 Nov 2026).
+    if (const char* keep = std::getenv("BF_DEV_KEEP_LOOK"); keep && *keep == '1') {
+      REXLOG_INFO("BF night ops: {} server: the server's look left as it is (BF_DEV_KEEP_LOOK)", what);
+      return;
+    }
+#endif
     const bool night = on;
     static constexpr const char* kNightOpsCvars[] = {
         "native_x_renderer_day_night", "native_x_renderer_sky",        "native_x_renderer_rain_lens",
@@ -4818,7 +4826,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
           const double fov = std::atof(Cvar("bf_fov").c_str());
           char b[32];
           std::snprintf(b, sizeof(b), "%g", std::clamp(std::round(fov > 0.0 ? fov : 86.0), 86.0, 120.0));
-          for (const char* c : {"bf_weapon_fov", "bf_ads_fov", "bf_fov_vehicle"}) {
+          for (const char* c : {"bf_weapon_fov", "bf_ads_fov", "bf_fov_vehicle", "bf_fov_vehicle_fp"}) {
             const double v = std::atof(Cvar(c).c_str());
             if (v <= 0.0 || v == 86.0) SetCvar(c, b);
           }
@@ -4836,15 +4844,25 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                               "How the gun is drawn while you aim down its sights, on the same scale as Weapon FOV. "
                               "86\xC2\xB0 is the game's own look. Scopes are not changed. Applies at once.",
                               "bf_ads_fov", 86, 120, 1, degrees, 86);
-      SettingRow veh = Slider("Field of view", "Vehicle FOV",
-                              "The camera's width while you sit in a vehicle: the tank, jeep, boat and plane views, "
-                              "their guns and turrets included. 86\xC2\xB0 is the game's own. Applies at once.",
+      // (The user, 24 Nov 2026: "We should separate 1st-person and 3rd-person Vehicle FOV into two sliders".) Not set yet,
+      // the first person one starts where the one slider was (0 follows it, but would show the game's own 86).
+      if (std::atof(Cvar("bf_fov_vehicle_fp").c_str()) <= 0.0 && std::atof(Cvar("bf_fov_vehicle").c_str()) > 0.0)
+        SetCvar("bf_fov_vehicle_fp", Cvar("bf_fov_vehicle"));
+      SettingRow veh_fp = Slider("Field of view", "Vehicle FOV (1st person)",
+                                 "The camera's width in a vehicle's first person views: a plane's cockpit, a gun or "
+                                 "turret seat, a tank's periscope. In a gun seat hold the left trigger or the right mouse "
+                                 "button to zoom in. 86\xC2\xB0 is the game's own. Applies at once.",
+                                 "bf_fov_vehicle_fp", 86, 120, 1, degrees, 86);
+      SettingRow veh = Slider("Field of view", "Vehicle FOV (3rd person)",
+                              "The camera's width in a vehicle's outside views: behind the tank, jeep, boat or plane. "
+                              "86\xC2\xB0 is the game's own. Applies at once.",
                               "bf_fov_vehicle", 86, 120, 1, degrees, 86);
       if (!custom)
-        hip.disabled = ads.disabled = veh.disabled = true,
-        hip.note = ads.note = veh.note = "Switch Custom FOV on to set it. Off, it follows your Field of view.";
+        hip.disabled = ads.disabled = veh.disabled = veh_fp.disabled = true,
+        hip.note = ads.note = veh.note = veh_fp.note = "Switch Custom FOV on to set it. Off, it follows your Field of view.";
       rows.push_back(hip);
       rows.push_back(ads);
+      rows.push_back(veh_fp);
       rows.push_back(veh);
     }
     // The level of detail's distance (frame_rate.cpp: every model's own switch distances times this; D202). Moved here

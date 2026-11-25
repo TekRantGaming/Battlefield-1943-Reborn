@@ -154,6 +154,12 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_lightning, true, "NativeXRenderer",
 REXCVAR_DEFINE_BOOL(native_x_renderer_reflections, false, "NativeXRenderer",
                     "Reflections of the renderer's own on the sea (screen space; the game's day sky cube map left out "
                     "of its shaders, D190)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_horizon_haze, true, "NativeXRenderer",
+                    "Haze over the far world and the sea carried on to the horizon in the sky's colour, with no fog set "
+                    "too (D238)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_sea_sky, true, "NativeXRenderer",
+                    "The sea reflects the hour's sky (the renderer's), not the game's day sky cube map, also without "
+                    "native_x_renderer_reflections (D240)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_glass_reflections, false, "NativeXRenderer",
                     "Experimental (D191): the window glass's reflections of the renderer's own in place of the game's "
                     "day sky cube map; with native_x_renderer_reflections");
@@ -2034,73 +2040,84 @@ void ExecuteDraw(const Command& c) {
   g_draw->SetSkipGameSky(SkyOn() && (REXCVAR_GET(native_x_renderer_sky_debug) == 0 || REXCVAR_GET(native_x_renderer_sky_debug) >= 7));
   {
     // The game's own daylight by the sky's hour (sky.h's SkyLightAt, DrawPath::SetOutdoorLight).
-    DrawPath::OutdoorLight light;
-    const WorldState world = World();
-    const int sky_debug = REXCVAR_GET(native_x_renderer_sky_debug);
-    SetSkyLightning(REXCVAR_GET(native_x_renderer_lightning));
-    SetCloudShadows(REXCVAR_GET(native_x_renderer_cloud_shadows));  // D214
-    SetStormSway(REXCVAR_GET(native_x_renderer_storm_sway));
-    SetSeaReflection(REXCVAR_GET(native_x_renderer_reflections) && SkyOn());
-    g_draw->SetOwnSeaReflection(SeaReflection());
-    if (float z[3], h[3]; SeaReflection() && g_own_sky.SeaSkyColours(z, h)) g_draw->SetSeaSky(z, h);
-    if (float sea; g_own_sky.SeaLevel(&sea)) g_draw->SetSeaLevel(sea);  // D205
-    // D191 (experimental, off: not yet seen working in a match): the window glass's own reflection.
-    g_draw->SetOwnGlassReflection(SeaReflection() && REXCVAR_GET(native_x_renderer_glass_reflections));
-    g_fog_wanted = world.fog > 0.001f || world.ground_fog > 0.001f || world.weather > 0.45f || sky_debug == 4 || sky_debug == 5 ||
-                   SeaReflection() ||
-                   sky_debug == 6 || REXCVAR_GET(native_x_renderer_rain_lens) || REXCVAR_GET(native_x_renderer_wetness) ||
-                   (REXCVAR_GET(native_x_renderer_sky) && !SkyForcedOff());  // (the clouds over the view are laid with it)  // (the lens's water needs the sea's height)
-    // D175: the night's lights come on as the cycle's sun sets (from 4 degrees up) and are full 6 degrees under.
-    {
-      float dark = 0.0f;
-      if (world.day_night) {
-        const float t = std::clamp((SkyLightAt(world.hour, world.weather).sun_elevation - 4.0f) / -10.0f, 0.0f, 1.0f);
-        dark = t * t * (3.0f - 2.0f * t);
+    // D247: worked out once a frame, at its first draw, and the same for every draw of the frame. Per draw it was 10
+    // to 14 % of this thread (World, SkyLightAt twice, SkyFlashAt, the settings), for 1,500 to 3,000 draws a frame.
+    static DrawPath::OutdoorLight light;
+    static uint64_t light_frame = ~0ull;
+    if (const uint64_t frame = g_device->frames_presented(); frame != light_frame) {
+      light_frame = frame;
+      light = DrawPath::OutdoorLight{};
+      const WorldState world = World();
+      const int sky_debug = REXCVAR_GET(native_x_renderer_sky_debug);
+      SetSkyLightning(REXCVAR_GET(native_x_renderer_lightning));
+      SetCloudShadows(REXCVAR_GET(native_x_renderer_cloud_shadows));  // D214
+      SetStormSway(REXCVAR_GET(native_x_renderer_storm_sway));
+      SetSeaReflection(REXCVAR_GET(native_x_renderer_reflections) && SkyOn());
+      SetHorizonHaze(REXCVAR_GET(native_x_renderer_horizon_haze) && SkyOn());  // D238
+      g_draw->SetOwnSeaReflection(SeaReflection());
+      // D240: the sea's cube maps as the hour's sky with the renderer's sky on, with or without its reflection.
+      const bool sea_sky = SeaReflection() || (REXCVAR_GET(native_x_renderer_sea_sky) && SkyOn());
+      g_draw->SetOwnSeaSky(sea_sky);
+      if (float z[3], h[3]; sea_sky && g_own_sky.SeaSkyColours(z, h)) g_draw->SetSeaSky(z, h);
+      if (float sea; g_own_sky.SeaLevel(&sea)) g_draw->SetSeaLevel(sea);  // D205
+      // D191 (experimental, off: not yet seen working in a match): the window glass's own reflection.
+      g_draw->SetOwnGlassReflection(SeaReflection() && REXCVAR_GET(native_x_renderer_glass_reflections));
+      g_fog_wanted = world.fog > 0.001f || world.ground_fog > 0.001f || world.weather > 0.45f || sky_debug == 4 || sky_debug == 5 ||
+                     SeaReflection() ||
+                     sky_debug == 6 || REXCVAR_GET(native_x_renderer_rain_lens) || REXCVAR_GET(native_x_renderer_wetness) ||
+                     (REXCVAR_GET(native_x_renderer_sky) && !SkyForcedOff());  // (the clouds over the view are laid with it)  // (the lens's water needs the sea's height)
+      // D175: the night's lights come on as the cycle's sun sets (from 4 degrees up) and are full 6 degrees under.
+      {
+        float dark = 0.0f;
+        if (world.day_night) {
+          const float t = std::clamp((SkyLightAt(world.hour, world.weather).sun_elevation - 4.0f) / -10.0f, 0.0f, 1.0f);
+          dark = t * t * (3.0f - 2.0f * t);
+        }
+        g_cycle_dark.store(dark, std::memory_order_relaxed);
       }
-      g_cycle_dark.store(dark, std::memory_order_relaxed);
-    }
-    if (world.day_night && REXCVAR_GET(native_x_renderer_sky_light)) {
-      const SkyLight at = SkyLightAt(world.hour, world.weather);
-      light.on = true;
-      light.game_sky = !SkyOn();  // the game's own sky is drawn: tinted by the hour
-      for (int i = 0; i < 3; ++i) light.key[i] = at.key[i], light.sky[i] = at.sky[i], light.ground[i] = at.ground[i];
-      for (int i = 0; i < 3; ++i) light.painted[i] = at.painted[i];
-      // The storm's lightning: for its moment the sky's light on everything, and the painted sky, flash blue-white.
-      if (const float flash = SkyFlashAt(world.cloud_seconds, world.storm).light; flash > 0.0f) {  // (D208: the match's)
-        const float tint[3] = {0.72f, 0.8f, 1.0f};
-        for (int i = 0; i < 3; ++i) {
-          light.sky[i] += flash * 0.9f * tint[i];
-          light.ground[i] += flash * 0.6f * tint[i];
-          light.painted[i] += flash * 0.5f * tint[i];
+      if (world.day_night && REXCVAR_GET(native_x_renderer_sky_light)) {
+        const SkyLight at = SkyLightAt(world.hour, world.weather);
+        light.on = true;
+        light.game_sky = !SkyOn();  // the game's own sky is drawn: tinted by the hour
+        for (int i = 0; i < 3; ++i) light.key[i] = at.key[i], light.sky[i] = at.sky[i], light.ground[i] = at.ground[i];
+        for (int i = 0; i < 3; ++i) light.painted[i] = at.painted[i];
+        // The storm's lightning: for its moment the sky's light on everything, and the painted sky, flash blue-white.
+        if (const float flash = SkyFlashAt(world.cloud_seconds, world.storm).light; flash > 0.0f) {  // (D208: the match's)
+          const float tint[3] = {0.72f, 0.8f, 1.0f};
+          for (int i = 0; i < 3; ++i) {
+            light.sky[i] += flash * 0.9f * tint[i];
+            light.ground[i] += flash * 0.6f * tint[i];
+            light.painted[i] += flash * 0.5f * tint[i];
+          }
+        }
+        // Where the light comes from: the sun, or once it is down the moon (opposite it), never under 5 degrees.
+        if (REXCVAR_GET(native_x_renderer_sky_sun_moves)) {
+          const bool moon = at.sun_elevation < -1.5f;
+          const float rad = 3.14159265f / 180.0f;
+          light.turn = true;
+          light.azimuth = (SkyNoonAzimuth() - at.sun_turn + (moon ? 180.0f : 0.0f)) * rad;
+          light.elevation = std::max(moon ? -at.sun_elevation : at.sun_elevation, 5.0f) * rad;
+          // While it rains (sky.cpp's rain: from 55% of the weather) the shadows go steep.
+          light.steep = std::clamp((world.weather - 0.55f) / 0.4f, 0.0f, 1.0f);
         }
       }
-      // Where the light comes from: the sun, or once it is down the moon (opposite it), never under 5 degrees.
-      if (REXCVAR_GET(native_x_renderer_sky_sun_moves)) {
-        const bool moon = at.sun_elevation < -1.5f;
-        const float rad = 3.14159265f / 180.0f;
-        light.turn = true;
-        light.azimuth = (SkyNoonAzimuth() - at.sun_turn + (moon ? 180.0f : 0.0f)) * rad;
-        light.elevation = std::max(moon ? -at.sun_elevation : at.sun_elevation, 5.0f) * rad;
-        // While it rains (sky.cpp's rain: from 55% of the weather) the shadows go steep.
-        light.steep = std::clamp((world.weather - 0.55f) / 0.4f, 0.0f, 1.0f);
+      // NXR_LIGHT_TEST=<nine numbers> (a developer's check of the mapping): the multipliers themselves, the sun's
+      // r, g, b, the sky's and the ground's.
+      static const std::vector<float> test = [] {
+        std::vector<float> out;
+        for (const char* q = std::getenv("NXR_LIGHT_TEST"); q && *q;) {
+          char* e = nullptr;
+          const float v = std::strtof(q, &e);
+          if (e == q) break;
+          out.push_back(v);
+          q = *e == ',' ? e + 1 : e;
+        }
+        return out;
+      }();
+      if (test.size() == 9) {
+        light.on = true;
+        for (int i = 0; i < 3; ++i) light.key[i] = test[i], light.sky[i] = test[3 + i], light.ground[i] = test[6 + i];
       }
-    }
-    // NXR_LIGHT_TEST=<nine numbers> (a developer's check of the mapping): the multipliers themselves, the sun's
-    // r, g, b, the sky's and the ground's.
-    static const std::vector<float> test = [] {
-      std::vector<float> out;
-      for (const char* q = std::getenv("NXR_LIGHT_TEST"); q && *q;) {
-        char* e = nullptr;
-        const float v = std::strtof(q, &e);
-        if (e == q) break;
-        out.push_back(v);
-        q = *e == ',' ? e + 1 : e;
-      }
-      return out;
-    }();
-    if (test.size() == 9) {
-      light.on = true;
-      for (int i = 0; i < 3; ++i) light.key[i] = test[i], light.sky[i] = test[3 + i], light.ground[i] = test[6 + i];
     }
     g_draw->SetOutdoorLight(light);
     static bool said_dir = false;

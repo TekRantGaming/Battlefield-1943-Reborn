@@ -153,6 +153,8 @@ class DrawPath {
   void SetSkipGameSky(bool on) { skip_game_sky_ = on; }
   // D190: the sea's reflection is the renderer's own: the game's cube map left out of the sea's shaders.
   void SetOwnSeaReflection(bool on) { own_sea_reflection_ = on; }
+  // D240: the sea's cube maps as the renderer's sky of the hour (SeaSkyView), with or without that reflection.
+  void SetOwnSeaSky(bool on) { own_sea_sky_ = on; }
   // D191: the window glass's reflection is the renderer's own: the cube map left out of its shaders, its draws kept.
   void SetOwnGlassReflection(bool on) { own_glass_reflection_ = on; }
   // The game's shadow map as what receives shadows last got it (the world's draws, not the first person weapon's):
@@ -633,6 +635,7 @@ class DrawPath {
   } alpha_to_coverage_blend_;
   bool skip_game_sky_ = false;
   bool own_sea_reflection_ = false;
+  bool own_sea_sky_ = false;  // D240
   float sea_level_ = std::numeric_limits<float>::quiet_NaN();  // D205
   bool sea_after_due_ = false;
   Diligent::RefCntAutoPtr<Diligent::ITexture> sea_after_source_, sea_after_;
@@ -690,7 +693,7 @@ class DrawPath {
   int wet_tint_ = -1;
   // D190: the sea's own sky cube (fetch 6 of Wake Island's and Coral Sea's sea shaders) as the renderer's sky.
   Diligent::IDeviceObject* SeaSkyView(uint32_t stage, uint32_t fetch_constant, Diligent::IDeviceObject* view,
-                                      const rex::graphics::SpirvShader& pixel_shader);
+                                      const rex::graphics::SpirvShader& pixel_shader, bool cube);
   Diligent::RefCntAutoPtr<Diligent::ITexture> sea_sky_cube_;
   float sea_sky_[2][3] = {};
   bool sea_sky_dirty_ = true;

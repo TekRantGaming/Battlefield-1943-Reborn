@@ -58,6 +58,17 @@ REXCVAR_DEFINE_DOUBLE(bf_fov, 0.0, "BF1943",
 // vehicles follow bf_fov.
 REXCVAR_DEFINE_DOUBLE(bf_fov_vehicle, 0.0, "BF1943",
                       "The camera's horizontal field of view in vehicles, at 16:9 in degrees (86 to 120), with bf_weapon_fov_custom; 0: the game's own");
+// Its first person views' own (the user, 24 Nov 2026: "We should separate 1st-person and 3rd-person Vehicle FOV into two
+// sliders"): a cockpit, a gun seat, a tank's periscope; bf_fov_vehicle is then the outside views'. 0: bf_fov_vehicle's.
+REXCVAR_DEFINE_DOUBLE(bf_fov_vehicle_fp, 0.0, "BF1943",
+                      "The camera's horizontal field of view in vehicles' first person views, at 16:9 in degrees (86 to 120), with bf_weapon_fov_custom; 0: as bf_fov_vehicle");
+REXCVAR_DEFINE_BOOL(bf_seat_fov_as_is, true, "BF1943",
+                    "Gun seats and the plane's cockpit in first person: the field of view slider's width as it is, and in "
+                    "a gun seat the left trigger (right mouse button) zooms to the seat's own view; false: scaled as every view");
+// Each turret's Iron Sight: "vehicle#seat=x,y,z,yaw,pitch,roll;..." (metres right, up, forward; degrees), the gun's
+// first person picture moved while zoomed in a gun seat, as the SMGs' (bf_smg_sight_us). Lined up in an internal build
+// with bf_smg_sight_tune's keys while zoomed. A turret with none only zooms (AA guns: through their own sights).
+REXCVAR_DEFINE_STRING(bf_turret_sights, "", "BF1943", "Turrets' Iron Sight moves: vehicle#seat=x,y,z,yaw,pitch,roll;...");
 // The first person weapon's own (the user, 18 Nov 2026: "Weapon FOV" and "ADS FOV", 86 to 120 degrees): the camera width
 // the weapon and the hands are drawn as seen through, on the camera slider's scale (86: the game's own look; wider
 // draws the gun smaller), from the hip and aiming down its sights, blended by the zoom. On foot; in a vehicle the
@@ -73,7 +84,6 @@ REXCVAR_DEFINE_DOUBLE(bf_ads_fov, 86.0, "BF1943",
 
 namespace bf1943 {
 bool LocalSeatedNow();  // hud_glyphs.cpp: the local soldier sits in a vehicle (from the pad hook)
-bool BombViewActive();  // vehicle_views.cpp: the plane's bomb view is shown
 // The game's own vertical field of view this frame (radians, before our mapping), zoom included: look.cpp scales the
 // mouse by how far a zoom narrows it.
 std::atomic<float> g_game_fov{0.0f};
@@ -110,9 +120,12 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr uint32_t kCameraFovCaller = 0x82294CB0;  // sub_82294A58's call of setFovY
 constexpr uint32_t kSecondViewCaller = 0x822948E4;  // sub_82294818's call of sub_82623DB8 (at 0x822948E0)
 
-// The slider that applies now: the vehicle's while the soldier sits in one with Custom FOV on, else the camera's.
+// The slider that applies now: the vehicle's while the soldier sits in one with Custom FOV on (its first person one in
+// a first person view, when set), else the camera's.
 double Chosen() {
-  return bf1943::LocalSeatedNow() && REXCVAR_GET(bf_weapon_fov_custom) ? REXCVAR_GET(bf_fov_vehicle) : REXCVAR_GET(bf_fov);
+  if (!bf1943::LocalSeatedNow() || !REXCVAR_GET(bf_weapon_fov_custom)) return REXCVAR_GET(bf_fov);
+  const double first = REXCVAR_GET(bf_fov_vehicle_fp);
+  return bf1943::FirstPersonView() == 1 && first > 0.0 ? first : REXCVAR_GET(bf_fov_vehicle);
 }
 
 // `weight`: how much of the mapping applies (1 all of it, 0 none: the value as the game has it); `chosen`: the
@@ -125,6 +138,28 @@ double MappedAs(double radians, double chosen, double weight) {
   return 2.0 * std::atan(k * std::tan(radians * 0.5));
 }
 double Mapped(double radians, double weight = 1.0) { return MappedAs(radians, Chosen(), weight); }
+
+// The gun seats and the plane's cockpit (the user, 24 Nov 2026: "Let's have Vehicle FOV also affect first-person plane
+// view, first-person on turrets, and tank seat 2 turrets"): the game's own views there are narrower than on foot (a
+// Sherman's second seat 37.5 degrees high, a boat's gun and a plane's cockpit 45, on foot 55: runs hl1, fb86, vt1), so
+// mapped by the same factor as every view they stayed zoomed in at any slider. In first person there the view is the
+// slider as it is (its width at 16:9), and in a gun seat holding the left trigger (the right mouse button in these
+// seats) eases it in to the seat's own view, mapped as before ("right-mouse or LT"). The gun's own picture (its
+// first person mesh, the weapon's view) is widened by the same factor as the world's, so it stays where it was on it.
+std::atomic<int> g_seat_lt{0};          // the left trigger as the game reads it now (0 to 255), in a seat
+std::atomic<int64_t> g_seat_lt_at{0};   // when
+std::atomic<double> g_seat_zoom{0.0};   // 0 the slider's width, 1 the seat's own view
+std::atomic<double> g_seat_factor{1.0};  // the world's view now over the game's own (half angles' tangents)
+std::atomic<int64_t> g_seat_factor_at{0};
+// 0: not such a view; 1: a gun seat in first person; 2: a plane's cockpit (its pilot, in first person).
+int GunSeatView(bf1943::SeatInfo& seat) {
+  if (!bf1943::LocalSeatedNow() || bf1943::FirstPersonView() != 1 || !bf1943::LocalSeat(seat)) return 0;
+  if (seat.kind == bf1943::SeatKind::kGunner) return 1;
+  if (seat.kind == bf1943::SeatKind::kPlane) return 2;
+  return 0;
+}
+int64_t TicksNow() { return std::chrono::steady_clock::now().time_since_epoch().count(); }
+int64_t Ticks(int ms) { return std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(ms)).count(); }
 // The same mapping for a value in degrees (the first person weapon's own projection).
 double MappedDegrees(double degrees, double weight) { return Mapped(degrees * kPi / 180.0, weight) * 180.0 / kPi; }
 // How much of the mapping the first person weapon's projection takes: all of it unzoomed, none through a scope. A
@@ -151,6 +186,19 @@ void DevViewSample(uint8_t* base, uint32_t view);
 #endif
 REX_HOOK_RAW(sub_82583248) {
 #if defined(BF_DEV_TOOLS)
+  // BF_DEV_FOV_CALLERS=1 (24 Nov 2026: which of setFovY's ten callers set a plane's cockpit and the turrets' views):
+  // each caller's field of view, once per caller, seat and whole degree.
+  if (static const bool callers = std::getenv("BF_DEV_FOV_CALLERS") != nullptr; callers) {
+    static std::mutex mutex;
+    static std::set<uint64_t> said;
+    bf1943::SeatInfo seat;
+    const int kind = bf1943::LocalSeat(seat) ? int(seat.kind) : -1;
+    const uint64_t key = uint64_t(uint32_t(ctx.lr)) << 24 | uint64_t(kind + 1) << 16 | uint64_t(std::lround(ctx.f1.f64 * 180.0 / 3.14159265));
+    std::lock_guard lock(mutex);
+    if (said.size() < 200 && said.insert(key).second)
+      REXLOG_INFO("BF dev fov: setFovY from {:08X} at {:.1f} degrees, view {:08X}, seat kind {} (scheme {})", uint32_t(ctx.lr),
+                  ctx.f1.f64 * 180.0 / 3.14159265, ctx.r3.u32, kind, seat.scheme);
+  }
   if (uint32_t(ctx.lr) == kCameraFovCaller) {
     bf1943::g_dev_view.store(ctx.r3.u32, std::memory_order_relaxed);
     bf1943::g_dev_view_calls.fetch_add(1, std::memory_order_relaxed);
@@ -203,10 +251,55 @@ REX_HOOK_RAW(sub_82583248) {
       native_x_renderer::NoteScopeView(on_foot, right, up, back,
                                        float(std::tan(std::clamp(own_rendered, 0.1, 3.0) * 0.5)), float(zoom));
     }
-    // The plane's bomb view (vehicle_views.cpp): the air raid bomber's bomb sight's own field of view, 55 degrees
-    // (the planes' views have 45), then the vehicles' slider as for any view.
-    if (bf1943::BombViewActive()) ctx.f1.f64 = 55.0 * kPi / 180.0;
+#if defined(BF_DEV_TOOLS)
+    const double before_map = ctx.f1.f64;
+#endif
+    const double native = ctx.f1.f64;
     ctx.f1.f64 = Mapped(ctx.f1.f64);
+    {
+      // The gun seats and the cockpit (GunSeatView): the slider's width, a gun seat's zoom to its own view.
+      bf1943::SeatInfo seat;
+      const int kind = REXCVAR_GET(bf_seat_fov_as_is) ? GunSeatView(seat) : 0;
+      const double chosen = Chosen();
+      static int64_t last = 0;
+      const int64_t now = TicksNow();
+      const double dt = last ? std::clamp(double(now - last) / double(Ticks(1000)), 0.0, 0.1) : 0.0;
+      last = now;
+      const bool lt_fresh = now - g_seat_lt_at.load(std::memory_order_relaxed) < Ticks(250);
+      const bool zoom_held = kind == 1 && lt_fresh && g_seat_lt.load(std::memory_order_relaxed) > 60;
+      double z = g_seat_zoom.load(std::memory_order_relaxed);
+      z = kind == 1 ? std::clamp(z + (zoom_held ? 1.0 : -1.0) * dt * 6.0, 0.0, 1.0) : 0.0;  // in or out in a sixth of a second
+      g_seat_zoom.store(z, std::memory_order_relaxed);
+      if (kind && chosen > 0.0 && native > 0.0 && native < kPi) {
+        const double wide = std::tan(std::clamp(chosen, 86.0, 120.0) * kPi / 360.0) * 9.0 / 16.0;  // the slider's, at 16:9
+        const double own = std::tan(ctx.f1.f64 * 0.5);
+        const double k = z * z * (3.0 - 2.0 * z);
+        ctx.f1.f64 = 2.0 * std::atan(wide + (own - wide) * k);
+      }
+      {
+        static int said_kind = -1;
+        static bool said_in = false;
+        if (kind != said_kind || (z > 0.5) != said_in) {
+          said_kind = kind, said_in = z > 0.5;
+          if (kind)
+            REXLOG_INFO("BF seat view: {} in first person, {} ({:.1f} degrees high; the game's own {:.1f})",
+                        kind == 1 ? "a gun seat" : "a plane's cockpit", z > 0.5 ? "zoomed in to its own view" : "at the slider's width",
+                        ctx.f1.f64 * 180.0 / kPi, native * 180.0 / kPi);
+        }
+      }
+      g_seat_factor.store(kind && native > 0.0 && native < kPi ? std::tan(ctx.f1.f64 * 0.5) / std::tan(native * 0.5) : 1.0,
+                          std::memory_order_relaxed);
+      g_seat_factor_at.store(kind ? now : 0, std::memory_order_relaxed);
+    }
+#if defined(BF_DEV_TOOLS)
+    if (static const bool callers = std::getenv("BF_DEV_FOV_CALLERS") != nullptr; callers) {
+      static std::set<int64_t> said;
+      const int64_t key = std::lround(before_map * 1800.0) * 1000 + std::lround(Chosen()) + (bf1943::LocalSeatedNow() ? 500 : 0);
+      if (said.size() < 100 && said.insert(key).second)
+        REXLOG_INFO("BF dev fov: the camera's {:.1f} degrees mapped to {:.1f} (slider {:.0f}, seated {})", before_map * 180.0 / kPi,
+                    ctx.f1.f64 * 180.0 / kPi, Chosen(), bf1943::LocalSeatedNow());
+    }
+#endif
   }
   __imp__sub_82583248(ctx, base);
 }
@@ -345,6 +438,12 @@ void SmgSightTuneSet(const double v[6], bool reset) {
   rex::cvar::SetFlagByName(name, value);
   std::lock_guard lock(g_tune_mutex);
   g_tune_save_name = name, g_tune_save_value = value;
+}
+// auto_join.cpp's pad hook, at each of the game's pad reads in a vehicle seat: the left trigger as the game reads it
+// (the right mouse button is on it in the gun seats), for a gun seat's zoom (GunSeatView).
+void SeatZoomPad(uint8_t left_trigger) {
+  g_seat_lt.store(left_trigger, std::memory_order_relaxed);
+  g_seat_lt_at.store(TicksNow(), std::memory_order_relaxed);
 }
 // game_menu.cpp, each frame: the tuning's line for the screen, and a changed setting to save (true once).
 std::string SmgSightTuneText() {
@@ -509,7 +608,10 @@ void AdsDepthOfField(uint8_t* base, uint32_t data, double blend) {
     }
     launcher = launchers.count(data) != 0;
   }
-  if (launcher && blend > 0.3) native_x_renderer::HideCrosshair();
+  // (On foot only: in a seat the soldier's own zoom can still read the left trigger, and the plane's ring and horizon
+  // are on the same sheet; the user, 24 Nov 2026: "The plane's circular crosshair with horizon-level also doesn't always
+  // show when in 1st-person".)
+  if (launcher && blend > 0.3 && !bf1943::LocalSeatedNow()) native_x_renderer::HideCrosshair();
   native_x_renderer::SetAdsBlend(float(blend));
 }
 // The skin the held weapon wears, told to the renderer each frame (it holds it a quarter second): the electric one
@@ -625,12 +727,118 @@ void SmgSights(uint8_t* base, uint32_t data, double blend, double fov_degrees) {
 #endif
   if (blend <= 0.001) return;
   // "remove crosshair when iron sight is being used when zoomed-in, just like the pistols and rifles natively do"
-  if (REXCVAR_GET(bf_smg_sights_no_crosshair) && blend > 0.3) native_x_renderer::HideCrosshair();
+  if (REXCVAR_GET(bf_smg_sights_no_crosshair) && blend > 0.3 && !bf1943::LocalSeatedNow()) native_x_renderer::HideCrosshair();  // (on foot only)
   const double k = blend * blend * (3.0 - 2.0 * blend);  // eased
   const double deg = 3.14159265358979 / 180.0;
   const double yaw = v[3] * deg * k, pitch = v[4] * deg * k, roll = v[5] * deg * k;
   const double cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch), cr = std::cos(roll), sr = std::sin(roll);
   // roll (about z) x pitch (about x) x yaw (about y), then the shift
+  const double ry[9] = {cy, 0, sy, 0, 1, 0, -sy, 0, cy};
+  const double rx[9] = {1, 0, 0, 0, cp, -sp, 0, sp, cp};
+  const double rz[9] = {cr, -sr, 0, sr, cr, 0, 0, 0, 1};
+  auto mul3 = [](const double* l, const double* r, double* o) {
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 3; ++j) o[i * 3 + j] = l[i * 3] * r[j] + l[i * 3 + 1] * r[3 + j] + l[i * 3 + 2] * r[6 + j];
+  };
+  double t[9], rot[9];
+  mul3(rx, ry, t), mul3(rz, t, rot);
+  const float move[16] = {float(rot[0]), float(rot[1]), float(rot[2]), float(v[0] * k),
+                          float(rot[3]), float(rot[4]), float(rot[5]), float(v[1] * k),
+                          float(rot[6]), float(rot[7]), float(rot[8]), float(v[2] * k),
+                          0, 0, 0, 1};
+  native_x_renderer::SetWeaponLayerMove(move, float(fov_degrees));
+}
+
+// A turret's Iron Sight (bf_turret_sights; the user, 24 Nov 2026: "add new Iron Sight alignments the zoom with
+// right-mouse or LT on gamepads (AA guns will just zoom, as they already look through their iron sights)"): in a gun
+// seat, while its zoom is in (GunSeatView, g_seat_zoom), the gun's first person picture moved as the SMGs' are, by its
+// own six values, eased with the zoom. A turret with none set only zooms. In an internal build bf_smg_sight_tune's keys
+// line it up while zoomed (the arrows, Page Up/Down, the number pad; Shift x5, Ctrl /5) and it is saved.
+void TurretSights(double fov_degrees) {
+  bf1943::SeatInfo seat;
+  if (GunSeatView(seat) != 1) return;
+  const std::string key = (seat.vehicle_name.empty() ? fmt::format("{:08X}", seat.cls) : seat.vehicle_name) + "#" +
+                          std::to_string(seat.seat);
+  // The setting's entries ("name#seat=six values;...").
+  std::map<std::string, std::string> all;
+  {
+    const std::string text = REXCVAR_GET(bf_turret_sights);
+    for (size_t pos = 0; pos < text.size();) {
+      const size_t semi = std::min(text.find(';', pos), text.size());
+      const std::string item = text.substr(pos, semi - pos);
+      if (const size_t eq = item.find('='); eq != std::string::npos) all[item.substr(0, eq)] = item.substr(eq + 1);
+      pos = semi + 1;
+    }
+  }
+  double v[6] = {0, 0, 0, 0, 0, 0};
+  if (auto it = all.find(key); it != all.end())
+    std::sscanf(it->second.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+  {
+    static std::string said;
+    if (said != key) {
+      said = key;
+      REXLOG_INFO("BF turret sights: in {} ({})", key, all.count(key) ? "its Iron Sight set" : "zoom only, no Iron Sight set");
+    }
+  }
+  const double z = g_seat_zoom.load(std::memory_order_relaxed);
+#if defined(_WIN32) && defined(BF_INTERNAL_TOOLS)
+  DWORD front_pid = 0;
+  GetWindowThreadProcessId(GetForegroundWindow(), &front_pid);
+  if (REXCVAR_GET(bf_smg_sight_tune) && z > 0.5 && front_pid == GetCurrentProcessId()) {
+    static std::map<int, std::chrono::steady_clock::time_point> next;
+    const auto now = std::chrono::steady_clock::now();
+    auto pressed = [&](int vk) {
+      if (!(GetAsyncKeyState(vk) & 0x8000)) {
+        next.erase(vk);
+        return false;
+      }
+      auto it = next.find(vk);
+      if (it == next.end()) {
+        next[vk] = now + std::chrono::milliseconds(350);
+        return true;
+      }
+      if (now < it->second) return false;
+      it->second = now + std::chrono::milliseconds(40);
+      return true;
+    };
+    const double scale = (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 5.0 : (GetAsyncKeyState(VK_CONTROL) & 0x8000) ? 0.2 : 1.0;
+    const double step = 0.002 * scale, turn = 0.25 * scale;
+    struct Key {
+      int vk, index;
+      double by;
+    };
+    const Key keys[] = {{VK_LEFT, 0, -step},   {VK_RIGHT, 0, step},   {VK_UP, 1, step},      {VK_DOWN, 1, -step},
+                        {VK_PRIOR, 2, step},   {VK_NEXT, 2, -step},   {VK_NUMPAD4, 3, -turn}, {VK_NUMPAD6, 3, turn},
+                        {VK_NUMPAD8, 4, turn}, {VK_NUMPAD2, 4, -turn}, {VK_NUMPAD7, 5, -turn}, {VK_NUMPAD9, 5, turn}};
+    bool changed = false;
+    for (const Key& k : keys)
+      if (pressed(k.vk)) v[k.index] += k.by, changed = true;
+    if (pressed(VK_NUMPAD0)) {
+      for (double& x : v) x = 0.0;
+      changed = true;
+    }
+    if (changed) {
+      all[key] = fmt::format("{:.4f},{:.4f},{:.4f},{:.2f},{:.2f},{:.2f}", v[0], v[1], v[2], v[3], v[4], v[5]);
+      std::string value;
+      for (const auto& [name, six] : all) value += (value.empty() ? "" : ";") + name + "=" + six;
+      rex::cvar::SetFlagByName("bf_turret_sights", value);
+      std::lock_guard lock(g_tune_mutex);
+      g_tune_save_name = "bf_turret_sights", g_tune_save_value = value;
+    }
+    std::lock_guard lock(g_tune_mutex);
+    g_tune_text = fmt::format("TURRET SIGHT TUNING  {}   right {:+.4f}  up {:+.4f}  forward {:+.4f} m   turn {:+.2f}  tilt {:+.2f}  roll {:+.2f} deg\n"
+                              "Arrows: left/right/up/down   PgUp/PgDn: forward/back   Numpad 4 6: turn   8 2: tilt   7 9: roll   0: reset   Shift x5, Ctrl /5",
+                              key, v[0], v[1], v[2], v[3], v[4], v[5]);
+    g_tune_text_at = now;
+  }
+#endif
+  bool any = false;
+  for (double x : v) any |= x != 0.0;
+  if (z <= 0.001 || !any) return;
+  const double k = z * z * (3.0 - 2.0 * z);
+  const double deg = 3.14159265358979 / 180.0;
+  const double yaw = v[3] * deg * k, pitch = v[4] * deg * k, roll = v[5] * deg * k;
+  const double cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch), cr = std::cos(roll), sr = std::sin(roll);
   const double ry[9] = {cy, 0, sy, 0, 1, 0, -sy, 0, cy};
   const double rx[9] = {1, 0, 0, 0, cp, -sp, 0, sp, cp};
   const double rz[9] = {cr, -sr, 0, sr, cr, 0, 0, 0, 1};
@@ -765,7 +973,14 @@ REX_HOOK_RAW(sub_821FAAF0) {
   uint32_t data = 0;
   double blend = 0;
   const bool held = first_person_weapon && HeldWeapon(ctx, base, soldier, data, blend);
-  if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) {
+  const bool seat_view = TicksNow() - g_seat_factor_at.load(std::memory_order_relaxed) < Ticks(250);
+  if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0 && seat_view) {
+    // A gun seat or the cockpit (GunSeatView): the gun's picture by the world's own factor this frame, so it keeps
+    // its place on it, wide or zoomed in.
+    const double factor = g_seat_factor.load(std::memory_order_relaxed);
+    ctx.f1.f64 = 2.0 * std::atan(factor * std::tan(ctx.f1.f64 * kPi / 360.0)) * 180.0 / kPi;
+    TurretSights(ctx.f1.f64);
+  } else if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) {
     if (bf1943::LocalSeatedNow() || !REXCVAR_GET(bf_weapon_fov_custom)) {
       // In a vehicle (its own slider with Custom FOV on), or on foot without Custom FOV: the camera's slider.
       ctx.f1.f64 = MappedDegrees(ctx.f1.f64, WeaponMapWeight());
@@ -781,8 +996,11 @@ REX_HOOK_RAW(sub_821FAAF0) {
   if (first_person_weapon) {  // with the field of view the weapon's view gets this frame
     const double answer = ctx.f1.f64;
     if (held) {
-      AdsDepthOfField(base, data, blend);
-      SmgSights(base, data, blend, answer);
+      // (Not in a gun seat or the cockpit: the soldier's own zoom there would move the turret's picture as an SMG's.)
+      if (!seat_view) {
+        AdsDepthOfField(base, data, blend);
+        SmgSights(base, data, blend, answer);
+      }
       WeaponSkin(base, data);
     }
     ctx.f1.f64 = answer;
