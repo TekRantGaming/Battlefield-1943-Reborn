@@ -1,8 +1,10 @@
 # Third party notices
 
-The port's own code is under the MIT License ([LICENSE](LICENSE)). That licence covers the port's own source code
-only: the game's data and the code recompiled from the game's executable are not part of this repository and are not
-covered by it. This repository also holds other people's code and art under their own licences: the ReXGlue SDK
+The port's own code is under the GNU General Public License version 3 only ([LICENSE](LICENSE)), with an additional
+permission for the game's recompiled code and closed libraries ([LICENSE-EXCEPTION.md](LICENSE-EXCEPTION.md)). Until
+25 Nov 2026 it was under the MIT License, whose notice is kept in [LICENSE-MIT-EARLIER.md](LICENSE-MIT-EARLIER.md).
+The port's licence covers its own source code only: the game's data and the code recompiled from the game's
+executable are not part of this repository and are not covered by it. This repository also holds other people's code and art under their own licences: the ReXGlue SDK
 (`sdk/src-bf`), NativeXRenderer (`bf/third_party/native-x-renderer`), DiligentCore and the rest below. Each keeps its
 licence text in the place given here.
 

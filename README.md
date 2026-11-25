@@ -351,7 +351,8 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 ## Credits
 
 - **Battlefield 1943** by DICE, published by Electronic Arts in 2009.
-- **Battlefield 1943 Reborn** by TekRantGaming and contributors (MIT, [LICENSE](LICENSE)): the port's own code.
+- **Battlefield 1943 Reborn** by TekRantGaming and contributors (GPL 3, [LICENSE](LICENSE), with an
+  [additional permission](LICENSE-EXCEPTION.md); MIT until 25 Nov 2026): the port's own code.
 - **[@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy)**: ultrawide screens, mouse flying, free look in vehicles and
   the mouse in the game's own input ([pull request 11](../../pull/11)); the mouse in every vehicle seat, Custom Match
   with LAN, key bindings with two keys, HUD scale and minimap size, and the experimental tick rates
