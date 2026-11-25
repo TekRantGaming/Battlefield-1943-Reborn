@@ -50,6 +50,8 @@ for lib in libstdc++.so.6 libgcc_s.so.1; do
 done
 cp "$WT/bf/data/linux/bf1943-reborn.png" "$A/bf1943-reborn.png"
 cp "$A/bf1943-reborn.png" "$A/.DirIcon"
+# RecompLauncher's file at the AppDir's top (/recomplauncher.json inside the AppImage), as in the Windows download.
+cp "$WT/recomplauncher.json" "$A/recomplauncher.json"
 cat > "$A/bf1943-reborn.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application

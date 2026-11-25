@@ -7,7 +7,7 @@
 #    AppImage's "linux-x86_64.AppImage" (an updater takes the name that ends so; old ones took any containing it);
 #    SHA256SUMS.txt has a matching line for each of them.
 # 3. Required files: the program, its runtime and renderer, the backend setting, the shader list, the fonts and
-#    glyphs, bf-retired.txt.
+#    glyphs, bf-retired.txt, recomplauncher.json (RecompLauncher's file: the player zip's only, never a server package's).
 # 4. No stale files (*.pdb, *.map, *.old, *.new, the Xenos plugin); bf-retired.txt names no file the release ships.
 param([Parameter(Mandatory)][string]$Release, [Parameter(Mandatory)][string]$Version)
 $ErrorActionPreference = 'Stop'
@@ -110,7 +110,7 @@ if (!$serverZip) { Bad 'no community server package (BF1943-Reborn-Server-<versi
                        'python/pythonw.exe', 'bin/bf1943.exe', 'bin/rexruntime.dll', 'version.txt', 'server.default.json', 'BF1943 Server.bat') {
             if ($names -notcontains $r) { Bad "the server package lacks $r" }
         }
-        foreach ($n in $names) { if ($n -match '(^|/)(official\.key|server\.json)$' -or $n -like 'game/*' -or $n -like 'logs/*') { Bad "the server package must not hold $n" } }
+        foreach ($n in $names) { if ($n -match '(^|/)(official\.key|server\.json|recomplauncher\.json)$' -or $n -like 'game/*' -or $n -like 'logs/*') { Bad "the server package must not hold $n" } }
         $ve = $sz.Entries | Where-Object { ($_.FullName -replace '\\', '/') -match '^[^/]+/version\.txt$' } | Select-Object -First 1
         if ($ve) { $rd = New-Object IO.StreamReader($ve.Open()); $sv = $rd.ReadToEnd().Trim(); $rd.Close(); if ($sv -ne $Version) { Bad "the server package says version '$sv', expected '$Version'" } }
     } finally { $sz.Dispose() }
@@ -127,7 +127,7 @@ if (Test-Path $sums) {
 foreach ($r in 'bf1943.exe', 'rexruntime.dll', 'rexgpu-bfnative.dll', 'bf1943.toml', 'data/shaders/bf1943-shaders.list',
                'data/startup/trg_studios.png', 'data/achievements/101.png', 'data/achievements/102.png',
                'data/achievements/103.png', 'bf-retired.txt', 'README.txt', 'WebView2Loader.dll',
-               'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+               'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'recomplauncher.json') {
     if (!$tree.Contains($r)) { Bad "required file missing: $r" }
 }
 foreach ($prefix in 'fonts/', 'glyphs/', 'licences/') {

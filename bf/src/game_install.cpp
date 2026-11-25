@@ -218,10 +218,12 @@ bool Extract(const fs::path& package, const fs::path& out, Progress& progress) {
   progress.total = total;
   std::error_code ec;
   fs::create_directories(out, ec);
+  const fs::path part = out / "default.xex.part";
+  fs::remove(part, ec);  // left by a run cut short
   std::vector<uint8_t> block(kBlock);
   uint64_t bad = 0;
-  // Paths by the package's own entry order (a parent comes before its children); default.xex written last, so an
-  // install cut short is never taken for a finished one.
+  // Paths by the package's own entry order (a parent comes before its children); default.xex written last, as
+  // default.xex.part renamed once every block is checked, so an install cut short is never taken for a finished one.
   const std::vector<Stfs::Entry>& original = entries;
   std::vector<fs::path> paths(original.size());
   for (size_t i = 0; i < original.size(); ++i) {
@@ -234,7 +236,7 @@ bool Extract(const fs::path& package, const fs::path& out, Progress& progress) {
   std::stable_partition(order.begin(), order.end(), [&](size_t i) { return original[i].name != "default.xex"; });
   for (size_t i : order) {
     const auto& e = original[i];
-    const fs::path dest = out / paths[i];
+    const fs::path dest = paths[i] == "default.xex" ? part : out / paths[i];
     if (e.dir) {
       fs::create_directories(dest, ec);
       continue;
@@ -258,8 +260,13 @@ bool Extract(const fs::path& package, const fs::path& out, Progress& progress) {
     if (!o) return fail("Cannot write " + paths[i].string() + " (is the disk full?).");
   }
   if (bad) {
+    fs::remove(part, ec);
     fs::remove(out / "default.xex", ec);
     return fail("The package is damaged: " + std::to_string(bad) + " blocks do not match their checksums.");
+  }
+  if (fs::exists(part, ec)) {
+    fs::rename(part, out / "default.xex", ec);
+    if (ec) return fail("Cannot write default.xex (" + ec.message() + ").");
   }
   REXLOG_INFO("BF install: {} files, {} MB from {} into {}", original.size(), total >> 20, package.filename().string(),
               out.string());
@@ -272,23 +279,118 @@ bool Extract(const fs::path& package, const fs::path& out, Progress& progress) {
 // ---- the server package's install, without a window: bf1943.exe --install_game=<package or folder>
 // [--game_data_root=<folder>]. Progress and the result on stdout (server_setup.ps1 reads them); the exit code is 0
 // when the game is installed.
+#include <chrono>
 #include <rex/cvar.h>
 REXCVAR_DEFINE_STRING(install_game, "", "BF1943",
                       "Install the game from this package (or a folder holding it) into the game folder, then exit");
+// RecompLauncher's setup step (recomplauncher.json prepare, run again after every new release): "progress <0 to 1>
+// <text>" lines on stdout, and a game already in the game folder is kept without reading a package, so --install_game
+// may be left out (prepare.keeps_copy: a player who deleted their package is not asked for it again). A game folder
+// picked instead of the package is copied into the game folder. Off: --install_game as before.
+REXCVAR_DEFINE_BOOL(install_progress, false, "BF1943",
+                    "Print progress lines as it installs, and keep a game already installed (--install_game optional)");
 
 namespace bf1943::install {
+namespace {
+// A game folder the player picked (default.xex, or the folder with it) copied into `out`, default.xex last, as
+// default.xex.part renamed once it is all there, so a copy cut short is never taken for a finished one.
+template <class Line>
+int CopyGame(const fs::path& from, const fs::path& out, Line line) {
+  std::error_code ec;
+  const fs::path part = out / "default.xex.part";
+  fs::remove(out / "default.xex", ec);
+  fs::remove(part, ec);  // left by a run cut short
+  std::vector<fs::path> files;
+  uint64_t total = 0, done = 0;
+  for (auto it = fs::recursive_directory_iterator(from, ec); !ec && it != fs::recursive_directory_iterator();
+       it.increment(ec)) {
+    if (!it->is_regular_file(ec)) continue;
+    const fs::path rel = it->path().lexically_relative(from);
+    if (rel != "default.xex") files.push_back(rel);
+    total += it->file_size(ec);
+  }
+  if (ec) {
+    std::printf("error: Cannot read %s (%s).\n", from.string().c_str(), ec.message().c_str());
+    return 1;
+  }
+  files.push_back("default.xex");
+  int shown = -1;
+  for (const fs::path& rel : files) {
+    const int percent = total ? int(done * 100 / total) : 0;
+    if (percent != shown) line(percent / 100.0, "Copying the game from your folder"), shown = percent;
+    fs::create_directories((out / rel).parent_path(), ec);
+    const fs::path to = rel == "default.xex" ? part : out / rel;
+    if (!ec) fs::copy_file(from / rel, to, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+      fs::remove(part, ec);
+      std::printf("error: Cannot write %s (is the folder writable and the disk not full?).\n", rel.string().c_str());
+      return 1;
+    }
+    done += fs::file_size(from / rel, ec);
+  }
+  fs::rename(part, out / "default.xex", ec);
+  if (ec) {
+    const std::string why = ec.message();
+    fs::remove(part, ec);
+    std::printf("error: Cannot write default.xex (%s).\n", why.c_str());
+    return 1;
+  }
+  line(1, "The game is installed");
+  std::printf("installed: %s\n", out.string().c_str());
+  return 0;
+}
+}  // namespace
+
 int InstallFromCommandLine(const std::filesystem::path& game_dir) {
+  const bool lines = REXCVAR_GET(install_progress);
+  auto line = [](double at, const char* text) {
+    std::printf("progress %.3f %s\n", at, text);
+    std::fflush(stdout);
+  };
+  if (lines && Installed(game_dir) && !OtherGame(game_dir)) {
+    line(1, "Already built");
+    std::printf("installed: %s\n", game_dir.string().c_str());
+    return 0;
+  }
+  if (lines && REXCVAR_GET(install_game).empty()) {
+    std::printf("error: The game is not installed in %s and no package was given. Pick your Battlefield 1943 package "
+                "(the single file in 5841097E\\000D0000) and set up again.\n",
+                game_dir.string().c_str());
+    return 1;
+  }
+  if (lines) line(0, "Checking your package");
   const Source source = Inspect(REXCVAR_GET(install_game));
   if (!source.ok) {
     std::printf("error: %s\n", source.error.c_str());
     return 1;
   }
+  std::error_code ec;
+  if (source.extracted && lines && !fs::equivalent(source.path, game_dir, ec))
+    return CopyGame(source.path, game_dir, line);
   if (source.extracted) {
     std::printf("installed: %s\n", source.path.string().c_str());
     return 0;
   }
   Progress progress;
-  std::thread([&] { Extract(source.path, game_dir, progress); }).join();
+  std::atomic<bool> ended{false};
+  std::thread worker([&] {
+    Extract(source.path, game_dir, progress);
+    ended = true;
+  });
+  if (lines) {
+    int shown = -1;
+    while (!ended) {
+      const uint64_t total = progress.total, done = progress.done;
+      const int percent = total ? int(done * 100 / total) : 0;
+      if (percent != shown) {
+        line(percent / 100.0, "Installing the game from your package");
+        shown = percent;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+  }
+  worker.join();
+  if (lines && !progress.failed) line(1, "The game is installed");
   if (progress.failed) {
     std::printf("error: %s\n", progress.error.c_str());
     return 1;
