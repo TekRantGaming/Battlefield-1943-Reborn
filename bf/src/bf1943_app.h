@@ -100,6 +100,7 @@ inline std::unique_ptr<rex::system::IInputSystem> CreateSharedInputSystem(bool t
 
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
 REXCVAR_DECLARE(std::string, install_game);  // game_install.cpp
+REXCVAR_DECLARE(bool, install_progress);  // game_install.cpp
 
 // Developer A/B switch (speed comparisons): BF_AB_OFF lists pieces to leave out (overlay, input, audio).
 inline bool AbOff(const char* piece) {
@@ -254,9 +255,11 @@ class Bf1943App : public rex::ReXApp {
     paths_ = paths;
   }
 
-  // --install_game (the server package's setup): the game unpacked into its folder, then the process ends.
+  // --install_game (the server package's setup) or --install_progress (RecompLauncher's, which leaves the package out
+  // once the game is installed): the game unpacked into its folder, then the process ends.
   void OnPostInitLogging() override {
-    if (!REXCVAR_GET(install_game).empty()) std::exit(bf1943::install::InstallFromCommandLine(GameDir(paths_)));
+    if (!REXCVAR_GET(install_game).empty() || REXCVAR_GET(install_progress))
+      std::exit(bf1943::install::InstallFromCommandLine(GameDir(paths_)));
   }
 
   // The game folder: --game_data_root, else the folder chosen at setup (an unpacked game used where it is), else
