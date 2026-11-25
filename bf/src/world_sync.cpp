@@ -607,7 +607,7 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
     d->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + 40 * u), IM_COL32(93, 138, 50, 90));
     d->AddText(f.ui_bold, 20 * u, ImVec2(x0 + 12 * u, y0 + 6 * u), kit::kCream, "MATCH ADMIN (F9)");
     // Night Ops (24 Nov 2026): what an admin changes here holds for the rest of the round (server/gmhost.py
-    // NIGHT_OPS_HELD); this button, or N, hands it all back to the server's schedule (19:00, the storm by the tickets).
+    // NIGHT_OPS_HELD); this button, or N, hands it all back to the server's schedule (18:30, the storm by the tickets).
     // In the header: the rows already reach past the screen's foot.
     if (status.night_ops) {
       const ImVec2 b1(x1 - 12 * u, y0 + 33 * u), b0(b1.x - 180 * u, y0 + 7 * u);

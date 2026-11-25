@@ -1091,8 +1091,8 @@ class World:
     # Night Ops (16 Nov 2026, TekRantGaming: the night maps gone, "we would just start the match to always be at a set
     # time the full time so could have night ops maps"): a Night Ops server's world is the day and night cycle held at
     # this hour for the whole match. 20 Nov 2026, his presets: "time of day should be 1900h and is locked at that time";
-    # the weather follows the tickets.
-    NIGHT_OPS_HOUR = 19.0
+    # the weather follows the tickets. 25 Nov 2026, TekRantGaming: 1830h instead ("it looks a lot better at 1830 hours").
+    NIGHT_OPS_HOUR = 18.5
     # The storm's build over a round (TekRantGaming, 20 Nov 2026: "a nice clear day at the start ... we still want to see
     # the stars, and then the cloud coverage slowly builds up ... the weather gets stronger up until the point at the end
     # of the game. Now it's all based on tickets ... I do want a good chunk of the first half of the game to be rain
@@ -1114,7 +1114,7 @@ class World:
     # they should be able to"; they used to snap back to the build). Per setting: what the admin moves is held at their
     # value for the rest of the round, and the build keeps driving the rest (the time moved, the storm still builds;
     # the weather moved, it stays there while the clouds and fog still follow the tickets). The next round starts as
-    # a plain Night Ops round (19:00, clear), and the panel's "Back to Night Ops" (ask flag 8) hands everything back to
+    # a plain Night Ops round (18:30, clear), and the panel's "Back to Night Ops" (ask flag 8) hands everything back to
     # the schedule at once. The settings the build drives: the clock (day and night, hour, a day's minutes), cloud
     # cover, weather, distance fog, ground fog. Cloud rate, wind and cloud height were always the admin's.
     NIGHT_OPS_HELD = ('clock', 'clouds', 'weather', 'fog', 'ground fog')
@@ -2068,11 +2068,11 @@ def main():
     ap.add_argument('--mode', choices=['classic', 'modern'], default='classic',
                     help='not used since v0.4.0: every server plays the original movement and aiming')
     # Night Ops (TekRantGaming, 11 Nov 2026): the maps at night, shown in the server list. Since 16 Nov 2026 the night
-    # is the server's world: the day and night cycle held at one hour for the whole match (World.NIGHT_OPS_HOUR, 19:00
-    # since 20 Nov 2026), drawn by players' games with the levels' lamps lit (NativeXRenderer D175); --day-night, --time
+    # is the server's world: the day and night cycle held at one hour for the whole match (World.NIGHT_OPS_HOUR, 18:30
+    # since 25 Nov 2026, 19:00 from 20 Nov), drawn by players' games with the levels' lamps lit (NativeXRenderer D175); --day-night, --time
     # and --day-minutes are then not used. Its storm builds with each round's tickets (World.match, --match-file).
     ap.add_argument('--night', action='store_true',
-                    help='a night server (Night Ops): its world held at 19:00, the storm building with the tickets')
+                    help='a night server (Night Ops): its world held at 18:30, the storm building with the tickets')
     # Where the server is (TekRantGaming, 13 Nov 2026: the browser shows the region with its flag): one of the game's
     # region codes (bf/src/regions.h, the manager's drop down). And its tick rate, for the browser: the game's own
     # 30 Hz today.
