@@ -47,6 +47,7 @@ namespace {
 // Player facing messages (the launcher's update page and its Home row).
 constexpr const char* kCouldNotCheck = "Could not check for updates.";
 constexpr const char* kUpToDate = "Up to date";
+constexpr const char* kFromRecompLauncher = "Updates come from RecompLauncher.";
 constexpr const char* kDownloadFailed = "The download failed. Check your internet connection; it tries again later.";
 constexpr const char* kDamaged = "The download did not pass its check, so nothing was changed.";
 #if defined(_WIN32)
@@ -295,6 +296,12 @@ void Check() {
     REXLOG_INFO("BF dev: BF_DEV_UPDATE_ZIP offers v{} from {}", r.version, zip);
   }
 #endif
+  // Started by RecompLauncher (RECOMPLAUNCHER=1): the launcher installs every release itself, so the game does not
+  // update itself as well. Started any other way, as before.
+  if (const char* rl = std::getenv("RECOMPLAUNCHER"); !dev && rl && std::strcmp(rl, "1") == 0) {
+    REXLOG_INFO("BF update: started by RecompLauncher, which installs the updates: not looked for here");
+    return SetState(State::kNone, kFromRecompLauncher);
+  }
 #if !defined(_WIN32)
   // The AppImage replaces itself; a program started some other way (a developer's build) has nothing to replace.
   const char* appimage = std::getenv("APPIMAGE");
