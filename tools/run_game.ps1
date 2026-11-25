@@ -13,8 +13,10 @@ param(
     [Parameter(Mandatory = $true)][string]$Name,
     [int]$Seconds = 90,
     [string]$Preset = "bf-relwithdebinfo",
+    [string]$BuildDir = "",  # a build folder instead of the preset's (the SDK v0.11 port: ..\sdk011\bf\out\build\bf-dev)
     [string[]]$GameArgs = @(),
     [string]$Shots = "",  # comma separated seconds after start at which to save a PNG of the game window (tools\capture_window.ps1)
+    [switch]$ShotsAtStops,  # instead: a PNG halfway through each camera stop the game logs (shot_stop<N>.png)
     [switch]$Interactive,
     [string]$Stacks = "",  # BF_DEV_STACKS: comma separated seconds at which to log every guest stack (bf-dev)
     [switch]$NetTrace,  # BF_NET_TRACE=1: log network and online imports (bf-dev, bf\src\net_trace.cpp)
@@ -43,7 +45,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $runs = Join-Path $root "runs"
 $lock = Join-Path $runs "game.lock"
-$build = Join-Path $root "bf\out\build\$Preset"
+$build = $(if ($BuildDir) { (Resolve-Path $BuildDir).Path } else { Join-Path $root "bf\out\build\$Preset" })
 New-Item -ItemType Directory -Force $runs | Out-Null
 
 $hold = "F:\KK-native-renderer\runs\game.lock"
@@ -224,6 +226,34 @@ if (-not $Interactive) { $launchArgs += "--bf_update_feed=$(if ($env:BF_TEST_UPD
         }
     }
     $script:gameProc = $proc
+    if ($ShotsAtStops) {
+        # One shot halfway through each camera stop the game logs (BF_DEV_CAMERA_TOUR's or _POINTS' "point N of M" /
+        # "spot N of M"; its dwell from BF_DEV_CAMERA_TOUR), saved as shot_stop<N>.png: the same stop lines up between
+        # two runs whatever their load times (24 Nov 2026: timed shots fell on another stop). -Shots is not used.
+        $dwell = 12
+        if ($env:BF_DEV_CAMERA_TOUR -match '^\d+:(\d+)') { $dwell = [int]$Matches[1] }
+        $logFile = Join-Path $dir 'bf1943.log'
+        $seen = 0; $pending = @()
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
+            if (Wait-GameExit 500) { $exited = $true; break }
+            if (Test-Path $logFile) {
+                $stops = @(Select-String -Path $logFile -Pattern 'BF dev camera: (?:point|spot) (\d+) of')
+                for ($i = $seen; $i -lt $stops.Count; $i++) {
+                    $pending += [pscustomobject]@{ At = $clock.Elapsed.TotalSeconds + $dwell / 2.0; N = $stops[$i].Matches[0].Groups[1].Value }
+                }
+                $seen = $stops.Count
+            }
+            foreach ($p in @($pending | Where-Object { $_.At -le $clock.Elapsed.TotalSeconds })) {
+                $script:gameProc.Refresh()
+                try { & (Join-Path $PSScriptRoot "capture_window.ps1") -ProcessId $script:gameProc.Id -Out (Join-Path $dir "shot_stop$($p.N).png"); "shot at stop $($p.N), $([int]$clock.Elapsed.TotalSeconds) s" }
+                catch { "shot at stop $($p.N) failed: $_" }
+            }
+            $pending = @($pending | Where-Object { $_.At -gt $clock.Elapsed.TotalSeconds })
+        }
+        $waited = [int]$clock.Elapsed.TotalSeconds
+        $Shots = ""
+    }
     $times = @($Shots -split "," | Where-Object { $_ } | ForEach-Object { [int]$_ })
     if ($StopServerAt -gt 0) { $times += $StopServerAt }
     foreach ($t in ($times | Sort-Object -Unique)) {

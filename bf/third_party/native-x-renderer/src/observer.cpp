@@ -178,6 +178,7 @@ uint64_t g_gpu_recorded = 0;
 // with the GPU's when it runs that packet, apart from the ring's draws.
 std::map<uint32_t, std::unique_ptr<Snapshot>> g_replayed;
 uint64_t g_replayed_executions = 0, g_replayed_clean = 0, g_replayed_unmatched = 0;
+std::vector<Unmatched> g_replayed_unmatched_list;  // (the draw audit: their shaders)
 
 bool InRecorded(uint32_t address) {
   auto it = g_recorded.upper_bound(address);
@@ -412,7 +413,11 @@ void OnGpuDraw(void* /*user*/, const rex::system::GpuDrawInfo& info) {
     // replay of it.
     if (g_gpu_phase != GpuPhase::kInside) return;
     ++g_gpu_recorded;
-    if (!CompareReplayed(address, info)) ++g_replayed_unmatched;
+    if (!CompareReplayed(address, info)) {
+      ++g_replayed_unmatched;
+      g_replayed_unmatched_list.push_back({address, r[kVgtDrawInitiator], r[0x2000], r[0x2001], r[0x2002],
+                                           r[kRbModeControl], info.vertex_shader_hash, info.pixel_shader_hash, 0});
+    }
     return;
   }
   switch (g_gpu_phase) {
@@ -549,6 +554,24 @@ void Report() {
   std::string ext;
   for (const auto& [key, n] : external) ext += fmt::format("\n    {} x{}", key, n);
   log(fmt::format("draw packets from buffers outside the command buffer ring: {}{}", g_external.size(), ext));
+  // The draw audit: what the GPU ran that no D3D draw or replayed recorded draw stands for, by its shaders, count and
+  // targets (the color target's info, the depth's), most first.
+  for (int list = 0; list < 2; ++list) {
+    const std::vector<Unmatched>& v = list ? g_replayed_unmatched_list : g_unmatched;
+    std::map<std::string, uint32_t> by;
+    for (const Unmatched& u : v)
+      ++by[fmt::format("vs {:016x} ps {:016x} prim {} count {} color {:#x} depth {:#x} mode {}", u.vertex_shader,
+                       u.pixel_shader, u.initiator & 0x3F, u.initiator >> 16, u.color_info, u.depth_info,
+                       u.mode_control & 7)];
+    std::vector<std::pair<uint32_t, std::string>> sorted;
+    for (const auto& [k, n] : by) sorted.push_back({n, k});
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::string out;
+    for (size_t i = 0; i < sorted.size() && i < 60; ++i) out += fmt::format("\n    x{} {}", sorted[i].first, sorted[i].second);
+    log(fmt::format("audit: {} by shaders ({} packets, {} kinds):{}",
+                    list ? "recorded command buffers' draws not replayed" : "ring draw packets with no D3D draw",
+                    v.size(), sorted.size(), out));
+  }
 
   log("render state mismatches:" + Top(g_register_mismatch, 24, RegisterName));
   log("vertex fetch mismatches (constants the VS reads):" +
@@ -592,6 +615,7 @@ void Reset() {
   g_gpu_recorded = 0;
   g_replayed.clear();
   g_replayed_executions = g_replayed_clean = g_replayed_unmatched = 0;
+  g_replayed_unmatched_list.clear();
   g_unmatched.clear();
   g_gpu_draws = g_matched_executions = g_draws_clean = g_unanalyzed = 0;
   g_vs_constants_compared = g_ps_constants_compared = 0;

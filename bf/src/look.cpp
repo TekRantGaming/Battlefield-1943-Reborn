@@ -475,7 +475,6 @@ bool g_free_hold = false;  // free look held (vehicle_views.cpp) at the pad hook
 }  // namespace
 bool FreeLookHeld(bool turret_seat);         // vehicle_views.cpp
 void TakeFreeLookPress(uint8_t* gamepad);  // vehicle_views.cpp
-void VehicleViewsPad(uint8_t* gamepad);    // vehicle_views.cpp
 bool VehicleFreeLook(double& yaw, double& pitch) {
   const int64_t at = g_free_at.load(std::memory_order_acquire);
   if (!at || Clock::now().time_since_epoch().count() - at > std::chrono::nanoseconds(std::chrono::milliseconds(200)).count())
@@ -529,9 +528,8 @@ void LookPad(uint8_t* gamepad, bool seated) {
         std::chrono::duration<double>(now - g.vehicle_moved).count() > 0.25)
       g.stick_moved = now;
   }
-  // A plane's camera button through its views and the bomb view (vehicle_views.cpp), the keyboard's and a controller's;
-  // the Free-Look keys' Guide button never reaches the game.
-  if (seated) VehicleViewsPad(gamepad), TakeFreeLookPress(gamepad);
+  // The Free-Look keys' Guide button never reaches the game (vehicle_views.cpp).
+  if (seated) TakeFreeLookPress(gamepad);
   // Not in the air raid's bombers (13 Nov 2026): the mouse neither steers them nor turns their view, in the bomb
   // sight or behind them; the keys and the controller steer.
   const bool mouse_active = MouseLook() && !comms::Typing() && !BomberSeat();

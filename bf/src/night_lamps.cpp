@@ -461,7 +461,10 @@ void NightJeeps() {
     l.color[0] = 9.0f, l.color[1] = 8.1f, l.color[2] = 6.3f;  // a little warmer than white
     l.range = 30.0f;
     l.cone_inner = 13.0f, l.cone_outer = 30.0f;
-    l.glow = 0.08f;
+    // (16 cm: the whole headlight's glass lit and a bloom about a metre across. At 8 cm only a point of the glass lit,
+    // its bloom half a metre: the user, 24 Nov 2026, "Headlights are projecting, but the headlight model on the
+    // vehicles are missing their actual light effect".)
+    l.glow = 0.16f;
     return l;
   };
   std::vector<native_x_renderer::NightModelLamps> models;
@@ -482,7 +485,13 @@ void NightJeeps() {
   // level's data file's first subset, times three), the Hull's matrix (the Sherman's parts Barrel, Hook1, Hook2, Hull:
   // the fourth, c26; the Chi-Ha's Hull the first, c17). The Sherman's two headlights on its glacis' corners; the
   // Chi-Ha's one, in the middle of its hull's front.
-  for (uint32_t n : {29745u, 14685u, 7416u}) add(n, kShermanLamp[0], kShermanLamp[1], kShermanLamp[2], 26);
+  // D237: not the Sherman's farthest level of detail (7416 indices): the Japanese infantry's nearest head
+  // (Jap_Infantry_Mesh's HeadShape_head and Jap_Rifleman_Mesh's Jap_Head1, 2472 triangles) has the same count, and
+  // when its bone matrix in c26 happened to be a clean rotation a running Japanese soldier got the tank's two
+  // headlights (the user, 24 Nov 2026: "Bots also occasionally still have vehicle headlights when running around as
+  // infantry", with a screenshot on Guadalcanal at night). No other count here is any other model's (every mesh of
+  // every level read for it); a far Sherman (its lamps reach 30 m) shows none.
+  for (uint32_t n : {29745u, 14685u}) add(n, kShermanLamp[0], kShermanLamp[1], kShermanLamp[2], 26);
   for (uint32_t n : {29418u, 14535u, 7281u}) add(n, kChiHaLamp[0], kChiHaLamp[1], kChiHaLamp[2], 17);
 #if defined(BF_DEV_TOOLS)
   // BF_DEV_NIGHT_BOAT_LAMPS=1 (tests): the landing boat (gen_Landingcraft, Main_Body, 19242 and 9303 indices; its box z

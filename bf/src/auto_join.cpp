@@ -73,6 +73,8 @@ void WeatherLevelLoading();  // world is taken at once (D221)
 void WeatherLevelIn();
 void SkinMatchRoundOver();   // fov.cpp: the electric skin's unlock, a full match under a hurricane
 void SkinMatchNewLevel();
+void SpawnMouseRoundOver();  // flash_mouse.cpp: the end of round scoreboard is not the deploy screen
+void SeatZoomPad(uint8_t left_trigger);  // fov.cpp: a gun seat's zoom
 #if defined(BF_DEV_TOOLS)
 extern std::atomic<float> g_dev_camera[3];                       // look.cpp: the local camera's position
 extern std::atomic<float> g_dev_view_pos[3];                     // dev_matscan.cpp: the rendered camera's
@@ -814,7 +816,7 @@ REX_HOOK_RAW(sub_8243BB70) {
     // winner) and, in a match, the next level's load (playerRoleReady, as on a join's load: runs endnames10, sb_round3,
     // m0472b, the last a change of map with no round's end).
     if (bf1943::g.stage == bf1943::Stage::kInGame && bf1943::g.seen_ready) {
-      if (name == "WinningTeamIsSet") bf1943::WeatherRoundOver(), bf1943::SkinMatchRoundOver();
+      if (name == "WinningTeamIsSet") bf1943::WeatherRoundOver(), bf1943::SkinMatchRoundOver(), bf1943::SpawnMouseRoundOver();
       if (name == "playerRoleReady" && std::chrono::steady_clock::now() - bf1943::g.ready_at > std::chrono::seconds(10))
         bf1943::WeatherLevelLoading(), bf1943::SkinMatchNewLevel();
     }
@@ -1445,6 +1447,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   bf1943::SharpTextTick();        // sharp_text.cpp: the HUD's sharper copies drawn or not
   bf1943::SquadColorsTick(base);  // squad_colors.cpp: the squad's icons a brighter green
   if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4, seated);
+  if (seated && !menu && !bf1943::g_walking) bf1943::SeatZoomPad(p[6]);  // fov.cpp: a gun seat's zoom (the left trigger)
   // The admin's free camera (free_cam.cpp, F9): while it flies it takes the pad and the game gets an empty one.
   bf1943::freecam::Pad(ctx, base, p + 4, !hidden);
   // Capture native navigation before the mouse helper adds any kit/button pulses.
@@ -1958,6 +1961,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
       const uint16_t b = uint16_t(p[4] << 8 | p[5]) | held;
       p[4] = uint8_t(b >> 8), p[5] = uint8_t(b);
       ++packet;
+      if (seated) bf1943::SeatZoomPad(p[6]);  // (a test's left trigger too: put in after the read above)
     }
   }
   if (!match_script.empty() && bf1943::InMatch() && !menu && !bf1943::g_walking) {

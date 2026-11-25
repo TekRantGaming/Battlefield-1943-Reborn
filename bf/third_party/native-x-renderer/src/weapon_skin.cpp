@@ -1196,6 +1196,13 @@ void WeaponSkinGunFrame(const float bone[12], const float magazine[12], const fl
 }
 
 namespace {
+// Whether the gun was drawn (its frame told) within the last tenth of a second: in a vehicle it is not.
+bool GunDrawnLately() {
+  GunFrameNow& f = Frame();
+  std::lock_guard<std::mutex> lock(f.mutex);
+  const int64_t tenth = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(100)).count();
+  return f.when && std::chrono::steady_clock::now().time_since_epoch().count() - f.when <= tenth;
+}
 // The gun's five vectors for the overlay (20 floats), if its frame was told within the last tenth of a second.
 bool GunPoints(float out[20]) {
   GunFrameNow& f = Frame();
@@ -1646,7 +1653,13 @@ bool WeaponSkinBloom(IRenderDevice* device, IDeviceContext* context, const Weapo
   // NXR_SKIN_GLOW=<the storm's light's strength over the picture> (1; 0: none), NXR_SKIN_FX=0 (no particles).
   static const float show = EnvFloat("NXR_SKIN_BLOOM_SHOW", 0.0f), strength = EnvFloat("NXR_SKIN_BLOOM", 0.5f),
                      glow_to = EnvFloat("NXR_SKIN_GLOW", 1.0f), fx_on = EnvFloat("NXR_SKIN_FX", 1.0f);
-  const bool fx = b.fx && fx_on > 0.0f && in.px > 0.01f && in.py > 0.01f;
+  // The particles only while the gun itself is drawn (its frame told within the last tenth of a second): with no gun in
+  // the picture they were still drawn where it had last been (the user, 24 Nov 2026: "Our new SMG shader skin's smoke
+  // stays on screen when entering vehicles").
+  // (Only whether it was drawn: GunPoints also turns down a frame whose back is at the eye, as it is while aiming down
+  // the sights, and the smoke went with it: the user, 24 Nov 2026, "when aiming down sights on SMG, the skin and cloud
+  // smoke disappear entirely".)
+  const bool fx = b.fx && fx_on > 0.0f && in.px > 0.01f && in.py > 0.01f && GunDrawnLately();
   {
     const double now = Clock();
     const float dt = b.last < 0.0 ? 1.0f / 60.0f : float(std::clamp(now - b.last, 0.001, 0.05));

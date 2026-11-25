@@ -106,6 +106,8 @@ class Recorder {
   uint32_t write_pos_ = 0;
   uint64_t recorded_ = 0;
   std::atomic<uint64_t> published_{0};
+  // D250: set while the recorder's thread sleeps on published_: only then does Publish wake it.
+  std::atomic<bool> consumer_sleeping_{false};
 
   Block* read_block_ = nullptr;
   Block* retired_ = nullptr;

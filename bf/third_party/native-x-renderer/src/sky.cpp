@@ -19,6 +19,9 @@
 
 #include "glsl.h"
 #include <native_x_renderer/native_x_renderer.h>  // LightningStrike
+#include <rex/cvar.h>
+
+REXCVAR_DECLARE(double, native_grass_water_level);  // the level's water mesh height (grass.cpp; D242)
 
 namespace native_x_renderer {
 namespace renderer {
@@ -317,9 +320,16 @@ vec3 lunar_surface(vec2 uv) {
   float sphere_light = 0.40 + 0.60 * max(dot(vec3(uv, z), normalize(vec3(-0.25, 0.15, 1.0))), 0.0);
   return vec3(0.82, 0.83, 0.80) * mix(1.0, 0.62, seas) * sphere_light * 1.1;
 }
+// D238: the sky's colour at the horizon and under it. The haze's grey (fog_color) only as much as there is haze in the
+// air (the fog's setting, the weather's mist); on a clear day the horizon's own colour a little lighter, so no grey
+// wall stands at the horizon (the user, 24 Nov 2026: "get rid of the grey wall at the horizon, so we can make it look
+// like infinite sea against the color of the sky like the original skybox does with haze").
+vec3 low_haze() {
+  return mix(horizon_color.rgb * 1.06, fog_color.rgb, 1.0 - exp(-fog_a.x * 1500.0));
+}
 vec3 sky_color(vec3 rd) {
   float up = clamp(rd.y, 0.0, 1.0);
-  vec3 sky = mix(fog_color.rgb, horizon_color.rgb, smoothstep(0.0, 0.1, up));
+  vec3 sky = mix(low_haze(), horizon_color.rgb, smoothstep(0.0, 0.1, up));
   sky = mix(sky, mid_color.rgb, smoothstep(0.1, 0.5, up));
   sky = mix(sky, zenith_color.rgb, smoothstep(0.5, 1.0, up));
   float night_amount = sun_color.w;
@@ -1035,6 +1045,11 @@ void main() {
   vec3 sky = sky_color(rd);
   vec4 clouds = textureLod(cloudTex, uv, 0.0);
   vec3 seen = sky * clouds.a + clouds.rgb;
+  // D238: the far clouds in the haze (the user, 24 Nov 2026: "get rid of the grey wall at the horizon"): the cloud
+  // deck tens of kilometres off, low over the horizon, stood there as a flat grey sheet over the sea. Taken as at
+  // 1.5 km up, a cloud fades into the sky behind it by its distance (a tenth gone at 3 km up the sky, half at 20 km,
+  // all of it at the horizon).
+  if (rd.y > 0.0) seen = mix(sky, seen, exp(-1500.0 / max(rd.y, 1e-3) / 30000.0));
   // Under the weather's whole cover the deck is one flat grey seen from below ("Sky box does this when the camera
   // looks up to the sky", 14 Nov 2026: nothing but a grey field): lighter and darker patches are laid over it, as an
   // overcast's base has, drifting with the clouds.
@@ -1258,7 +1273,7 @@ void main() {
   // from the ground under what is seen, not the sea (2 m under it: so over the island too, not only the shore).
   float tau_low = 0.0;
   float top = fog_a.w;
-  int fog_off = int(bolt.w + 0.5);  // BF_FOG_PARTS (tests): 8 the ground fog off, 16 the shafts, 32 the rain here, 64 the sea
+  int fog_off = int(bolt.w + 0.5);  // BF_FOG_PARTS (tests): 8 the ground fog off, 16 the shafts, 32 the rain here, 64 the sea, 128 the horizon's haze (D238)
   if (fog_a.z > 0.0 && fog_b.z > 0.5 && (fog_off & 8) == 0) {
     float floor_h = nothing ? 0.0 : max(eye_h + rd.y * L - 2.0, 0.0) * gale.x;
     float eh = eye_h - floor_h;  // the eye over the layer's floor
@@ -1823,13 +1838,15 @@ void main() {
       // (D215: darker, the user: "Let's make cloud shadow darker than that please", "Darker still", then "That's a
       // little too dark": 6.0 and 0.91, between 4.5 and 0.88 (the ground 21% darker) and 7.5 and 0.93 (34%);
       // D214's 2.2 and 0.75 (9%). Then "A bit darker": 6.75 and 0.92, about 31%. D221: "cloud shadows are still
-      // too dark", 19 Nov 2026, seen from over the clouds: 5.0 and 0.89, about 24%.)
+      // too dark", 19 Nov 2026, seen from over the clouds: 5.0 and 0.89, about 24%. D235: "Cloud shadows are also far
+      // too dark, and should be about 50% light than they currently are", 24 Nov 2026: the share taken halved, 0.445,
+      // about 12%, the shadows' shapes and edges the same.)
       float through = exp(-od * 5.0);
       // Under the weather's overcast there is little direct sun left to take (the sun's light 75% down at full
       // weather, Fill): the shadows' most falls to 15% of it as the weather here closes in (D217: under a 100% storm
       // the tank and the ground were left nearly black, runs vwet1 and vwet2).
       float direct = 1.0 - 0.85 * smoothstep(0.3, 0.9, layers.w);
-      cloud_shade = mix(1.0, through, 0.89 * direct * smoothstep(0.05, 0.12, ls.y));
+      cloud_shade = mix(1.0, through, 0.445 * direct * smoothstep(0.05, 0.12, ls.y));
     }
   }
   float keep = shows * wet * (1.0 + (0.45 + 0.35 * smoothstep(0.75, 1.0, rain_now)) * streaks) * (1.0 - sea_f);
@@ -1853,6 +1870,73 @@ void main() {
   vec3 room_tint = room_info.y > 0.5 ? (vec3(0.0, 0.25, 0.0) * room_seen + vec3(0.3, 0.0, 0.0) * room_left) * view.z : vec3(0.0);
   out_color = vec4((light + rain_light + bolt_light) * view.z + sea_refl * sea_f * shows + cloud_back + room_tint,
                    keep * cloud_shade * room);
+  // D238: the horizon's haze, always (the user, 24 Nov 2026: "We really need to make our horizon blend neatly like the
+  // SDK renderer does, but for all times of day"). With the fog setting at 0 nothing hazed the far sea, and the game's
+  // pale far water met our sky in a hard line at the horizon. What is far takes the sky's own colour just over the
+  // horizon in its direction (its haze and the sun's or the moon's glow, as the sky pass draws it there, without the sun's disc), at
+  // any hour and weather; below the horizon where nothing was drawn (past the sea's own draws) it is the sea's plane
+  // distance, so the drawn sea and what is past it end in the same colour.
+  // Past the sea's draws (they end a few kilometres out) the sea goes on: in that band under the horizon, the colour
+  // of the farthest sea drawn below it on the screen (found by steps toward where the view looks lower), so the sea
+  // runs on to the horizon as the original skybox's painted sea did, not the sky's haze standing up from its edge.
+  // The haze is on the world too, not on the sky alone (the user, 24 Nov 2026: "the distant fog only fills the
+  // skybox, it does not actually fill the level's world"): all that is drawn, by its distance (from 400 m: a tenth by
+  // 1 km, a quarter by 2, half by 5, most by 15) and thinner up high (a scale height of 1200 m: peaks and what is seen
+  // from a plane up there keep more of their colour).
+  vec2 lower = -vec2(dFdx(rd.y), dFdy(rd.y));
+  if (eye_h > 0.0 && (!nothing || rd.y < -1e-5) && (fog_off & 128) == 0) {
+    float h = 1.0 - exp(-haze_depth(1.0 / 6000.0, 1200.0, eye_h, rd.y, max(L - 400.0, 0.0)));
+    // (The sky as the sky pass draws it just over the horizon that way: its haze, the sun's glow and the moon's.)
+    vec3 flat_rd = normalize(vec3(rd.x, 0.0, rd.z) + vec3(1e-5, 0.0, 0.0));
+    float sc = max(dot(flat_rd, normalize(sun_dir.xyz)), 0.0), mc = max(dot(flat_rd, normalize(moon_dir.xyz)), 0.0);
+    vec3 at_horizon = low_haze() + sun_color.rgb * sun_dir.w * 0.18 * pow(sc, 8.0) +
+                      moon_color.rgb * (0.10 * pow(mc, 400.0) + 0.035 * pow(mc, 24.0)) * sun_color.w;
+    // The sea's last degree under the horizon fades into that sky, however far it is (as a skybox's painted haze:
+    // from the deck the sea's own drawn edge a kilometre or two out met the sky in a line, run hz3_on_1050). Only the
+    // sea (what lies on its plane, or nothing past its draws): islands and ships there keep their own colours.
+    // D242: the sea by its height, within 1 m of the level's water (its waves; 3 m faded a carrier's waterline, run
+    // hzi_sun), over its last two degrees (one was a few pixels of a fade): by the distance to the sea's plane (97%
+    // of it), a low eye's sea failed and stayed a bright band under a duller sky (the user, 24 Nov 2026: "get rid of the grey band on the sky box at the horizon, so the
+    // water and the sky blend better at that point"; run rel2_false, Iwo Jima's beach).
+    // D246: only the far sea (from 300 m, whole by 700 m): near the water's level at eye height that band reaches tens
+    // of metres out, and the rocks, beaches and obstacles at the waterline took the sky's colour over them (the user,
+    // 24 Nov 2026, with screenshots: "water just now has this weird translucent layer over objects and terrain at
+    // eye-level").
+    if (nothing || (rd.y < -1e-5 && abs(eye_h + rd.y * L) < 1.0))
+      h = max(h, (1.0 - smoothstep(0.0, 0.035, -rd.y)) * (nothing ? 1.0 : smoothstep(300.0, 700.0, L)));
+    if (nothing && dot(lower, lower) > 1e-14) {
+      vec2 dir = normalize(lower), last_px = view.xy - 1.0;
+      float lo = 0.0, hi = -1.0;
+      for (int i = 0; i < 12; ++i) {
+        float s = exp2(float(i));
+        vec2 p = gl_FragCoord.xy + dir * s;
+        if (any(lessThan(p, vec2(0.0))) || any(greaterThan(p, last_px))) break;
+        if (texelFetch(depthTex, ivec2(p), 0).r > 1e-6) { hi = s; break; }
+        lo = s;
+      }
+      if (hi > 0.0) {
+        for (int i = 0; i < 6; ++i) {
+          float m = (lo + hi) * 0.5;
+          if (texelFetch(depthTex, ivec2(gl_FragCoord.xy + dir * m), 0).r > 1e-6) hi = m; else lo = m;
+        }
+        vec2 e = clamp(gl_FragCoord.xy + dir * (hi + 2.0), vec2(0.0), last_px);
+        float ed = texelFetch(depthTex, ivec2(e), 0).r;
+        vec3 er = ViewRay(e);
+        float erl = length(er);
+        // (Only the sea: what is drawn there lies on the sea's plane, not an island or a ship at the sea's edge.)
+        // (D242: by its height, within 1 m of the level's water, as above.)
+        float e_l = ed > 1e-6 ? fog_b.x / ed * erl : 0.0;
+        if (ed > 1e-6 && er.y < 0.0 && abs(eye_h + er.y / erl * e_l) < 1.0) {
+          // (The scene before this pass: the sea there as drawn, not yet hazed; this band is hazed by its own distance.)
+          vec3 edge = texelFetch(sceneTex, ivec2(e), 0).rgb;
+          // (What this pass lays there (the weather's mist and rain) over it as over the sea.)
+          out_color = vec4((edge * out_color.a + out_color.rgb) * (1.0 - h) + at_horizon * view.z * h, 0.0);
+          h = 0.0;
+        }
+      }
+    }
+    if (h > 0.001) out_color = vec4(out_color.rgb * (1.0 - h) + at_horizon * view.z * h, out_color.a * (1.0 - h));
+  }
 }
 )";
 // The view's lowest heights, for the sea's (Sky::ReadSea): each pixel of the small target the lowest of 4 x 4 places of
@@ -1976,14 +2060,16 @@ void main() {
     bend += (vec2(vnoise(q * 14.0 + 1.7), vnoise(q * 14.0 + 9.2)) - 0.5) * 0.25 * blot;
   }
   // D189, D193: a strong storm's shake: the picture moved by drift.zw (of the view's height) and turned a little about
-  // its middle by drift.y (the crosshair's aim stays where it is; the drops on the lens do not move), a touch larger
-  // (by the most the shake can take, so it does not breathe) so its corners stay filled.
+  // its middle by drift.y (the crosshair's aim stays where it is; the drops on the lens do not move). D251: at its own
+  // size (it was drawn larger by the shake's strength to keep its corners filled, so it zoomed in and out with the
+  // wind's gusts and a strike's shove: "like lens distortion is being turned on and off"); the few pixels at the edge
+  // the shake uncovers are the picture's own, mirrored.
   vec2 from = px;
   if (drift.x > 0.0) {
     vec2 c = 0.5 * view.xy, d = px - c;
     float ca = cos(drift.y), sa = sin(drift.y);
-    d = vec2(ca * d.x - sa * d.y, sa * d.x + ca * d.y) / (1.0 + drift.x);  // (D222: drift.x the margin itself)
-    from = c + d + drift.zw * view.y;
+    from = c + vec2(ca * d.x - sa * d.y, sa * d.x + ca * d.y) + drift.zw * view.y;
+    from = view.xy - abs(view.xy - abs(from));  // mirrored at the edges
   }
   vec2 at = clamp(from + bend * 0.035 * view.y, vec2(0.5), view.xy - 0.5);
   vec3 seen = texelFetch(sceneTex, ivec2(at), 0).rgb;
@@ -2620,9 +2706,8 @@ bool Sky::Lens(IDeviceContext* context, ITexture* color, uint32_t width, uint32_
     const float jy = float(0.5 * std::sin(t * 37.0 + 0.7) + 0.3 * std::sin(t * 73.0 + 2.9) + 0.2 * std::sin(t * 97.0 + 0.4));
     const float jr = float(0.6 * std::sin(t * 47.0 + 1.9) + 0.4 * std::sin(t * 83.0 + 0.2));
     const float s = sway_ * buffet;
-    const float aspect = float(width) / float(std::max(height, 1u));
-    // drift.x: how much larger the picture is drawn so its corners stay filled (the most the shakes can move it).
-    k.drift[0] = sway_ * (0.0016f * aspect + 0.004f);
+    // drift.x: above 0 while the picture is shaken (D251: no longer a zoom; the edges mirrored instead).
+    k.drift[0] = sway_;
     k.misc[3] = edge_;  // D194
     k.drift[1] = s * 0.0016f * jr;
     k.drift[2] = s * 0.0016f * jx;
@@ -2640,7 +2725,7 @@ bool Sky::Lens(IDeviceContext* context, ITexture* color, uint32_t width, uint32_
       k.drift[2] += -shove_side_ * a * (swing + rumble);
       k.drift[3] += a * 0.45f * (float(std::sin(tau * 2.0 * ts + 0.6)) * e + rumble);
       k.drift[1] += shove_side_ * 0.007f * shove_amp_ * float(std::sin(tau * 1.6 * ts + 0.3)) * e;
-      k.drift[0] += e * (2.0f * a * 1.2f + 2.0f * a * 0.45f * 1.2f + 0.007f * shove_amp_ * aspect);
+      k.drift[0] += e;
     }
   }
   {
@@ -2707,6 +2792,11 @@ std::atomic<bool> g_sea_reflection{true};
 }
 void SetSeaReflection(bool on) { g_sea_reflection.store(on, std::memory_order_relaxed); }
 bool SeaReflection() { return g_sea_reflection.load(std::memory_order_relaxed); }
+namespace {
+std::atomic<bool> g_horizon_haze{true};
+}
+void SetHorizonHaze(bool on) { g_horizon_haze.store(on, std::memory_order_relaxed); }
+bool HorizonHaze() { return g_horizon_haze.load(std::memory_order_relaxed); }
 
 namespace {
 // One slot's flash, if it has one: when it starts on the world's clock, its strokes' strengths, where it is.
@@ -3333,7 +3423,11 @@ void Sky::Fill(const Inputs& in, SkyConstantBlock& k) {
       kDuskZenith{0.12f, 0.16f, 0.35f};
   const Rgb kNightFog{0.04f, 0.06f, 0.125f}, kNightHorizon{0.065f, 0.095f, 0.18f}, kNightMid{0.03f, 0.05f, 0.12f},
       kNightZenith{0.01f, 0.022f, 0.08f};
-  const Rgb kFog{0.71f, 0.74f, 0.79f}, kHorizon{0.6f, 0.66f, 0.76f}, kMid{0.4f, 0.54f, 0.8f}, kZenith{0.24f, 0.45f, 0.82f};
+  // D242: a clear day's horizon a pale sky blue (it was 0.6 0.66 0.76, a grey lavender, its red as its green, darker
+  // than the blue over it, and the lowest part of the sky up to 17 degrees grey behind the clouds: "the grey band on
+  // the sky box at the horizon", "this greyness behind the clouds", the user, 24 Nov 2026), so the sky goes from pale
+  // to deep blue and the sea's far band fades into the sky's own colour rather than a grey wall.
+  const Rgb kFog{0.71f, 0.74f, 0.79f}, kHorizon{0.6f, 0.75f, 0.96f}, kMid{0.4f, 0.54f, 0.8f}, kZenith{0.24f, 0.45f, 0.82f};
   const Rgb kMoon{0.62f, 0.75f, 1.0f};
   const Rgb sun_color = Mix({1.0f, 0.96f, 0.9f}, kDuskSun, warm * 0.9f);
   const float moon_up = Smooth(0.0f, 0.2f, -to_sun[1]);
@@ -3505,7 +3599,7 @@ void Sky::DryForNewRound(const Inputs& in) {
 
 bool Sky::FogWanted(const Inputs& in) {
   return in.fog > 0.001f || in.ground_fog > 0.001f || in.weather > 0.45f || in.debug == 4 || in.debug == 5 || in.debug == 6 ||
-         SeaReflection();
+         SeaReflection() || HorizonHaze();  // D238: the haze is there with no fog set too
 }
 
 // The sea's height from the small target's copy (made a few frames ago): the view's lowest heights; where the lowest
@@ -3530,6 +3624,15 @@ void Sky::ReadSea(IDeviceContext* context) {
       if (std::isfinite(row[x]) && row[x] < 1e8f) seen.push_back(row[x]);
   }
   context->UnmapTextureSubresource(sea_staging_, 0, 0);
+  // D242: the level's own water height (its water mesh, read when the level loads) when it is known: the lowest flat
+  // ground in sight was the sea only where the sea is in sight (Wake Island's flag C: 233.4 m, the airfield, for a sea
+  // at 213.7), and on Iwo Jima 4.4 m for the game's water drawn at 5.3, which kept the horizon's fade off the sea.
+  if (const double water = REXCVAR_GET(native_grass_water_level); water > -10000.0) {
+    if (!sea_known_ || std::abs(float(water) - sea_) > 0.01f)
+      REXLOG_INFO("[native_x_renderer] sky: the sea's height is the level's water, {:.2f} m (D242)", water);
+    sea_ = float(water), sea_known_ = true;
+    return;
+  }
   std::sort(seen.begin(), seen.end());
   if (seen.size() < 40) return;
   const float low = seen[seen.size() / 20], more = seen[seen.size() / 5];
@@ -3654,6 +3757,7 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   SkyConstantBlock k{};
   Fill(in, k);
   k.bolt[3] = (in.old_rain_order ? 4.0f : 0.0f) + float(in.fog_parts_off);  // BF_FOG_AB, BF_FOG_PARTS (tests)
+  if (!HorizonHaze() && (in.fog_parts_off & 128) == 0) k.bolt[3] += 128.0f;  // D238 off
   // D221: 2 when the clouds were laid over the view this frame (their textures bound below).
   // (D229: laid this frame, the textures it laid still the clouds' own.)
   const bool over_known = clouds_over && clouds_over_frame_ == frames_ && over_tex_[0] && over_tex_[1];
@@ -3813,8 +3917,8 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   if (!FogWanted(in) && k.room_info[0] < 0.5f) return probed;
   ITextureView* target = in.color->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET);
   if (!target) return probed;
-  // D190: the scene as it is, for the sea's reflection (only while that is on).
-  if (SeaReflection()) {
+  // D190: the scene as it is, for the sea's reflection; D238: and for the sea carried on past its draws to the horizon.
+  {
     const TextureDesc& cd = in.color->GetDesc();
     if (!fog_scene_ || fog_scene_->GetDesc().Width != cd.Width || fog_scene_->GetDesc().Height != cd.Height ||
         fog_scene_->GetDesc().Format != cd.Format) {

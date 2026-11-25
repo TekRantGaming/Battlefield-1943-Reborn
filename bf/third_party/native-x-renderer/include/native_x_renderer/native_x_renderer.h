@@ -371,6 +371,9 @@ bool GrassProbeResult(uint32_t* id, float* ground);
 // D205: the ground's height under (x, z) for the renderer's own use (the turned shadows' pivot): asked through the
 // probe whenever it is free, the last answer within 40 m returned (false before one, or with grass off).
 bool GrassCameraGround(float x, float z, float* ground);
+// D239: the shadow ray (from the sun to the ground) the game's own shadow setup should build its cascades from, given
+// the one it was about to use: the sky's sun's while the day and night cycle moves it; false to leave the game's.
+bool ShadowSourceDirection(const float game_ray[3], float out_ray[3]);
 
 // D151: where grass may grow on the level, from the game's own map of its ground (TekRantGaming, 9 Nov 2026: grass decided
 // from the screen flickered at the edges of the ground's grass, moved about, and faded in as he turned): each cell's
