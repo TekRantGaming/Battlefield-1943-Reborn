@@ -3,18 +3,79 @@
     "format": 1,
     "name": "Battlefield 1943 Reborn",
     "repo": "TekRantGaming/Battlefield-1943-Reborn",
+    "inputs": [
+        {
+            "id": "game",
+            "label": "Your Battlefield 1943 (Xbox 360) package: the single file in 5841097E\\000D0000 from your console's storage.",
+            "formats": [
+                {
+                    "type": "file"
+                }
+            ],
+            "check": {
+                "ids": [
+                    "5841097E"
+                ]
+            }
+        }
+    ],
+    "prepare": {
+        "program": [
+            "bf1943.exe",
+            "BF1943-Reborn-linux-x86_64.AppImage"
+        ],
+        "args": [
+            "--install_game={input:game}",
+            "--install_progress=true",
+            "--game_data_root={install}/game"
+        ],
+        "env": {
+            "SDL_VIDEODRIVER": "offscreen",
+            "SDL_VIDEO_DRIVER": "offscreen"
+        },
+        "label": "The game installed from your package",
+        "done": [
+            "{install}/game/default.xex"
+        ]
+    },
     "start": {
         "program": [
-            "bf1943.exe"
+            "bf1943.exe",
+            "BF1943-Reborn-linux-x86_64.AppImage"
+        ],
+        "args": [
+            "--game_data_root={install}/game"
         ]
+    },
+    "saves": [
+        "{install}/user/bf1943-settings.txt",
+        "{install}/user/achievements",
+        "{install}/usr/bin/user/bf1943-settings.txt",
+        "{install}/usr/bin/user/achievements"
+    ],
+    "system": {
+        "windows": {
+            "version": "10.0.14393"
+        },
+        "linux": {
+            "glibc": "2.35"
+        }
     },
     "folders": {
         "logs": [
+            {
+                "path": "{install}/usr/bin/user",
+                "if": "{install}/usr/bin/bf1943"
+            },
             {
                 "path": "{install}/user"
             }
         ],
         "crashes": [
+            {
+                "path": "{install}/usr/bin/user/crashes",
+                "if": "{install}/usr/bin/bf1943"
+            },
             {
                 "path": "{install}/user/crashes"
             }
