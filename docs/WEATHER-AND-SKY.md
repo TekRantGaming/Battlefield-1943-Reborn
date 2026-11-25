@@ -70,7 +70,7 @@ sets"). They left the graphics settings.
   follows again.
 - **Dynamic storm** (D209): the host takes the weather up to a full storm over each round and back. See
   [BOTS-AND-CUSTOM-MATCH.md](BOTS-AND-CUSTOM-MATCH.md#dynamic-storm).
-- **Night Ops servers** (upstream, 20 Nov): the world held at 19:00, and the storm built by the round's tickets: a clear
+- **Night Ops servers** (upstream, 20 Nov): the world held at 18:30 (19:00 until 25 Nov), and the storm built by the round's tickets: a clear
   starry night for the first 40% of the tickets lost, the clouds gathering to 55%, the storm rolling in to 100% weather
   by 80%, then the full storm; a new round starts clear. `BF_DEV_NIGHT_RAMP=<seconds>` (tests) runs the build by time.
   **An admin's F9 on Night Ops** (24 Nov 2026, TekRantGaming's ask): what the admin moves (the time, cloud cover,

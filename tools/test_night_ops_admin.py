@@ -1,7 +1,7 @@
 """An admin's F9 on a Night Ops server (server/gmhost.py World, 24 Nov 2026) without the game: a World on a stand in
 host, asked with the bytes world_sync.cpp sends.
 
-Checks: a plain Night Ops round as before (19:00, the build by tickets, a new round clear); an admin's time, weather,
+Checks: a plain Night Ops round as before (18:30, the build by tickets, a new round clear); an admin's time, weather,
 clouds and fog taking effect and staying while the build goes on (per setting: what they did not move still follows the
 tickets); the answer's flags (4 Night Ops, 8 held); "Back to Night Ops" (ask flag 8); the next round a plain Night Ops
 round again; a game from before the touched mask (moved = not the server's); a non admin's change ignored; a regular
@@ -94,7 +94,7 @@ near = lambda a, b: abs(a - b) < 1e-4
 
 # --- a plain Night Ops round, as before
 w, host = world(True)
-check('Night Ops starts at 19:00, clock held, clear', w.day_night and w.hour == 19.0 and w.day_minutes == 0 and
+check('Night Ops starts at 18:30, clock held, clear', w.day_night and w.hour == 18.5 and w.day_minutes == 0 and
       near(w.cover, 0.15) and w.weather == 0 and w.fog == 0)
 w.match(1, 1.0)
 w.match(1, 0.5)  # half the tickets gone
@@ -107,7 +107,7 @@ check('answer flags: Night Ops (4), not an admin, nothing held', flags & 4 and n
 before = now(w)
 noon = dict(before, hour=12.0)
 answer(w, host, ask(key='not-it', change=noon, touched=T['hour']))
-check('a non admin cannot set the time', w.hour == 19.0)
+check('a non admin cannot set the time', w.hour == 18.5)
 
 # --- the admin moves the time: it stays, the storm still builds
 flags, vals = answer(w, host, ask(change=noon, touched=T['hour']))
@@ -133,7 +133,7 @@ check('held: clock and weather', w.held == {'clock', 'weather'}, w.held)
 
 # --- Back to Night Ops
 flags, _ = answer(w, host, ask(back=True))
-check('Back to Night Ops: 19:00 again, the build at the round\'s progress', w.hour == 19.0 and w.day_minutes == 0
+check('Back to Night Ops: 18:30 again, the build at the round\'s progress', w.hour == 18.5 and w.day_minutes == 0
       and near(w.weather, gmhost.World.night_ops_values(0.95)[1]) and not w.held, now(w))
 check('answer flags after it: nothing held', not flags & 8, flags)
 answer(w, host, ask(key='not-it', back=True))
@@ -143,8 +143,8 @@ answer(w, host, ask(change=dict(now(w), hour=12.0, day_minutes=24.0, cover=0.0, 
                     touched=T['hour'] | T['day_minutes'] | T['cover'] | T['fog'] | T['ground_fog']))
 check('held: clock, clouds, fog, ground fog', w.held == {'clock', 'clouds', 'fog', 'ground fog'}, w.held)
 w.match(2, 1.0)
-check('the next round is a plain Night Ops round: 19:00, clock held, clear',
-      w.hour == 19.0 and w.day_minutes == 0 and w.day_night and near(w.cover, 0.15) and w.weather == 0 and
+check('the next round is a plain Night Ops round: 18:30, clock held, clear',
+      w.hour == 18.5 and w.day_minutes == 0 and w.day_night and near(w.cover, 0.15) and w.weather == 0 and
       w.fog == 0 and w.ground_fog == 0 and not w.held, now(w))
 check('the round change says the admin\'s settings ended', any('admin settings ended' in n for n in host.notes))
 
@@ -153,7 +153,7 @@ w.match(2, 0.4)
 c60, wx60, f60, _ = gmhost.World.night_ops_values(0.6)
 answer(w, host, ask(change=dict(now(w), weather=0.9)))
 check('an older game: the moved weather is taken and held, the rest untouched',
-      near(w.weather, 0.9) and w.held == {'weather'} and w.hour == 19.0 and near(w.cover, c60), now(w))
+      near(w.weather, 0.9) and w.held == {'weather'} and w.hour == 18.5 and near(w.cover, c60), now(w))
 
 # --- cloud rate, wind and height stay the admin's, as before
 answer(w, host, ask(change=dict(now(w), rate=0.8, wind=0.7, cloud_height=777.0),
