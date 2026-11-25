@@ -367,6 +367,8 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
   rendering, the audio crackling fix, the leaner Linux build and Wayland ([pull request 28](../../pull/28)).
 - **[@Erubadhron](https://github.com/Erubadhron)**: deploy map clicks that land where you click
   ([pull request 31](../../pull/31)).
+- **[@DicksonWu654](https://github.com/DicksonWu654)** (Dickson Wu, from SEAL & CertiK): reported an issue to us
+  privately, fixed in 0.4.7.5.
 - [**ReXGlue SDK**](https://github.com/rexglue/rexglue-sdk) (BSD 3 Clause), derived from
   [**Xenia**](https://github.com/xenia-project/xenia): the recompiler and runtime.
 - **NativeXRenderer** by Gustavo Garcia (MIT): the Vulkan renderer. **GHMetalRecomp** (MIT): its NativeXRenderer
