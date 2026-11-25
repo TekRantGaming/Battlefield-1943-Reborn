@@ -40,6 +40,11 @@ HEADER = 12
 MULTI_LIMIT = 8064   # packets larger than this go as multi part (the client says fragmentSize=8096)
 MULTI_CHUNK = 6000   # raw payload bytes per part
 MULTI = (0xB0000000, 0xF0000000)  # multi part response, request
+# The most a client's packet, a multi part request's whole payload and a stats request's keys may be (the game splits
+# anything over fragmentSize=8096 into parts and asks for up to 201 stats); more ends the connection or is cut.
+MAX_PACKET = 65536
+MAX_MULTI = 262144
+MAX_STAT_KEYS = 1024
 RESERVATIONS = {}  # player IP -> (GID, time): the server picked in our menu, for the next Quick Match
 # A full server refuses new joins (TekRantGaming, 15 Nov 2026: players joining a full server; the game itself lets in up
 # to 64, and a join over the game's own cap crashed a test server). A server is full when the players its host last
@@ -1007,19 +1012,25 @@ class Client:
                 head = await self.reader.readexactly(HEADER)
                 kind = head[:4].decode('latin-1')
                 word, length = struct.unpack('>II', head[4:])
+                if length > MAX_PACKET:
+                    self.note('closed (a packet of %d bytes)' % length)
+                    break
                 body = await self.reader.readexactly(length - HEADER) if length > HEADER else b''
                 transmission, packet_id = word & 0xFF000000, word & 0xFFFFFF
                 fields = parse_payload(body)
                 if transmission in MULTI:
                     part = fields.get('data', '').replace('%3d', '=')
                     if self.multi_id != packet_id:
-                        self.multi_id, self.multi_data, self.multi_b64 = packet_id, b'', 0
+                        self.multi_id, self.multi_data, self.multi_b64 = packet_id, bytearray(), 0
                     self.multi_data += base64.b64decode(part)
                     self.multi_b64 += len(part)
+                    if len(self.multi_data) > MAX_MULTI:
+                        self.note('closed (a multi part request over %d bytes)' % MAX_MULTI)
+                        break
                     if self.multi_b64 < int(fields.get('size', '0')):
                         continue
                     self.multi_id = None
-                    fields = parse_payload(self.multi_data)
+                    fields = parse_payload(bytes(self.multi_data))
                 self.note('-> %s %08X id %d %s' % (kind, transmission, packet_id, fields))
                 await self.handle(kind, transmission, packet_id, fields)
         except (asyncio.IncompleteReadError, ConnectionError) as e:
@@ -1116,7 +1127,7 @@ class Client:
             await self.send(kind, RESPONSE, packet_id, {'TXN': txn, 'filters': '', 'enabled': '', 'disabled': '',
                                                         'telemetryToken': token})
         elif key == 'rank/GetStats':
-            count = int(f.get('keys.[]', '0') or 0)
+            count = min(int(f.get('keys.[]', '0') or 0), MAX_STAT_KEYS)
             out = {'TXN': txn, 'stats.[]': count}
             for i in range(count):
                 stat = f.get('keys.%d' % i, '')

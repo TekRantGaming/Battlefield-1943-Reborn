@@ -27,10 +27,14 @@ CONTROL, LINK, VOICE = 7, 1, 0
 INIT, CONN, UNREL, DATA = 1, 2, 0x80, 0x100
 KIND_STREAM, KIND_DATAGRAM, KIND_SYNC = 6, 7, 0x40
 RESEND_SECONDS = 0.3
-# At most this many clients that have not joined at a time (the one heard from longest ago gives way to a new one),
-# and at most this many log lines in 10 s.
+# At most this many clients that have not joined at a time (GameHost.packet: who gives way to a new one), at most this
+# many of them from one address, and at most this many log lines in 10 s.
 MAX_LINKING = 64
+MAX_LINKING_PER_IP = 8
 NOTE_BUDGET = 200
+# A game's tunnel datagram carries a few sub packets (one to three in every capture we have); one that would need more
+# heads than this is not a game's and is passed over.
+MAX_HEADS = 64
 
 
 PING, PROBE, PONG = b'BF43PING', b'BF43PRBE', b'BF43PONG'
@@ -810,12 +814,15 @@ class Peer:
             self.first = data[:16]
         if len(data) < 4:
             return
-        heads, at = [], 2
+        heads, at, head_bytes = [], 2, 0  # head_bytes: the sub packets' lengths so far
         while at + 2 <= len(data):
+            if len(heads) >= MAX_HEADS:
+                return
             h = struct.unpack_from('>H', data, at)[0]
             heads.append((h >> 4, h & 15))
             at += 2
-            if at + sum(n for n, _ in heads) >= len(data):
+            head_bytes += h >> 4
+            if at + head_bytes >= len(data):
                 break
         for n, port in heads:
             sub = data[at:at + n]
@@ -1077,10 +1084,14 @@ class GameHost(asyncio.DatagramProtocol):
             return
         peer = self.peers.get(addr)
         if not peer:
-            waiting = [(p.last_heard, a) for a, p in self.peers.items() if p.state != 'joined']
-            if len(waiting) >= MAX_LINKING:
-                # The one heard from longest ago gives way (a real player's new link is never kept out for long).
-                self.drop(min(waiting)[1])
+            # Who gives way first: a client that never linked (no INIT), then one with no player yet, then the one heard
+            # from longest ago (a real player's new link is never kept out for long). One address keeps at most
+            # MAX_LINKING_PER_IP of these; its own oldest gives way to its next.
+            waiting = [(p.player is not None, p.connected, p.last_heard, a) for a, p in self.peers.items()
+                       if p.state != 'joined']
+            same = [w for w in waiting if w[3][0] == addr[0]]
+            if len(same) >= MAX_LINKING_PER_IP or len(waiting) >= MAX_LINKING:
+                self.drop(min(same if len(same) >= MAX_LINKING_PER_IP else waiting)[3])
                 self.refused_peers += 1
                 self.quiet_note('packets passed over')
             peer = self.peers[addr] = Peer(self, addr)
