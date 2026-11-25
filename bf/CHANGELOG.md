@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.7.5 (25 November 2026): a hotfix
+
+**Fixed**
+- **General bug fixes.**
+
+**Thanks**
+- To Dickson Wu from SEAL & CertiK, for reporting an issue to us privately.
+
+The known issues of 0.4.7.4, below, still apply.
+
 ## 0.4.7.4 (18 November 2026): a hotfix
 
 **Known issues, please read**
