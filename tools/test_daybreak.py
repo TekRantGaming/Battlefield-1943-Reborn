@@ -54,8 +54,10 @@ class Host:
         self.notes.append(text)
         print('      GMHOST ' + text)
 
+    players = ['Tester']  # a player on the server (Daybreak's clock waits while nobody is)
+
     def player_names(self):
-        return []
+        return list(self.players)
 
 
 def world(night=False, daybreak=False):
@@ -173,6 +175,29 @@ check('the round change says sunrise', any('Daybreak round 2 starts at sunrise' 
 CLOCK.t += 90
 answer(w, host, ask(key='not-it'))
 check('and its clock runs from the round\'s start (90 s: 06:01:30)', near(w.hour, 6.0 + 90 / 3600.0, 1e-4), w.hour)
+
+# --- nobody on the server: the sun waits
+e, ehost = world(daybreak=True)
+ehost.players = []
+e.match(1, 1.0)
+CLOCK.t += 3600
+answer(e, ehost, ask(key='not-it'))
+check('nobody on the server: an hour later still 06:00', near(e.hour, 6.0), e.hour)
+check('it says so', any('the sun waits' in n for n in ehost.notes), ehost.notes[-3:])
+ehost.players = ['Tester']
+answer(e, ehost, ask(key='not-it'))
+CLOCK.t += 600
+answer(e, ehost, ask(key='not-it'))
+check('a player joins: the sun rises from there (10 minutes: 06:10)', near(e.hour, 6.0 + 10 / 60.0, 1e-4), e.hour)
+answer(e, ehost, ask(change=dict(now(e), weather=0.5), touched=T['weather']))
+answer(e, ehost, ask(back=True))
+check('Back to Daybreak counts only the time with players (06:10)', near(e.hour, 6.0 + 10 / 60.0, 1e-3), e.hour)
+ehost.players = []
+answer(e, ehost, ask(change=dict(now(e), hour=12.0), touched=T['hour']))
+CLOCK.t += 600
+answer(e, ehost, ask(key='not-it'))
+check("an admin's clock runs whoever is on (not held still by the empty server)", e.hour >= 12.0 and 'clock' in e.held,
+      (e.hour, e.held))
 
 # --- a test's faster day
 os.environ['BF_DEV_DAYBREAK_MINUTES'] = '24'
