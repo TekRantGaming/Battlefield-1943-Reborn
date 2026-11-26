@@ -269,9 +269,10 @@
     settings_.Save();
     ApplyFrameRate();
     for (const auto& [name, value] : TierSettings(tier)) SetCvar(name, value);
-    static const char* kTiers[] = {"slow: the Low preset (FSR 1 Performance, AO and GI off, grass to 45 m)",
+    static const char* kTiers[] = {"slow: the Low preset (FSR 1 Quality, AO and GI off, grass to 45 m)",
                                    "middle: the Medium preset (FSR 1 Quality, shadows Original, AO and GI Low, grass to 180 m)",
-                                   "fast: the High preset (FSR 1 Quality, shadows High, AO and GI at Medium, grass to the whole map)"};
+                                   "fast: the High preset (FSR 1 Quality, shadows High, soft shadows and SSR, AO and GI at "
+                                   "Medium, grass to the whole map)"};
     REXLOG_INFO("BF launcher: auto detect{}: {} FPS for a {} Hz screen, FXAA; the GPU {} ({:.1f} times an RTX 4070 Ti's "
                 "time), so {}",
                 when, fps, refresh, slowness > 0 ? "timed" : "not timed yet", slowness, kTiers[tier]);

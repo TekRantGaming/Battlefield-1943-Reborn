@@ -11,7 +11,7 @@
                                                       "VOLUME, VOICE CHAT", "KEYBOARD AND MOUSE, OR CONTROLLER",  // by device since 16 Nov
                                                       "NAME, CAMERA, HUD",
                                                       // the sniper scope only in a build with it (scope_pip.h)
-                                                      "FOV, LIGHTING, HD TEXTURES"};
+                                                      "FOV, LIGHTING, HUD SCALE"};
 
   // Back where the settings were opened from: the pause (a match running), else the menu (Home before the game runs).
   void BackFromSettings() {
