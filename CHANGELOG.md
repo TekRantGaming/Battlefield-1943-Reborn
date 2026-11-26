@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.8 (27 November 2026)
+
+**New graphics defaults, moved once for everyone**
+- **The spatial upscaler is on in every preset,** Ultra included, at Quality: NVIDIA NIS on an NVIDIA card that runs
+  it, AMD FSR 1 on any other card. Players who had NVIDIA NIS keep it.
+- **Soft shadows and SSR reflections are on in the High and Ultra presets,** and off in Potato, Low and Medium.
+- **Transparent edges Smooth, Animation smoothing on and HUD scale High-Res** for everyone, whatever the preset.
+- **Storm shake is off** until you turn it on in Settings, Graphics.
+- When you update, your settings move to these once: from then on your own changes stay.
+
+**Changes**
+- **The electric weapon skin** is now unlocked by playing one full Night Ops match: join near its start and stay to
+  its end. Equip it from the main menu's Unlockables.
+- **The soldier name page with a controller:** the on screen keys no longer have to be closed first. While they are
+  open, RB opens I have a recovery code, X protects your name, Y gives a random name, and B deletes a letter (on an
+  empty box it closes the keys). The tabs can be clicked at any time, and F3 always switches them.
+- **HD textures** stay out of Settings: they are not ready yet.
+
 ## 0.4.7.4 (18 November 2026): a hotfix
 
 Earlier versions update to it by themselves, and the servers only let the newest version in.
