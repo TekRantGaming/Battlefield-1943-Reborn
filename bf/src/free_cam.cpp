@@ -281,6 +281,19 @@ void Pad(PPCContext& ctx, uint8_t* base, uint8_t* pad, bool input) {
   };
   const float lx = stick(4), ly = stick(6), rx = stick(8), ry = stick(10);
   std::memset(pad, 0, 12);
+  // The server's idle kick (sub_8237F1F8: a player whose input stays still for the server's idle time is kicked; the
+  // user, 26 Nov 2026: "i still get kicked from the game when using free cam as an admin i think its the idel kick
+  // timer"): the game gets an empty pad while the camera flies, so every 600 pad reads (10 s at 60 frames) its look
+  // stick goes three quarters right for four reads and as far left for four: the soldier turns there and back, and the
+  // server sees input.
+  {
+    static uint32_t reads = 0;
+    const uint32_t phase = reads++ % 600;
+    if (phase < 8) {
+      const uint16_t v = uint16_t(int16_t(phase < 4 ? 24576 : -24576));
+      pad[8] = uint8_t(v >> 8), pad[9] = uint8_t(v & 0xFF);
+    }
+  }
   const uint16_t pressed = buttons & ~g_f.last_buttons;
   g_f.last_buttons = buttons;
   if (pressed & 0x0020) {  // Back: off

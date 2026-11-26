@@ -276,6 +276,7 @@ layout(std140, set = 0, binding = 0) uniform SkyConstants {
   vec4 wake_n;               // x how many pieces
   vec4 rooms[192];           // D222: per room (kMaxRooms) the world to its space (three rows), its half size and lift (w), its box on the view (0 to 1), its roof's slopes (xy)
   vec4 room_info;            // D222: x how many rooms; y 1 to tint them
+  vec4 room_depth;           // D222: the world's farthest partition: stored depth = x / distance + y, from z down (z 0: none)
 };
 layout(set = 0, binding = 1) uniform sampler2D weatherTex;
 
@@ -1178,6 +1179,14 @@ float haze_depth(float a, float H, float h0, float dy, float L) {
 // Returns the lift (1: none); `seen` how much of a room this is, `left` how much the fade toward the walls takes off.
 const float kRoomInset = 0.15;  // metres the light stops short of a room's walls and ceiling
 const float kRoomFade = 0.6;    // metres over which it comes in from there
+// D222: the distance along the view (ViewRay's units) for the rooms: 0.1 / depth (fog_b.x) in the game's nearer depth
+// partitions; in its farthest, whose depth reaches 0 at its far plane, from that partition's own curve. (TekRantGaming,
+// 25 Nov 2026, from a plane: "I can see the light boxes for all the buildings": 0.1 / depth put a roof 200 m away 6 m
+// too deep, inside its room.)
+float RoomDistance(float depth) {
+  if (room_depth.z > 0.0 && depth <= room_depth.z) return room_depth.x / max(depth - room_depth.y, 1e-9);
+  return fog_b.x / max(depth, 1e-7);
+}
 float RoomLift(vec3 P, vec3 facing, out float seen, out float left) {
   float room = 1.0;
   seen = 0.0, left = 0.0;
@@ -1228,7 +1237,7 @@ void main() {
   // D222: the pass drawn for the rooms alone (no fog, weather or rain now): their lift, nothing else.
   if (room_info.z > 0.5) {
     float seen, left;
-    float lift = nothing ? 1.0 : RoomLift(P, facing, seen, left);
+    float lift = nothing ? 1.0 : RoomLift(eye_world.xyz + r * RoomDistance(depth), facing, seen, left);
     vec3 tint = room_info.y > 0.5 && !nothing ? (vec3(0.0, 0.25, 0.0) * seen + vec3(0.3, 0.0, 0.0) * left) * view.z : vec3(0.0);
     out_color = vec4(tint, lift);
     return;
@@ -1866,7 +1875,7 @@ void main() {
   }
   // (D222, upstream's: the buildings' rooms lifted at night, with this pass.)
   float room_seen = 0.0, room_left = 0.0;
-  float room = !nothing && room_info.x > 0.5 ? RoomLift(P, facing, room_seen, room_left) : 1.0;
+  float room = !nothing && room_info.x > 0.5 ? RoomLift(eye_world.xyz + r * RoomDistance(depth), facing, room_seen, room_left) : 1.0;
   vec3 room_tint = room_info.y > 0.5 ? (vec3(0.0, 0.25, 0.0) * room_seen + vec3(0.3, 0.0, 0.0) * room_left) * view.z : vec3(0.0);
   out_color = vec4((light + rain_light + bolt_light) * view.z + sea_refl * sea_f * shows + cloud_back + room_tint,
                    keep * cloud_shade * room);
@@ -2430,6 +2439,7 @@ struct SkyConstantBlock {
   float wake_n[4];
   float rooms[kMaxRooms * kRoomRows][4];  // D222: per room the world to its space (three rows), its half size and lift, its box on the view, its roof
   float room_info[4];             // D222: x how many rooms; y 1 to tint them (the developer's view)
+  float room_depth[4];            // D222: the farthest partition's depth curve for the rooms (Sky::Inputs::room_depth)
 };
 
 static_assert(kMaxRooms * kRoomRows == 192, "kCommon's rooms[] holds six vec4 a room");
@@ -3765,6 +3775,7 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   k.room_info[0] = float(PackRooms(in, k));  // D222
   k.room_info[1] = in.room_debug ? 1.0f : 0.0f;
   k.room_info[2] = FogWanted(in) ? 0.0f : 1.0f;  // drawn for the rooms alone
+  for (int i = 0; i < 3; ++i) k.room_depth[i] = in.room_depth[i];
   {
     static uint64_t said_at = 0;
     if (fog_frames_ >= said_at + 3600) {

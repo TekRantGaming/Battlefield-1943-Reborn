@@ -2934,6 +2934,45 @@ void CopyNightGlow(HostTarget* source, const Blitter::Rect& from) {
   if (g_draw) g_draw->TargetsChanged();
 }
 
+// D222: the stored depth of the world's farthest partition as a distance, for the rooms (Sky::Inputs::room_depth).
+// Battlefield 1943 stores 0.1 / distance in its nearer partitions, but its farthest (21.34 m to 6000 m, depth 0.0047
+// to 0) reaches 0 at its far plane, not at no end: read as 0.1 / depth, a roof 200 m away was 6 m too deep, inside its
+// room, and lit (TekRantGaming, 25 Nov 2026, from a plane: "I can see the light boxes for all the buildings"). From
+// that partition's projection (clip z = a clip w + b) and depth range: stored = A / distance + B. BF_NIGHT_ROOMS_DEPTH=0
+// (tests): 0.1 / depth everywhere, as before.
+static void RoomDepth(Sky::Inputs& in) {
+  static const bool off = [] {
+    const char* v = std::getenv("BF_NIGHT_ROOMS_DEPTH");
+    return v && *v == '0';
+  }();
+  in.room_depth[0] = in.room_depth[1] = in.room_depth[2] = 0.0f;
+  if (off) return;
+  const TerrainFrame::Partition* farthest = nullptr;
+  const auto top = [](const TerrainFrame::Partition& q) { return std::max(q.viewport.MinDepth, q.viewport.MaxDepth); };
+  for (uint32_t p = 0; p < g_terrain.partition_count && p < g_terrain.partitions.size(); ++p)
+    if (!farthest || top(g_terrain.partitions[p]) < top(*farthest)) farthest = &g_terrain.partitions[p];
+  if (!farthest || farthest->ndc_scale[2] == 0.0f) return;
+  const float(*m)[4] = farthest->wvp;
+  const double ww = double(m[3][0]) * m[3][0] + double(m[3][1]) * m[3][1] + double(m[3][2]) * m[3][2];
+  if (ww < 1e-20) return;
+  const double a = (double(m[2][0]) * m[3][0] + double(m[2][1]) * m[3][1] + double(m[2][2]) * m[3][2]) / ww;
+  const double b = double(m[2][3]) - a * m[3][3];
+  const double range = double(farthest->viewport.MaxDepth) - farthest->viewport.MinDepth;
+  const double A = range * farthest->ndc_scale[2] * b;
+  const double B = farthest->viewport.MinDepth + range * (double(farthest->ndc_scale[2]) * a + farthest->ndc_offset[2]);
+  const float from = top(*farthest);
+  // Only a curve near the nearer partitions' (0.1 / distance at the partition's near end) is taken.
+  const bool sane = std::isfinite(A) && std::isfinite(B) && A > 0.05 && A < 0.2 && std::abs(B) < 1e-3 && from > 0.0f &&
+                    from < 0.05f;
+  static uint64_t said = 0;
+  if (++said == 600 || said % 36000 == 0)
+    REXLOG_INFO("[native_x_renderer] night rooms (D222): the farthest depth partition ({} of {}) stores {:.6f} / distance "
+                "{:+.8f} from depth {:.6f} down{}", int(farthest - g_terrain.partitions.data()) + 1, g_terrain.partition_count,
+                A, B, from, sane ? "" : ": not used");
+  if (!sane) return;
+  in.room_depth[0] = float(A), in.room_depth[1] = float(B), in.room_depth[2] = from;
+}
+
 // D132, D133: at the end of the main view's opaque draws, the ambient occlusion (GTAO) multiplied into the scene's
 // colour, then the global illumination (SSGI) added to it, both King Kong Recompiled's, with one camera.
 void ApplyOpaqueEffects() {
@@ -3014,6 +3053,7 @@ void ApplyOpaqueEffects() {
       in.to_ndc[1] = -float(in.height) * 2.0f / (vp.Height * g_terrain.ndc_scale[1]);
       in.to_ndc[2] = (-vp.TopLeftX * 2.0f / vp.Width - 1.0f - g_terrain.ndc_offset[0]) / g_terrain.ndc_scale[0];
       in.to_ndc[3] = (vp.TopLeftY * 2.0f / vp.Height + 1.0f - g_terrain.ndc_offset[1]) / g_terrain.ndc_scale[1];
+      RoomDepth(in);  // D222
       const WorldState world = World();
       in.seconds = world.cloud_seconds;
       in.evolve = world.cloud_evolve;
