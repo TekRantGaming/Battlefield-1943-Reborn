@@ -39,6 +39,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -974,6 +975,17 @@ void NoteWater(const uint8_t* base, uint32_t phys) {
   const float w = LoadF(base, phys + 304);
   if (std::isfinite(w) && w != 0.0f && w > nav.water) nav.water = w;
 }
+// A cell a bot swims in: the sea's (state 3), or one walked as ground that is under the water. A swimmer's walk was
+// learned as ground (LearnWalk before the water's height was known, and LoadLearned makes every walked cell ground):
+// on Wake 1,310 such cells 1.3 m under the surface drew lines of "land" across the lagoon and out from the carriers,
+// routes the bots took into the water (TekRantGaming, 26 Nov 2026: "a pool of bots in the middle of the map in the
+// water"). Read when used, so it holds whenever the water's height becomes known.
+bool SwimCell(const NavCell& c) { return c.state == 3 || (c.state == 1 && c.y < nav.water - 0.9f); }
+// How much more a swum step costs than a walked one: swimming is slow, and a swimmer cannot shoot (TekRantGaming,
+// 26 Nov 2026: bots "try to swim over to the other side of the island instead of correctly traveling the island or
+// taking a boat"). At 3 the 160 m swim across Wake's lagoon beat its 612 m walk round; at 10 a swim wins only where the
+// walk round is ten times longer (a short channel).
+constexpr float kSwimCost = 10.0f;
 
 // The step from cell a (ground ya) to its neighbour in direction d. 0: out of budget, 1 open, 2 closed.
 // The ray test hits soldiers too (its filter keeps out no character: run bots_s1g, every step out of a bot's own cell
@@ -1559,7 +1571,7 @@ std::vector<std::array<float, 3>> FindPath(PPCContext& ctx, uint8_t* base, uint3
       }
       if (st != 1) continue;
       const NavCell& c = nav.cells[nk];
-      const float swim = c.state == 3 ? 3.0f : 1.0f;  // swimming: slow, and no shooting
+      const float swim = SwimCell(c) ? kSwimCost : 1.0f;  // swimming: slow, and no shooting
       const float cost = ((d < 4 ? kCell : kCell * 1.414f) + std::max(0.0f, c.y - n.y) * 1.5f) *
                          LearnedCost(StepKey(n.ix, n.iz, d), nk, side, ways) * swim;
       const float g2 = n.g + cost;
@@ -1849,7 +1861,7 @@ float SwimAhead(const Bot& bot, const float pos[3]) {
       const float t = float(i) / float(steps);
       const auto c = nav.cells.find(
           CellKey(CellOf(from[0] + (pt[0] - from[0]) * t), CellOf(from[2] + (pt[2] - from[2]) * t)));
-      if (c != nav.cells.end() && c->second.state == 3) m += len / float(steps);
+      if (c != nav.cells.end() && SwimCell(c->second)) m += len / float(steps);
     }
     from[0] = pt[0], from[1] = pt[1], from[2] = pt[2];
   }
@@ -1866,10 +1878,186 @@ float StraightWater(const float from[3], const float to[3]) {
   for (int i = 1; i <= steps; ++i) {
     const float t = float(i) / float(steps);
     const auto c = nav.cells.find(CellKey(CellOf(from[0] + (to[0] - from[0]) * t), CellOf(from[2] + (to[2] - from[2]) * t)));
-    if (c == nav.cells.end() || c->second.state == 3) m += len / float(steps);
+    if (c == nav.cells.end() || SwimCell(c->second)) m += len / float(steps);
   }
   return m;
 }
+
+// The way to each flag over the whole level (TekRantGaming, 26 Nov 2026, Wake: bots swim across the lagoon and gather
+// in the water in the middle). A bot's path search (FindPath) looks at kExpandPerSearch cells; Wake's walks round the
+// lagoon need 14,000 to 31,000 (the saved grid of run size64h, searched offline), so a search toward a flag across
+// the lagoon ended at the cell nearest the flag it had seen: the shore, then the water, toward the flag. Here, every
+// few minutes, a snapshot of the grid is taken on the server's thread and a thread of its own works out, for each flag,
+// every cell's cost to reach it (Dijkstra, walked steps 1, swum kSwimCost, as FindPath; learned costs left to it). A
+// bot far from its flag then plans its usual search only to a point about 80 m along that way (field::Waypoint), which
+// the search always reaches; near the flag it searches to it as before. A cell the field does not reach (a scan still
+// under way, a bot on a carrier's deck) goes the old way.
+namespace field {
+constexpr int kStepsAhead = 40;            // the waypoint: 40 cells (80 m) along the way
+constexpr float kFrom = 70.0f;             // used from this far from the flag
+constexpr double kRebuildSeconds = 180.0;  // the grid learns as the match goes on
+struct Snapshot {
+  int x0 = 0, z0 = 0, w = 0, h = 0;
+  std::vector<uint8_t> kind, open;  // kind 0 unknown, 1 ground, 2 blocked, 3 swum
+  std::vector<float> y;
+  std::vector<std::array<float, 3>> flags;
+};
+struct Fields {
+  std::string map;
+  int x0 = 0, z0 = 0, w = 0, h = 0;
+  std::vector<uint8_t> open, kind;
+  std::vector<float> y;
+  std::vector<std::vector<float>> to_flag;  // by flag index: each cell's cost to reach it (+inf: not reached)
+};
+std::mutex mutex;
+std::shared_ptr<const Fields> ready;  // the latest, for the bots
+std::atomic<bool> busy{false};
+std::atomic<int> generation{0};  // a level change: a build under way is thrown away
+Clock::time_point built_at{};
+std::string built_map;
+
+float StepLen(int d) { return d < 4 ? kCell : kCell * 1.41421f; }
+
+void Build(std::shared_ptr<Snapshot> snap, std::string map, int gen) {
+  const auto t0 = Clock::now();
+  auto out = std::make_shared<Fields>();
+  out->map = map, out->x0 = snap->x0, out->z0 = snap->z0, out->w = snap->w, out->h = snap->h;
+  const int w = snap->w, h = snap->h;
+  const size_t n = size_t(w) * size_t(h);
+  size_t reached_total = 0;
+  for (const auto& f : snap->flags) {
+    std::vector<float> dist(n, std::numeric_limits<float>::infinity());
+    using Item = std::pair<float, uint32_t>;
+    std::priority_queue<Item, std::vector<Item>, std::greater<Item>> open;
+    // Seeds: the passable cells within 4 m of the pole (it may stand on a roof or in a hut), else within 12 m.
+    for (float r : {4.0f, 12.0f}) {
+      const int cr = int(std::ceil(r / kCell));
+      const int fx = CellOf(f[0]) - snap->x0, fz = CellOf(f[2]) - snap->z0;
+      for (int dz = -cr; dz <= cr; ++dz)
+        for (int dx = -cr; dx <= cr; ++dx) {
+          const int x = fx + dx, z = fz + dz;
+          if (x < 0 || z < 0 || x >= w || z >= h || float(dx * dx + dz * dz) * kCell * kCell > r * r) continue;
+          const uint32_t i = uint32_t(z) * uint32_t(w) + uint32_t(x);
+          if (snap->kind[i] != 1 && snap->kind[i] != 3) continue;
+          dist[i] = 0, open.push({0.0f, i});
+        }
+      if (!open.empty()) break;
+    }
+    size_t reached = 0;
+    while (!open.empty()) {
+      if (generation.load() != gen) return;  // the level changed
+      const auto [d0, i] = open.top();
+      open.pop();
+      if (d0 > dist[i]) continue;
+      ++reached;
+      const int x = int(i % uint32_t(w)), z = int(i / uint32_t(w));
+      for (int d = 0; d < 8; ++d) {
+        const int mx = x + kDx[d], mz = z + kDz[d];
+        if (mx < 0 || mz < 0 || mx >= w || mz >= h) continue;
+        const uint32_t m = uint32_t(mz) * uint32_t(w) + uint32_t(mx);
+        if (snap->kind[m] != 1 && snap->kind[m] != 3) continue;
+        if (!(snap->open[m] & (1 << kBack[d]))) continue;  // the step from m into i
+        const float c = d0 + StepLen(d) * (snap->kind[i] == 3 ? kSwimCost : 1.0f);
+        if (c < dist[m]) dist[m] = c, open.push({c, m});
+      }
+    }
+    reached_total += reached;
+    out->to_flag.push_back(std::move(dist));
+  }
+  out->open = std::move(snap->open), out->kind = std::move(snap->kind), out->y = std::move(snap->y);
+  if (generation.load() != gen) return;
+  {
+    std::lock_guard lock(mutex);
+    ready = out;
+  }
+  busy = false;
+  REXLOG_INFO("BF bots: the ways to {} flags worked out over {} x {} cells ({} reached in all) in {:.0f} ms",
+              out->to_flag.size(), w, h, reached_total,
+              std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+}
+
+// The server's thread, each tick: a new build when there is none for this level or the last is kRebuildSeconds old.
+void Tick(const std::string& map) {
+  if (map.empty() || g.flags.empty() || nav.cells.size() < 1000 || nav.water < -1e8f || busy.load()) return;
+  const auto now = Clock::now();
+  if (map == built_map && now - built_at < std::chrono::duration<double>(kRebuildSeconds)) return;
+  built_map = map, built_at = now;
+  auto snap = std::make_shared<Snapshot>();
+  int x0 = INT32_MAX, z0 = INT32_MAX, x1 = INT32_MIN, z1 = INT32_MIN;
+  for (const auto& [k, c] : nav.cells) {
+    if (c.state != 1 && c.state != 3) continue;
+    const int x = CellX(k), z = CellZ(k);
+    x0 = std::min(x0, x), z0 = std::min(z0, z), x1 = std::max(x1, x), z1 = std::max(z1, z);
+  }
+  if (x0 > x1 || int64_t(x1 - x0 + 1) * int64_t(z1 - z0 + 1) > 8000000) return;  // none, or a level far too big
+  snap->x0 = x0, snap->z0 = z0, snap->w = x1 - x0 + 1, snap->h = z1 - z0 + 1;
+  const size_t n = size_t(snap->w) * size_t(snap->h);
+  snap->kind.assign(n, 0), snap->open.assign(n, 0), snap->y.assign(n, 0.0f);
+  for (const auto& [k, c] : nav.cells) {
+    if (c.state == 0) continue;
+    const int x = CellX(k) - x0, z = CellZ(k) - z0;
+    if (x < 0 || z < 0 || x >= snap->w || z >= snap->h) continue;
+    const size_t i = size_t(z) * size_t(snap->w) + size_t(x);
+    snap->kind[i] = c.state == 2 ? 2 : SwimCell(c) ? 3 : 1;
+    snap->open[i] = c.open, snap->y[i] = c.y;
+  }
+  for (const Flag& f : g.flags) snap->flags.push_back({f.pos[0], f.pos[1], f.pos[2]});
+  busy = true;
+  std::thread(Build, snap, map, generation.load()).detach();
+}
+
+// A level change: what was worked out is the old level's.
+void Reset() {
+  ++generation;
+  busy = false;
+  built_map.clear();
+  std::lock_guard lock(mutex);
+  ready.reset();
+}
+
+// A point about 80 m along the best way from `pos` to flag `flag` (true), or nothing known (false).
+bool Waypoint(int flag, const float pos[3], float out[3]) {
+  std::shared_ptr<const Fields> f;
+  {
+    std::lock_guard lock(mutex);
+    f = ready;
+  }
+  if (!f || flag < 0 || size_t(flag) >= f->to_flag.size()) return false;
+  const std::vector<float>& dist = f->to_flag[size_t(flag)];
+  auto index = [&](int x, int z) -> int64_t {
+    x -= f->x0, z -= f->z0;
+    return x < 0 || z < 0 || x >= f->w || z >= f->h ? -1 : int64_t(z) * f->w + x;
+  };
+  // The bot's cell, or the best of its neighbours (it may stand on a cell's edge, or one the grid has blocked).
+  int cx = CellOf(pos[0]), cz = CellOf(pos[2]);
+  int64_t cur = index(cx, cz);
+  if (cur < 0 || !std::isfinite(dist[size_t(cur)])) {
+    cur = -1;
+    float best = std::numeric_limits<float>::infinity();
+    for (int d = 0; d < 8; ++d) {
+      const int ax = CellOf(pos[0]) + kDx[d], az = CellOf(pos[2]) + kDz[d];
+      const int64_t m = index(ax, az);
+      if (m >= 0 && dist[size_t(m)] < best) best = dist[size_t(m)], cur = m, cx = ax, cz = az;
+    }
+    if (cur < 0) return false;
+  }
+  for (int step = 0; step < kStepsAhead && dist[size_t(cur)] > 0.0f; ++step) {
+    int64_t next = -1;
+    float best = dist[size_t(cur)];
+    int nx = cx, nz = cz;
+    for (int d = 0; d < 8; ++d) {
+      if (!(f->open[size_t(cur)] & (1 << d))) continue;
+      const int64_t m = index(cx + kDx[d], cz + kDz[d]);
+      if (m < 0 || dist[size_t(m)] >= best) continue;
+      best = dist[size_t(m)], next = m, nx = cx + kDx[d], nz = cz + kDz[d];
+    }
+    if (next < 0) break;
+    cur = next, cx = nx, cz = nz;
+  }
+  out[0] = CellCenter(cx), out[1] = f->y[size_t(cur)], out[2] = CellCenter(cz);
+  return true;
+}
+}  // namespace field
 
 void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const float pos[3],
            const std::vector<uint32_t>& listed, Clock::time_point now) {
@@ -2216,7 +2404,14 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
     }
     const auto ways = learn.ways_in.find(g.flags[best].name);
     ++cost.searches;
-    bot.path = FindPath(ctx, base, soldier, pos, bot.goal_pos, &complete, &starved, team,
+    // Far from a goal at its flag: the search to a point along the level's best way there (field::Waypoint).
+    float plan_to[3] = {bot.goal_pos[0], bot.goal_pos[1], bot.goal_pos[2]};
+    bool by_field = false;
+    if (Dist2D(pos, bot.goal_pos) > field::kFrom && Dist2D(bot.goal_pos, g.flags[best].pos) < field::kFrom &&
+        field::Waypoint(best, pos, plan_to))
+      by_field = Dist2D(plan_to, bot.goal_pos) > 4.0f;
+    if (!by_field) std::copy(bot.goal_pos, bot.goal_pos + 3, plan_to);
+    bot.path = FindPath(ctx, base, soldier, pos, plan_to, &complete, &starved, team,
                         ways != learn.ways_in.end() ? &ways->second : nullptr);
     if (!complete && !starved && !bot.path.empty() && Dist2D(bot.path.back().data(), bot.goal_pos) > 4.0f) ++bot.no_reach;
     if (complete) bot.no_reach = 0;
@@ -2826,7 +3021,7 @@ bool BailCheck(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t vehicle, uint3
     for (size_t i = 0; i < g.flags.size(); ++i)
       if (g.flags[i].takeable && Dist2D(at, g.flags[i].pos) < nd) nd = Dist2D(at, g.flags[i].pos), nearest = int(i);
     const auto c = nav.cells.find(CellKey(CellOf(at[0]), CellOf(at[2])));
-    const bool sea = c == nav.cells.end() || c->second.state == 3;
+    const bool sea = c == nav.cells.end() || SwimCell(c->second);
     if (sea && nd > 300.0f && (nearest < 0 || StraightWater(at, g.flags[size_t(nearest)].pos) > 150.0f))
       stay = "open sea, no flag near";
   }
@@ -3168,6 +3363,7 @@ void BotsLevelChange() {
   g.level_seen = false;
   nav.cells.clear();
   nav.scan.clear(), nav.scanned.clear(), nav.scan_started = nav.scan_done = false;
+  field::Reset();
   nav.scan_min[0] = nav.scan_min[1] = 1e9f, nav.scan_max[0] = nav.scan_max[1] = -1e9f;
 }
 
@@ -3642,6 +3838,8 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       SaveGrid();
       REXLOG_INFO("BF bots: mapping: {} cells known, {} to look at", nav.cells.size(), nav.scan.size());
     }
+    CostTimer t(&cost.scan);
+    field::Tick(learn.map);  // the ways to the flags over the whole level (its snapshot here, the work on a thread)
   }
   // Squads (the plan's step 2d; the vehicle bindings session for the user, 18 Nov 2026: "make bots join the game's own
   // squads ... so a human player ends up in a squad with bots"). The game's team pick looks only for an open squad
