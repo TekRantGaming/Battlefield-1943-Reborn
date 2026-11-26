@@ -3281,6 +3281,12 @@ uint32_t DrawPath::DrawSkinOver(ITextureView* target, ITextureView* depth) {
                      index_buffer = draw.index_buffer, index_offset = draw.index_offset, index_type = draw.index_type,
                      vertex_count = draw.vertex_count, texture = draw.texture.RawPtr(),
                      sampler = skin_sampler_.RawPtr()](IDeviceContext* context) {
+          // skinTex is a combined image and sampler (kOverPS): no "skinTex_sampler" variable, and the pipeline (the
+          // game's draws' cache) has no immutable sampler, so its sampler is the view's own. Without one the
+          // descriptor's sampler was null, and NVIDIA's Vulkan driver read through it as the resources were committed
+          // (TekRantGaming, 26 Nov 2026: "When it's equipped, my game crashes immediately when loading in with that
+          // class"; his dump and run skin_crash1: nvoglv64.dll, a read of 0xf0, from here; other drivers let it pass).
+          if (texture->GetSampler() != sampler) texture->SetSampler(sampler);
           if (auto* v = srb->GetVariableByName(SHADER_TYPE_PIXEL, "skinTex")) v->Set(texture);
           if (auto* v = srb->GetVariableByName(SHADER_TYPE_PIXEL, "skinTex_sampler")) v->Set(sampler);
           context->SetPipelineState(pso);
