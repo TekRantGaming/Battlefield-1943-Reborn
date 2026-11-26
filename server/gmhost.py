@@ -1133,29 +1133,31 @@ class World:
     # one, but a storm nonetheless, is to slowly come in throughout the match. Make sure that you're utilizing all
     # aspects of our new graphics ... a preset a lot like night ops, so that servers can pre-select it." His picks the
     # same day: every round starts again at sunrise; the storm a thunderstorm to 70%; servers only (no Custom Match).
-    # The clock: 06:00 (the sky's sun on the horizon, NativeXRenderer sky.cpp: 70 sin(pi (hour - 6) / 12) degrees up)
-    # and a day in 1440 minutes, so a 30 minute round ends with the sun about 9 degrees up; the lamps fade out by
-    # 06:13 (NXR D175). BF_DEV_DAYBREAK_MINUTES=<a day's minutes> runs it faster in tests.
-    DAYBREAK_HOUR = 6.0
-    DAYBREAK_DAY_MINUTES = 1440.0
-    # The build by tickets, as Night Ops' (the same progress), with its own columns: progress, cloud cover, weather,
-    # distance fog, ground fog, wind. First light: a clear sky, a morning haze and a low mist on the ground and the
-    # sea; the mist burns off as the sun climbs; fair weather clouds build; a thunderstorm forms out at sea from 25%
-    # weather (its roll cloud, far rain shafts and rumble) and comes in; at 70% it rains under it with lightning
-    # (from 60%), its mist starting (from 45%) but never the 60 m storm mist of Night Ops' end (from 75%). The wind
-    # rises with it. Never backwards within a round; a new round is first light again.
+    # 26 Nov 2026, after playing it (the real time sun and the 70% storm): "the storm value was too low ... day break
+    # time starts at 06:10 and stays there. follow the same rules as night ops as the storm was too weak and i think
+    # ground fog needs to be pulled back a little too". So: held at 06:10 (the sun just up, NativeXRenderer sky.cpp:
+    # 70 sin(pi (hour - 6) / 12), about 3 degrees; the lamps nearly out, NXR D175), and Night Ops' build. A day's
+    # minutes above 0 would run the clock from there (advance waits while nobody is joined); BF_DEV_DAYBREAK_MINUTES
+    # sets them in tests.
+    DAYBREAK_HOUR = 6.0 + 10 / 60.0
+    DAYBREAK_DAY_MINUTES = 0.0
+    # The build by tickets: Night Ops' rows (clear to 40%, the clouds gathering to 55%, the storm rolling in to 100%
+    # weather by 80%, then the full storm, its 60 m mist from 75%), with Daybreak's own columns: progress, cloud cover,
+    # weather, distance fog, ground fog, wind. A thinner morning mist at first light than the first cut (35%, was 60%)
+    # that burns off by 40%, and less ground fog in the storm than Night Ops' (35%, Night Ops 50%). The wind rises
+    # with the storm. Never backwards within a round; a new round is first light again.
     DAYBREAK_STAGES = (
-        (0.00, 0.10, 0.00, 0.20, 0.60, 0.10),  # first light: clear, the sun on the horizon, haze and ground mist
-        (0.30, 0.20, 0.05, 0.10, 0.15, 0.20),  # the mist burns off
-        (0.50, 0.50, 0.20, 0.10, 0.10, 0.35),  # the clouds build, the wind gets up
-        (0.70, 0.75, 0.45, 0.20, 0.15, 0.50),  # the storm comes in from the sea: dark cloud, far lightning
-        (0.90, 0.85, 0.70, 0.30, 0.25, 0.65),  # the storm over the map: rain and lightning
-        (1.00, 0.85, 0.70, 0.30, 0.25, 0.65),
+        (0.00, 0.15, 0.00, 0.15, 0.35, 0.15),  # first light: clear, the low sun, a morning haze and a thin mist
+        (0.40, 0.15, 0.00, 0.10, 0.10, 0.20),  # still clear at 40%, the mist gone
+        (0.55, 0.60, 0.30, 0.10, 0.10, 0.35),  # the clouds gather, the storm forms out at sea: far lightning
+        (0.80, 0.90, 1.00, 0.50, 0.35, 0.80),  # it rolls in: rain over the map, lightning, its mist
+        (1.00, 0.90, 1.00, 0.50, 0.35, 0.80),  # the full storm to the end
     )
-    DAYBREAK_STAGE_NAMES = ('first light', 'the mist burns off', 'the clouds build', 'the storm comes in', 'the storm')
+    DAYBREAK_STAGE_NAMES = ('first light', 'the clouds gather', 'the storm rolls in', 'the full storm')
     # The surface fog for the whole round (eased amounts above; its depth and sparseness are not eased by the games,
-    # so they stay): knee deep, in wide patches (the game's own default is shin deep and sparse: 0.5 m, 0.7).
-    DAYBREAK_GROUND_FOG_HEIGHT, DAYBREAK_GROUND_FOG_SPARSE = 2.0, 0.45
+    # so they stay): calf deep in patches (the first cut's 2 m in wide patches was too much; the game's own default
+    # is shin deep and sparse: 0.5 m, 0.7).
+    DAYBREAK_GROUND_FOG_HEIGHT, DAYBREAK_GROUND_FOG_SPARSE = 1.2, 0.6
     # What its build drives, and so what an admin's F9 holds for the round: Night Ops' and the wind.
     DAYBREAK_HELD = NIGHT_OPS_HELD + ('wind',)
 
@@ -1355,8 +1357,10 @@ class World:
         dt, self.at = now - self.at, now
         # Daybreak's sun waits for players (26 Nov 2026, US Central: a round on a server nobody is on lasts hours, so
         # the first to join found mid morning): while no player is joined (bots never are), its clock stands still,
-        # the round's own too (Back to Daybreak), unless an admin set the clock.
-        paused = self.daybreak and 'clock' not in self.held and not self.host.player_names()
+        # the round's own too (Back to Daybreak), unless an admin set the clock. (Since its clock is held at 06:10,
+        # only when DAYBREAK_DAY_MINUTES or a test's BF_DEV_DAYBREAK_MINUTES runs it.)
+        paused = (self.daybreak and self.day_minutes > 0 and 'clock' not in self.held and
+                  not self.host.player_names())
         if paused != self.paused:
             self.paused = paused
             self.host.note('world: Daybreak: nobody on the server, the sun waits' if paused else
@@ -2363,10 +2367,10 @@ def main():
     # and --day-minutes are then not used. Its storm builds with each round's tickets (World.match, --match-file).
     ap.add_argument('--night', action='store_true',
                     help='a night server (Night Ops): its world held at 18:30, the storm building with the tickets')
-    # Daybreak (TekRantGaming, 26 Nov 2026): the second event, as Night Ops: a round from sunrise in real time, a thunderstorm
-    # building with the tickets (World.DAYBREAK_*). Listed for the browser's DAYBREAK chip; --night wins if both are given.
+    # Daybreak (TekRantGaming, 26 Nov 2026): the second event, as Night Ops: the world held at 06:10, just after sunrise,
+    # the storm building with the tickets (World.DAYBREAK_*). Listed for the browser's DAYBREAK chip; --night wins if both are given.
     ap.add_argument('--daybreak', action='store_true',
-                    help='a Daybreak server: each round from sunrise in real time, a thunderstorm building with the tickets')
+                    help='a Daybreak server: its world held at 06:10, the storm building with the tickets')
     # Where the server is (TekRantGaming, 13 Nov 2026: the browser shows the region with its flag): one of the game's
     # region codes (bf/src/regions.h, the manager's drop down). And its tick rate, for the browser: the game's own
     # 30 Hz today.

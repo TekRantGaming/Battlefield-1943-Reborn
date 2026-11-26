@@ -1,12 +1,13 @@
 """Daybreak servers (server/gmhost.py World, 26 Nov 2026) without the game: a World on a stand in host and a stand in
 clock, asked with the bytes world_sync.cpp sends.
 
-Checks: a Daybreak round starts at sunrise (06:00) with the clock running in real time (a day in 1440 minutes), clear,
-with the morning's haze and ground mist; the answer's flags (4 an event, 16 Daybreak) and its last bytes (storm type 0,
-the surface fog 2 m deep in wide patches); the build by tickets to a 70% thunderstorm, the mist burning off and the
-wind rising; never backwards in a round; a new round back at sunrise and clear; an admin's wind held (Daybreak drives
-it); "Back to Daybreak" puts the clock where the round's own is; --night wins over --daybreak; Night Ops and a regular
-server answer as before (no flag 16, the games' own fog depth).
+Checks (TekRantGaming's rules after playing the first cut: held at 06:10, Night Ops' storm, less ground fog): the
+world held at 06:10, clear, with a morning haze and a thin ground mist; the answer's flags (4 an event, 16 Daybreak)
+and its last bytes (storm type 0, the surface fog 1.2 m deep in patches); Night Ops' build by tickets to the full
+storm (100% weather by 80%, the same clouds, weather and distance fog as Night Ops' at every point), less ground fog
+than Night Ops', the wind rising; never backwards in a round; a new round clear at 06:10; an admin's wind held (Daybreak
+drives it); "Back to Daybreak"; with a running clock (BF_DEV_DAYBREAK_MINUTES) the sun waits while nobody is joined;
+--night wins over --daybreak; Night Ops and a regular server answer as before (no flag 16, the games' own fog depth).
 
     python -I tools/test_daybreak.py
 """
@@ -114,37 +115,39 @@ T = gmhost.World.TOUCHED
 near = lambda a, b, e=1e-4: abs(a - b) < e
 D = gmhost.World
 
-# --- a Daybreak round from sunrise
+# --- a Daybreak round: held at 06:10
 w, host = world(daybreak=True)
-check('Daybreak starts at sunrise: 06:00, day and night, a day in 1440 minutes (real time)',
-      w.day_night and near(w.hour, 6.0) and near(w.day_minutes, 1440.0), now(w))
-check('first light: clear, haze, ground mist, a light wind', near(w.cover, 0.10) and w.weather == 0 and
-      near(w.fog, 0.20) and near(w.ground_fog, 0.60) and near(w.wind, 0.10), now(w))
+check('Daybreak is held at 06:10: day and night on, time standing still', w.day_night and
+      near(w.hour, 6.0 + 10 / 60.0) and w.day_minutes == 0, now(w))
+check('first light: clear (15%), a haze (15%), a thin ground mist (35%), a light wind (15%)', near(w.cover, 0.15) and
+      w.weather == 0 and near(w.fog, 0.15) and near(w.ground_fog, 0.35) and near(w.wind, 0.15), now(w))
 flags, vals, tail = parse(answer(w, host, ask(key='not-it')))
 check('answer flags: day and night (1), an event (4), Daybreak (16), not an admin, nothing held',
       flags & 1 and flags & 4 and flags & 16 and not flags & 2 and not flags & 8, flags)
-check('answer is 80 bytes: storm type 0 (a thunderstorm), ground fog 2 m deep, sparseness 0.45',
-      tail is not None and tail[0] == 0 and near(tail[1], 2.0) and near(tail[2], 0.45), tail)
-
-# the clock runs in real time from the first round's start
+check('answer is 80 bytes: storm type 0 (a thunderstorm), ground fog 1.2 m deep, sparseness 0.6',
+      tail is not None and tail[0] == 0 and near(tail[1], 1.2) and near(tail[2], 0.6), tail)
 w.match(1, 1.0)
 CLOCK.t += 30 * 60
 flags, vals, _ = parse(answer(w, host, ask(key='not-it')))
-check('30 minutes later it is 06:30 (the sky\'s sun about 9 degrees up)', near(w.hour, 6.5, 1e-3) and
-      near(vals[0], 6.5, 1e-3), w.hour)
+check('30 minutes later still 06:10', near(w.hour, 6.0 + 10 / 60.0) and near(vals[0], 6.0 + 10 / 60.0, 1e-4), w.hour)
+check('a held clock never says the sun waits', not any('the sun waits' in n for n in host.notes))
 
-# the build by tickets
-w.match(1, 0.5)
-check('at 50%: the clouds build (50%), weather 20%, the mist gone (10%), wind 35%',
-      near(w.cover, 0.5) and near(w.weather, 0.2) and near(w.ground_fog, 0.1) and near(w.wind, 0.35), now(w))
-w.match(1, 0.8)  # a team's tickets back up (20% lost): the build stays
-check('never backwards within a round', near(w.weather, 0.2), now(w))
-w.match(1, 0.0)
-check('the end: a thunderstorm at 70%, clouds 85%, fog 30%, ground fog 25%, wind 65%',
-      near(w.cover, 0.85) and near(w.weather, 0.70) and near(w.fog, 0.30) and near(w.ground_fog, 0.25) and
-      near(w.wind, 0.65), now(w))
-check('never Night Ops\' storm mist (weather under 75%) at any point',
-      max(D.daybreak_values(p / 100.0)[1] for p in range(101)) <= 0.70 + 1e-9)
+# --- Night Ops' build by tickets
+same = all(near(D.daybreak_values(p / 100.0)[k], D.night_ops_values(p / 100.0)[k]) for p in range(101) for k in (0, 1))
+check("clouds and weather are Night Ops' at every point of the round", same)
+check("distance fog is Night Ops' in the full storm (from 80%; a light daytime haze before it)",
+      all(near(D.daybreak_values(p / 100.0)[2], D.night_ops_values(p / 100.0)[2]) for p in range(80, 101)))
+check("less ground fog than Night Ops' in the storm (35% against 50%)",
+      near(D.daybreak_values(1.0)[3], 0.35) and D.daybreak_values(1.0)[3] < D.night_ops_values(1.0)[2])
+w.match(1, 0.6)  # 40% lost: still clear, the mist gone
+check('at 40%: still clear, the mist burnt off (10%)', near(w.cover, 0.15) and w.weather == 0 and
+      near(w.ground_fog, 0.10), now(w))
+w.match(1, 0.8)  # a team's tickets back up: the build stays
+check('never backwards within a round', near(w.ground_fog, 0.10), now(w))
+w.match(1, 0.2)
+check('at 80%: the full storm, weather 100%, clouds 90%, fog 50%, ground fog 35%, wind 80%',
+      near(w.cover, 0.9) and near(w.weather, 1.0) and near(w.fog, 0.5) and near(w.ground_fog, 0.35) and
+      near(w.wind, 0.8), now(w))
 s, shost = world(daybreak=True)
 shost.notes.clear()  # (the server's start says first light too)
 s.match(1, 1.0)
@@ -155,54 +158,45 @@ check('each stage said once, in order', said == list(D.DAYBREAK_STAGE_NAMES), sa
 
 # --- an admin's wind and time are held; Back to Daybreak
 answer(w, host, ask(change=dict(now(w), wind=0.1), touched=T['wind']))
-check('an admin\'s wind (10%) takes effect and is held (Daybreak drives it)', near(w.wind, 0.1) and
+check("an admin's wind (10%) takes effect and is held (Daybreak drives it)", near(w.wind, 0.1) and
       'wind' in w.held, (w.wind, w.held))
-answer(w, host, ask(change=dict(now(w), hour=12.0, day_minutes=0.0), touched=T['hour'] | T['day_minutes']))
-check('an admin\'s time (12:00, held still) takes effect and is held', near(w.hour, 12.0) and w.day_minutes == 0 and
-      'clock' in w.held, now(w))
-CLOCK.t += 60
+answer(w, host, ask(change=dict(now(w), hour=12.0), touched=T['hour']))
+check("an admin's time (12:00) takes effect and is held", near(w.hour, 12.0) and 'clock' in w.held, now(w))
 flags, _, _ = parse(answer(w, host, ask(back=True)))
-check('Back to Daybreak: the round\'s own clock (sunrise + 31 minutes), the build\'s wind, nothing held',
-      near(w.hour, 6.0 + 31 / 60.0, 1e-3) and near(w.day_minutes, 1440) and near(w.wind, 0.65) and not w.held and
-      not flags & 8, (now(w), w.held))
+check("Back to Daybreak: 06:10, the build's wind, nothing held", near(w.hour, 6.0 + 10 / 60.0) and
+      w.day_minutes == 0 and near(w.wind, 0.8) and not w.held and not flags & 8, (now(w), w.held))
 
-# --- a new round: sunrise again, clear
-CLOCK.t += 300
+# --- a new round: clear at 06:10
 w.match(2, 1.0)
-check('round 2 starts at sunrise again, clear, with the mist', near(w.hour, 6.0) and near(w.day_minutes, 1440) and
-      near(w.cover, 0.10) and w.weather == 0 and near(w.ground_fog, 0.60) and not w.held, now(w))
-check('the round change says sunrise', any('Daybreak round 2 starts at sunrise' in n for n in host.notes))
-CLOCK.t += 90
-answer(w, host, ask(key='not-it'))
-check('and its clock runs from the round\'s start (90 s: 06:01:30)', near(w.hour, 6.0 + 90 / 3600.0, 1e-4), w.hour)
+check('round 2: 06:10, clear, the mist back', near(w.hour, 6.0 + 10 / 60.0) and near(w.cover, 0.15) and
+      w.weather == 0 and near(w.ground_fog, 0.35) and not w.held, now(w))
+check('the round change says so', any('Daybreak round 2 starts at sunrise' in n for n in host.notes))
 
-# --- nobody on the server: the sun waits
-e, ehost = world(daybreak=True)
+# --- a running clock (a test's, or a later rule): the sun waits while nobody is joined
+os.environ['BF_DEV_DAYBREAK_MINUTES'] = '1440'
+e, ehost = world(daybreak=True)  # (the switch stays set: each round start reads it)
+check('BF_DEV_DAYBREAK_MINUTES=1440: the clock runs, a day in 1440 minutes', near(e.day_minutes, 1440.0), e.day_minutes)
+H0 = 6.0 + 10 / 60.0
 ehost.players = []
 e.match(1, 1.0)
 CLOCK.t += 3600
 answer(e, ehost, ask(key='not-it'))
-check('nobody on the server: an hour later still 06:00', near(e.hour, 6.0), e.hour)
+check('nobody on the server: an hour later still 06:10', near(e.hour, H0), e.hour)
 check('it says so', any('the sun waits' in n for n in ehost.notes), ehost.notes[-3:])
 ehost.players = ['Tester']
 answer(e, ehost, ask(key='not-it'))
 CLOCK.t += 600
 answer(e, ehost, ask(key='not-it'))
-check('a player joins: the sun rises from there (10 minutes: 06:10)', near(e.hour, 6.0 + 10 / 60.0, 1e-4), e.hour)
+check('a player joins: the sun rises from there (10 minutes: 06:20)', near(e.hour, H0 + 10 / 60.0, 1e-4), e.hour)
 answer(e, ehost, ask(change=dict(now(e), weather=0.5), touched=T['weather']))
 answer(e, ehost, ask(back=True))
-check('Back to Daybreak counts only the time with players (06:10)', near(e.hour, 6.0 + 10 / 60.0, 1e-3), e.hour)
+check('Back to Daybreak counts only the time with players (06:20)', near(e.hour, H0 + 10 / 60.0, 1e-3), e.hour)
 ehost.players = []
 answer(e, ehost, ask(change=dict(now(e), hour=12.0), touched=T['hour']))
 CLOCK.t += 600
 answer(e, ehost, ask(key='not-it'))
 check("an admin's clock runs whoever is on (not held still by the empty server)", e.hour >= 12.0 and 'clock' in e.held,
       (e.hour, e.held))
-
-# --- a test's faster day
-os.environ['BF_DEV_DAYBREAK_MINUTES'] = '24'
-t, _ = world(daybreak=True)
-check('BF_DEV_DAYBREAK_MINUTES=24: a day in 24 minutes', near(t.day_minutes, 24.0), t.day_minutes)
 os.environ.pop('BF_DEV_DAYBREAK_MINUTES')
 
 # --- --night wins over --daybreak
