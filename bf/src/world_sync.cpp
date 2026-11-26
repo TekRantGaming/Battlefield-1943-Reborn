@@ -86,7 +86,7 @@ bool InMatch();                   // auto_join.cpp
 bool LauncherShowing();           // game_menu.cpp
 void StartWeatherAudio();         // weather_audio.cpp
 void LoadStormPatterns();         // storm_patterns.cpp (D228)
-void SkinMatchSample(int storm_type, float weather, int time_limit, float time_left);  // fov.cpp
+void SkinMatchSample(bool night_ops, int time_limit, float time_left);  // fov.cpp
 }  // namespace bf1943
 
 namespace bf1943::world {
@@ -387,7 +387,7 @@ void Run() {
                     s.held ? "held by an admin's settings for the rest of the round" : "on its schedule again",
                     s.now.hour, s.now.day_minutes, s.now.cloud_cover * 100, s.now.weather * 100, s.now.fog * 100,
                     s.now.ground_fog * 100);
-      bf1943::SkinMatchSample(s.now.storm_type, s.now.weather, s.time_limit, s.time_left);  // fov.cpp: the skin's unlock
+      bf1943::SkinMatchSample(s.night_ops && !s.daybreak, s.time_limit, s.time_left);  // fov.cpp: the skin's unlock
       if (!valid)
         REXLOG_INFO("BF world: the match's host keeps its world: day and night {}, {:.1f} h, a day in {:.0f} min, clouds "
                     "{:.0f}% at rate {:.0f}%, weather {:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m{}",

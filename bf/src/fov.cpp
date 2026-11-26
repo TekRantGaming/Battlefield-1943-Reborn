@@ -453,9 +453,9 @@ std::string SmgSightTuneText() {
 }
 // Reborn's weapon skins (the renderer's weapon_skin.h). The electric skin, the first unlockable (TekRantGaming, 21 Nov
 // 2026), worn by the player's own Thompson and Type 100: only this game draws it, on its first person weapon; nothing
-// is sent to the server, so no other player sees it. Unlocked by playing a full match under a hurricane (SkinMatch
-// below; the user, 23 Nov 2026: "Remove the lightning strike requirement. It should just be playing a full match with
-// the hurricane storm"); bf_skin_electric is the switch (off until then). Unlocked is not worn (the user, 22 Nov 2026: "commit weapon skin
+// is sent to the server, so no other player sees it. Unlocked by playing one full Night Ops match (SkinMatch below;
+// TekRantGaming, 26 Nov 2026: "skin unlocks when you finish 1 full nightops match"; before, a full match under a
+// hurricane, which no official or package server ever sends); bf_skin_electric is the switch (off until then). Unlocked is not worn (the user, 22 Nov 2026: "commit weapon skin
 // as an unlock, and only shows if equipped from main menu's unlock screen"): it shows while bf_skin_equipped names
 // it, which the main menu's Unlockables screen sets (game_menu_launcher.inc, UnlockablesPage).
 void UnlockElectricSkin() {
@@ -465,34 +465,33 @@ void UnlockElectricSkin() {
   std::lock_guard lock(g_tune_mutex);  // saved with the menu's settings (SmgSightTakeSave)
   g_tune_save_name = "bf_skin_electric", g_tune_save_value = "true";
 }
-// The electric skin's unlock: a full match under a hurricane. A match counts when this game was in it from near its
-// start to its end (the game's WinningTeamIsSet), the match's storm was a hurricane all that time, and the storm did
-// come in (the weather reached half). "From near its start": at least kSkinMatchSeconds played, and, where the host
-// tells a time limit, joined within two minutes of the round's start. BF_DEV_SKIN_MATCH_SECONDS=<s> (tests): another
-// least time.
+// The electric skin's unlock: one full Night Ops match (26 Nov 2026). A match counts when this game was in it from near
+// its start to its end (the game's WinningTeamIsSet) and its host said all that time that it is a Night Ops server (the
+// world answer's flag 4; Daybreak, flag 16 as well, is another event and does not count). "From near its start": at
+// least kSkinMatchSeconds played, and, where the host tells a time limit, joined within two minutes of the round's
+// start. BF_DEV_SKIN_MATCH_SECONDS=<s> (tests): another least time.
 namespace {
 constexpr double kSkinMatchSeconds = 300.0;
 struct SkinMatch {
   std::mutex mutex;
-  bool on = false, hurricane = false, stormy = false, late = false;
+  bool on = false, night_ops = false, late = false;
   std::chrono::steady_clock::time_point since{}, last{};
 } g_skin_match;
 }  // namespace
 // world_sync.cpp, with each answer of the match's host (about once a second).
-void SkinMatchSample(int storm_type, float weather, int time_limit, float time_left) {
+void SkinMatchSample(bool night_ops, int time_limit, float time_left) {
   if (REXCVAR_GET(bf_skin_electric)) return;
   std::lock_guard lock(g_skin_match.mutex);
   auto& m = g_skin_match;
   const auto now = std::chrono::steady_clock::now();
   if (!m.on || now - m.last > std::chrono::seconds(10)) {  // a match joined, or a new level
-    m.on = true, m.since = now, m.hurricane = true, m.stormy = false;
+    m.on = true, m.since = now, m.night_ops = true;
     m.late = time_limit > 0 && time_left >= 0 && time_left < float(time_limit) * 60.0f - 120.0f;
     REXLOG_INFO("BF weapon skins: a match counted from now for the electric skin ({}{})",
-                storm_type == 1 ? "a hurricane" : "no hurricane", m.late ? ", joined late" : "");
+                night_ops ? "a Night Ops server" : "not Night Ops", m.late ? ", joined late" : "");
   }
   m.last = now;
-  if (storm_type != 1) m.hurricane = false;
-  if (weather >= 0.5f) m.stormy = true;
+  if (!night_ops) m.night_ops = false;
 }
 // auto_join.cpp: the next level is loading or in.
 void SkinMatchNewLevel() {
@@ -511,10 +510,9 @@ void SkinMatchRoundOver() {
     double least = kSkinMatchSeconds;
     if (const char* env = std::getenv("BF_DEV_SKIN_MATCH_SECONDS")) least = std::atof(env);
     const double played = std::chrono::duration<double>(std::chrono::steady_clock::now() - m.since).count();
-    earned = m.hurricane && m.stormy && !m.late && played >= least;
-    REXLOG_INFO("BF weapon skins: the round is over after {:.0f} s here: hurricane throughout {}, the storm came in {}, "
-                "joined late {}: {}",
-                played, m.hurricane ? "yes" : "no", m.stormy ? "yes" : "no", m.late ? "yes" : "no",
+    earned = m.night_ops && !m.late && played >= least;
+    REXLOG_INFO("BF weapon skins: the round is over after {:.0f} s here: Night Ops throughout {}, joined late {}: {}",
+                played, m.night_ops ? "yes" : "no", m.late ? "yes" : "no",
                 earned ? "the electric skin is earned" : "not earned");
   }
   if (earned) UnlockElectricSkin();

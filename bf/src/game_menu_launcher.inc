@@ -4385,7 +4385,7 @@
                "For your Thompson and Type 100: dark metal, gold wood, and a storm of smoke and lightning round the gun.");
     d->AddText(f.ui, st(15), ImVec2(tx, a.y + st(112)), IM_COL32(61, 59, 49, 255),
                unlocked ? "Unlocked. Only your own game draws it: other players do not see it yet."
-                        : "Locked. To unlock it: play a full match under a hurricane.");
+                        : "Locked. To unlock it: play one full Night Ops match, from its start to its end.");
     const char* state = equipped ? "EQUIPPED" : unlocked ? "NOT EQUIPPED" : "LOCKED";
     const float sw = kit::SpacedWidth(f.stencil, st(26), state, st(2));
     kit::Spaced(d, f.stencil, st(26), ImVec2(b.x - st(24) - sw, a.y + st(24)), equipped ? kit::kGreenDark : kit::kStamp, state, st(2));
