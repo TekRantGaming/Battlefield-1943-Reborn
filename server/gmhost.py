@@ -1089,6 +1089,7 @@ class World:
         self.tickets = 0  # each team's tickets at the round's start, from match.txt; 0: the level's own (read_match)
         self.ramp_from = time.monotonic()
         self.round_from = time.monotonic()  # Daybreak: when this round's sunrise was (Back to Daybreak's clock)
+        self.paused = False  # Daybreak: its clock waits while nobody is on the server (advance)
         self.pings = {}  # a joined player's name -> (their ping in ms, when they said it): the scoreboards' ping
 
     # Night Ops (16 Nov 2026, TekRantGaming: the night maps gone, "we would just start the match to always be at a set
@@ -1352,7 +1353,17 @@ class World:
     def advance(self):
         now = time.monotonic()
         dt, self.at = now - self.at, now
-        if self.day_night and self.day_minutes > 0:
+        # Daybreak's sun waits for players (26 Nov 2026, US Central: a round on a server nobody is on lasts hours, so
+        # the first to join found mid morning): while no player is joined (bots never are), its clock stands still,
+        # the round's own too (Back to Daybreak), unless an admin set the clock.
+        paused = self.daybreak and 'clock' not in self.held and not self.host.player_names()
+        if paused != self.paused:
+            self.paused = paused
+            self.host.note('world: Daybreak: nobody on the server, the sun waits' if paused else
+                           'world: Daybreak: a player is on, the sun rises from %.2f h' % self.hour)
+        if paused:
+            self.round_from += dt
+        elif self.day_night and self.day_minutes > 0:
             self.hour = (self.hour + dt / (self.day_minutes * 60) * 24) % 24
         self.seconds += dt
         self.evolve += dt * self.rate
