@@ -299,7 +299,7 @@ struct Bot {
   Clock::time_point melee_until{};  // hitting something in its way with the knife (a breakable fence) until then
   // Driving a tank (TankTick): its waypoint, when it last checked it was moving, the gun's next shot.
   float tank_way[3] = {}, tank_check_pos[3] = {};
-  Clock::time_point tank_think{}, tank_check_at{}, tank_fire_at{}, tank_turn_until{};
+  Clock::time_point tank_think{}, tank_check_at{}, tank_fire_at{}, tank_turn_until{}, tank_reverse_until{};
   float tank_turn = 0;
   int tank_goal = -1;
   // Flying a plane (PlaneTick): where it was a moment ago (its speed), whether it has left the ground.
@@ -520,8 +520,8 @@ std::string DataName(const uint8_t* base, uint32_t obj) {
 
 // A kit's weapons (the user, 23 Nov 2026: "bots should be able to use grenades and switch weapons too, such as using
 // the bazooka to shoot at tanks or low flying planes, or the rifle grenade launch to hit infantry at far"): its
-// soldier data's (SoldierEntityData, vtable 0x8205AD34) Weapons list at +0x1A8 (the class's field table at 0x82D3F198;
-// MeleeWeaponIndex +0x13C), in slot order, each weapon's kind told by its name. A slot is picked with SelectWeapon1 to
+// soldier data's (SoldierEntityData, vtable 0x8205AD34) Weapons list at +0x1B8 (26 Nov 2026; the class's field
+// table at 0x82D3F198; MeleeWeaponIndex +0x13C), in slot order, each weapon's kind told by its name. A slot is picked with SelectWeapon1 to
 // 4 (concepts 30 to 33: run weap1, the game took 31 and 32 at once; Y, the pad's swap, is 9 and 19).
 struct KitWeapons {
   int at = -1, gl = -1, thrown = -1;  // the slots of its anti-tank weapon, rifle grenade and thrown explosive (-1 none)
@@ -530,37 +530,75 @@ struct KitWeapons {
 std::unordered_map<uint32_t, KitWeapons> kit_weapons;  // by soldier data; forgotten at a level change
 const KitWeapons& WeaponsOf(const uint8_t* base, uint32_t data) {
   static const KitWeapons none;
-  if (!Readable(data, 0x1B0)) return none;
+  if (!Readable(data, 0x1C0)) return none;
   if (const auto it = kit_weapons.find(data); it != kit_weapons.end()) return it->second;
   KitWeapons k;
-  const uint32_t list = Load32(base, data + 0x1A8);
-  const uint32_t count = Readable(list - 4, 4) ? Load32(base, list - 4) : 0;
-  const uint32_t n = count >= 1 && count <= 8 ? count : 6;
+  // The list is at +0x1B8 (26 Nov 2026, run fx_wakeB's probe of every kit's soldier data: "+1B8 counted 3: Thompson,
+  // US_Pineapple_Gren, M18"). +0x1A8, read until then, held the same six words for
+  // every kit and a count of 2191647088, so no bot ever found its anti-tank weapon (TekRantGaming, 26 Nov 2026: "if I
+  // am in a tank bots shoot at me rather than using their class equipment correctly").
+  // Its count is the word at +0x1B0 (+0x1B4 the room for them): 4 on every kit, the knife last (run fx_kits1). The word
+  // before the list held 3 by chance on three kits and garbage on the others.
+  const uint32_t list = Load32(base, data + 0x1B8);
+  const uint32_t count = Load32(base, data + 0x1B0);
+  const uint32_t n = count >= 1 && count <= 8 && Readable(list, 4 * count) ? count : 0;
   for (uint32_t i = 0; i < n && Readable(list + 4 * i, 4); ++i) {
     const uint32_t w = Load32(base, list + 4 * i);
     std::string name = DataName(base, w);
     if (name.empty() && Readable(w, 0x18)) name = DataName(base, Load32(base, w + 0x14));
-    if (name.empty() && count == 0) break;  // the list's end, its count not known
     std::string low = name;
     for (char& c : low) c = char(std::tolower(static_cast<unsigned char>(c)));
+    const std::string leaf = low.substr(low.rfind('/') == std::string::npos ? 0 : low.rfind('/') + 1);
     const char* kind = "";
-    const bool rifle_grenade = low.find("riflegrenade") != std::string::npos || low.find("rifle_grenade") != std::string::npos ||
-                               low.find("grenadelauncher") != std::string::npos || low.find("m7") != std::string::npos;
-    if (low.find("bazooka") != std::string::npos || low.find("rocket") != std::string::npos ||
-        low.find("type4") != std::string::npos || low.find("antitank") != std::string::npos) {
+    const bool rifle_grenade = leaf.find("_rgl") != std::string::npos || leaf.find("riflegrenade") != std::string::npos ||
+                               leaf.find("rifle_grenade") != std::string::npos || leaf.find("grenadelauncher") != std::string::npos;
+    if (leaf.find("bazooka") != std::string::npos || leaf.find("rocket") != std::string::npos || leaf == "m18" ||
+        leaf.rfind("m18_", 0) == 0 || leaf.find("type4") != std::string::npos || leaf.find("antitank") != std::string::npos ||
+        leaf.find("type99_at") != std::string::npos) {
       if (k.at < 0 && i < 4) k.at = int(i);
       kind = " (anti-tank)";
     } else if (rifle_grenade) {
       if (k.gl < 0 && i < 4) k.gl = int(i);
       kind = " (rifle grenade)";
-    } else if (low.find("grenade") != std::string::npos || low.find("dynamite") != std::string::npos ||
-               low.find("explosive") != std::string::npos) {
+    } else if (leaf.find("gren") != std::string::npos || leaf.find("dynamite") != std::string::npos) {
       if (k.thrown < 0 && i < 4) k.thrown = int(i);
       kind = " (thrown)";
     }
     k.text += fmt::format(" {} '{}'{}", i, name.empty() ? fmt::format("{:08X}", w) : name, kind);
   }
   k.text += fmt::format("; {} listed, melee index {}", count, int32_t(Load32(base, data + 0x13C)));
+  // A list not readable yet (three of Wake's six kits at the level's start, run fx_tank1) is read again later: kept
+  // as known only once it holds weapons, each soldier data logged once either way.
+  static std::unordered_map<uint32_t, int> logged;  // data -> 1 empty logged, 2 weapons logged
+  int& said = logged[data];
+  if (n == 0) {
+    if (said == 0) {
+      said = 1;
+      REXLOG_INFO("BF bots: weapons of soldier data {:08X} not readable yet:{}", data, k.text);
+#if defined(BF_DEV_TOOLS)
+      std::string dump;
+      for (uint32_t o = 0x180; o < 0x1E0; o += 4) dump += fmt::format(" +{:X}:{:08X}", o, Load32(base, data + o));
+      REXLOG_INFO("BF bots: soldier data {:08X} words:{}", data, dump);
+      if (Readable(list - 8, 32)) {
+        std::string at;
+        for (int o = -8; o < 24; o += 4) {
+          const uint32_t w = Load32(base, uint32_t(int64_t(list) + o));
+          std::string nm = DataName(base, w);
+          if (nm.empty() && Readable(w, 0x18)) nm = DataName(base, Load32(base, w + 0x14));
+          at += fmt::format(" {:+d}:{:08X}{}", o, w, nm.empty() ? "" : "'" + nm + "'");
+        }
+        REXLOG_INFO("BF bots: soldier data {:08X} +1B8 -> {:08X}:{}", data, list, at);
+      }
+#endif
+    }
+    static KitWeapons empty;
+    empty = k;
+    return empty;
+  }
+  if (said < 2) {
+    said = 2;
+    REXLOG_INFO("BF bots: weapons of soldier data {:08X}:{}", data, k.text);
+  }
   return kit_weapons.emplace(data, k).first->second;
 }
 
@@ -568,6 +606,7 @@ const KitWeapons& WeaponsOf(const uint8_t* base, uint32_t data) {
 // name from its data object (+0x14, its name at +0xC: native_input.cpp, run kb_probe_g2), the seat the entry the
 // player holds (+292: 0 the driver's). "" on foot.
 std::string VehicleName(const uint8_t* base, uint32_t vehicle);
+bool IsTank(const std::string& name);  // the Sherman and the Japanese tanks, by name (below)
 std::string VehicleKey(const uint8_t* base, uint32_t player, uint32_t* vehicle_out = nullptr) {
   const uint32_t so = Load32(base, player + 288), ctl = Load32(base, player + 312);
   if (!ctl || ctl == so || !Readable(ctl, 0x20)) return {};
@@ -2083,8 +2122,19 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
   // enemy's chest (the ray stops short of the enemy so its own body does not count).
   const Enemy* seen = nullptr;
   int rays = 0;
+  // An enemy in a tank (TekRantGaming, 26 Nov 2026: "if I am in a tank bots shoot at me rather than using their class
+  // equipment correctly"): fought only with what hurts a tank, the kit's anti-tank weapon or its rifle grenade while it
+  // has shots of it left this life. A bot with neither leaves the tank alone and goes on with its flag (its gun only
+  // scratched the paint, and it stood still to do it).
+  const KitWeapons& kit_w = WeaponsOf(base, Load32(base, bot.player + 500));
+  const bool hurts_tanks = (kit_w.at >= 0 && bot.heavy_shots[0] < 5) || (kit_w.gl >= 0 && bot.heavy_shots[1] < 6);
+  auto in_tank = [&](uint32_t player, uint32_t soldier_of) {
+    const uint32_t c = player && Readable(player, 0x140) ? Load32(base, player + 312) : 0;
+    return c && c != soldier_of && IsTank(VehicleName(base, c));
+  };
   for (const Enemy& e : enemies) {
     if (rays >= 3) break;
+    if (!hurts_tanks && in_tank(e.player, e.soldier)) continue;
     const float off = std::fabs(WrapAngle(YawTo(pos, e.pos) - bot.yaw));
     if (off > kFov / 2 && e.dist > 12.0f && e.soldier != bot.enemy) continue;
     // Head, chest and hips: any one in sight is enough (a single ray lost the enemy behind every leaf, run bots_s1i).
@@ -2166,9 +2216,12 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
       const bool in_vehicle = ctl && ctl != seen->soldier;
       const bool plane = in_vehicle && IsPlane(VehicleName(base, ctl));
       int want = 0, kind = -1;
+      const bool tank = in_vehicle && IsTank(VehicleName(base, ctl));
       if (kw.at >= 0 && in_vehicle && bot.heavy_shots[0] < 5 && seen->dist < (plane ? 120.0f : 150.0f) &&
           (!plane || seen->pos[1] - pos[1] < 40.0f))
         want = kw.at, kind = 0;
+      else if (kw.gl >= 0 && tank && bot.heavy_shots[1] < 6 && seen->dist > 15.0f && seen->dist < 140.0f)
+        want = kw.gl, kind = 1;  // a rifle grenade at a tank (26 Nov 2026), its hull's middle
       else if (kw.gl >= 0 && !in_vehicle && fresh && bot.heavy_shots[1] < 6 && seen->dist > 35.0f && seen->dist < 140.0f)
         want = kw.gl, kind = 1;
       else if (kw.thrown >= 0 && !in_vehicle && !fresh && bot.heavy_shots[2] < 3 && seen->dist > 8.0f && seen->dist < 25.0f)
@@ -2459,6 +2512,9 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
       }
     }
     if (!stuck) bot.melee_tries = 0;
+    if (stuck && REXCVAR_GET(bf_bots_log_detail))
+      REXLOG_INFO("BF bots: {} is stuck at {:.1f} {:.1f} {:.1f}{}", bot.name, pos[0], pos[1], pos[2],
+                  fence ? ", something low ahead: the knife" : ", a side step");
     if (stuck && !fence) {
       // Stuck on something the grid does not know (a vehicle, a soldier, a corner): a side step first.
       bot.detour_yaw = WrapAngle(bot.yaw + (Rand01() < 0.5f ? -1 : 1) * (1.2f + Rand01()));
@@ -2604,7 +2660,8 @@ void PlaneTick(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t plane, uint32_
 // by the absolute aim, input 7 its gun). Its goal: the nearest flag its side does not hold (else the nearest it holds),
 // stopping 18 m short to fight from there. The way: toward the goal, or along the cells the players drove this tank
 // over (what it learned) when one of them, 12 to 45 m off, is nearer the goal; rays ahead at the hull's height
-// (straight and half a radian either side) steer it round what is in front; not moving for 3 s, a hard turn for 2 s.
+// (straight, then six ways up to a radian either side) steer it round what is in front; not moving for 3 s, it backs
+// off 1.5 s and turns hard 2 s (26 Nov 2026; a hard turn only before, and it dug in: 85 stuck in 6 min, run fx_guad1).
 // The gun: the nearest enemy soldier within 150 m it can see, aimed at, a shot every 2.5 s once the aim has settled.
 void TankTick(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t vehicle, uint32_t soldier,
               const std::vector<uint32_t>& listed, Clock::time_point now, double dt) {
@@ -2654,20 +2711,43 @@ void TankTick(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t vehicle, uint32
   };
   const float ahead = clear(hdg);
   if (ahead < 0.7f) {
-    const float left = clear(hdg + 0.5f), right = clear(hdg - 0.5f);
-    want = hdg + (left >= right ? 0.8f : -0.8f);
+    // Something within 7 m ahead (TekRantGaming, 26 Nov 2026: "bots driving will often run into things"): the clearest
+    // of six ways round it, up to a radian either side, the one nearest the way it wants when two are as clear (only
+    // two rays half a radian off before, and a turn of 0.8 whatever they found).
+    float best_clear = -1.0f, best_yaw = hdg;
+    for (float off : {0.35f, -0.35f, 0.7f, -0.7f, 1.05f, -1.05f}) {
+      const float c = clear(hdg + off);
+      const float score = c - 0.15f * std::fabs(WrapAngle(hdg + off - want));
+      if (score > best_clear) best_clear = score, best_yaw = hdg + off;
+    }
+    want = best_yaw + (WrapAngle(best_yaw - hdg) > 0 ? 0.25f : -0.25f);
   }
   if (now - bot.tank_check_at > std::chrono::seconds(3)) {
-    if (bot.tank_check_at != Clock::time_point{} && Dist2D(at, bot.tank_check_pos) < 1.0f && to_goal > 18.0f) {
+    if (REXCVAR_GET(bf_bots_log_detail))
+      REXLOG_INFO("BF bots: {} drives {} at {:.0f} {:.0f} {:.0f}, {:.0f} m to its flag, moved {:.1f} m in 3 s, clear ahead "
+                  "{:.0f}%{}",
+                  bot.name, VehicleName(base, vehicle), at[0], at[1], at[2], to_goal,
+                  bot.tank_check_at == Clock::time_point{} ? 0.0f : Dist2D(at, bot.tank_check_pos), ahead * 100,
+                  now < bot.tank_turn_until ? ", turning hard" : "");
+    if (bot.tank_check_at != Clock::time_point{} && Dist2D(at, bot.tank_check_pos) < 1.0f && to_goal > 18.0f &&
+        now >= bot.tank_turn_until) {
+      // Stuck: back off 1.5 s first (pushing on only dug in), its hull swinging, then the hard turn the other way 2 s.
       bot.tank_turn = Rand01() < 0.5f ? 1.0f : -1.0f;
-      bot.tank_turn_until = now + std::chrono::seconds(2);
+      bot.tank_reverse_until = now + std::chrono::milliseconds(1500);
+      bot.tank_turn_until = now + std::chrono::milliseconds(3500);
+      REXLOG_INFO("BF bots: {} is stuck in {} at {:.0f} {:.0f} ({:.0f} m to its flag): backs off and turns", bot.name,
+                  VehicleName(base, vehicle), at[0], at[2], to_goal);
     }
     std::copy(at, at + 3, bot.tank_check_pos);
     bot.tank_check_at = now;
   }
   const float err = WrapAngle(want - hdg);
-  analog[4] = now < bot.tank_turn_until ? bot.tank_turn : std::clamp(err * 1.5f, -1.0f, 1.0f);
-  analog[0] = to_goal < 18.0f && now >= bot.tank_turn_until ? 0.0f : std::fabs(err) > 1.2f ? 0.4f : 1.0f;
+  const bool reversing = now < bot.tank_reverse_until;
+  analog[4] = reversing ? -bot.tank_turn : now < bot.tank_turn_until ? bot.tank_turn : std::clamp(err * 1.5f, -1.0f, 1.0f);
+  analog[0] = reversing                                          ? -1.0f
+              : to_goal < 18.0f && now >= bot.tank_turn_until ? 0.0f
+              : std::fabs(err) > 1.2f || ahead < 0.4f         ? 0.4f
+                                                              : 1.0f;
   // The gun.
   const float gun[3] = {at[0], at[1] + 2.5f, at[2]};
   float target[3] = {}, best_d = 150.0f;

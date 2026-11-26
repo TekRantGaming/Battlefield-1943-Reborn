@@ -108,9 +108,12 @@ offline or LAN play and for real servers.
   - All the way up: the bots fight closer (preferred range down to 70%), aim up to 30% better, settle their aim faster,
     sprint more and pause less between bursts.
   - Not yet seen in a match.
-- **Weapons (not yet seen in a match):** a bot reads its kit's weapons in slot order (the soldier data's weapon
-  list) and tells the anti-tank weapon, the rifle grenade and a thrown explosive apart by their names; the server log
-  lists each kit's weapons as the level starts. It picks a slot with the game's SelectWeapon1 to 4 (run weap1: the
+- **Weapons:** a bot reads its kit's weapons in slot order (the soldier data's weapon list at +0x1B8, its count at
+  +0x1B0; until 26 Nov 2026 the list was read at +0x1A8, which held no weapons, so no bot ever used anything but its
+  gun) and tells the anti-tank weapon (M18, M18_jap), the rifle grenade (M1Garand_rgl, Type5_rgl) and a thrown grenade
+  (US_Pineapple_Gren, Jap_Type97_Gren) apart by their names; the server log lists each kit's weapons as the level
+  starts. An enemy in a tank is fought only with the anti-tank weapon or a rifle grenade (15 to 140 m); a bot with
+  neither left leaves the tank alone and goes on with its flag. It picks a slot with the game's SelectWeapon1 to 4 (run weap1: the
   server took them; the pad's Y swap is actions 9 and 19 together) and waits about a second before firing. The
   anti-tank weapon goes at an enemy in a vehicle within 150 m (a plane only within 120 m and 40 m over the bot), the
   rifle grenade at an enemy on foot 35 to 140 m off, a thrown explosive at one 8 to 25 m off just lost behind cover.
@@ -158,7 +161,10 @@ offline or LAN play and for real servers.
 - **Tanks (new, commit b28008c6):** a bot within 20 m of a free Sherman or Japanese tank may take its driver's seat,
   two bots a side at most. It drives to the nearest flag its side does not hold and stops about 18 m short, follows
   the ground human players drove that tank over where that is shorter, steers round what is in front of it, and fires
-  the gun at the nearest enemy soldier it can see within 150 m, a shot every 2.5 seconds.
+  the gun at the nearest enemy soldier it can see within 150 m, a shot every 2.5 seconds. Something within 7 m ahead:
+  it steers for the clearest of six ways up to a radian either side and slows down; not moving for 3 seconds, it backs
+  off 1.5 seconds and turns hard 2 seconds (26 Nov 2026: a hard turn alone before; stuck tanks in a 6 minute
+  Guadalcanal match with 16 bots went from 85 to 47).
 - **Planes (new, commit b28008c6):** one bot pilot a side at most, in a Corsair or a Zero within 40 m. It takes off,
   climbs to about 100 m over the flags, banks toward the nearest flag its side does not hold and the enemy soldiers
   near it, dives on them, fires when lined up and pulls up about 75 m over the ground. On the Japanese airfield of
