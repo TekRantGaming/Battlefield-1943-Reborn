@@ -127,7 +127,15 @@ offline or LAN play and for real servers.
   each tick so the server keeps up (Guadalcanal took 86 seconds while the match ran). The grid is saved and loaded
   whole in later matches.
 - Where human players walk becomes walkable ground for sure, whatever the rays found.
-- Water is swimmable once its height is known, at three times the cost of a step on land.
+- Water is swimmable once its height is known, at ten times the cost of a step on land (three until 26 Nov 2026:
+  on Wake the swim across the lagoon then beat the walk round it). A cell walked by a swimmer counts as water, not
+  ground: before, swimmers' tracks were learned as ground, lines of "land" across the lagoon and out from the
+  carriers that led bots into the water.
+- **The way to each flag over the whole level** (26 Nov 2026): every three minutes the server works out, on a thread
+  of its own, every cell's cost to reach each flag. A bot more than 70 m from a goal at its flag plans its path only
+  to a point about 80 m along that way, so a long way round (Wake's lagoon) is always found; the path search alone
+  looks at 4,000 cells, and Wake's walks round the lagoon need 14,000 to 31,000. The server log says "the ways to N
+  flags worked out".
 - A bot that gets stuck closes that step for a while and plans round it. Stuck in front of something low (blocked at
   the waist within 1.5 m, clear over the head), it knifes it for 2 seconds, twice at most, before going round: a fence
   the game lets break falls. Not yet seen on a real fence in a test.
