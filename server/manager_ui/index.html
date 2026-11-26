@@ -375,7 +375,8 @@ header { background: url(logo) right center / contain no-repeat, #111; }
   <p class="hint" id="e-bots-note">Bots sit out Coral Sea, because they can't fly. They come back on the next map.</p>
   <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Maps, in the order they are played</span><div class="maps" id="e-maps"></div></div>
   <label class="check"><input type="checkbox" id="e-listed"><span>Listed in the server browser<br><small>Off: players join only with Direct connect, by the address you give them.</small></span></label>
-  <label class="check" id="e-night-box"><input type="checkbox" id="e-night"><span>Night Ops: players see the maps at night</span></label>
+  <label class="field" id="e-night-box"><span>Event</span><select id="e-event"><option value="">None: the world below</option><option value="night">Night Ops: 18:30, a storm builds with the tickets</option><option value="daybreak">Daybreak: from sunrise in real time, a storm builds with the tickets</option></select></label>
+  <p class="hint" id="e-event-note">An event sets the time, clouds, weather, fog and wind itself, every round. Admins can still change them with F9 for the rest of a round.</p>
   <label class="check"><input type="checkbox" id="e-balance"><span>Team balance<br><small>When one team has 2 or more players more for 20 seconds, a player who has died on it moves to the other team, with no points lost. A Change Team that would make the teams uneven is refused.</small></span></label>
   <label class="check"><input type="checkbox" id="e-daynight"><span>Day and night: the light, the shadows and the sky follow the server's clock<br><small>Admins can change all of these while the server runs, with F9 in the game.</small></span></label>
   <div class="grid2">
@@ -686,7 +687,7 @@ function openEdit(n) {
   const fresh = n > state.config.servers.length;
   const used = state.config.servers.map(x => x.port);
   let port = 18300; while (used.includes(port)) port++;
-  const sv = fresh ? { name: 'Battlefield 1943 Reborn ' + n, description: '', maps: state.maps.map(m => m.key), round_end_delay: 45, listed: true, night: false, port: port, max_players: 32, autostart: true, team_balance: true } : state.config.servers[n - 1];
+  const sv = fresh ? { name: 'Battlefield 1943 Reborn ' + n, description: '', maps: state.maps.map(m => m.key), round_end_delay: 45, listed: true, night: false, daybreak: false, port: port, max_players: 32, autostart: true, team_balance: true } : state.config.servers[n - 1];
   $('edit-title').textContent = fresh ? 'A new server' : 'Server ' + n;
   $('e-name').value = sv.name; $('e-description').value = sv.description; $('e-port').value = sv.port;
   // Server sizes (docs/SERVER-SIZES.md): the game's own 24 (the original) and smaller, 32 (the default since 20 Nov
@@ -717,13 +718,13 @@ function openEdit(n) {
   $('e-tick').replaceChildren(h('option', { value: 0, text: 'As under Network (' + state.tick + ' Hz)' }),
     ...[[60, 'Recommended'], [30, 'Original'], [75, 'Experimental'], [100, 'Experimental']].map(([hz, word]) => h('option', { value: hz, text: hz + ' Hz - ' + word })));
   $('e-tick').value = String([30, 60, 75, 100].includes(sv.tick) ? sv.tick : 0);
-  $('e-listed').checked = sv.listed; $('e-night').checked = sv.night; $('e-autostart').checked = sv.autostart; $('e-balance').checked = sv.team_balance !== false;
+  $('e-listed').checked = sv.listed; $('e-event').value = sv.night ? 'night' : sv.daybreak ? 'daybreak' : ''; $('e-autostart').checked = sv.autostart; $('e-balance').checked = sv.team_balance !== false;
   $('e-daynight').checked = sv.day_night === true; $('e-time').value = sv.time ?? 16; $('e-dayminutes').value = sv.day_minutes ?? 0;
   $('e-cloud').value = sv.cloud_cover ?? 35; $('e-cloudrate').value = sv.cloud_rate ?? 33; $('e-weather').value = sv.weather ?? 0;
   $('e-fog').value = sv.fog ?? 0; $('e-groundfog').value = sv.ground_fog ?? 0; $('e-wind').value = sv.wind ?? 30;
   $('e-cloudheight').value = sv.cloud_height ?? 450;
   $('e-admins').value = sv.admins ?? '';
-  $('e-night-box').style.display = state.night_ops ? '' : 'none';
+  $('e-night-box').style.display = $('e-event-note').style.display = state.night_ops ? '' : 'none';
   $('e-remove').style.display = fresh || state.config.servers.length < 2 ? 'none' : '';
   $('e-save-restart').style.display = fresh ? 'none' : '';
   const order = sv.maps.concat(state.maps.map(m => m.key).filter(k => !sv.maps.includes(k)));
@@ -788,7 +789,7 @@ async function saveEdit(restart) {
   for (const k of ['balance_gap', 'balance_min_players', 'balance_delay', 'balance_block_stacking'])
     if (servers[editing - 1] && servers[editing - 1][k] !== undefined) kept[k] = servers[editing - 1][k];
   servers[editing - 1] = { ...kept, team_balance: $('e-balance').checked, name: name, description: $('e-description').value.trim(), maps: maps, round_end_delay: Number($('e-delay').value), listed: $('e-listed').checked,
-    night: $('e-night').checked, port: port, max_players: Number($('e-max').value), bots: Number($('e-bots').value) || 0,
+    night: $('e-event').value === 'night', daybreak: $('e-event').value === 'daybreak', port: port, max_players: Number($('e-max').value), bots: Number($('e-bots').value) || 0,
     tickets: ['auto', 'map'].includes($('e-tickets').value) ? $('e-tickets').value : Number($('e-tickets').value), autostart: $('e-autostart').checked,
     tick: Number($('e-tick').value) || 0,
     day_night: $('e-daynight').checked, time: Number($('e-time').value) || 0, day_minutes: Number($('e-dayminutes').value) || 0,

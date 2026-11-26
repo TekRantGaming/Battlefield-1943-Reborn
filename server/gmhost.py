@@ -1081,11 +1081,14 @@ class World:
         self.seconds = self.evolve = 0.0
         self.at = time.monotonic()
         self.admins, self.key = set(), ''
+        self.ground_fog_height, self.ground_fog_sparse = 0.5, 0.7  # the surface fog's depth (m) and sparseness
         self.night_ops = False
+        self.daybreak = False  # 26 Nov 2026: the second event (DAYBREAK_*); never both, Night Ops first
         self.round, self.progress, self.stage = None, 0.0, -1  # Night Ops: the round's build (match)
         self.held = set()  # Night Ops: what an admin set this round (NIGHT_OPS_HELD), which the build leaves alone
         self.tickets = 0  # each team's tickets at the round's start, from match.txt; 0: the level's own (read_match)
         self.ramp_from = time.monotonic()
+        self.round_from = time.monotonic()  # Daybreak: when this round's sunrise was (Back to Daybreak's clock)
         self.pings = {}  # a joined player's name -> (their ping in ms, when they said it): the scoreboards' ping
 
     # Night Ops (16 Nov 2026, TekRantGaming: the night maps gone, "we would just start the match to always be at a set
@@ -1124,28 +1127,91 @@ class World:
     TOUCHED = {'day_night': 1, 'hour': 2, 'day_minutes': 4, 'cover': 8, 'rate': 16, 'weather': 32, 'fog': 64,
                'ground_fog': 128, 'wind': 256, 'cloud_height': 512}
 
-    @classmethod
-    def night_ops_values(cls, progress):
-        """Cloud cover, weather and fog at a round's progress (0 to 1), and the stage's index (NIGHT_OPS_STAGE_NAMES:
-        the clear night up to the second row, then one stage for each row after it, the last row's from its start)."""
-        rows = cls.NIGHT_OPS_STAGES
+    # Daybreak (TekRantGaming, 26 Nov 2026): "start with the sun just rising on the horizon, and for it to play in real
+    # time, so the sun will continue to rise as the game goes on ... I want a storm, not as strong as ... the nighttime
+    # one, but a storm nonetheless, is to slowly come in throughout the match. Make sure that you're utilizing all
+    # aspects of our new graphics ... a preset a lot like night ops, so that servers can pre-select it." His picks the
+    # same day: every round starts again at sunrise; the storm a thunderstorm to 70%; servers only (no Custom Match).
+    # The clock: 06:00 (the sky's sun on the horizon, NativeXRenderer sky.cpp: 70 sin(pi (hour - 6) / 12) degrees up)
+    # and a day in 1440 minutes, so a 30 minute round ends with the sun about 9 degrees up; the lamps fade out by
+    # 06:13 (NXR D175). BF_DEV_DAYBREAK_MINUTES=<a day's minutes> runs it faster in tests.
+    DAYBREAK_HOUR = 6.0
+    DAYBREAK_DAY_MINUTES = 1440.0
+    # The build by tickets, as Night Ops' (the same progress), with its own columns: progress, cloud cover, weather,
+    # distance fog, ground fog, wind. First light: a clear sky, a morning haze and a low mist on the ground and the
+    # sea; the mist burns off as the sun climbs; fair weather clouds build; a thunderstorm forms out at sea from 25%
+    # weather (its roll cloud, far rain shafts and rumble) and comes in; at 70% it rains under it with lightning
+    # (from 60%), its mist starting (from 45%) but never the 60 m storm mist of Night Ops' end (from 75%). The wind
+    # rises with it. Never backwards within a round; a new round is first light again.
+    DAYBREAK_STAGES = (
+        (0.00, 0.10, 0.00, 0.20, 0.60, 0.10),  # first light: clear, the sun on the horizon, haze and ground mist
+        (0.30, 0.20, 0.05, 0.10, 0.15, 0.20),  # the mist burns off
+        (0.50, 0.50, 0.20, 0.10, 0.10, 0.35),  # the clouds build, the wind gets up
+        (0.70, 0.75, 0.45, 0.20, 0.15, 0.50),  # the storm comes in from the sea: dark cloud, far lightning
+        (0.90, 0.85, 0.70, 0.30, 0.25, 0.65),  # the storm over the map: rain and lightning
+        (1.00, 0.85, 0.70, 0.30, 0.25, 0.65),
+    )
+    DAYBREAK_STAGE_NAMES = ('first light', 'the mist burns off', 'the clouds build', 'the storm comes in', 'the storm')
+    # The surface fog for the whole round (eased amounts above; its depth and sparseness are not eased by the games,
+    # so they stay): knee deep, in wide patches (the game's own default is shin deep and sparse: 0.5 m, 0.7).
+    DAYBREAK_GROUND_FOG_HEIGHT, DAYBREAK_GROUND_FOG_SPARSE = 2.0, 0.45
+    # What its build drives, and so what an admin's F9 holds for the round: Night Ops' and the wind.
+    DAYBREAK_HELD = NIGHT_OPS_HELD + ('wind',)
+
+    @staticmethod
+    def stage_values(rows, names, progress):
+        """A schedule's values at a round's progress (0 to 1): each column after the progress in a straight line
+        between two rows, and the stage's index (the first up to the second row, then one stage for each row after
+        it, the last row's from its start)."""
         p = max(0.0, min(1.0, progress))
         i = 0
         while i < len(rows) - 2 and p > rows[i + 1][0]:
             i += 1
         a, b = rows[i], rows[i + 1]
         t = 0.0 if b[0] <= a[0] else max(0.0, min(1.0, (p - a[0]) / (b[0] - a[0])))
-        cover, weather, fog = (a[k] + (b[k] - a[k]) * t for k in (1, 2, 3))
-        stage = 0 if p <= rows[1][0] else min(len(cls.NIGHT_OPS_STAGE_NAMES) - 1, i if p < rows[-2][0] else i + 1)
+        values = tuple(a[k] + (b[k] - a[k]) * t for k in range(1, len(a)))
+        stage = 0 if p <= rows[1][0] else min(len(names) - 1, i if p < rows[-2][0] else i + 1)
+        return values, stage
+
+    @classmethod
+    def night_ops_values(cls, progress):
+        """Night Ops' cloud cover, weather and fog at a round's progress (0 to 1), and the stage's index
+        (NIGHT_OPS_STAGE_NAMES)."""
+        (cover, weather, fog), stage = cls.stage_values(cls.NIGHT_OPS_STAGES, cls.NIGHT_OPS_STAGE_NAMES, progress)
         return cover, weather, fog, stage
+
+    @classmethod
+    def daybreak_values(cls, progress):
+        """Daybreak's cloud cover, weather, distance fog, ground fog and wind at a round's progress, and the stage's
+        index (DAYBREAK_STAGE_NAMES)."""
+        values, stage = cls.stage_values(cls.DAYBREAK_STAGES, cls.DAYBREAK_STAGE_NAMES, progress)
+        return values + (stage,)
+
+    @property
+    def scheduled(self):
+        """An event server (Night Ops or Daybreak): its schedule drives the world, the tickets its storm."""
+        return self.night_ops or self.daybreak
+
+    @property
+    def event_name(self):
+        return 'Night Ops' if self.night_ops else 'Daybreak' if self.daybreak else ''
+
+    @property
+    def event_held(self):
+        return self.DAYBREAK_HELD if self.daybreak else self.NIGHT_OPS_HELD
 
     def configure(self, args):
         clamp = lambda v, lo, hi: max(lo, min(hi, float(v)))
         self.night_ops = bool(getattr(args, 'night', False))
+        self.daybreak = bool(getattr(args, 'daybreak', False)) and not self.night_ops
         self.day_night = bool(args.day_night)
         self.hour = clamp(args.time, 0, 24) % 24
         self.day_minutes = clamp(args.day_minutes, 0, 1440)
-        if self.night_ops:
+        self.ground_fog_height, self.ground_fog_sparse = 0.5, 0.7
+        if self.daybreak:
+            self.ground_fog_height = self.DAYBREAK_GROUND_FOG_HEIGHT
+            self.ground_fog_sparse = self.DAYBREAK_GROUND_FOG_SPARSE
+        if self.scheduled:
             self.night_ops_clock()
         self.cover, self.rate = clamp(args.cloud_cover, 0, 1), clamp(args.cloud_rate, 0, 1)
         self.weather = clamp(args.weather, 0, 1)
@@ -1155,7 +1221,7 @@ class World:
         self.round, self.progress, self.stage = None, 0.0, -1
         self.held = set()
         self.match_file, self.match_read = getattr(args, 'match_file', '') or '', 0.0
-        if self.night_ops:
+        if self.scheduled:
             self.set_night_ops(0.0)
         # Player IDs as the game shows them (eight hex digits, the low half of the XUID).
         self.admins = {a.strip().upper().rjust(8, '0') for a in args.admins.replace(';', ',').replace(' ', ',').split(',')
@@ -1170,9 +1236,15 @@ class World:
             self.weather * 100, self.fog * 100, self.ground_fog * 100, self.wind * 100, self.cloud_height)
 
     def set_night_ops(self, progress):
-        """The build at a round's progress, on every setting an admin has not set this round (held)."""
+        """An event's build (Night Ops or Daybreak) at a round's progress, on every setting an admin has not set this
+        round (held)."""
         self.progress = progress
-        cover, weather, fog, stage = self.night_ops_values(progress)
+        if self.daybreak:
+            cover, weather, fog, ground_fog, wind, stage = self.daybreak_values(progress)
+            names = self.DAYBREAK_STAGE_NAMES
+        else:
+            cover, weather, fog, stage = self.night_ops_values(progress)
+            ground_fog, wind, names = fog, None, self.NIGHT_OPS_STAGE_NAMES
         if 'clouds' not in self.held:
             self.cover = cover
         if 'weather' not in self.held:
@@ -1180,37 +1252,58 @@ class World:
         if 'fog' not in self.held:
             self.fog = fog
         if 'ground fog' not in self.held:
-            self.ground_fog = fog
+            self.ground_fog = ground_fog
+        if wind is not None and 'wind' not in self.held:  # Night Ops' wind was always the admin's
+            self.wind = wind
         if stage != self.stage:
             self.stage = stage
-            self.host.note('world: Night Ops at %.0f%% of the round: %s, %s%s' % (
-                progress * 100, self.NIGHT_OPS_STAGE_NAMES[stage], self.said(), self.held_said()))
+            self.host.note('world: %s at %.0f%% of the round: %s, %s%s' % (
+                self.event_name, progress * 100, names[stage], self.said(), self.held_said()))
 
     def held_said(self):
-        held = [h for h in self.NIGHT_OPS_HELD if h in self.held]
+        held = [h for h in self.event_held if h in self.held]
         return '; held by an admin this round: %s' % ', '.join(held) if held else ''
 
     def night_ops_clock(self):
-        self.day_night, self.hour, self.day_minutes = True, self.NIGHT_OPS_HOUR, 0.0
+        """An event's clock at a round's start: Night Ops' held at 18:30, Daybreak's from sunrise in real time."""
+        self.advance()  # the time so far on the old clock (and the clouds' clocks), so it runs from now
+        if self.daybreak:
+            minutes = self.DAYBREAK_DAY_MINUTES
+            test = os.environ.get('BF_DEV_DAYBREAK_MINUTES', '')  # tests: a faster day
+            if test:
+                try:
+                    minutes = max(1.0, min(1440.0, float(test)))
+                except ValueError:
+                    pass
+            self.day_night, self.hour, self.day_minutes = True, self.DAYBREAK_HOUR, minutes
+        else:
+            self.day_night, self.hour, self.day_minutes = True, self.NIGHT_OPS_HOUR, 0.0
 
     def night_ops_back(self, who):
-        """Night Ops: everything an admin set this round back on the schedule (the panel's "Back to Night Ops")."""
-        if not self.night_ops or not self.held:  # on it already (the panel sends it until an answer says so)
+        """An event: everything an admin set this round back on the schedule (the panel's "Back to Night Ops" or
+        "Back to Daybreak"). Daybreak's clock goes back to where the round's own would be: sunrise plus the round's
+        time so far."""
+        if not self.scheduled or not self.held:  # on it already (the panel sends it until an answer says so)
             return
         had = self.held_said()
         self.held = set()
         self.night_ops_clock()
+        if self.daybreak and self.day_minutes > 0:
+            self.hour = (self.hour + (time.monotonic() - self.round_from) / (self.day_minutes * 60) * 24) % 24
         self.stage = -1  # says the stage again
-        self.host.note('world: %s put Night Ops back on its schedule (%s)' % (who or 'an admin', had.lstrip('; ')))
+        self.host.note('world: %s put %s back on its schedule (%s)' % (who or 'an admin', self.event_name,
+                                                                         had.lstrip('; ')))
         self.set_night_ops(self.progress)
 
     def match(self, round_number, left):
-        """Night Ops: the round's progress from the server (round number, the share of tickets the team with fewer still
-        has): the clouds, weather and fog of NIGHT_OPS_STAGES. A new round starts clear."""
-        if not self.night_ops:
+        """An event server: the round's progress from the server (round number, the share of tickets the team with fewer
+        still has): the clouds, weather and fog of NIGHT_OPS_STAGES or DAYBREAK_STAGES. A new round starts clear, and
+        on Daybreak at sunrise again (TekRantGaming, 26 Nov 2026: back at sunrise every round)."""
+        if not self.scheduled:
             return
         progress = max(0.0, min(1.0, 1.0 - left))
-        test = os.environ.get('BF_DEV_NIGHT_RAMP', '')  # tests: the whole build in this many seconds, not the tickets
+        # tests: the whole build in this many seconds, not the tickets
+        test = os.environ.get('BF_DEV_NIGHT_RAMP', '') or os.environ.get('BF_DEV_EVENT_RAMP', '')
         if test:
             try:
                 progress = min(1.0, (time.monotonic() - self.ramp_from) / max(1.0, float(test)))
@@ -1218,13 +1311,14 @@ class World:
                 test = ''
         if round_number != self.round:
             if self.round is not None:
-                self.host.note('world: Night Ops round %s starts clear%s' % (
-                    round_number, ', the last round\'s admin settings ended' if self.held else ''))
-            if self.held:  # an admin's settings last the round: the next is a plain Night Ops round
+                self.host.note('world: %s round %s starts %s%s' % (
+                    self.event_name, round_number, 'at sunrise' if self.daybreak else 'clear',
+                    ', the last round\'s admin settings ended' if self.held else ''))
+            if self.held or self.daybreak:  # an admin's settings last the round: the next is a plain event round
                 self.held = set()
                 self.night_ops_clock()
             self.round, self.stage = round_number, -1
-            self.ramp_from = time.monotonic()
+            self.ramp_from = self.round_from = time.monotonic()
             self.set_night_ops(0.0 if not test else progress)
             return
         if progress > self.progress + 1e-6:
@@ -1331,6 +1425,8 @@ class World:
             self.rate = rate
         if touched & t['wind']:
             self.wind = wind
+            if 'wind' in self.event_held:  # Daybreak's build drives the wind too
+                self.held.add('wind')
         if touched & t['cloud_height'] and height is not None:
             self.cloud_height = height
         if self.said() != before or self.held != held_before:
@@ -1348,11 +1444,11 @@ class World:
             if version != 1 or at > len(data):
                 return
             self.advance()
-            self.read_match()  # Night Ops: a new round's world at once
+            self.read_match()  # Night Ops and Daybreak: a new round's world at once
             admin = self.admin(name, key, addr)
-            if flags & 8 and admin:  # Night Ops: "Back to Night Ops" (24 Nov 2026)
+            if flags & 8 and admin:  # Night Ops: "Back to Night Ops" (24 Nov 2026); Daybreak's the same
                 self.night_ops_back(name)
-            if flags & 1 and admin and len(data) >= at + 33 and self.night_ops:
+            if flags & 1 and admin and len(data) >= at + 33 and self.scheduled:
                 self.night_ops_set(name, data, at)
             elif flags & 1 and admin and len(data) >= at + 33:
                 day_night = data[at] != 0
@@ -1380,10 +1476,13 @@ class World:
                         self.pings[name] = (ms, time.monotonic())
                     else:
                         self.pings.pop(name, None)
-            # Flags 4 and 8 (24 Nov 2026; a game from before reads only 1 and 2): a Night Ops server, and an admin's
-            # settings hold some of its build this round (the panel's "Back to Night Ops").
+            # Flags 4 and 8 (24 Nov 2026; a game from before reads only 1 and 2): an event server (Night Ops, and since
+            # 26 Nov 2026 Daybreak too), and an admin's settings hold some of its build this round (the panel's "Back
+            # to Night Ops"). Flag 16 (26 Nov 2026): the event is Daybreak (the panel's "Back to Daybreak"; a game from
+            # before says Night Ops).
             reply = b'BF43WRLR' + bytes([1, (1 if self.day_night else 0) | (2 if admin else 0) |
-                                         (4 if self.night_ops else 0) | (8 if self.held else 0)]) + struct.pack(
+                                         (4 if self.scheduled else 0) | (8 if self.held else 0) |
+                                         (16 if self.daybreak else 0)]) + struct.pack(
                 '>8f2d', self.hour, self.day_minutes, self.cover, self.rate, self.weather, self.fog, self.ground_fog,
                 self.wind, self.seconds, self.evolve) + struct.pack('>f', self.cloud_height)
             # Then as the game's own host sends them (gm_host.cpp, 19 Nov 2026; a game from before reads none): the
@@ -1391,6 +1490,10 @@ class World:
             # (0 the level's own; the HUD's ticket bars, 24 Nov 2026), the time limit in minutes (0: not told) and the
             # round's seconds left (-1: none shown).
             reply += struct.pack('>BHHf', 0, self.tickets, 0, -1.0)
+            # Then (26 Nov 2026, as gm_host.cpp sends them since D224 and 21 Nov; a game from before reads none): the
+            # storm's type (0 a thunderstorm: what every game drew from this host before, which sent none), and the
+            # surface fog's depth and sparseness (the games' own defaults, 0.5 m and 0.7, but on Daybreak).
+            reply += struct.pack('>Bff', 0, self.ground_fog_height, self.ground_fog_sparse)
             self.host.transport.sendto(reply, addr)
             if flags & 4:
                 self.host.transport.sendto(self.ping_list(), addr)
@@ -1781,7 +1884,7 @@ async def serve(args):
         reg = {'op': 'register', 'name': args.name, 'port': public[1], 'map': args.map,
                'max_players': args.max_players, 'mode': 'classic', 'description': args.description[:200],
                'maps': [m for m in args.maps.split(',') if m], 'listed': not args.unlisted, 'night': args.night,
-               'region': args.region, 'tick': args.tick}
+               'daybreak': args.daybreak and not args.night, 'region': args.region, 'tick': args.tick}
         # A host on one address of its own (tests: 127.0.0.2) says where; one on every address (the packages: 0.0.0.0)
         # is found by the backend.
         if args.public or listen[0] not in ('0.0.0.0', '::'):
@@ -2073,6 +2176,10 @@ def main():
     # and --day-minutes are then not used. Its storm builds with each round's tickets (World.match, --match-file).
     ap.add_argument('--night', action='store_true',
                     help='a night server (Night Ops): its world held at 18:30, the storm building with the tickets')
+    # Daybreak (TekRantGaming, 26 Nov 2026): the second event, as Night Ops: a round from sunrise in real time, a thunderstorm
+    # building with the tickets (World.DAYBREAK_*). Listed for the browser's DAYBREAK chip; --night wins if both are given.
+    ap.add_argument('--daybreak', action='store_true',
+                    help='a Daybreak server: each round from sunrise in real time, a thunderstorm building with the tickets')
     # Where the server is (TekRantGaming, 13 Nov 2026: the browser shows the region with its flag): one of the game's
     # region codes (bf/src/regions.h, the manager's drop down). And its tick rate, for the browser: the game's own
     # 30 Hz today.

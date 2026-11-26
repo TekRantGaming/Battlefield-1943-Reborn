@@ -1587,11 +1587,12 @@ class Registry:
     """Dedicated servers register here (server/gmhost.py run by the server package) and stay listed while their
     connection lasts. One JSON object per line:
       server:  {"op": "register", "name", "port", "map", "max_players", "mode", "description", "maps", "listed",
-                "official"?, "address"?, "night"?, "region"?, "tick"?, "version"?}
+                "official"?, "address"?, "night"?, "daybreak"?, "region"?, "tick"?, "version"?}
                region: where the server is, one of the game's region codes (bf/src/regions.h: "gb", "us-east"...);
                the browser shows its name and flag. tick: the server's simulation rate in Hz (30 today)
                mode: "classic" or "modern", the movement and aiming the server plays (default classic)
                night: true for a Night Ops server (its maps drawn at night in players' games; default false)
+               daybreak: true for a Daybreak server (each round from sunrise, a storm building; default false)
                the address: the one the registration came from (a loopback one: this backend's --theater-host);
                "address" [host, port] only from older packages and tests (SERVERS-PLAN.md section 6)
                listed false: not in the list, joined by Direct connect ("find") only
@@ -2020,6 +2021,8 @@ class Registry:
                                   'local': local,  # on this backend's own machine (for_player)
                                   'mode': 'modern' if m.get('mode') == 'modern' else 'classic',
                                   'night': m.get('night') is True,  # Night Ops: its maps at night
+                                  # Daybreak (26 Nov 2026): from sunrise, a storm building; never both
+                                  'daybreak': m.get('daybreak') is True and m.get('night') is not True,
                                   'region': ''.join(c for c in str(m.get('region', '')).lower()
                                                     if c.isalnum() or c == '-')[:16],
                                   'tick': tick_of(m.get('tick')),
@@ -2785,6 +2788,7 @@ def listing(g):
             'description': g.get('description', ''), 'official': bool(g.get('official') or g.get('promoted')),
             'promoted': bool(g.get('promoted') and not g.get('official')),  # Promoted: on the Reborn tab, marked
             'next_map': g.get('next_map', ''), 'maps': g.get('maps', []), 'night': bool(g.get('night')),
+            'daybreak': bool(g.get('daybreak')),
             'region': g.get('region', ''), 'tick': g.get('tick', 0),
             'queue': len(queue_line(g['GID']))}  # players waiting for a place (0.4.7.4)
 
@@ -2792,7 +2796,7 @@ def listing(g):
 def public(g):
     """A game's fields without our own bookkeeping."""
     return {k: v for k, v in g.items()
-            if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night', 'region', 'tick',
+            if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night', 'daybreak', 'region', 'tick',
                          'server_version', 'local', 'hidden', 'from', 'host_key', 'build_digest', 'promoted',
                          'status_at', 'bots')}
 

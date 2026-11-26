@@ -106,6 +106,7 @@ struct ServerInfo {
   bool promoted = false;
   bool Reborn() const { return official && !promoted; }
   bool night = false;  // a Night Ops server: its maps drawn at night (NativeXRenderer D162) while playing there
+  bool daybreak = false;  // a Daybreak server (26 Nov 2026): each round from sunrise, a storm building (gmhost.py)
   std::string region;  // where it is, a region code (regions.h); empty: not said (an older server)
   int tick_hz = 0;     // its tick rate; 0: not said
   // 0.4.1: a server is only listed, found and joined by a game simulating at its rate (a server that says none runs
@@ -602,6 +603,7 @@ class ServerList {
     s.official = JsonField(obj, "official") == "true";
     s.promoted = s.official && JsonField(obj, "promoted") == "true";
     s.night = kNightOps && JsonField(obj, "night") == "true";  // night_ops.h: none without Night Ops
+    s.daybreak = kNightOps && !s.night && JsonField(obj, "daybreak") == "true";  // the same build switch
     s.region = JsonField(obj, "region");
     s.tick_hz = std::atoi(JsonField(obj, "tick").c_str());
     return s;

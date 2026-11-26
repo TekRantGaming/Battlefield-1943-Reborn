@@ -345,6 +345,7 @@ void Run() {
       s.now.day_night = (buf[9] & 1) != 0;
       s.admin = (buf[9] & 2) != 0;
       s.night_ops = (buf[9] & 4) != 0, s.held = (buf[9] & 8) != 0;  // 24 Nov 2026
+      s.daybreak = s.night_ops && (buf[9] & 16) != 0;                // 26 Nov 2026: the event is Daybreak
       s.now.hour = GetF32(buf + 10), s.now.day_minutes = GetF32(buf + 14), s.now.cloud_cover = GetF32(buf + 18);
       s.now.cloud_rate = GetF32(buf + 22), s.now.weather = GetF32(buf + 26);
       s.now.fog = GetF32(buf + 30), s.now.ground_fog = GetF32(buf + 34), s.now.wind = GetF32(buf + 38);
@@ -382,9 +383,9 @@ void Run() {
       }
       // Night Ops: an admin's settings now hold its schedule, or it is back on it (every player's game says so).
       if (s.night_ops && valid && s.held != was_held)
-        REXLOG_INFO("BF world: Night Ops {}: {:.2f} h, a day in {:.0f} min, clouds {:.0f}%, weather {:.0f}%, fog {:.0f}%, "
+        REXLOG_INFO("BF world: {} {}: {:.2f} h, a day in {:.0f} min, clouds {:.0f}%, weather {:.0f}%, fog {:.0f}%, "
                     "ground fog {:.0f}%",
-                    s.held ? "held by an admin's settings for the rest of the round" : "on its schedule again",
+                    s.EventName(), s.held ? "held by an admin's settings for the rest of the round" : "on its schedule again",
                     s.now.hour, s.now.day_minutes, s.now.cloud_cover * 100, s.now.weather * 100, s.now.fog * 100,
                     s.now.ground_fog * 100);
       bf1943::SkinMatchSample(s.now.storm_type, s.now.weather, s.time_limit, s.time_left);  // fov.cpp: the skin's unlock
@@ -481,7 +482,9 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
                         stage == 15 ? " after Back to Night Ops" : "", status.now.weather * 100,
                         status.now.cloud_height, t / 3600, t / 60 % 60, t % 60, status.now.cloud_cover * 100,
                         status.now.fog * 100,
-                        !status.night_ops ? "" : status.held ? "; Night Ops held by an admin" : "; Night Ops on its schedule");
+                        !status.night_ops ? ""
+                        : status.held     ? fmt::format("; {} held by an admin", status.EventName())
+                                          : fmt::format("; {} on its schedule", status.EventName()));
             if (stage == 15) open = false;
             break;
           }
@@ -612,7 +615,8 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
     if (status.night_ops) {
       const ImVec2 b1(x1 - 12 * u, y0 + 33 * u), b0(b1.x - 180 * u, y0 + 7 * u);
       const bool hot = status.held && over(b0, b1);
-      const char* label = status.held ? "BACK TO NIGHT OPS (N)" : "ON NIGHT OPS' SCHEDULE";
+      const char* label = status.daybreak ? (status.held ? "BACK TO DAYBREAK (N)" : "ON DAYBREAK'S SCHEDULE")
+                                          : (status.held ? "BACK TO NIGHT OPS (N)" : "ON NIGHT OPS' SCHEDULE");
       d->AddRectFilled(b0, b1, status.held ? (hot ? IM_COL32(201, 183, 122, 90) : IM_COL32(18, 22, 14, 160))
                                            : IM_COL32(18, 22, 14, 80));
       d->AddRect(b0, b1, status.held ? kit::kGold : IM_COL32(232, 226, 204, 60), 0, 0, u);
@@ -622,7 +626,7 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
           ((hot && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) || ImGui::IsKeyPressed(ImGuiKey_N, false))) {
         BackToNightOps();
         edited_at_ = -100;  // the host's values again as soon as it answers
-        REXLOG_INFO("BF world: the admin asked for Night Ops' schedule back");
+        REXLOG_INFO("BF world: the admin asked for {}'s schedule back", status.EventName());
       }
     }
     if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) row_ = (row_ + count - 1) % count;
@@ -762,7 +766,8 @@ class AdminPanel final : public rex::ui::ImGuiDialog {
     d->AddLine(ImVec2(x0 + 12 * u, fy), ImVec2(x1 - 12 * u, fy), IM_COL32(201, 183, 122, 64));
     d->AddText(f.ui, 12 * u, ImVec2(x0 + 12 * u, fy + 6 * u), IM_COL32(207, 198, 168, 255), rows[row_].help);
     d->AddText(f.ui, 12 * u, ImVec2(x0 + 12 * u, fy + 24 * u), IM_COL32(207, 198, 168, 255),
-               status.night_ops ? "Every player sees a change within two seconds. Night Ops: it holds to the round's end."
+               status.daybreak  ? "Every player sees a change within two seconds. Daybreak: it holds to the round's end."
+               : status.night_ops ? "Every player sees a change within two seconds. Night Ops: it holds to the round's end."
                                 : "Every player of the match sees a change within two seconds.");
     d->AddText(f.ui, 12 * u, ImVec2(x0 + 12 * u, fy + 40 * u), IM_COL32(207, 198, 168, 255),
                "Drag a slider, click a value to type it, or use the arrows \xC2\xB7 F9 or Esc: close");

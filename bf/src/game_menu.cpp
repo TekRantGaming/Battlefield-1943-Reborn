@@ -1070,6 +1070,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }
     NotePresence();  // Discord Rich Presence, the menu open or not
     NoteRebornAchievements();  // Reborn's own achievements, once a joined match's level has the soldier
+    TickEventLook();  // an event server's look, when its host says it is one and its listing did not (in a match)
     // Every frame, the menu open or not (Yes closes the pause: the check never ran, run v41team1).
     if (team_suicide_at_ > 0 && ImGui::GetTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
       team_suicide_at_ = -1;
@@ -1383,10 +1384,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     h = 0xCBF29CE484222325ull;
     for (bool b : {update_popup_, whats_new_open_, whats_new_all_, own_popup_, tick_popup_, pw_popup_, exp_popup_, ping_popup_,
                    new_version_popup_, notice_popup_, news_open_, tutorial_open_, queue_popup_, quit_popup_, skip_popup_, files_help_, browsing_,
-                   browser_typing_, browser_has_players_, browser_not_full_, browser_night_, quick_waiting_ > 0,
+                   browser_typing_, browser_has_players_, browser_not_full_, quick_waiting_ > 0,
                    direct_keys_, direct_letters_, name_keys_})
       HashIn(h, b);
-    for (int v : {pause_confirm_, handing_over_, passing_, browser_size_}) HashIn(h, uint64_t(int64_t(v)));
+    for (int v : {pause_confirm_, handing_over_, passing_, browser_size_, browser_event_}) HashIn(h, uint64_t(int64_t(v)));
     HashIn(h, capture_), HashIn(h, browser_region_);
     // What the on screen keys typed (a key pressed is a press that did something).
     for (const std::string* t : {&direct_text_, &name_text_, &pm_edit_text_, &pw_text_, &browser_search_}) HashIn(h, *t);
@@ -2812,10 +2813,14 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     comms::NoteJoined(sv.address);  // voice and text chat go to this server's host (comms.cpp)
     world::NoteJoined(sv.address);  // and the match's clock and weather come from it (world_sync.cpp)
     // The server's look (TekRantGaming, 20 Nov 2026): a regular server plays as the released game, with the server's
-    // look settings off; a Night Ops server turns them on (none is one in a build without Night Ops, night_ops.h). A
+    // look settings off; a Night Ops server turns them on (none is one in a build without Night Ops, night_ops.h), and
+    // since 26 Nov 2026 a Daybreak server too (its sunrise, lamps, lens flare, rain and wet hands are the same look). A
     // match a player's game hosts (Custom Match, LAN) has them on: its host's world (time, weather) decides what shows.
     const bool player_match = sv.player_hosted || pm_hosting_ || !own_backend_.empty();
-    ApplyServerLook(player_match || sv.night, player_match ? "a Custom Match or LAN" : sv.night ? "a Night Ops" : "a regular");
+    look_join_at_ = world::Now();  // TickEventLook: answers from this server's host only
+    ApplyServerLook(player_match || sv.night || sv.daybreak, player_match ? "a Custom Match or LAN"
+                                                             : sv.night  ? "a Night Ops"
+                                                             : sv.daybreak ? "a Daybreak" : "a regular");
     joined_from_start_ = MenuDriverStage() < 2;  // its joining page shows the game's start first
     tutorial_ = false;
     NotePlayedLevel(sv.map.empty() ? "Wake Island" : sv.map);
@@ -2853,6 +2858,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     joined_gid_.clear();
     comms::NoteJoined("");
     world::NoteJoined("");
+    look_join_at_ = -1;
     ach_join_ = AchJoin::kNone;
     page_ = Page::kMain, row_ = 1;  // the game runs now: our main menu, the pop-up over it
     if (answer == ServerList::Reserved::kOutdated) AskToUpdate(needs, server);
@@ -3217,6 +3223,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (update::RestartSelf() && quit_) quit_();
   }
   // Each frame on Home after such a restart: the join, once the list has the server.
+  // An event server (Night Ops, Daybreak) also says so in its world answer (world_sync.cpp: flags 4 and 16, 26 Nov
+  // 2026). A listing that did not (a backend whose plasma.py does not pass "daybreak" on yet, or Direct connect to a
+  // server it never listed) left the look off at the join: turned on here once this server's host has answered.
+  bool look_on_ = false;
+  double look_join_at_ = -1;  // world::Now() at the join; -1: none to watch
+  void TickEventLook() {
+    if (!kNightOps || look_on_ || look_join_at_ < 0 || !InMatch()) return;
+    const world::Status s = world::Current();
+    if (!s.answered || !s.night_ops || s.answered_at <= look_join_at_) return;
+    look_join_at_ = -1;
+    ApplyServerLook(true, s.daybreak ? "a Daybreak (as its host says)" : "a Night Ops (as its host says)");
+  }
   void TickRejoinTick() {
     if (tick_join_address_.empty() || !pre_game_) return;
     if (tick_join_until_ == 0) tick_join_until_ = ImGui::GetTime() + 25;
@@ -3629,6 +3647,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // Settings; each join sets them (saved, so the menus keep the last match's), and each applies at once. Lightning
   // and Storm shake are the player's own (Graphics > Weather). Night Ops' hour and storm are the server's (gmhost.py).
   void ApplyServerLook(bool on, const char* what) {
+    look_on_ = on;
 #if defined(BF_DEV_TOOLS)
     // BF_DEV_KEEP_LOOK=1 (tests): the look settings stay as the command line and the profile gave them, so an A/B run
     // can turn one off (--native_x_renderer_sky=false was set back on by the hosted match's join, 24 Nov 2026).

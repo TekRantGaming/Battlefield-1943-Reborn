@@ -80,6 +80,18 @@ sets"). They left the graphics settings.
   everything back to the schedule at once. The panel sends which rows were moved, so a value the schedule changed since
   the admin's last answer is never set back (`server/gmhost.py` `World.NIGHT_OPS_HELD`, `TOUCHED`;
   `tools/test_night_ops_admin.py`).
+- **Daybreak servers** (26 Nov 2026, TekRantGaming's second event; `gmhost.py --daybreak`, server.json `"daybreak"`,
+  the manager's **Event** choice): each round starts at 06:00, the sky's sun on the horizon, and the clock runs in real
+  time (a day in 1440 minutes: a 30 minute round ends with the sun about 9 degrees up; the lamps fade out by 06:13).
+  A thunderstorm builds by the round's tickets as Night Ops' does (`World.DAYBREAK_STAGES`): first light (clear, a
+  morning haze, a knee deep ground mist in wide patches), the mist burning off by 30%, the clouds building to 50%, the
+  storm coming in from the sea to 70% and over the map by 90% at 70% weather: rain and lightning under it, never Night
+  Ops' 60 m storm mist. The wind rises with it (Daybreak drives it; Night Ops leaves it to the admin). A new round is
+  first light again. Admins' F9 holds as on Night Ops, the wind too; **Back to Daybreak (N)** puts the clock back on
+  the round's own. Joining one turns the server's look on as Night Ops does; the browser's events chip goes Events,
+  Night Ops, Daybreak. The host sends the storm type (0) and the surface fog's depth and sparseness on every server
+  since (the games' own defaults but on Daybreak). Tests: `BF_DEV_EVENT_RAMP=<seconds>` (the build by time, as
+  `BF_DEV_NIGHT_RAMP`), `BF_DEV_DAYBREAK_MINUTES=<a day's minutes>`; `tools/test_daybreak.py`.
 
 | Host cvar | Default | What it sets |
 |---|---|---|

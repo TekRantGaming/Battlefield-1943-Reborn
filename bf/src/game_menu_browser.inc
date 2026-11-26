@@ -108,7 +108,10 @@
     }
     return w + st(7);
   }
-  bool browser_has_players_ = false, browser_not_full_ = false, browser_night_ = false;  // the filter chips
+  bool browser_has_players_ = false, browser_not_full_ = false;  // the filter chips
+  // The events chip (26 Nov 2026, Daybreak beside Night Ops): 0 every server, 1 Night Ops only, 2 Daybreak only; a
+  // click goes on to the next (it was the NIGHT OPS chip, on or off).
+  int browser_event_ = 0;
   std::string browser_region_;       // the region chip: only this region's servers (a code of regions.h); empty: all
   // The size chip (server sizes, docs/SERVER-SIZES.md; TekRantGaming, 20 Nov 2026: the size shown, no pop-up): only
   // servers of this size (24: the game's own and smaller, 32, 64); 0: all.
@@ -172,7 +175,8 @@
       if (browser_tab_ == kTabFavourites ? !fav : sv.official != (browser_tab_ == kTabOfficial)) continue;
       if (browser_has_players_ && sv.players <= 0) continue;
       if (browser_not_full_ && sv.max_players > 0 && sv.players >= sv.max_players) continue;
-      if (browser_night_ && !sv.night) continue;
+      if (browser_event_ == 1 && !sv.night) continue;
+      if (browser_event_ == 2 && !sv.daybreak) continue;
       if (!browser_region_.empty() && sv.region != browser_region_) continue;
       if (browser_size_ && SizeOf(sv) != browser_size_) continue;
       if (!search.empty() && Lower(sv.name + " " + sv.map).find(search) == std::string::npos) continue;
@@ -369,7 +373,8 @@
       };
       bool c_sort = false, c_night = false, c_full = false, c_players = false, c_region = false, c_size = false;
       chip_right(sort_by_ping_ ? "SORT: PING" : "SORT: PLAYERS", false, &c_sort);
-      if (kNightOps) chip_right("NIGHT OPS", browser_night_, &c_night);  // night_ops.h: not in every build
+      if (kNightOps)  // night_ops.h: not in every build
+        chip_right(browser_event_ == 1 ? "NIGHT OPS" : browser_event_ == 2 ? "DAYBREAK" : "EVENTS", browser_event_ != 0, &c_night);
       chip_right("NOT FULL", browser_not_full_, &c_full);
       chip_right("HAS PLAYERS", browser_has_players_, &c_players);
       // The region chip (TekRantGaming, 13 Nov 2026: servers say their region): a click goes through the regions
@@ -403,7 +408,7 @@
         browser_region_ = browser_region_.empty() ? regions.front() : at + 1 == regions.end() ? std::string() : *(at + 1);
       }
       if (c_sort) sort_by_ping_ = !sort_by_ping_;
-      if (c_night) browser_night_ = !browser_night_;
+      if (c_night) browser_event_ = (browser_event_ + 1) % 3;
       if (c_full) browser_not_full_ = !browser_not_full_;
       if (c_players) browser_has_players_ = !browser_has_players_;
       if (c_sort || c_night || c_full || c_players || c_region || c_size) row_ = 0, scroll_ = 0;
@@ -507,6 +512,9 @@
         if (sv.night && kNightOps)
           Chip(d, st, ImVec2(ta.x + colx[0] + nw + st(12), y + (rh - st(16)) * 0.5f), st(16), "NIGHT", IM_COL32(40, 46, 88, 255),
                kit::kStripText, false);
+        else if (sv.daybreak && kNightOps)  // a dawn's amber beside Night Ops' navy
+          Chip(d, st, ImVec2(ta.x + colx[0] + nw + st(12), y + (rh - st(16)) * 0.5f), st(16), "DAYBREAK", IM_COL32(150, 84, 36, 255),
+               kit::kStripText, false);
         d->PopClipRect();
       }
       {  // the map: its picture and its name
@@ -579,7 +587,7 @@
       else if (browser_tab_ == kTabFavourites)
         why = fmt::format("No favourites yet. {} on a server keeps it here.",
                           device_ == Device::kKeyboard ? KeyFor(kit::Button::kY) : "Y");
-      else if (browser_has_players_ || browser_not_full_ || browser_night_ || browser_size_) why = "No server passes the filters. Switch one off.";
+      else if (browser_has_players_ || browser_not_full_ || browser_event_ || browser_size_) why = "No server passes the filters. Switch one off.";
       else
         why = fmt::format("No {} server right now. The list refreshes every 5 seconds.",
                           browser_tab_ == kTabOfficial ? "Reborn" : "community");
@@ -628,6 +636,8 @@
         x += Chip(d, st, ImVec2(x, y), st(18), "COMMUNITY", kit::kStrip, kit::kStripText, false) + st(6);
       if (sv->night && kNightOps)
         x += Chip(d, st, ImVec2(x, cy), st(18), "NIGHT OPS", IM_COL32(40, 46, 88, 255), kit::kStripText, false) + st(6);
+      else if (sv->daybreak && kNightOps)
+        x += Chip(d, st, ImVec2(x, cy), st(18), "DAYBREAK", IM_COL32(150, 84, 36, 255), kit::kStripText, false) + st(6);
       if (fav) Chip(d, st, ImVec2(x, cy), st(18), "FAVOURITE", kit::kGold, kit::kInk, false);
       y += kh + st(14);
       kit::GameText(d, kit::GameFont::kText, st(13), ImVec2(pa.x + st(18), y), kit::kInk, sv->name);

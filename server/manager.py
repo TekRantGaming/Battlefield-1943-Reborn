@@ -524,7 +524,7 @@ def game_installed():
 
 def new_server(name, port):
     return {'name': name, 'description': '', 'maps': [k for k, _, _ in MAPS], 'round_end_delay': 45, 'listed': True,
-            'night': False, 'port': port, 'max_players': DEFAULT_SIZE, 'bots': 0, 'tickets': 'auto', 'autostart': True,
+            'night': False, 'daybreak': False, 'port': port, 'max_players': DEFAULT_SIZE, 'bots': 0, 'tickets': 'auto', 'autostart': True,
             'tick': 0, 'team_balance': True, 'balance_gap': 2, 'balance_min_players': 4, 'balance_delay': 20,
             'balance_block_stacking': True,
             # The server's world (gmhost.py's World; 14 Nov 2026): its clock and weather, per cent where it says, and
@@ -618,6 +618,8 @@ def clean_config(raw):
             entry['tickets'] = server_tickets(s.get('tickets'))
         entry['listed'] = s.get('listed') is not False
         entry['night'] = s.get('night') is True
+        # Daybreak (26 Nov 2026): the second event, one or the other (Night Ops first, as gmhost.py takes them).
+        entry['daybreak'] = s.get('daybreak') is True and not entry['night']
         entry['day_night'] = s.get('day_night') is True
         with contextlib.suppress(TypeError, ValueError):
             entry['time'] = max(0.0, min(23.75, float(s.get('time', 16.0))))
@@ -1119,6 +1121,8 @@ class Manager:
             host.append('--unlisted')
         if s['night'] and self.flags['night_ops']:
             host.append('--night')
+        elif s.get('daybreak') and self.flags['night_ops']:  # the same package flag: a game with the events
+            host.append('--daybreak')
         host += ['--time', str(s['time']), '--day-minutes', str(s['day_minutes']),
                  '--cloud-cover', str(s['cloud_cover'] / 100), '--cloud-rate', str(s['cloud_rate'] / 100),
                  '--weather', str(s['weather'] / 100), '--fog', str(s['fog'] / 100),
