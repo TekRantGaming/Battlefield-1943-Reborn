@@ -18,6 +18,12 @@
   empty box it closes the keys). The tabs can be clicked at any time, and F3 always switches them.
 - **HD textures** stay out of Settings: they are not ready yet.
 
+**Bots**
+- **On Wake Island bots walk round the lagoon** instead of swimming across it and gathering in the water.
+- **Bots use their kit:** the anti tank weapon and the rifle grenade against tanks, and grenades. A bot with nothing
+  that can hurt a tank leaves it alone and goes on to its flag instead of shooting at it.
+- **Bot tank drivers back off when they get stuck** and steer round what is in front of them.
+
 ## 0.4.7.4 (18 November 2026): a hotfix
 
 Earlier versions update to it by themselves, and the servers only let the newest version in.
