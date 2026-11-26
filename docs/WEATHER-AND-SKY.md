@@ -81,17 +81,19 @@ sets"). They left the graphics settings.
   the admin's last answer is never set back (`server/gmhost.py` `World.NIGHT_OPS_HELD`, `TOUCHED`;
   `tools/test_night_ops_admin.py`).
 - **Daybreak servers** (26 Nov 2026, TekRantGaming's second event; `gmhost.py --daybreak`, server.json `"daybreak"`,
-  the manager's **Event** choice): each round starts at 06:00, the sky's sun on the horizon, and the clock runs in real
-  time (a day in 1440 minutes: a 30 minute round ends with the sun about 9 degrees up; the lamps fade out by 06:13).
-  A thunderstorm builds by the round's tickets as Night Ops' does (`World.DAYBREAK_STAGES`): first light (clear, a
-  morning haze, a knee deep ground mist in wide patches), the mist burning off by 30%, the clouds building to 50%, the
-  storm coming in from the sea to 70% and over the map by 90% at 70% weather: rain and lightning under it, never Night
-  Ops' 60 m storm mist. The wind rises with it (Daybreak drives it; Night Ops leaves it to the admin). A new round is
-  first light again. Admins' F9 holds as on Night Ops, the wind too; **Back to Daybreak (N)** puts the clock back on
-  the round's own. Joining one turns the server's look on as Night Ops does; the browser's events chip goes Events,
-  Night Ops, Daybreak. The host sends the storm type (0) and the surface fog's depth and sparseness on every server
-  since (the games' own defaults but on Daybreak). Tests: `BF_DEV_EVENT_RAMP=<seconds>` (the build by time, as
-  `BF_DEV_NIGHT_RAMP`), `BF_DEV_DAYBREAK_MINUTES=<a day's minutes>`; `tools/test_daybreak.py`.
+  the manager's **Event** choice): the world held at 06:10, the sun just up (his rule after playing the first cut,
+  which ran the clock in real time from 06:00 with a 70% storm: "the storm value was too low ... starts at 06:10 and
+  stays there. follow the same rules as night ops"). The storm builds by the round's tickets on Night Ops' rows
+  (`World.DAYBREAK_STAGES`): clear to 40% with a morning haze and a thin ground mist that burns off, the clouds
+  gathering to 55%, the storm rolling in to 100% weather by 80% (rain over the map, lightning, its 60 m mist from 75%),
+  then the full storm. Daybreak's own columns: less ground fog than Night Ops' (35% in the storm, the surface fog
+  1.2 m deep in patches), and the wind rising with the storm (Night Ops leaves it to the admin). A new round is first
+  light again. Admins' F9 holds as on Night Ops, the wind too (**Back to Daybreak (N)**). Joining one turns the
+  server's look on as Night Ops does, from its listing or from its host's answer; the browser's events chip goes
+  Events, Night Ops, Daybreak. The host sends the storm type (0) and the surface fog's depth and sparseness on every
+  server since (the games' own defaults but on Daybreak). Tests: `BF_DEV_EVENT_RAMP=<seconds>` (the build by time, as
+  `BF_DEV_NIGHT_RAMP`), `BF_DEV_DAYBREAK_MINUTES=<a day's minutes>` (runs its clock; it then waits while nobody is
+  joined); `tools/test_daybreak.py`.
 
 | Host cvar | Default | What it sets |
 |---|---|---|
