@@ -185,7 +185,7 @@ std::pair<int, int> DrawnSizeFor(int out_w, int out_h, double ratio) {
 // presets for players"): the Graphics page's settings that cost frame time. Low, Medium and High are the auto detect's
 // slow, middle and fast tiers (TierSettings): Medium is the GTX 1060 or RX 580 at 1080p and 60 FPS, High an RTX 2060 or
 // 3060 and up. Potato is below Low for integrated graphics (no antialiasing, no texture filtering), Ultra every setting
-// at its most with the game drawn at the display's resolution (the upscaler Off). A setting a preset leaves out stays
+// at its most (since 0.4.8 with the upscaler on at Quality, as every preset). A setting a preset leaves out stays
 // the player's: the look's own (AO strength, sharpness), AO's and GI's quality where they are off, HD textures above
 // Low (they need a pack imported; Potato and Low turn them off for the graphics memory). Ultra's GI distance is Far:
 // the most the menus offer (TekRantGaming, 13 Nov 2026: Full is the F8 panel's only).
@@ -194,30 +194,40 @@ struct GraphicsPreset {
   std::vector<std::pair<const char*, const char*>> settings;
 };
 const std::vector<GraphicsPreset>& GraphicsPresets() {
+  // 0.4.8 (TekRantGaming, 26 Nov 2026: "graphic settings on by default on all presets"): every preset has the spatial
+  // upscaler on, AMD FSR 1 at Quality (NVIDIA NIS stands in where this GPU is an NVIDIA card that runs it:
+  // PresetValueMatches, ApplyGraphicsPreset, NoteNisSupport), Ultra too; Soft shadows and SSR reflections on High and
+  // Ultra only. Transparent edges, Animation smoothing, HUD scale and Storm shake are the same on every preset, so
+  // they are defaults instead (NewInstallDefaults, install_defaults 7) and a preset leaves the player's choice alone.
   static const std::vector<GraphicsPreset> kPresets = {
       {"Potato",
-       {{"bf_post_aa", "off"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "performance"},
+       {{"bf_post_aa", "off"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "0"}, {"native_ao_mode", "0"},
-        {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"}}},
+        {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"},
+        {"native_x_renderer_soft_shadows", "off"}, {"native_x_renderer_reflections", "false"}}},
       {"Low",
-       {{"bf_post_aa", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "performance"},
+       {{"bf_post_aa", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "2"}, {"native_ao_mode", "0"},
-        {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"}}},
+        {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"},
+        {"native_x_renderer_soft_shadows", "off"}, {"native_x_renderer_reflections", "false"}}},
       {"Medium",
        {{"bf_post_aa", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "4"}, {"native_ao_mode", "1"},
         {"native_ao_samples", "1"}, {"native_gi_mode", "1"}, {"native_gi_quality", "1"}, {"native_gi_distance", "1"},
-        {"native_grass_radius", "180.000000"}}},
+        {"native_grass_radius", "180.000000"}, {"native_x_renderer_soft_shadows", "off"},
+        {"native_x_renderer_reflections", "false"}}},
       {"High",
        {{"bf_post_aa", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "2.000000"}, {"anisotropic_override", "5"}, {"native_ao_mode", "1"},
         {"native_ao_samples", "2"}, {"native_gi_mode", "1"}, {"native_gi_quality", "2"}, {"native_gi_distance", "2"},
-        {"native_grass_radius", "1440.000000"}}},
+        {"native_grass_radius", "1440.000000"}, {"native_x_renderer_soft_shadows", "soft"},
+        {"native_x_renderer_reflections", "true"}}},
       {"Ultra",
-       {{"native_x_renderer_antialiasing", "fxaa"}, {"native_x_renderer_scaling", "bilinear"},
+       {{"native_x_renderer_antialiasing", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "4.000000"}, {"anisotropic_override", "5"}, {"native_ao_mode", "1"},
         {"native_ao_samples", "3"}, {"native_gi_mode", "1"}, {"native_gi_quality", "3"}, {"native_gi_distance", "3"},
-        {"native_grass_radius", "1440.000000"}}},
+        {"native_grass_radius", "1440.000000"}, {"native_x_renderer_soft_shadows", "soft"},
+        {"native_x_renderer_reflections", "true"}}},
   };
   return kPresets;
 }
@@ -4958,7 +4968,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       rows.push_back(r);
     }
     // HD textures (TekRantGaming, 9 Nov 2026: an HD texture pack, imported in the launcher, toggled here; NativeXRenderer D149).
-    {
+    // Not shown (TekRantGaming, 26 Nov 2026: "remove HD textures and import HD texture pack from being shown in the
+    // settings these are not ready to be used yet"), as on the Graphics page since v0.4.7.4; the code stays.
+    constexpr bool kHdTexturesShown = false;
+    if (kHdTexturesShown) {
       const fs::path pack = HdPackPath(UserDir());
       std::error_code ec;
       const bool have = fs::exists(pack, ec);
@@ -6597,6 +6610,17 @@ std::string StartupGpuPlugin(const fs::path&) {
 // exclusive Fullscreen left the game minimised behind the setup's file picker). Not in test runs (a
 // window kept in the background or hidden, as tools\run_game.ps1 starts it) unless BF_DEV_NEW_INSTALL=1, and their
 // window is never made fullscreen.
+// 0.4.8's graphics defaults (TekRantGaming, 26 Nov 2026), the same on every preset, and Soft shadows and SSR as the
+// High and Ultra presets have them (`high`) or the others. The settings file's keys.
+std::vector<std::pair<std::string, std::string>> GraphicsDefaults048(bool high) {
+  return {{"cvar.bf_upscaler_mode", "quality"},
+          {"cvar.native_x_renderer_alpha_to_coverage", "blend"},  // Transparent edges: Smooth
+          {"cvar.bf_smooth_bones", "true"},                        // Animation smoothing: on
+          {"cvar.bf_hud_scale", "high"},                           // HUD scale: High-Res
+          {"cvar.native_x_renderer_storm_sway", "false"},          // Storm shake: off
+          {"cvar.native_x_renderer_soft_shadows", high ? "soft" : "off"},
+          {"cvar.native_x_renderer_reflections", high ? "true" : "false"}};
+}
 void NewInstallDefaults(Settings& settings) {
   // 0.4.0 (TekRantGaming, 13 Nov 2026): the GI distance Full is the F8 panel's only; Far is the most the Settings
   // page and the Ultra preset offer. Both offered Full before, so a saved Full becomes Far once (gi_full_capped);
@@ -6666,6 +6690,25 @@ void NewInstallDefaults(Settings& settings) {
     REXLOG_INFO("BF settings: v0.4.8's defaults: Soft shadows and Reflections Off, the spatial upscaler at Quality "
                 "(it was {}; NVIDIA NIS where this GPU is an NVIDIA card that runs it)", was);
   }
+  // 0.4.8's graphics defaults (TekRantGaming, 26 Nov 2026: "graphic settings on by default on all presets"): once, for
+  // every settings file from before, the spatial upscaler is AMD FSR 1 at Quality (NVIDIA NIS kept where it was chosen,
+  // and made from this GPU's first answer on an NVIDIA card that runs it: upscaler_auto, NoteNisSupport), Transparent
+  // edges Smooth, Animation smoothing on, HUD scale High-Res and Storm shake off; Soft shadows and SSR reflections on
+  // for a player on the High or Ultra preset (the last one chosen; with none chosen, shadows at High or more), off
+  // for the others. The player's own choices after this stay.
+  if (settings.Get("install_defaults", "") == "6") {
+    const std::string preset = settings.Get("graphics_preset", "");
+    const bool high = preset == "High" || preset == "Ultra" ||
+                      (preset.empty() && std::atof(settings.Get("cvar.native_x_renderer_shadow_scale", "0").c_str()) >= 2.0);
+    for (const auto& [key, value] : GraphicsDefaults048(high)) settings.values[key] = value;
+    if (settings.Get("cvar.native_x_renderer_scaling", "") != "nis") settings.values["cvar.native_x_renderer_scaling"] = "fsr";
+    settings.values["upscaler_auto"] = "1";
+    settings.values["install_defaults"] = "7";
+    settings.Save();
+    REXLOG_INFO("BF settings: v0.4.8's graphics defaults: the spatial upscaler at Quality, Transparent edges Smooth, "
+                "Animation smoothing on, HUD scale High-Res, Storm shake off, Soft shadows and SSR {} (preset {})",
+                high ? "on" : "off", preset.empty() ? "none chosen" : preset);
+  }
   if (REXCVAR_GET(server) || !settings.Get("launcher_setup", "").empty() || !settings.Get("install_defaults", "").empty())
     return;
   const std::string start = rex::cvar::GetFlagByName("window_start");
@@ -6691,9 +6734,12 @@ void NewInstallDefaults(Settings& settings) {
       // Controls: camera response Modern. Gameplay: performance metrics off (the setting's own default).
       {"cvar.bf_camera_modern", "true"}, {"cvar.bf_performance_metrics", "off"}};
   for (const auto& [key, value] : kDefaults) settings.values[key] = value;
+  // 0.4.8's graphics defaults (above); Soft shadows and SSR on, as these defaults are the High preset's kind. The first
+  // start's auto detect then applies its preset (TierSettings), which sets both for a slower PC.
+  for (const auto& [key, value] : GraphicsDefaults048(true)) settings.values[key] = value;
   settings.values["fullscreen_mode"] = "desktop";  // Borderless (a test window stays a window)
   if (!test_window) settings.values["fullscreen"] = "on";
-  settings.values["install_defaults"] = "6";  // 0.4.8's: nothing to move (above)
+  settings.values["install_defaults"] = "7";  // 0.4.8's: nothing to move (above)
   settings.values["upscaler_auto"] = "1";     // NVIDIA NIS on a GPU that runs it (NoteNisSupport)
   settings.values["gi_full_capped"] = "1";    // a new install never had the menus' Full (above)
   std::error_code ec;
