@@ -586,7 +586,7 @@
     const bool card = np_card_ != 0;
     const bool code_off = NameProtected();  // a recovery code is for a new PC (this one's name is protected already)
     // ---- the keyboard's own keys
-    const bool enter_key = in.accept && accept_from_key_;
+    bool enter_key = in.accept && accept_from_key_;
     if (!card) {
       if (io.InputQueueCharacters.Size > 0 && !typed_logged_) {
         typed_logged_ = true;
@@ -626,9 +626,24 @@
         cues.push_back({kit::Button::kB, "Close", "Esc"});
       }
     } else if (name_keys_) {
-      cues = {{kit::Button::kA, "Type"}, {kit::Button::kX, "Delete", "Backspace"},
-              {kit::Button::kStart, code_mode_ ? "Bring it back" : name_setup_ ? "Save and continue" : "Save", "Enter", true},
-              {kit::Button::kB, "Done typing", "Esc"}};
+      // The on screen keys no longer hold the page (TekRantGaming, 26 Nov 2026: X deleted instead of protecting, Y and
+      // RB did nothing until Done typing, "many people ... will have tripped up on this"): with the keys open every
+      // button the page shows works, so B deletes (on an empty box it closes the keys) and X stays Protect.
+      cues = {{kit::Button::kA, "Type"}, {kit::Button::kB, "Delete", "Backspace"}};
+      if (code_mode_) {
+        if (!code_off) cues.push_back({kit::Button::kY, "Paste"});
+        cues.push_back({kit::Button::kLB, "New soldier", "F3"});
+        cues.push_back({kit::Button::kStart, "Bring it back", "Enter", true});
+      } else {
+        cues.push_back({kit::Button::kBack, "Tag / name", "Tab"});
+        if (AccountOnline() && !(code_off && NpSameAsSaved()))
+          cues.push_back({kit::Button::kX, np_protect_ ? "Protect: on" : "Protect: off", "F2"});
+        else if (code_off && NpSameAsSaved())
+          cues.push_back({kit::Button::kX, "Show code", "F2"});
+        cues.push_back({kit::Button::kY, "Random name", "F5"});
+        cues.push_back({kit::Button::kRB, "Recovery code", "F3"});
+        cues.push_back({kit::Button::kStart, name_setup_ ? "Save and continue" : "Save", "Enter", true});
+      }
     } else if (code_mode_) {
       if (pad && !code_off) cues.push_back({kit::Button::kA, "Type the code"});
       if (!code_off && pad) cues.push_back({kit::Button::kY, "Paste"});
@@ -666,7 +681,7 @@
     const float x = fa.x + st(28), w = fb.x - fa.x - st(56);
     float y = fa.y + st(20);
     int clicked_focus = -1;
-    bool switch_tab = NpTabs(d, st, x, y, w) && !card && !name_keys_;
+    bool switch_tab = NpTabs(d, st, x, y, w) && !card;
     y += st(40 + 18);
     if (name_setup_) {
       kit::Spaced(d, f.typed, st(10.5f), ImVec2(x, y), kit::kInkFaint,
@@ -843,7 +858,9 @@
     } else if (name_keys_) {
       key_clicked = OnScreenKeys(d, st, ImVec2(rx, ry), in, name_key_, name_keys_, name_caps_, false, nullptr, !code_mode_);
       const float ky = ry + st(26) + 5 * (st(40) + st(4.5f)) + st(8);
-      const std::string hint = "A types, X deletes, B closes the keys, Start saves. With a keyboard, just type.";
+      const std::string hint = code_mode_ ? "A types, B deletes, Y pastes, Start brings your soldier back. With a keyboard, just type."
+                                          : "A types, B deletes, Start saves. X, Y and RB work while the keys are open. With a "
+                                            "keyboard, just type.";
       const float hh = kit::Wrapped(d, f.ui, st(14.5f), ImVec2(rx, ky), kit::kKhakiText, hint, rw);
       const float by = ky + hh + st(16);
       float k = 1;
@@ -879,13 +896,15 @@
       else name_keys_ = false;  // DONE: the keys close (Start saves)
     }
     if (name_keys_) {
-      if (in.x) NameDelete();
+      // B deletes, and closes the keys once the box is empty; the stick, the D-pad and A were the keys'. The page's
+      // other buttons and clicks go on below, as with the keys closed.
       if (in.back) {
-        name_keys_ = false;
-        return;
+        const bool empty = tag_mode_ && !code_mode_ ? tag_text_.empty() : name_text_.empty();
+        if (empty) name_keys_ = false;
+        else NameDelete();
       }
-      if (in.start) NpSave();
-      return;
+      in.back = in.accept = in.up = in.down = in.left = in.right = false;
+      enter_key = false;
     }
     if (clicked_focus >= 0) {
       np_focus_ = clicked_focus;
@@ -895,6 +914,8 @@
     if ((in.prev_tab && code_mode_) || (in.next_tab && !code_mode_) || f3) switch_tab = true;
     if (switch_tab && !acct_busy_.load()) {
       NpCodeTab(!code_mode_);
+      name_key_ = 10;  // the keys stay open for the other tab's box; its keys differ (no TM key for a code)
+      if (code_mode_ && (NameProtected() || !AccountOnline())) name_keys_ = false;  // nothing to type there
       if (code_mode_) TagSwitch(false);
       np_focus_ = kNpName;
       REXLOG_INFO("BF name page: the {} tab", code_mode_ ? "recovery code" : "new soldier");
