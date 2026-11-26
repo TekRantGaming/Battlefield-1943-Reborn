@@ -3286,7 +3286,10 @@ uint32_t DrawPath::DrawSkinOver(ITextureView* target, ITextureView* depth) {
           // descriptor's sampler was null, and NVIDIA's Vulkan driver read through it as the resources were committed
           // (TekRantGaming, 26 Nov 2026: "When it's equipped, my game crashes immediately when loading in with that
           // class"; his dump and run skin_crash1: nvoglv64.dll, a read of 0xf0, from here; other drivers let it pass).
-          if (texture->GetSampler() != sampler) texture->SetSampler(sampler);
+          // NXR_TEST_SKIN_NO_SAMPLER=1 (test): leave the view without one, to see DiligentCore patch 0012's fallback
+          // sampler take its place (a warning in the log, no crash).
+          static const bool no_sampler = [] { const char* v = std::getenv("NXR_TEST_SKIN_NO_SAMPLER"); return v && *v == '1'; }();
+          if (!no_sampler && texture->GetSampler() != sampler) texture->SetSampler(sampler);
           if (auto* v = srb->GetVariableByName(SHADER_TYPE_PIXEL, "skinTex")) v->Set(texture);
           if (auto* v = srb->GetVariableByName(SHADER_TYPE_PIXEL, "skinTex_sampler")) v->Set(sampler);
           context->SetPipelineState(pso);
