@@ -43,6 +43,9 @@ struct Status {
   // and `held`: an admin's settings hold some of them for the rest of the round.
   bool night_ops = false;
   bool held = false;
+  // 26 Nov 2026: the event is Daybreak (the answer's flag 16; night_ops is then set too: an event server).
+  bool daybreak = false;
+  const char* EventName() const { return daybreak ? "Daybreak" : "Night Ops"; }
 };
 Status Current();
 // Which settings an admin moved (Request's `touched`; the host's World.TOUCHED in server/gmhost.py).
