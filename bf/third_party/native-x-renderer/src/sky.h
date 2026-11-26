@@ -137,6 +137,9 @@ class Sky {
     uint32_t room_count = 0;
     float room_amount = 0.0f;
     bool room_debug = false;
+    // The world's farthest depth partition, where its stored depth is not 0.1 / distance: there (stored depth from [2]
+    // down) it is [0] / distance + [1]. [2] 0: none known (0.1 / distance everywhere).
+    float room_depth[3] = {};
     int debug = 0;              // 1: the sky's pixels in one flat colour (which pixels are taken)
   };
   ~Sky();
