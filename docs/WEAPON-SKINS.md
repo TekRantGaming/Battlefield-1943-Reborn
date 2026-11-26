@@ -1,8 +1,9 @@
 # Weapon skins
 
 Reborn's first unlockable is the **electric skin**: the player's own Thompson (US) and Type 100 (Japan) look as if
-electricity runs through them. It is planned to be unlocked by being struck by lightning in Night Ops' storm. That
-unlock is not built yet.
+electricity runs through them. It is unlocked by playing one full Night Ops match: join near its start (within two
+minutes of the round's start, and at least five minutes played) and stay to its end. Daybreak matches do not count.
+Once unlocked, equip it from the main menu's Unlockables screen.
 
 ## What it looks like
 
@@ -17,13 +18,14 @@ other players see their own guns, and yours, as always. Your hands are not chang
 
 ## Turning it on for testing
 
-There is no unlock yet, so the skin is behind a setting that is off by default:
+The unlock turns on a setting that is off by default; for testing it can be turned on by hand:
 
 - `cvar.bf_skin_electric = true` in `bf1943-settings.txt`, or
 - `--bf_skin_electric=true` on the command line.
 
-When the unlock is built, it calls `bf1943::UnlockElectricSkin()` (`bf/src/fov.cpp`), which turns the setting on and
-saves it.
+The unlock (`SkinMatchSample` and `SkinMatchRoundOver` in `bf/src/fov.cpp`, fed by the world answer's Night Ops flag in
+`bf/src/world_sync.cpp`) calls `bf1943::UnlockElectricSkin()`, which turns the setting on and saves it.
+`BF_DEV_SKIN_MATCH_SECONDS=<s>` sets another least time for tests.
 
 ## How it works
 

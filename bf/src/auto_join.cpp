@@ -71,7 +71,7 @@ void NoteLevelChange();                                          // modern_mode.
 void WeatherRoundOver();     // weather_audio.cpp: between two rounds the weather is silent, and a new round's
 void WeatherLevelLoading();  // world is taken at once (D221)
 void WeatherLevelIn();
-void SkinMatchRoundOver();   // fov.cpp: the electric skin's unlock, a full match under a hurricane
+void SkinMatchRoundOver();   // fov.cpp: the electric skin's unlock, one full Night Ops match
 void SkinMatchNewLevel();
 void SpawnMouseRoundOver();  // flash_mouse.cpp: the end of round scoreboard is not the deploy screen
 void SeatZoomPad(uint8_t left_trigger);  // fov.cpp: a gun seat's zoom
