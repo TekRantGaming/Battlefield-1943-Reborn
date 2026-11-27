@@ -8,6 +8,9 @@
 
 #include <imgui.h>
 
+#include <fstream>
+#include <vector>
+
 #include <rex/app/app.h>
 #include <rex/cli.h>
 
@@ -25,27 +28,64 @@ double SecondsSince(std::chrono::steady_clock::time_point t) {
 }
 
 #if !defined(BF_DEV_TOOLS)
+#if defined(__linux__)
+// Copies what an earlier start kept in usr/bin/user into RecompLauncher's data folder, once. Each item goes to
+// <name>.copying and is renamed into place only when it copied; the marker, written last, says it's done. A start
+// that was interrupted or failed leaves no marker, so the next one removes the .copying leftovers and tries again.
+// Items already in the data folder are never overwritten, the cache is left out (it's rebuilt), and the originals
+// stay where they are.
+void CopyOldUserDir(const std::filesystem::path& from, const std::filesystem::path& to) {
+  namespace fs = std::filesystem;
+  const fs::path marker = to / ".copied-from-program-folder";
+  std::error_code ec;
+  if (fs::exists(marker, ec) || !fs::is_directory(from, ec)) return;
+  fs::create_directories(to, ec);
+  std::vector<fs::path> leftovers;
+  for (const auto& e : fs::directory_iterator(to, ec))
+    if (e.path().extension() == ".copying") leftovers.push_back(e.path());
+  for (const auto& p : leftovers) fs::remove_all(p, ec);
+  bool ok = true;
+  std::error_code it;
+  for (const auto& e : fs::directory_iterator(from, it)) {
+    const fs::path name = e.path().filename();
+    if (name == "cache" || fs::exists(to / name, ec)) continue;
+    const fs::path part = to / (name.string() + ".copying");
+    std::error_code c;
+    fs::copy(e.path(), part, fs::copy_options::recursive, c);
+    if (!c) fs::rename(part, to / name, c);
+    if (c) {
+      REXLOG_WARN("BF setup: {} not copied to {}: {}", e.path().string(), to.string(), c.message());
+      fs::remove_all(part, ec);
+      ok = false;
+    }
+  }
+  if (it) {
+    REXLOG_WARN("BF setup: {} not read: {}", from.string(), it.message());
+    ok = false;
+  }
+  if (ok) {
+    std::ofstream out(marker);
+    out << from.string() << "\n";
+    out.close();
+    ok = !out.fail();
+  }
+  if (ok)
+    REXLOG_INFO("BF setup: the player's folder {} copied to RecompLauncher's {}", from.string(), to.string());
+  else
+    REXLOG_WARN("BF setup: {} not all copied to {}; the next start tries again", from.string(), to.string());
+}
+#endif
+
 // The player's folder: "user" beside the exe, or on Linux RecompLauncher's data folder when it starts the game
 // (RECOMPLAUNCHER_DATA, <install>/recompdata). The launcher runs the unpacked AppImage, so beside the exe is
-// <install>/usr/bin, which every update replaces. The first start there copies what an earlier one kept in
-// usr/bin/user (not its cache); the old files stay.
+// <install>/usr/bin, and the launcher's backups, cloud saves and Uninstall only look after the paths its manifest
+// names; the data folder is one of them. The first start there copies what an earlier one kept in usr/bin/user.
 std::filesystem::path PlayerUserDir() {
   const std::filesystem::path beside = bf1943::PlayerRoot() / "user";
 #if defined(__linux__)
   if (const char* data = std::getenv("RECOMPLAUNCHER_DATA"); data && *data) {
     const std::filesystem::path dir = data;
-    std::error_code ec;
-    if (!std::filesystem::exists(dir / "bf1943-settings.txt", ec) && std::filesystem::is_directory(beside, ec)) {
-      std::filesystem::create_directories(dir, ec);
-      for (const auto& e : std::filesystem::directory_iterator(beside, ec)) {
-        if (e.path().filename() == "cache") continue;
-        std::error_code c;
-        std::filesystem::copy(e.path(), dir / e.path().filename(),
-                              std::filesystem::copy_options::recursive | std::filesystem::copy_options::skip_existing, c);
-        if (c) REXLOG_WARN("BF setup: {} not copied to {}: {}", e.path().string(), dir.string(), c.message());
-      }
-      REXLOG_INFO("BF setup: the player's folder {} copied to RecompLauncher's {}", beside.string(), dir.string());
-    }
+    CopyOldUserDir(beside, dir);
     return dir;
   }
 #endif
