@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -30,7 +31,16 @@ REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
 REXCVAR_DEFINE_STRING(audio_device, "", "Audio",
                       "Playback device for the game's audio, by its name; empty: the system default");
 
+REXCVAR_DEFINE_INT32(audio_device_watch_ms, 250, "Audio",
+                     "How often the output device is checked (a changed setting, a device unplugged or back, a new "
+                     "layout), in ms; 0: never");
+
 namespace rex::audio::sdl {
+namespace {
+// Underruns: the device asked for sound and no game frame was queued (silence played), after the first game frame.
+// Counted in the device's callback, logged by the watcher at most every 5 s while they happen (issue 74).
+std::atomic<uint64_t> g_frames_played{0}, g_silent_fills{0};
+}  // namespace
 
 SDLAudioDriver::SDLAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
     : AudioDriver(memory), semaphore_(semaphore) {}
@@ -161,7 +171,24 @@ void SDLAudioDriver::Watch() {
   std::string last_wanted = REXCVAR_GET(audio_device);
   int failures = 0;
   std::unique_lock<std::mutex> lock(watch_mutex_);
+  uint64_t said_silent = 0;
+  auto said_at = std::chrono::steady_clock::now();
+  auto checked_at = said_at;
   while (!watch_wake_.wait_for(lock, std::chrono::milliseconds(250), [this] { return watch_stop_; })) {
+    const auto now_t = std::chrono::steady_clock::now();
+    if (now_t - said_at >= std::chrono::seconds(5)) {
+      const uint64_t silent = g_silent_fills.load(std::memory_order_relaxed);
+      if (silent != said_silent) {
+        REXAPU_INFO("audio: {} underruns in the last {:.0f} s (the device wanted sound, no game frame was ready: "
+                    "silence played)", silent - said_silent, std::chrono::duration<double>(now_t - said_at).count());
+      }
+      said_silent = silent, said_at = now_t;
+    }
+    const int every_ms = REXCVAR_GET(audio_device_watch_ms);
+    if (every_ms <= 0 || now_t - checked_at < std::chrono::milliseconds(every_ms)) {
+      continue;
+    }
+    checked_at = now_t;
     const std::string wanted = REXCVAR_GET(audio_device);
     const SDL_AudioDeviceID target = WantedDevice();
     const char* why = nullptr;
@@ -280,6 +307,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
     static uint32_t sdl_callback_count = 0;
     std::unique_lock<std::mutex> guard(driver->frames_mutex_);
     if (driver->frames_queued_.empty()) {
+      if (g_frames_played.load(std::memory_order_relaxed) != 0) {
+        g_silent_fills.fetch_add(1, std::memory_order_relaxed);
+      }
       if (sdl_callback_count < 10) {
         REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
         sdl_callback_count++;
@@ -293,6 +323,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
     } else {
       auto buffer = driver->frames_queued_.front();
       driver->frames_queued_.pop();
+      g_frames_played.fetch_add(1, std::memory_order_relaxed);
       if (REXCVAR_GET(audio_mute)) {
         std::memset(data, 0, len);
       } else {

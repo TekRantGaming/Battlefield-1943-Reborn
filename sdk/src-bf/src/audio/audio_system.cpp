@@ -26,6 +26,16 @@
 #include <rex/system/thread_state.h>
 #include <rex/thread.h>
 #include <rex/cvar.h>
+#include <rex/platform.h>
+
+#include <thread>
+
+#if REX_PLATFORM_WIN32
+#include "../core/platform_win.h"
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+#endif
 
 REXCVAR_DEFINE_INT32(audio_render_wait_ms, 12, "Audio",
                      "Before each render callback, wait up to this long while the game says its mixer is not ready "
@@ -57,6 +67,29 @@ std::atomic<RenderReadyCheck> g_render_ready{nullptr};
 }  // namespace
 
 void SetRenderReadyCheck(RenderReadyCheck check) { g_render_ready.store(check); }
+
+namespace {
+// A real wait of about 250 us. rex::thread::Sleep makes anything under a millisecond Sleep(0) on Windows, which gives
+// the core up only to a thread of the same priority that is ready: the mixer wait below spun a whole core for up to
+// audio_render_wait_ms while the game's mixer it waited for needed one (issue 74: glitchy sound on a busy 4 core i7).
+void ShortWait() {
+#if REX_PLATFORM_WIN32
+  thread_local HANDLE timer =
+      CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+  if (timer) {
+    LARGE_INTEGER due;
+    due.QuadPart = -2500;  // 250 us from now, in 100 ns units
+    if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+      WaitForSingleObject(timer, 2);
+      return;
+    }
+  }
+  ::Sleep(1);
+#else
+  std::this_thread::sleep_for(std::chrono::microseconds(250));
+#endif
+}
+}  // namespace
 
 AudioSystem::AudioSystem(runtime::FunctionDispatcher* function_dispatcher)
     : memory_(function_dispatcher->memory()),
@@ -214,7 +247,7 @@ void AudioSystem::WaitForGameMixer() {
   const auto deadline = start + std::chrono::milliseconds(wait_ms);
   bool ok = false;
   while (!ok && std::chrono::steady_clock::now() < deadline) {
-    rex::thread::Sleep(std::chrono::microseconds(100));
+    ShortWait();
     ok = ready();
   }
   if (!ok) {
