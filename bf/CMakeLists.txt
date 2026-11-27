@@ -283,7 +283,8 @@ endforeach()
 # src/dev_stacks.cpp). Never in a release build.
 # Night Ops (src/night_ops.h): not in releases until TekRantGaming says it is ready (12 Nov 2026, for 0.3.0); ON for
 # the private test builds and development.
-option(BF_NIGHT_OPS "Night Ops: a night server's maps drawn at night in players' games" OFF)
+# On since 0.4.8, the release that brings Night Ops and Daybreak to players (TekRantGaming, 27 Nov 2026).
+option(BF_NIGHT_OPS "Night Ops: a night server's maps drawn at night in players' games" ON)
 if(BF_NIGHT_OPS)
     target_compile_definitions(bf1943 PRIVATE BF_NIGHT_OPS=1)
 endif()

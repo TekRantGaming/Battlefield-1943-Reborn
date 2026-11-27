@@ -31,10 +31,11 @@ if (Test-Path $out) { throw "release folder exists: $out" }
 # skips a bf-files.txt of another version. 0.1.x shipped 0.1.33 inside 0.1.33-preview.
 $built = (Select-String -Path (Join-Path $build "CMakeCache.txt") -Pattern '^BF_VERSION:STRING=(.*)$').Matches.Groups[1].Value
 if ($built -ne $Version) { throw "the build is version '$built', not ${Version}: build it with that version first (cmake -DBF_VERSION=$Version)" }
-# Night Ops (bf/src/night_ops.h) is not in releases until TekRantGaming says it is ready (12 Nov 2026): only a test
-# build (a version with -test) may have it.
+# Night Ops (bf/src/night_ops.h): in releases since 0.4.8 (TekRantGaming, 27 Nov 2026), so every build for players must
+# have it, or a Night Ops or Daybreak server's maps are drawn by day in that player's game (until then only a test
+# build, a version with -test, could have it).
 $nightOps = (Select-String -Path (Join-Path $build "CMakeCache.txt") -Pattern '^BF_NIGHT_OPS:BOOL=(ON|TRUE|1)$' -Quiet)
-if ($nightOps -and $Version -notmatch '-test') { throw "the build has Night Ops (BF_NIGHT_OPS ON): not for a release; build it with -DBF_NIGHT_OPS=OFF" }
+if (-not $nightOps) { throw "the build has no Night Ops (BF_NIGHT_OPS OFF): players' games would draw Night Ops and Daybreak servers by day; build it with -DBF_NIGHT_OPS=ON" }
 # The picture in picture sniper scope (bf/src/scope_pip.h): taken out of 0.4.1 at TekRantGaming's word (13 Nov 2026);
 # only a test build may have it.
 $scopePip = (Select-String -Path (Join-Path $build "CMakeCache.txt") -Pattern '^BF_SCOPE_PIP:BOOL=(ON|TRUE|1)$' -Quiet)
