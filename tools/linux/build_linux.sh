@@ -82,7 +82,7 @@ build_game() {
       { tail -40 "$BASE/game-configure.log"; exit 1; }
   fi
   # The release's version (BfVersion(): the pipeline sharing, the updater's comparison), as the Windows package's.
-  cmake "$B" -DBF_VERSION="${BF_VERSION:-0.1.33-preview}" -DBF_DEV_TOOLS="${BF_DEV_TOOLS:-OFF}" >> "$BASE/game-configure.log" 2>&1 ||
+  cmake "$B" -DBF_VERSION="${BF_VERSION:-0.1.33-preview}" -DBF_DEV_TOOLS="${BF_DEV_TOOLS:-OFF}" -DBF_NIGHT_OPS="${BF_NIGHT_OPS:-ON}" >> "$BASE/game-configure.log" 2>&1 ||
     { tail -20 "$BASE/game-configure.log"; exit 1; }
   step "game build ($JOBS jobs)"
   cmake --build "$B" -j "$JOBS" -- -k 0 > "$BASE/game-build.log" 2>&1 ||
