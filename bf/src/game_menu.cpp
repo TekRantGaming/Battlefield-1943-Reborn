@@ -43,7 +43,7 @@
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/window.h>
 #if defined(BF_DEV_TOOLS)
-#include <rex/ui/window_sdl.h>  // the tests' mouse side buttons, pushed into the window's own SDL queue
+#include <SDL3/SDL.h>  // the tests' mouse side buttons, pushed into the window's own SDL queue
 #endif
 
 #include <native_x_renderer/native_x_renderer.h>
@@ -147,6 +147,25 @@ REXCVAR_DECLARE(bool, native_x_renderer_fill_screen);  // NativeXRenderer: ultra
 void SetFrameRate(double fps);  // frame_rate.cpp
 
 namespace bf1943 {
+
+namespace {
+// The menu's clock, in seconds: Dear ImGui's time inside a frame, as before. SDK v0.11+ makes the UI system's ImGui
+// context current only while it builds a frame, and some of the menu's work runs outside one (the launcher's start,
+// shader preparation after an update: ImGui::GetTime() read through a null context there, a crash at every first start
+// after an update; the port's Linux client, 25 Nov 2026). Outside a frame: the steady clock, at the offset the last
+// frame saw, so the timers keep one time base.
+double MenuTime() {
+  static std::atomic<double> offset{0.0};
+  const double steady =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (ImGui::GetCurrentContext()) {
+    const double imgui = ImGui::GetTime();
+    offset.store(imgui - steady, std::memory_order_relaxed);
+    return imgui;
+  }
+  return steady + offset.load(std::memory_order_relaxed);
+}
+}  // namespace
 
 // The real Steam and Discord marks on the launcher's cards (TekRantGaming, 11 Nov 2026; King Kong's, Simple Icons, CC0).
 namespace {
@@ -822,7 +841,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     open_ = true, page_ = Page::kPause, pause_row_ = 0, pause_focus_panel_ = false, handing_over_ = -1;
     pause_confirm_ = -1;
     pause_page_ = 0, pause_map_wide_ = true;  // the map first, the whole battle (TekRantGaming, 18 Nov 2026)
-    pause_opened_at_ = ImGui::GetTime();
+    pause_opened_at_ = MenuTime();
   }
   bool open() const { return open_; }
   // For the graphics panel (f8_panel.cpp): the launcher's own pages are up; the settings file.
@@ -959,13 +978,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (sp.finished) {
         shaders_behind_ = false;
         REXLOG_INFO("BF shaders: {} stored pipelines made behind the menus, {:.1f} s after the menu came up", sp.done,
-                    ImGui::GetTime() - shaders_behind_from_);
+                    MenuTime() - shaders_behind_from_);
       }
     }
     if (!gpu_benchmark_started_ && want_time && !REXCVAR_GET(server)) {
       if (page_ == Page::kShaders || shaders_behind_ || pre_game_ || io.DeltaTime > 0.05f)
-        gpu_benchmark_at_ = ImGui::GetTime() + 3.0;
-      else if (ImGui::GetTime() >= gpu_benchmark_at_) gpu_benchmark_started_ = true, native_x_renderer::GpuBenchmarkStart();
+        gpu_benchmark_at_ = MenuTime() + 3.0;
+      else if (MenuTime() >= gpu_benchmark_at_) gpu_benchmark_started_ = true, native_x_renderer::GpuBenchmarkStart();
     }
     if (!REXCVAR_GET(server)) AutoDetectWhenTimed(), NoteNisSupport(), NoteTemporalSupport();
 #if defined(BF_DEV_TOOLS)
@@ -978,7 +997,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (const char* v = std::getenv("BF_DEV_HD_FLIP"); v && *v) {
       static double next = 0;
       static bool on = true;
-      const double now = ImGui::GetTime();
+      const double now = MenuTime();
       if (next == 0) next = now + std::atof(v);
       if (now >= next) {
         on = !on, next = now + std::atof(v);
@@ -1013,8 +1032,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }
     {
       std::string name, value;
-      if (SmgSightTakeSave(name, value)) settings_.values["cvar." + name] = value, smg_tune_dirty_at_ = ImGui::GetTime();
-      if (smg_tune_dirty_at_ > 0 && ImGui::GetTime() - smg_tune_dirty_at_ > 1.0) smg_tune_dirty_at_ = -1, settings_.Save();
+      if (SmgSightTakeSave(name, value)) settings_.values["cvar." + name] = value, smg_tune_dirty_at_ = MenuTime();
+      if (smg_tune_dirty_at_ > 0 && MenuTime() - smg_tune_dirty_at_ > 1.0) smg_tune_dirty_at_ = -1, settings_.Save();
     }
     if (!open_) ReopenPause();
     // A new match: BF's pause list starts on its first row again.
@@ -1042,8 +1061,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       // is still on screen with its "Joining game" box (TekRantGaming, 10 Nov: the old menu showed; run launchaudio1), so our
       // page stays over it until the load's first progress, 10 s at most.
       if (stage == 5) {
-        if (joining_load_at_ < 0) joining_load_at_ = ImGui::GetTime();
-        if (LoadingScreenShown() || ImGui::GetTime() - joining_load_at_ > 10)
+        if (joining_load_at_ < 0) joining_load_at_ = MenuTime();
+        if (LoadingScreenShown() || MenuTime() - joining_load_at_ > 10)
           open_ = false, page_ = Page::kMain, joining_load_at_ = -1;
       } else {
         joining_load_at_ = -1;
@@ -1084,7 +1103,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     NoteRebornAchievements();  // Reborn's own achievements, once a joined match's level has the soldier
     TickEventLook();  // an event server's look, when its host says it is one and its listing did not (in a match)
     // Every frame, the menu open or not (Yes closes the pause: the check never ran, run v41team1).
-    if (team_suicide_at_ > 0 && ImGui::GetTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
+    if (team_suicide_at_ > 0 && MenuTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
       team_suicide_at_ = -1;
       // Only when the team did change and the player is still in the match (the review of pull request 16: a refused
       // switch, or leaving within the two seconds, still killed the soldier).
@@ -1148,15 +1167,15 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         } else if (!QuickJoin()) {
           menu_error_ = list_.reachable() ? "No server has room right now. Try again in a moment, or open the server browser."
                                          : "The servers do not answer. Check your internet connection.";
-          menu_error_at_ = ImGui::GetTime();
+          menu_error_at_ = MenuTime();
         }
-      } else if (ImGui::GetTime() > quick_waiting_) {
+      } else if (MenuTime() > quick_waiting_) {
         quick_waiting_ = 0;
         if (const ServerNotice n = list_.notice(); n.active()) {  // the backend is down: the last notice known
           menu_error_.clear();
           ShowNotice(n, "Quick Play");
         } else {
-          menu_error_ = "The servers do not answer. Check your internet connection.", menu_error_at_ = ImGui::GetTime();
+          menu_error_ = "The servers do not answer. Check your internet connection.", menu_error_at_ = MenuTime();
         }
       }
     }
@@ -1468,7 +1487,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (selection || value || popup) PlayMenuSound(kSoundScroll, "up or down");
     } else if (drag) {
       // A slider dragged: a tick for its value's changes, at most every 80 ms (the pad's held steps' pace).
-      if (value && ImGui::GetTime() - slider_tick_at_ > 0.08) slider_tick_at_ = ImGui::GetTime(), PlayMenuSound(kSoundTick, "slider");
+      if (value && MenuTime() - slider_tick_at_ > 0.08) slider_tick_at_ = MenuTime(), PlayMenuSound(kSoundTick, "slider");
     } else if (moved && selection) {
       PlayMenuSound(kSoundScroll, "mouse over");
     }
@@ -1534,7 +1553,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // The vehicle ones (Steel Behemoth and the rest): whatever the match, from the seat the soldier sits in.
     if (reborn_achievements::VehicleTick(InMatch() && LevelLoaded())) SendLeaderboard("an achievement");
     if (ach_join_ == AchJoin::kNone) return;
-    const double now = ImGui::GetTime();
+    const double now = MenuTime();
     if (!(InMatch() && LevelLoaded() && comms::InWorld())) {
       ach_in_world_since_ = -1;
       return;
@@ -1568,8 +1587,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     return "";
   }
   void NotePresence() {
-    if (REXCVAR_GET(server) || ImGui::GetTime() - presence_at_ < 0.25) return;
-    presence_at_ = ImGui::GetTime();
+    if (REXCVAR_GET(server) || MenuTime() - presence_at_ < 0.25) return;
+    presence_at_ = MenuTime();
     using W = discord::Presence::Where;
     discord::Presence p;
     const int stage = MenuDriverStage();
@@ -1867,7 +1886,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                             // the two files while the notice shows)
   void IntroPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
     const ImVec2 sz = io.DisplaySize;
-    const double now = ImGui::GetTime();
+    const double now = MenuTime();
     const fs::path dir = UserDir() / "cache" / "extracted" / "startup";
     struct Card {
       const char* file;
@@ -1989,13 +2008,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // With none, the slots are tried again once a second (a read of an empty slot is slow).
     static DWORD slot = 0;
     static double none_at = -10;
-    if (slot == 4 && ImGui::GetTime() - none_at < 1.0) return;
+    if (slot == 4 && MenuTime() - none_at < 1.0) return;
     if (slot == 4 || get_state(slot, &state) != 0) {
       DWORD i = 0;
       while (i < 4 && get_state(i, &state) != 0) ++i;
       slot = i;
       if (i == 4) {
-        none_at = ImGui::GetTime();
+        none_at = MenuTime();
         return;
       }
     }
@@ -2046,8 +2065,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     static std::map<SDL_JoystickID, SDL_Gamepad*> pads;
     static double scanned_at = -10;
     SDL_UpdateGamepads();
-    if (ImGui::GetTime() - scanned_at >= 1.0) {  // the pads connected, looked over once a second
-      scanned_at = ImGui::GetTime();
+    if (MenuTime() - scanned_at >= 1.0) {  // the pads connected, looked over once a second
+      scanned_at = MenuTime();
       int count = 0;
       SDL_JoystickID* ids = SDL_GetGamepads(&count);
       std::map<SDL_JoystickID, SDL_Gamepad*> now;
@@ -2172,7 +2191,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // in when it changes; -1: the four in turn.
   void MainBackdrop(ImDrawList* d, ImVec2 sz, int fixed = -1) {
     static constexpr const char* kMaps[] = {"wake", "guadalcanal", "iwo", "coral"};
-    const double now = ImGui::GetTime();
+    const double now = MenuTime();
     if (main_map_at_ < 0) main_map_at_ = now;
     if (fixed >= 0 && fixed < 4 && fixed != main_map_) main_map_ = fixed, main_map_at_ = now;
     else if (fixed < 0 && now - main_map_at_ > 16) main_map_ = (main_map_ + 1) % 4, main_map_at_ = now;
@@ -2504,7 +2523,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // Test joins: nobody to read it (BF_DEV_JOIN_WARNINGS=1: shown anyway, for the pop-up's own tests).
     if (std::getenv("BF_AUTO_JOIN") && !std::getenv("BF_DEV_JOIN_WARNINGS")) return true;
 #endif
-    exp_popup_ = true, exp_us_ = us, exp_promo_ = !us && promo, exp_popup_server_ = sv, exp_popup_at_ = ImGui::GetTime();
+    exp_popup_ = true, exp_us_ = us, exp_promo_ = !us && promo, exp_popup_server_ = sv, exp_popup_at_ = MenuTime();
     popup_row_ = exp_promo_ ? 1 : 0, promo_dont_show_ = false;  // a promoted server's box starts on Connect
     if (us) REXLOG_INFO("BF join: {} is a US Central play test server: warned before joining", sv.name);
     else if (exp_promo_) REXLOG_INFO("BF join: {} is a promoted community server: introduced before joining", sv.name);
@@ -2654,7 +2673,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }
     // Close, and Connect anyway: locked for its first 5 s (it counts down), then like any button. A promoted server's
     // Connect is never locked.
-    const double left = exp_promo_ ? 0.0 : 5.0 - (ImGui::GetTime() - exp_popup_at_);
+    const double left = exp_promo_ ? 0.0 : 5.0 - (MenuTime() - exp_popup_at_);
     const bool locked = left > 0;
     if (locked) popup_row_ = 0;
     else if (in.left || in.right || in.up || in.down) popup_row_ = 1 - popup_row_;
@@ -2743,7 +2762,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const ImVec2 f0(a.x + st(28), a.y + st(86)), f1(b.x - st(28), a.y + st(122));
     d->AddRectFilled(f0, f1, IM_COL32(34, 36, 27, 22));
     d->AddRect(f0, f1, kit::kInk, 0, 0, 1.0f);
-    const std::string shown = std::string(pw_text_.size(), '*') + (std::fmod(ImGui::GetTime(), 1.0) < 0.5 ? "_" : "");
+    const std::string shown = std::string(pw_text_.size(), '*') + (std::fmod(MenuTime(), 1.0) < 0.5 ? "_" : "");
     d->AddText(f.ui_bold, st(14), ImVec2(f0.x + st(10), f0.y + (f1.y - f0.y - st(14) * 1.45f) * 0.5f), kit::kInk, shown.c_str());
     kit::Wrapped(d, f.ui, st(11), ImVec2(a.x + st(28), a.y + st(134)), pw_error_.empty() ? kit::kInkFaint : kit::kRed,
                  pw_error_.empty() ? std::string("Ask the match's host for it. Enter joins, Esc goes back.") : pw_error_,
@@ -2803,7 +2822,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       case ServerList::Reserved::kNo:
         REXLOG_WARN("BF join: {} could not be reserved (no answer from the server list, or the server is gone)", sv.name);
         menu_error_ = "Could not join that server: the server list did not answer. Try again in a moment.";
-        menu_error_at_ = ImGui::GetTime();
+        menu_error_at_ = MenuTime();
         BrowserNote("COULD NOT JOIN: THE SERVER LIST DID NOT ANSWER");
         return;
     }
@@ -2811,7 +2830,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
   // The join once the backend keeps the server for this game: at once, or at its turn in the server's queue.
   void JoinReserved(const ServerInfo& sv) {
-    reserved_at_ = ImGui::GetTime();
+    reserved_at_ = MenuTime();
     joining_ = sv.name;
     joining_map_ = sv.map;
     report::NoteLastMatch(UserDir(), sv.name, sv.Reborn(), sv.map, sv.players, sv.max_players, sv.ping_ms);  // a report's Last match
@@ -2860,10 +2879,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     ServerNotice refusal;
     const ServerList::Reserved answer = list_.Reserve(joined_gid_, &needs, &refusal);
     const bool refused = answer == ServerList::Reserved::kRefused || answer == ServerList::Reserved::kOutdated;
-    REXLOG_INFO("BF join: asked again signed in, {:.0f} s after the reservation: {}", ImGui::GetTime() - reserved_at_,
+    REXLOG_INFO("BF join: asked again signed in, {:.0f} s after the reservation: {}", MenuTime() - reserved_at_,
                 refused ? "refused" : answer == ServerList::Reserved::kYes ? "kept" : "no answer, going on");
     if (!refused) {
-      if (answer == ServerList::Reserved::kYes) reserved_at_ = ImGui::GetTime();
+      if (answer == ServerList::Reserved::kYes) reserved_at_ = MenuTime();
       return true;
     }
     const std::string server = joining_;
@@ -2892,7 +2911,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   void EnterQueue(const ServerInfo& sv, const QueuePlace& place) {
     queue_from_page_ = page_ == Page::kJoining ? (pre_game_ ? Page::kHome : Page::kMain) : page_;
     queue_server_ = sv, queue_place_ = place;
-    queue_popup_ = true, queue_since_ = ImGui::GetTime(), popup_row_ = 0;
+    queue_popup_ = true, queue_since_ = MenuTime(), popup_row_ = 0;
     joining_ = sv.name, joining_map_ = sv.map;
     joined_from_start_ = MenuDriverStage() < 2;
     failed_ = false, tutorial_ = false;
@@ -2906,7 +2925,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     queue_watch_.Stop(true);
     page_ = queue_from_page_;
     REXLOG_INFO("BF join: left the queue of {} ({}) after {:.0f} s, at {} of {}", queue_server_.name, how,
-                ImGui::GetTime() - queue_since_, queue_place_.position, queue_place_.total);
+                MenuTime() - queue_since_, queue_place_.position, queue_place_.total);
   }
   // Every frame while in a queue: the place from the watch's last answer, the turn, or the end of the wait.
   void QueueTick() {
@@ -2923,7 +2942,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (snap.state == QueueWatch::State::kTurn) {
       ServerInfo sv = queue_server_;
       sv.gid = snap.place.gid;  // the same server, registered again while the player waited
-      REXLOG_INFO("BF join: {}: our turn in its queue after {:.0f} s; joining", sv.name, ImGui::GetTime() - queue_since_);
+      REXLOG_INFO("BF join: {}: our turn in its queue after {:.0f} s; joining", sv.name, MenuTime() - queue_since_);
       return JoinReserved(sv);
     }
     page_ = queue_from_page_;
@@ -2940,7 +2959,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const kit::Fonts& f = kit::GetFonts();
     d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 190));
     const int pos = std::max(1, queue_place_.position), total = std::max(pos, queue_place_.total);
-    const double waited = ImGui::GetTime() - queue_since_;
+    const double waited = MenuTime() - queue_since_;
     const float w = st(520);
     const float h = st(26) + st(22) + st(52) + st(30) + st(56) + st(34) + st(44) + st(70) + st(20);
     const float top = st.P(0, 360).y - h * 0.5f;
@@ -2962,7 +2981,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       const std::string place = fmt::format("Position {} of {}", pos, total);
       d->AddText(f.ui_bold, st(36), ImVec2(a.x + st(30), y), kit::kInk, place.c_str());
       // The breathing dot: the place is watched (it moves by itself).
-      const float pulse = 0.5f + 0.5f * float(std::sin(ImGui::GetTime() * 3.0));
+      const float pulse = 0.5f + 0.5f * float(std::sin(MenuTime() * 3.0));
       const float px = a.x + st(30) + kit::TextWidth(f.ui_bold, st(36), place) + st(18);
       d->AddCircleFilled(ImVec2(px, y + st(22)), st(6), IM_COL32(93, 138, 50, int(110 + 145 * pulse)));
       y += st(56);
@@ -3041,7 +3060,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     pre_game_ = false, started_from_launcher_ = true;
     NoteStartValues();  // the renderer takes its settings now
     shaders_prepared_hint_ = false;
-    shaders_wait_from_ = ImGui::GetTime();
+    shaders_wait_from_ = MenuTime();
     page_ = Page::kShaders, shaders_shown_ = false;
     auto start = std::move(start_game_);
     start();
@@ -3249,7 +3268,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
   void TickRejoinTick() {
     if (tick_join_address_.empty() || !pre_game_) return;
-    if (tick_join_until_ == 0) tick_join_until_ = ImGui::GetTime() + 25;
+    if (tick_join_until_ == 0) tick_join_until_ = MenuTime() + 25;
     for (const ServerInfo& sv : list_.servers()) {
       if (sv.address != tick_join_address_) continue;
       REXLOG_INFO("BF join: joining {} as asked before the restart ({} Hz)", sv.name, sv.Tick());
@@ -3259,10 +3278,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       Join(sv);
       return;
     }
-    if (ImGui::GetTime() > tick_join_until_) {
+    if (MenuTime() > tick_join_until_) {
       tick_join_address_.clear();
       menu_error_ = "That server is not on the list any more. Open the server browser to see what is.";
-      menu_error_at_ = ImGui::GetTime();
+      menu_error_at_ = MenuTime();
     }
   }
   void OwnBackendPopup(ImDrawList* d, ImGuiIO& io, Input in) {
@@ -3293,7 +3312,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // Each frame on Home after such a restart: the join, once that backend's list has the server.
   void OwnBackendTick() {
     if (own_join_port_.empty() || !pre_game_) return;
-    if (own_join_until_ == 0) own_join_until_ = ImGui::GetTime() + 25;
+    if (own_join_until_ == 0) own_join_until_ = MenuTime() + 25;
     const std::string tail = ":" + own_join_port_;
     for (const ServerInfo& sv : list_.servers()) {
       if (sv.address.size() > tail.size() && sv.address.compare(sv.address.size() - tail.size(), tail.size(), tail) == 0) {
@@ -3303,10 +3322,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         return;
       }
     }
-    if (ImGui::GetTime() > own_join_until_) {
+    if (MenuTime() > own_join_until_) {
       own_join_port_.clear();
       menu_error_ = "That server is not on its backend's list any more. Open the server browser to see what is.";
-      menu_error_at_ = ImGui::GetTime();
+      menu_error_at_ = MenuTime();
     }
   }
   void DirectConnectPage(ImDrawList* d, float s, ImGuiIO& io, const Input& in, float x0, float x1, float top) {
@@ -3359,7 +3378,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     d->AddRect(f0, f1, kTableGreen, 0, 0, 4 * s);
     const std::string shown = direct_text_.empty() && !direct_keys_ ? "" : direct_text_;
     Text(d, g_fonts.bf_med, 34 * s, ImVec2(f0.x + 16 * s, CapTop(f0.y, 64 * s, 34 * s)), kTableInk, shown);
-    if (std::fmod(ImGui::GetTime(), 1.0) < 0.6) {
+    if (std::fmod(MenuTime(), 1.0) < 0.6) {
       const float cx = f0.x + 18 * s + Width(g_fonts.bf_med, 34 * s, shown);
       d->AddRectFilled(ImVec2(cx, f0.y + 14 * s), ImVec2(cx + 3 * s, f1.y - 14 * s), kTableInk);
     }
@@ -3721,7 +3740,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   SettingRow DeviceChoice(const std::string& section, const std::string& name, const std::string& help,
                           audio_devices::Role role) {
     const bool recording = role == audio_devices::Role::kChatIn;
-    const double now = ImGui::GetTime();
+    const double now = MenuTime();
     if (now - devices_listed_at_[recording] > 1.0 || now < devices_listed_at_[recording])
       device_names_[recording] = audio_devices::Names(recording), devices_listed_at_[recording] = now;
     SettingRow r{section, name, help};
@@ -4924,15 +4943,21 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "edges. Applies at once.",
                           "native_x_renderer_soft_shadows", {{"Off", "off"}, {"Soft", "soft"}, {"Softer", "softer"}}));
     // Reflections (the user, 19 Nov 2026: "an option for planar reflections. This is be in the enhancements tab as
-    // \"Reflections\" with Off / SSR / Planar"): moved here from Graphics > Sky's Sea reflections. Planar (the world
-    // drawn again from under the water) is not built yet, so not offered.
+    // \"Reflections\" with Off / SSR / Planar"): moved here from Graphics > Sky's Sea reflections. D252: Planar, the
+    // world drawn again mirrored in the water (native_x_renderer_reflection_mode; before it, the SSR switch).
     {
       SettingRow reflections = Choice("Lighting", "Reflections",
-                          "How the sea reflects. SSR: what is around it, the shore, ships and the sky as it is now, day "
-                          "or night, with ripples, from what is on the screen. Off: the game's own reflection of a "
-                          "painted day sky. Needs the volumetric sky. Applies at once.",
-                          "native_x_renderer_reflections", {{"Off", "false"}, {"SSR", "true"}});
-      reflections.index = Truthy(Cvar("native_x_renderer_reflections")) ? 1 : 0;
+                          "How the sea reflects. Planar: the world drawn a second time as a mirror in the water shows "
+                          "it, also what is off the screen or behind other things, with ripples; costs the most. SSR: "
+                          "what is around it from what is on the screen, the shore, ships and the sky as it is now, day "
+                          "or night. Off: the game's own water with the sky of the hour. Needs the volumetric sky. "
+                          "Applies at once.",
+                          "native_x_renderer_reflection_mode", {{"Off", "0"}, {"SSR", "1"}, {"Planar", "2"}});
+      const int mode = std::atoi(Cvar("native_x_renderer_reflection_mode").c_str());
+      reflections.index = mode >= 0 && mode <= 2 && !Cvar("native_x_renderer_reflection_mode").empty() &&
+                                  Cvar("native_x_renderer_reflection_mode") != "-1"
+                              ? mode
+                              : (Truthy(Cvar("native_x_renderer_reflections")) ? 1 : 0);
       rows.push_back(reflections);
     }
     // Ambient occlusion: King Kong's three rows (GTAO, NativeXRenderer D132), all applied at once.
@@ -5220,8 +5245,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                        capture_.find("stick_right") == std::string::npos && capture_.find("chat") == std::string::npos &&
                        capture_.find("talk") == std::string::npos;
     if (ImGui::IsKeyDown(ImGuiKey_Escape)) {
-      if (esc_held_since_ < 0) esc_held_since_ = ImGui::GetTime();
-      if (ImGui::GetTime() - esc_held_since_ >= 0.6) {
+      if (esc_held_since_ < 0) esc_held_since_ = MenuTime();
+      if (MenuTime() - esc_held_since_ >= 0.6) {
         StoreBindSlot(capture_, capture_slot_, "");
         capture_.clear();
         esc_held_since_ = -1;
@@ -5254,8 +5279,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       REXLOG_INFO("BF settings: {} cleared (the controller)", what);
     };
     if (ImGui::IsKeyDown(ImGuiKey_Escape)) {
-      if (esc_held_since_ < 0) esc_held_since_ = ImGui::GetTime();
-      if (ImGui::GetTime() - esc_held_since_ >= 0.6) {
+      if (esc_held_since_ < 0) esc_held_since_ = MenuTime();
+      if (MenuTime() - esc_held_since_ >= 0.6) {
         clear_slot();
         capture_.clear();
         esc_held_since_ = -1;
@@ -5268,7 +5293,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       capture_.clear();
       return true;
     }
-    if (ImGui::GetTime() - pad_capture_at_ > 8.0) {
+    if (MenuTime() - pad_capture_at_ > 8.0) {
       REXLOG_INFO("BF settings: {} kept (no press from the controller)", what);
       capture_.clear();
       return true;
@@ -5517,7 +5542,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }();
     static size_t next = 0;
     if (release_click_) ImGui::GetIO().AddMouseButtonEvent(0, false), release_click_ = false;
-    while (next < steps.size() && ImGui::GetTime() > steps[next].first) {
+    while (next < steps.size() && MenuTime() > steps[next].first) {
       const std::string& w = steps[next++].second;
       REXLOG_INFO("BF menu steps: {}", w);
       std::lock_guard<std::mutex> lock(pad_mutex_);
@@ -5640,7 +5665,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (at.first < 0) return;
     static double in_match = -1;
     static int step = 0;
-    const double now = ImGui::GetTime();
+    const double now = MenuTime();
     if (MenuDriverStage() != 5 || (in_match < 0 && !LevelLoaded())) return;  // from Loading complete
     if (in_match < 0) in_match = now;
     // BF_PAUSE_BARE=1: the leave walk with our menu closed, so screenshots show BF's own menu.
@@ -5715,8 +5740,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   uint8_t side_button_up_ = 0;
   double side_button_up_at_ = 0;
   void PushSideButton(uint8_t button, bool down) {
-    auto* w = window_ ? static_cast<rex::ui::WindowSDL*>(window_()) : nullptr;
-    SDL_Window* sdl = w ? w->sdl_window() : nullptr;
+    auto* w = window_ ? window_() : nullptr;
+    SDL_Window* sdl = w ? w->sdl_window() : nullptr;  // SDK v0.11+: the compat window's own (compat/rex/ui/window.h)
     if (!sdl) {
       REXLOG_WARN("BF test: no window for mouse button {}", int(button));
       return;
@@ -5730,10 +5755,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const bool ok = SDL_PushEvent(&e);
     REXLOG_INFO("BF test: mouse button {} {} through the window's queue{}", int(button), down ? "down" : "up",
                 ok ? "" : " (refused)");
-    if (down) side_button_up_ = button, side_button_up_at_ = ImGui::GetTime() + 0.15;
+    if (down) side_button_up_ = button, side_button_up_at_ = MenuTime() + 0.15;
   }
   void SideButtonTick() {
-    if (side_button_up_ && ImGui::GetTime() >= side_button_up_at_) {
+    if (side_button_up_ && MenuTime() >= side_button_up_at_) {
       const uint8_t b = side_button_up_;
       side_button_up_ = 0;
       PushSideButton(b, false);
@@ -5760,13 +5785,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const int mine = comms::Team();
     if (mine != 1 && mine != 2) {
       REXLOG_WARN("BF pause: Change Team, but the player's team is not known yet");
-      menu_error_ = "Your team is not known yet. Try again once you have spawned.", menu_error_at_ = ImGui::GetTime();
+      menu_error_ = "Your team is not known yet. Try again once you have spawned.", menu_error_at_ = MenuTime();
       return;
     }
     const int other = 3 - mine;
     REXLOG_INFO("BF pause: Change Team, from team {} to {} (the game's own selectTeam)", mine, other);
     GameCommand("selectTeam", std::to_string(other));
-    team_suicide_at_ = ImGui::GetTime() + 2.0, team_wanted_ = other;
+    team_suicide_at_ = MenuTime() + 2.0, team_wanted_ = other;
   }
   int team_wanted_ = 0;  // the team Change Team asked for
   bool ach_from_pause_ = false;  // the achievements opened from the pause: B goes back there
@@ -5961,7 +5986,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (it.does == Does::kLeave) {  // the game's own Exit Game command (doExitLevel), not its rows pressed
       LeaveMatch();
       page_ = Page::kLeaving;
-      leaving_at_ = ImGui::GetTime();
+      leaving_at_ = MenuTime();
       return;
     }
     if (it.does == Does::kQuestion) {  // Suicide: the game's own command; the pause closes as the game's does
@@ -6028,7 +6053,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       reopen_check_ = false;
     }
     if (passing_main_) page_ = Page::kMain, row_ = passing_;
-    else page_ = Page::kPause, pause_row_ = passing_, pause_focus_panel_ = false, pause_opened_at_ = ImGui::GetTime();
+    else page_ = Page::kPause, pause_row_ = passing_, pause_focus_panel_ = false, pause_opened_at_ = MenuTime();
     passing_ = -1, reopen_at_ = {};
     pad_ = {};
     open_ = true;
@@ -6036,7 +6061,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
   void Leave() {
     page_ = Page::kLeaving;
-    leaving_at_ = ImGui::GetTime();
+    leaving_at_ = MenuTime();
     LeaveMatch();
   }
 
@@ -6053,7 +6078,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     Text(d, g_fonts.bf_med, 26 * s, ImVec2(a.x + 18 * s, a.y + 64 * s), IM_COL32(50, 50, 48, 255), Upper(line));
     if (spinner) {  // BF's turning arrow, bottom right
       const ImVec2 c(b.x - 52 * s, b.y - 52 * s);
-      const float r = 26 * s, t = float(ImGui::GetTime()) * 4.0f;
+      const float r = 26 * s, t = float(MenuTime()) * 4.0f;
       d->PathArcTo(c, r, t, t + 5.0f, 32);
       d->PathStroke(IM_COL32(70, 70, 68, 255), 0, 6 * s);
       const ImVec2 tip(c.x + std::cos(t + 5.0f) * r, c.y + std::sin(t + 5.0f) * r);
@@ -6111,7 +6136,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (done) d->AddCircleFilled(c, st(5), kit::kGreenBright);
       else d->AddCircle(c, st(5), now ? kit::kInk : kit::kKhakiDim, 0, st(1.5f));
       if (now) {  // a turning arc over the step under way
-        const float a0 = float(ImGui::GetTime()) * 5.0f;
+        const float a0 = float(MenuTime()) * 5.0f;
         d->PathArcTo(c, st(9), a0, a0 + 2.2f, 16);
         d->PathStroke(kit::kStamp, 0, st(2));
       }
@@ -6145,7 +6170,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   void LeavingPage(ImDrawList* d, float s, ImGuiIO& io) {
     (void)s;
     // Still in the match after 30 s (the walk takes about 17): BF's Exit Game did not go through; back to the match.
-    if (MenuDriverStage() == 5 && ImGui::GetTime() - leaving_at_ > 30) open_ = false, page_ = Page::kMain;
+    if (MenuDriverStage() == 5 && MenuTime() - leaving_at_ > 30) open_ = false, page_ = Page::kMain;
     const int map = MapIndexOf(joining_map_);
     if (lost_) {
       TransitPage(d, io, map, "The connection to the server was lost", "Disconnected", joining_,
@@ -6231,7 +6256,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // One press per action across the controller and the keyboard: Steam's desktop layout types keys for a controller,
   // so the same action from the other device within 0.25 s is the same press (King Kong's rule).
   Input MergeInput(const Input& pad, const Input& key) {
-    const double now = ImGui::GetTime();
+    const double now = MenuTime();
     Input out;
     int i = 0;
     for (bool Input::*m : {&Input::up, &Input::down, &Input::left, &Input::right, &Input::accept, &Input::back,
@@ -6260,7 +6285,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // time in matches for the rank.
   void UpdateWalk(ImGuiIO& io) {
     if (name_ready_at_ > 0) {
-      const bool late = ImGui::GetTime() - name_ready_at_ > 3.0;
+      const bool late = MenuTime() - name_ready_at_ > 3.0;
       if (PollNameCheck(late) || late) name_ready_at_ = 0;
     }
     // Protect your name: the name check's answer (signed in for the protected name, with the account's progress to take
@@ -6299,8 +6324,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       for (const auto& [key, value] : settings_.values) any = any || key.rfind("stat.", 0) == 0;
       if (any) SendLeaderboard("saved totals at the start");
     }
-    if (ImGui::GetTime() - stats_taken_at_ > 10) {
-      stats_taken_at_ = ImGui::GetTime();
+    if (MenuTime() - stats_taken_at_ > 10) {
+      stats_taken_at_ = MenuTime();
       const auto events = TakeScoreEvents();
       for (const auto& [label, v] : events) match_score_ += v.second;
       for (const auto& [label, v] : events) {
@@ -6316,10 +6341,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     {
       static int last_stage = -1;
       const int stage = MenuDriverStage();
-      if (stage == 5 && last_stage != 5) match_score_ = 0, match_began_ = ImGui::GetTime();
+      if (stage == 5 && last_stage != 5) match_score_ = 0, match_began_ = MenuTime();
       last_stage = stage;
-      if (stage == 5 && !joined_gid_.empty() && ImGui::GetTime() - match_score_sent_at_ > 10) {
-        match_score_sent_at_ = ImGui::GetTime();
+      if (stage == 5 && !joined_gid_.empty() && MenuTime() - match_score_sent_at_ > 10) {
+        match_score_sent_at_ = MenuTime();
         std::string name;
         for (char c : settings_.Get("player_name", ""))
           if (std::isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_') name += c;

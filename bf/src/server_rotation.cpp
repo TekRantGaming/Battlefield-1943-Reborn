@@ -378,7 +378,7 @@ void StartTickWatchdogOnce() {
           REXLOG_ERROR("BF server hang: no tick for {:.0f} s (bf_server_hang_seconds {:.0f}): ending the process so "
                        "its manager starts it again",
                        quiet, limit);
-          rex::FlushLogging();
+          rex::log::Flush();
 #if defined(_WIN32)
           // An exception of our own, so the crash report and its minidump (every thread's stack, the stuck tick's
           // included) are written; abort() is a fail fast that ends the process before any report.

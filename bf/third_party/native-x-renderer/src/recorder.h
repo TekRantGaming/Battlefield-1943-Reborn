@@ -29,8 +29,15 @@ class Recorder {
   // The context for direct use: what was recorded is done first.
   Diligent::IDeviceContext* context() {
     if (threaded() && std::this_thread::get_id() != thread_id_) Drain();
+    direct_uses_.fetch_add(1, std::memory_order_relaxed);
     return context_;
   }
+  // How many times context() was taken, or a recorded call submits the context (NoteSubmit): a pass that used the
+  // context directly may have set a pipeline and committed its own resources since, and a submit starts a command
+  // buffer with no descriptor set bound (DrawPath: a draw's binding set committed again then; D82, D111).
+  uint64_t direct_uses() const { return direct_uses_.load(std::memory_order_relaxed); }
+  // A call recorded now submits the context when it runs (DiligentCore's BindSparseResourceMemory flushes it).
+  void NoteSubmit() { direct_uses_.fetch_add(1, std::memory_order_relaxed); }
 
   // Until EndInline, calls are made at once, on the calling thread, after what was recorded before.
   void BeginInline() {
@@ -108,6 +115,7 @@ class Recorder {
   std::atomic<uint64_t> published_{0};
   // D250: set while the recorder's thread sleeps on published_: only then does Publish wake it.
   std::atomic<bool> consumer_sleeping_{false};
+  std::atomic<uint64_t> direct_uses_{0};
 
   Block* read_block_ = nullptr;
   Block* retired_ = nullptr;

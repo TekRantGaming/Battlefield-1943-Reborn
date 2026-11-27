@@ -86,6 +86,10 @@
       {"keybind_rstick_down", "Look down (mouse camera off)"},
       {"keybind_rstick_left", "Look left (mouse camera off)"},
       {"keybind_rstick_right", "Look right (mouse camera off)"},
+      // The seat keys (issue 80), in the ground vehicles' and the boats' tabs, one setting each (vehicle_binds.h).
+      {"keybind_seat_1", "Seat 1 (driver)"}, {"keybind_seat_2", "Seat 2"}, {"keybind_seat_3", "Seat 3"},
+      {"keybind_seat_4", "Seat 4"}, {"keybind_seat_5", "Seat 5"}, {"keybind_seat_6", "Seat 6"},
+      {"keybind_seat_7", "Seat 7"}, {"keybind_seat_8", "Seat 8"}, {"keybind_seat_9", "Seat 9"},
       {"keybind_push_to_talk", "Push to talk (voice chat)"},
       {"keybind_chat_all", "Chat to everyone"},
       {"keybind_chat_team", "Chat to your team"},

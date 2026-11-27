@@ -52,6 +52,7 @@
 #include <xxhash.h>
 
 #include "../third_party/miniz/miniz.h"
+#include "compat/sdk_module.h"
 #include "capture_points.h"
 #include "dbx_tree.h"
 #include "theme_chime.h"
@@ -1939,7 +1940,7 @@ void DevNoteOpenedHandle(const uint8_t* base, uint32_t handle_out, uint32_t attr
 namespace {
 PPCFunc* RuntimeKernelExport(const char* name) {
 #if defined(_WIN32)
-  static HMODULE runtime = GetModuleHandleA("rexruntime.dll");
+  static HMODULE runtime = bf1943::SdkModule("rexkernel");  // v0.11: the kernel and XAM exports (__imp__*) are rexkernel's
   return reinterpret_cast<PPCFunc*>(GetProcAddress(runtime, name));
 #else
   return reinterpret_cast<PPCFunc*>(dlsym(RTLD_NEXT, name));  // the runtime's own, after ours (input_settings.cpp)

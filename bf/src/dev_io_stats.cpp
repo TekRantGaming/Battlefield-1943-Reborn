@@ -28,13 +28,14 @@
 #else
 #include <dlfcn.h>
 #endif
+#include "compat/sdk_module.h"
 
 namespace {
 using Clock = std::chrono::steady_clock;
 
 PPCFunc* RuntimeExport(const char* name) {
 #if defined(_WIN32)
-  static HMODULE runtime = GetModuleHandleA("rexruntime.dll");
+  static HMODULE runtime = bf1943::SdkModule("rexkernel");  // v0.11: the kernel and XAM exports (__imp__*) are rexkernel's
   return reinterpret_cast<PPCFunc*>(GetProcAddress(runtime, name));
 #else
   return reinterpret_cast<PPCFunc*>(dlsym(RTLD_NEXT, name));

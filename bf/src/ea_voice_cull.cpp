@@ -38,3 +38,31 @@ REX_HOOK_RAW(sub_82183680) {
                 cull ? "; stopping its lowest-priority sounds" : "; no sound stopped");
   if (cull) __imp__sub_82183680(ctx, base);
 }
+
+// Issue 76 (0.4.8, a Night Ops storm on Iwo Jima, once): EA's mixer thread crashed writing 0x00000014 in
+// sub_821AFE98(object r3), which gives an object's mixer nodes back to EA's free list under its lock: for each of its
+// object+68 entries (28 bytes each, from object+52) it unlinks the entry's node (its first word; the links at
+// node+20) and puts it on the free list. One entry had no node, so the unlink wrote to 0 + 20. An object with an
+// entry like that is left as it is: its nodes are not given back (a few nodes of EA's pool lost) instead of the game
+// ending. Logged, so a player's report shows it.
+REX_EXTERN(__imp__sub_821AFE98);
+REX_HOOK_RAW(sub_821AFE98) {
+  const auto load = [base](uint32_t a) {
+    return uint32_t(base[a]) << 24 | uint32_t(base[a + 1]) << 16 | uint32_t(base[a + 2]) << 8 | base[a + 3];
+  };
+  const uint32_t object = ctx.r3.u32;
+  if (object >= 0x10000) {
+    const uint32_t count = load(object + 68), table = load(object + 52);
+    bool whole = count == 0 || (table >= 0x10000 && count < 4096);
+    for (uint32_t i = 0; whole && i < count; ++i) whole = load(table + i * 28) >= 0x10000;
+    if (!whole) {
+      static std::atomic<uint64_t> times{0};
+      const uint64_t n = ++times;
+      if (n <= 10 || (n & (n - 1)) == 0)
+        REXLOG_WARN("BF audio: an EA mixer object {:08X} with {} nodes has one missing; its nodes kept, not freed ({} "
+                    "times so far)", object, count, n);
+      return;
+    }
+  }
+  __imp__sub_821AFE98(ctx, base);
+}

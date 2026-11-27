@@ -72,7 +72,7 @@ LONG CALLBACK FloatExceptionHandler(EXCEPTION_POINTERS* ep) {
   // keep a cached csr of 0 and every enable/disableFlushMode re-unmasks the
   // host. Repair the cached value so this thread doesn't trap again.
   if (auto* ts = rex::runtime::ThreadState::Get()) {
-    if (auto* ctx = ts->context()) ctx->fpscr.csr |= kMxcsrMaskAll;
+    if (auto* ctx = ts->GetContext()) ctx->fpscr.csr |= kMxcsrMaskAll;
   }
 
   ep->ContextRecord->MxCsr |= kMxcsrMaskAll;
@@ -121,7 +121,7 @@ void FloatSignalHandler(int sig, siginfo_t* info, void* uctx) {
   }
   // As on Windows, repair the context's cached csr so this thread doesn't trap again.
   if (auto* ts = rex::runtime::ThreadState::Get()) {
-    if (auto* ctx = ts->context()) ctx->fpscr.csr |= kMxcsrMaskAll;
+    if (auto* ctx = ts->GetContext()) ctx->fpscr.csr |= kMxcsrMaskAll;
   }
   uc->uc_mcontext.fpregs->mxcsr = (uc->uc_mcontext.fpregs->mxcsr | kMxcsrMaskAll) & ~kMxcsrFlags;
   uc->uc_mcontext.fpregs->cwd |= 0x3F;

@@ -107,8 +107,12 @@ if (!$serverZip) { Bad 'no community server package (BF1943-Reborn-Server-<versi
     try {
         $names = @($sz.Entries | ForEach-Object { ($_.FullName -replace '\\', '/') -replace '^[^/]+/', '' })
         foreach ($r in 'server/manager.py', 'server/manager_ui/index.html', 'server/gmhost.py', 'server/plasma.py', 'server/ed25519.py', 'server/stats.py', 'server/player_stats.py', 'server/text_filter.py', 'python/python.exe',
-                       'python/pythonw.exe', 'bin/bf1943.exe', 'bin/rexruntime.dll', 'version.txt', 'server.default.json', 'BF1943 Server.bat') {
+                       'python/pythonw.exe', 'bin/bf1943.exe', 'version.txt', 'server.default.json', 'BF1943 Server.bat') {
             if ($names -notcontains $r) { Bad "the server package lacks $r" }
+        }
+        # SDK v0.11: the runtime's modules beside the exe (the server loads the same ones; rexkernel.dll, rexkernelrd.dll...).
+        foreach ($m in 'rexkernel', 'rexapp', 'rexgpu-xenos-bfnative', 'SDL3') {
+            if (-not ($names | Where-Object { $_ -match "^bin/$([regex]::Escape($m))(rd|d)?\.dll$" })) { Bad "the server package lacks bin/$m.dll" }
         }
         foreach ($n in $names) { if ($n -match '(^|/)(official\.key|server\.json|recomplauncher\.json)$' -or $n -like 'game/*' -or $n -like 'logs/*') { Bad "the server package must not hold $n" } }
         $ve = $sz.Entries | Where-Object { ($_.FullName -replace '\\', '/') -match '^[^/]+/version\.txt$' } | Select-Object -First 1
@@ -124,11 +128,15 @@ if (Test-Path $sums) {
 }
 
 # 3. required
-foreach ($r in 'bf1943.exe', 'rexruntime.dll', 'rexgpu-bfnative.dll', 'bf1943.toml', 'data/shaders/bf1943-shaders.list',
+foreach ($r in 'bf1943.exe', 'bf1943.toml', 'data/shaders/bf1943-shaders.list',
                'data/startup/trg_studios.png', 'data/achievements/101.png', 'data/achievements/102.png',
                'data/achievements/103.png', 'bf-retired.txt', 'README.txt', 'WebView2Loader.dll',
                'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'recomplauncher.json') {
     if (!$tree.Contains($r)) { Bad "required file missing: $r" }
+}
+# SDK v0.11 (the port): the runtime is one DLL per module and SDL 3's own (with "rd" in a RelWithDebInfo build).
+foreach ($m in 'rexkernel', 'rexapp', 'rexxam', 'rexgpu-xenos-bfnative', 'SDL3') {
+    if (-not ($tree.Keys | Where-Object { $_ -match "^$([regex]::Escape($m))(rd|d)?\.dll$" })) { Bad "required file missing: $m.dll" }
 }
 foreach ($prefix in 'fonts/', 'glyphs/', 'licences/') {
     if (!($tree.Keys | Where-Object { $_.StartsWith($prefix) })) { Bad "no files under $prefix" }
@@ -137,7 +145,8 @@ foreach ($prefix in 'fonts/', 'glyphs/', 'licences/') {
 # 4. stale
 foreach ($p in $tree.Keys) {
     $l = $p.ToLowerInvariant()
-    if ($l -eq 'rexgpu-xenos.dll' -or $l -match '\.(map|pdb|old|new)$') { Bad "stale file in the zip: $p" }
+    # v0.10's runtime and plugins (gone with SDK v0.11), and the Tracy profiler's client (never in a player's build).
+    if ($l -in 'rexgpu-xenos.dll', 'rexruntime.dll', 'rexgpu-bfnative.dll' -or $l -like 'tracyclient*.dll' -or $l -match '\.(map|pdb|old|new)$') { Bad "stale file in the zip: $p" }
 }
 if ($null -ne $retiredText) {
     $ret = ParseList $retiredText 'bf-retired.txt'

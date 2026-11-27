@@ -28,6 +28,7 @@
 #include <rex/ui/keybinds.h>
 
 #include <fmt/format.h>
+#include <xxhash.h>
 
 #include <algorithm>
 #include <array>
@@ -82,9 +83,9 @@ struct RegisterNameEntry {
   const char* name;
 };
 constexpr RegisterNameEntry kRegisterNames[] = {
-#define XE_GPU_REGISTER(index, type, name) {index, #name},
-#include <rex/graphics/register_table.inc>
-#undef XE_GPU_REGISTER
+#define REXGPU_REGISTER(index, type, name) {index, #name},
+#include <rex/xenos/register_table.inc>
+#undef REXGPU_REGISTER
 };
 
 std::string RegisterName(uint32_t reg) {

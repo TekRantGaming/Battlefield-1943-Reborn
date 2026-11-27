@@ -21,8 +21,8 @@ inline bool GuestCommittedReadable(rex::memory::Memory* memory, uint32_t address
   const uint32_t last = address + (size - 1);
   for (uint32_t page = address;;) {
     rex::memory::BaseHeap* heap = memory->LookupHeap(page);
-    if (!heap || !heap->heap_size()) return false;
-    const uint32_t heap_last = heap->heap_base() + (heap->heap_size() - 1);
+    if (!heap || !heap->GetHeapSize()) return false;
+    const uint32_t heap_last = heap->GetHeapBase() + (heap->GetHeapSize() - 1);
     if (heap_last < page) return false;
     const uint32_t end = std::min(last, heap_last);
     if (!heap->QueryRangeCommittedReadable(page, end)) return false;

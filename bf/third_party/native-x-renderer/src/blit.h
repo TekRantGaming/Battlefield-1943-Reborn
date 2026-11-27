@@ -44,7 +44,7 @@ struct BlitOptions {
   // past 32 and on to inf and NaN, very bright and flickering, and stayed in the reused target).
   bool fixed16 = false;
   // kColorScaled, kColorGamma: a guest texture swizzle (3 bits per component,
-  // xenos::XE_GPU_TEXTURE_SWIZZLE_*), the default being RGBA.
+  // XE_GPU_TEXTURE_SWIZZLE_*), the default being RGBA.
   uint32_t swizzle = 0 | 1 << 3 | 2 << 6 | 3 << 9;
   // kColorGamma: the ramp texture (gamma.h), and which of its ramps to apply.
   Diligent::ITextureView* ramp = nullptr;
