@@ -40,6 +40,12 @@ int seh_filter(u32 code, void* exception_pointers);
 /// Initialize SEH signal handlers (POSIX only, no-op on Windows).
 void seh_initialize();
 
+/// POSIX: called on a fatal signal the SEH handlers do not take (outside an SEH region, or rethrown), before the
+/// process ends with the default action: a game's crash report. The arguments are the signal handler's (int, siginfo_t*,
+/// ucontext_t*; null when rethrown). It runs in the signal handler; null: none.
+using FatalSignalHook = void (*)(int sig, void* info, void* ucontext);
+void set_fatal_signal_hook(FatalSignalHook hook);
+
 /// Thread-local flag for POSIX: true when in SEH-protected code.
 bool& seh_active();
 

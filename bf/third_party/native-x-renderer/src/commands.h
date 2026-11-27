@@ -164,6 +164,9 @@ class CommandQueue {
   // signals.
   Waits TakeProducerWaits() { return Take(producer_waits_, producer_wait_ns_); }
   Waits TakeGateWaits() { return Take(gate_waits_, gate_wait_ns_); }
+  // The same waits' time since the start (ns), for the diagnostics' per-frame record (diag.h).
+  uint64_t producer_total_ns() const { return producer_total_ns_.load(std::memory_order_relaxed); }
+  uint64_t gate_total_ns() const { return gate_total_ns_.load(std::memory_order_relaxed); }
 
  private:
   void Run();
@@ -193,6 +196,7 @@ class CommandQueue {
   bool finished_ = false;  // guarded by mutex_
   std::thread thread_;
   std::atomic<uint64_t> producer_waits_{0}, producer_wait_ns_{0}, gate_waits_{0}, gate_wait_ns_{0};
+  std::atomic<uint64_t> producer_total_ns_{0}, gate_total_ns_{0};
 };
 
 }  // namespace native_x_renderer

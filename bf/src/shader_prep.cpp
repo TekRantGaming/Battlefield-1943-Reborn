@@ -51,6 +51,7 @@
 #define XXH_INLINE_ALL  // header only, no link to the SDK's xxhash.lib
 #include <xxhash.h>
 
+#include "diagnostics.h"
 #include "../third_party/miniz/miniz.h"
 #include "capture_points.h"
 #include "dbx_tree.h"
@@ -1946,12 +1947,12 @@ PPCFunc* RuntimeKernelExport(const char* name) {
 #endif
 }
 
-void NoteOpenedFile(const uint8_t* base, uint32_t attributes) {
-  if (attributes < 0x10000 || attributes >= 0xF0000000u) return;
+std::string NoteOpenedFile(const uint8_t* base, uint32_t attributes) {
+  if (attributes < 0x10000 || attributes >= 0xF0000000u) return {};
   const uint32_t name = bf1943::Be32(base + attributes + 4);
-  if (name < 0x10000 || name >= 0xF0000000u) return;
+  if (name < 0x10000 || name >= 0xF0000000u) return {};
   const uint32_t length = uint32_t(base[name]) << 8 | base[name + 1], buffer = bf1943::Be32(base + name + 4);
-  if (!length || length > 400 || buffer < 0x10000 || buffer >= 0xF0000000u) return;
+  if (!length || length > 400 || buffer < 0x10000 || buffer >= 0xF0000000u) return {};
   const std::string path(reinterpret_cast<const char*>(base + buffer), length);
 #if defined(BF_DEV_TOOLS)
   static const bool files = std::getenv("BF_DEV_FILES") != nullptr;
@@ -1959,27 +1960,37 @@ void NoteOpenedFile(const uint8_t* base, uint32_t attributes) {
   if (files && logged.fetch_add(1) < 80) REXLOG_INFO("BF dev file: {}", path);
 #endif
   bf1943::NoteGameFile(path.c_str());
+  return path;
+}
+// The handle the open wrote (r3 at the call: where it goes), for the diagnostics' sound stream reads.
+void NoteHandle(const uint8_t* base, uint32_t handle_out, uint32_t status, const std::string& path) {
+  if (status != 0 || path.empty() || handle_out < 0x10000 || handle_out >= 0xF0000000u) return;
+  bf1943::diagnostics::NoteOpenedHandle(bf1943::Be32(base + handle_out), path);
 }
 }  // namespace
 
 extern "C" REX_FUNC(__imp__NtCreateFile) {
   static PPCFunc* original = RuntimeKernelExport("__imp__NtCreateFile");
-  NoteOpenedFile(base, ctx.r5.u32);
+  const std::string opened = NoteOpenedFile(base, ctx.r5.u32);
+  const uint32_t opened_handle_out = ctx.r3.u32;
 #if defined(BF_DEV_TOOLS)
   const uint32_t handle_out = ctx.r3.u32, attributes = ctx.r5.u32, lr = uint32_t(ctx.lr), sp = ctx.r1.u32;
 #endif
   original(ctx, base);
+  NoteHandle(base, opened_handle_out, ctx.r3.u32, opened);
 #if defined(BF_DEV_TOOLS)
   bf1943::DevNoteOpenedHandle(base, handle_out, attributes, ctx.r3.u32, lr, sp);  // dev_io_stats.cpp (BF_DEV_IOSTATS)
 #endif
 }
 extern "C" REX_FUNC(__imp__NtOpenFile) {
   static PPCFunc* original = RuntimeKernelExport("__imp__NtOpenFile");
-  NoteOpenedFile(base, ctx.r5.u32);
+  const std::string opened = NoteOpenedFile(base, ctx.r5.u32);
+  const uint32_t opened_handle_out = ctx.r3.u32;
 #if defined(BF_DEV_TOOLS)
   const uint32_t handle_out = ctx.r3.u32, attributes = ctx.r5.u32, lr = uint32_t(ctx.lr), sp = ctx.r1.u32;
 #endif
   original(ctx, base);
+  NoteHandle(base, opened_handle_out, ctx.r3.u32, opened);
 #if defined(BF_DEV_TOOLS)
   bf1943::DevNoteOpenedHandle(base, handle_out, attributes, ctx.r3.u32, lr, sp);  // dev_io_stats.cpp (BF_DEV_IOSTATS)
 #endif

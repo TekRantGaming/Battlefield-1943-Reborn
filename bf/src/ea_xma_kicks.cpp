@@ -10,13 +10,20 @@
 // and decoding them on worker threads (audio_xma_kick_threads) keeps EA's lock short; the mix tick that follows finds
 // the voices decoded, as it would on the console.
 
+#include <chrono>
+
+#include "diagnostics.h"
 #include <rex/audio/xma/decoder.h>
 #include <rex/hook.h>
 #include <rex/ppc/context.h>
 
 REX_EXTERN(__imp__sub_8218DBF8);
 REX_HOOK_RAW(sub_8218DBF8) {
+  const auto start = std::chrono::steady_clock::now();
   rex::audio::BeginDeferredXmaKicks();
   __imp__sub_8218DBF8(ctx, base);
   rex::audio::EndDeferredXmaKicks();
+  // Settings > Diagnostics: EA's control step's time (the black box's audio part; EA counts it against its budget).
+  bf1943::diagnostics::NoteEaStep(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
 }

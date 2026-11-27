@@ -39,6 +39,7 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
+#include "diagnostics.h"
 #include "player_name.h"
 
 #if defined(_WIN32)
@@ -239,6 +240,7 @@ uint32_t PlayerId() { return g_player_id; }
 void SetPlayerIdentity(const std::string& name, uint32_t id) {
   g_player_name = name.size() <= player_name::kMaxBytes ? name : player_name::Clean(name, true);  // never half a sign
   g_player_id = id;
+  diagnostics::NoteOwnName(g_player_name);  // [you] in a player's log (diagnostics.h)
   REXLOG_INFO("BF LIVE: playing as {} (id {:08X})", g_player_name, id);
 }
 }  // namespace bf1943

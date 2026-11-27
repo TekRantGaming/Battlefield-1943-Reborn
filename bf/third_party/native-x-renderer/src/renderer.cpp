@@ -18,6 +18,7 @@
 #include "renderer.h"
 
 #include "aa.h"
+#include "diag.h"
 #include "cpu_cores.h"
 #include "gtao.h"
 #include "grass.h"
@@ -71,6 +72,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <optional>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -361,6 +363,7 @@ constexpr uint32_t kRbDepthClear = 0x231D;
 
 const Profile* g_profile = nullptr;
 std::unique_ptr<Device> g_device;
+std::atomic<Device*> g_device_for_queries{nullptr};  // QueryVideoMemory, from any thread (set once)
 RenderTargets g_targets;
 // The order of the writes to host targets: each draw or clear stamps the targets it writes (D95).
 uint64_t g_target_writes = 0;
@@ -1342,7 +1345,7 @@ class FrameTimer {
 class SectionTimers {
  public:
   enum Id { kSky, kCloudsOver, kFog, kLens, kWet, kGrass, kGtao, kSsgi, kAa, kUpscale, kMotionBlur, kDof,
-            kSkyMarch, kSkyResolve, kSkyDraw, kGiDepth, kAoDepth, kGiGather, kGiBlur, kAoMain, kGiCopy, kGiComposite, kAoRest, kSkin, kSkinBloom, kCount };
+            kSkyMarch, kSkyResolve, kSkyDraw, kGiDepth, kAoDepth, kGiGather, kGiBlur, kAoMain, kGiCopy, kGiComposite, kAoRest, kSkin, kSkinBloom, kMainView, kWholeFrame, kCount };
   static constexpr const char* kNames[kCount] = {"sky",  "clouds over", "fog and rain", "lens", "wet copies", "grass",
                                                  "GTAO", "SSGI",        "AA",           "upscaler", "motion blur",
                                                  "DOF",  "(sky: the clouds' march", "the clouds' blend", "the sky drawn)",
@@ -1350,7 +1353,11 @@ class SectionTimers {
                                                  "(SSGI's light and gather)", "(SSGI's history and blur)",
                                                  "(GTAO's occlusion and blur)", "(SSGI's colour copy)",
                                                  "(SSGI's composite)", "(GTAO's history and apply)",
-                                                 "weapon skin", "weapon skin bloom"};
+                                                 "weapon skin", "weapon skin bloom",
+                                                 // 27 Nov 2026: the game's own 3D view (its draws, from its view's
+                                                 // start to its geometry's end) and the whole frame (the frame end to
+                                                 // the next present): what the game's own drawing costs the GPU.
+                                                 "the game's 3D view", "the whole frame"};
   void Begin(IRenderDevice* device, IDeviceContext* context, Id id) {
     if (FaultLabels() && context && !labelled_[id]) {
       context->BeginDebugGroup(kNames[id]);
@@ -1376,12 +1383,14 @@ class SectionTimers {
       QueryDataDuration data;
       if (sec.queries[sec.index]->GetData(&data, sizeof(data), true) && data.Frequency) {
         const int ph = sec.phase[sec.index];
+        diag::NoteGpuSection(sec.frame[sec.index], int(id), kNames[id], double(data.Duration) * 1000.0 / double(data.Frequency));
         sec.total_ms += double(data.Duration) * 1000.0 / double(data.Frequency), ++sec.uses;
         sec.phase_ms[ph] += double(data.Duration) * 1000.0 / double(data.Frequency), ++sec.phase_uses[ph];
       }
       sec.pending[sec.index] = false;
     }
     sec.phase[sec.index] = int(AbPhase() & 1);
+    sec.frame[sec.index] = diag::FrameNow();
     context->BeginQuery(sec.queries[sec.index]);
     sec.active = true;
   }
@@ -1426,6 +1435,7 @@ class SectionTimers {
     double total_ms = 0.0;
     uint64_t uses = 0;
     int phase[kQueries] = {};  // each query's A/B phase (AbPhase)
+    uint64_t frame[kQueries] = {};  // each query's frame (diag.h: the black box's GPU parts)
     double phase_ms[2] = {};
     uint64_t phase_uses[2] = {};
   };
@@ -2393,6 +2403,9 @@ void ExecuteDraw(const Command& c) {
   if (g_auto_views && g_draw->TakeSceneStarted()) {  // D119: this draw started the main 3D view
     g_scene_view = scene = true;
     g_scene_color = g_scene_depth = nullptr;
+    // The game's 3D view on the GPU (SectionTimers kMainView), found from the draws too (27 Nov 2026: with auto views
+    // the view's command never starts it).
+    if (g_device) g_sections.Begin(g_device->device(), g_device->context(), SectionTimers::kMainView);
   }
   if (scene && targets[0] && targets[0]->guest_width == g_profile->output_width &&
       targets[0]->guest_height == g_profile->output_height) {
@@ -4009,6 +4022,7 @@ void ExecuteResolve(const Command& c) {
   // chosen: with reduced targets (D121) it is then the upscaled image's, at the render scale.
   if (g_auto_views && g_scene_view && c.caller == g_profile->upscale_resolve_caller && surface && !surface.depth &&
       surface.width == g_profile->output_width && surface.height == g_profile->output_height) {
+    if (g_device) g_sections.End(g_device->context(), SectionTimers::kMainView);
     UpscaleScene();
     g_auto_view_done = true;
     g_auto_reduced = false;
@@ -4450,6 +4464,7 @@ void ExecuteBeginView(const Command& c) {
   g_scene_view = c.has_matrix;
   if (g_scene_view) g_scene_view_projection = c.matrix;
   g_scene_color = g_scene_depth = nullptr;
+  if (g_scene_view && g_device) g_sections.Begin(g_device->device(), g_device->context(), SectionTimers::kMainView);
 }
 
 // The main 3D view's end: DLSS or FSR 3.1 on its color and depth, before the game's post-processing reads them.
@@ -4647,6 +4662,7 @@ void UpscaleScene() {
 }
 
 void ExecuteEndViewGeometry() {
+  if (g_device) g_sections.End(g_device->context(), SectionTimers::kMainView);
   if (!g_auto_views) UpscaleScene();
 }
 
@@ -5032,6 +5048,7 @@ void PresentPending(bool room = false) {
 }
 
 void ExecutePresent(const Command& c) {
+  if (g_device) g_sections.End(g_device->context(), SectionTimers::kWholeFrame);  // the frame's GPU work, to its present
   // Host MSAA: what it copies in a frame, said now and then.
   if (MsaaSetting() > 1) {
     static uint64_t frames = 0, downs = 0, ups = 0;
@@ -5903,6 +5920,7 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
   g_timer.Initialize(device->device());
   g_timer.Begin(device->context());
   g_device = std::move(device);
+  g_device_for_queries.store(g_device.get(), std::memory_order_release);
   g_registers = std::make_unique<rex::graphics::RegisterFile>();
   // The renderer's thread (D71), only where the command processor can wait for it before it signals the game
   // (SetSignalGate(nullptr) answers whether it can, and sets nothing).
@@ -6238,7 +6256,10 @@ void WatchDeviceLoss() {
 void ExecuteFrameEnd(const Command& c) {
   uint32_t frame = c.frame;
   ++g_frames_presented;
-  if (frame % 30 == 0) WatchDeviceLoss();
+  if (frame % 30 == 0) {
+    diag::ScopedSlice slice(kSliceFrameEndDeviceCheck);
+    WatchDeviceLoss();
+  }
   g_timer.SetFrame(frame, REXCVAR_GET(native_x_renderer_hitch_ms));
   {
     // NXR_TEX_LOADS=1: how many frames the game has ended that this thread has not (each 600 frames: average, most).
@@ -6260,11 +6281,15 @@ void ExecuteFrameEnd(const Command& c) {
     }
   }
   g_upload_ahead = REXCVAR_GET(native_x_renderer_upload_ahead);
-  sdk::NextFrame();
+  {
+    diag::ScopedSlice slice(kSliceFrameEndSdk);
+    sdk::NextFrame();
+  }
   // Render targets and resolved textures unused for a minute are freed (D52): 3600 frames at 60 FPS, and as many
   // more as the frame rate since the last log is above that (D74; at 120 FPS 3600 frames were half a minute). The
   // resolved textures that still hold their resolve, only above native_x_renderer_resolved_memory_mb (D96).
   {
+    diag::ScopedSlice slice(kSliceFrameEndFreeTargets);
     uint64_t unused_frames = 3600;
     if (g_pacing.frames && g_pacing.interval_ms > 0) {
       unused_frames = std::max<uint64_t>(unused_frames, uint64_t(60000.0 * g_pacing.frames / g_pacing.interval_ms));
@@ -6281,7 +6306,11 @@ void ExecuteFrameEnd(const Command& c) {
     }
   }
   // The frame was submitted at Present: collect the occlusion query results that arrived.
-  if (g_queries_on) g_queries.Poll();
+  if (g_queries_on) {
+    diag::ScopedSlice slice(kSliceFrameEndQueries);
+    g_queries.Poll();
+  }
+  std::optional<diag::ScopedSlice> stats_slice(std::in_place, kSliceFrameEndStats);
   DrawPath::Stats draws = g_draw ? g_draw->TakeStats() : DrawPath::Stats{};
   {
     // NXR_DRAW_DROPS=1 (a bring-up aid): a frame with under 80% of the last frame's draws is logged with the recorded
@@ -6341,6 +6370,36 @@ void ExecuteFrameEnd(const Command& c) {
                   (loaded_bytes - last_loaded_bytes) >> 10, draws.uploaded_bytes >> 10, draws.copies, g_phase.draws,
                   g_phase.clears, g_phase.resolves, g_phase.effects, g_phase.present, g_pacing.swap_ms, g_pacing.submit_ms);
     }
+    {
+      // The frame's record for a game's diagnostics (its black box: native_x_renderer.h SetFrameDiagnostics).
+      FrameDiagnostics f;
+      f.frame = frame;
+      f.interval_ms = float(g_pacing.last_interval_ms);
+      f.gpu_wait_ms = float(g_pacing.last_wait_ms);
+      f.renderer_ms = float(renderer_ms);
+      f.swap_ms = float(g_pacing.swap_ms), f.submit_ms = float(g_pacing.submit_ms);
+      f.draws = draws.draws, f.drawn = draws.drawn;
+      f.skipped_translating = draws.translating, f.skipped_compiling = draws.compiling, f.failed_draws = draws.failed;
+      f.waited_draws = draws.waited, f.waited_ms = float(draws.waited_ms);
+      f.pipelines = draws.pipelines.count, f.pipelines_ms = float(draws.pipelines.ms);
+      f.analyses = draws.analyses.count, f.analyses_ms = float(draws.analyses.ms);
+      f.translations = draws.translations.count, f.translations_ms = float(draws.translations.ms);
+      f.uploaded_kb = uint32_t(draws.uploaded_bytes >> 10);
+      static uint64_t last_producer_ns = 0, last_gate_ns = 0;
+      const uint64_t producer_ns = g_queue.producer_total_ns(), gate_ns = g_queue.gate_total_ns();
+      f.game_waited_ms = float((producer_ns - last_producer_ns) / 1e6);
+      f.gate_waited_ms = float((gate_ns - last_gate_ns) / 1e6);
+      last_producer_ns = producer_ns, last_gate_ns = gate_ns;
+      f.frames_behind = uint16_t(std::min<uint32_t>(
+          g_frames_captured.load(std::memory_order_relaxed) - uint32_t(g_frames_presented), 65535));
+      f.draws_ms = float(g_phase.draws), f.resolves_ms = float(g_phase.resolves + g_phase.clears);
+      f.effects_ms = float(g_phase.effects), f.present_ms = float(g_phase.present);
+      static double last_cpu_ms = -1;
+      const double cpu_ms = diag::ThreadCpuMs();
+      if (cpu_ms >= 0 && last_cpu_ms >= 0) f.thread_cpu_ms = float(cpu_ms - last_cpu_ms);
+      last_cpu_ms = cpu_ms;
+      diag::DeliverFrame(f);
+    }
     g_phase = {};
     g_pacing.swap_ms = g_pacing.submit_ms = 0;
     last_loads = loads;
@@ -6375,6 +6434,8 @@ void ExecuteFrameEnd(const Command& c) {
   g_motion.match_ns += draws.motion_match_ns;
   g_motion.draw_ns += draws.motion_draw_ns;
   g_motion.longest_key = std::max<uint64_t>(g_motion.longest_key, draws.motion_longest_key);
+  stats_slice.reset();
+  std::optional<diag::ScopedSlice> logs_slice(std::in_place, kSliceFrameEndLogs);
   if (g_frames_presented == 1 || g_frames_presented % 600 == 0) {
     REXLOG_INFO("[native_x_renderer] renderer: frame {}: {} clears, {} resolves ({} skipped, {} also written to the guest "
                 "memory mirror for vertex reads, D140); {} render targets, {} "
@@ -6589,8 +6650,17 @@ void ExecuteFrameEnd(const Command& c) {
     g_pacing = {};
     g_pacing.last_present = last_present;
   }
-  if (g_draw) g_draw->EndFrame();
+  logs_slice.reset();
+  if (g_draw) {
+    diag::ScopedSlice slice(kSliceFrameEndDrawPath);
+    g_draw->EndFrame();
+  }
   g_stats = {};
+  // The next frame's GPU time from here to its present (SectionTimers kWholeFrame; its view ended at the latest there).
+  if (g_device) {
+    g_sections.End(g_device->context(), SectionTimers::kMainView);
+    g_sections.Begin(g_device->device(), g_device->context(), SectionTimers::kWholeFrame);
+  }
 }
 
 // A draw's context calls are recorded for the recorder's thread; any other command, and a draw that presents
@@ -6598,7 +6668,26 @@ void ExecuteFrameEnd(const Command& c) {
 // recorded call holds copies of what it uploads, and a draw changes nothing the game reads.
 void ExecuteCommand(Command& c);
 
-void Execute(Command& c) {
+// The diagnostics' slice of a command (FrameSlice): the renderer's thread's time, every command named by kind.
+int SliceOf(Command::Type type) {
+  switch (type) {
+    case Command::Type::kDraw: return kSliceDraws;
+    case Command::Type::kClear: return kSliceClears;
+    case Command::Type::kResolve: return kSliceResolves;
+    case Command::Type::kBeginTiling:
+    case Command::Type::kEndTiling: return kSliceTiling;
+    case Command::Type::kQuery: return kSliceQueries;
+    case Command::Type::kPresent: return kSlicePresents;
+    case Command::Type::kFrameEnd: return kSliceFrameEnd;
+    case Command::Type::kBeginView: return kSliceBeginView;
+    case Command::Type::kEndViewGeometry: return kSliceEndViewGeometry;
+    case Command::Type::kAspectBox:
+    case Command::Type::kNone: return kSliceAspectBox;
+  }
+  return kSliceAspectBox;
+}
+
+void ExecuteRecorded(Command& c) {
   Recorder* recorder = g_device && g_device->recorder().threaded() ? &g_device->recorder() : nullptr;
   if (!recorder) return ExecuteCommand(c);
   const bool record = c.type == Command::Type::kDraw && !g_pending_count;
@@ -6606,6 +6695,16 @@ void Execute(Command& c) {
   ExecuteCommand(c);
   if (record) recorder->Publish();
   else recorder->EndInline();
+}
+
+void Execute(Command& c) {
+  const Command::Type type = c.type;
+  {
+    diag::ScopedSlice slice(SliceOf(type));
+    ExecuteRecorded(c);
+  }
+  // The frame's record goes out after its frame end ran (its time in it too).
+  if (type == Command::Type::kFrameEnd) diag::FlushFrame();
 }
 
 void ExecuteCommand(Command& c) {
@@ -6661,4 +6760,8 @@ Diligent::ITextureView* HostMsaaDrawView(HostTarget* target, bool multisampled, 
   return renderer::MsaaDrawView(target, multisampled, writes);
 }
 bool DeviceLost() { return renderer::g_device_lost.load(std::memory_order_relaxed); }
+bool QueryVideoMemory(VideoMemory* out) {
+  Device* device = renderer::g_device_for_queries.load(std::memory_order_acquire);
+  return device && !DeviceLost() && device->QueryVideoMemory(out);
+}
 }  // namespace native_x_renderer

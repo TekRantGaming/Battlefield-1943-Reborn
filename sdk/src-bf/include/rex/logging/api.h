@@ -13,7 +13,10 @@
 
 #include <rex/logging/types.h>
 
+#include <chrono>
 #include <filesystem>
+#include <functional>
+#include <string>
 #include <span>
 
 #include <rex/cvar.h>
@@ -26,6 +29,7 @@ REXCVAR_DECLARE(bool, log_noisy);
 REXCVAR_DECLARE(int32_t, log_flush_interval);
 REXCVAR_DECLARE(int32_t, log_max_file_size_mb);
 REXCVAR_DECLARE(int32_t, log_max_files);
+REXCVAR_DECLARE(bool, log_file_writer_thread);
 
 namespace rex {
 
@@ -79,6 +83,20 @@ void ShutdownLogging();
  * concurrent logger cannot hit freed state.
  */
 void FlushLogging();
+
+/**
+ * A filter every line passes on its way into the log file (not the console or other sinks): it returns the line
+ * as it is to be written. Set it before InitLogging(); the file is then written on a thread of its own, so the filter
+ * never runs on the thread that logged. It must not log.
+ */
+using LogFileFilter = std::function<std::string(const std::string&)>;
+void SetLogFileFilter(LogFileFilter filter);
+
+/**
+ * Waits until every line logged so far is in the log file (with log_file_writer_thread or a file filter; otherwise
+ * at once). Takes no lock a crashed thread could hold: for crash reports. False on the timeout.
+ */
+bool DrainLogFile(std::chrono::milliseconds timeout);
 
 /**
  * Register a new log category at runtime.

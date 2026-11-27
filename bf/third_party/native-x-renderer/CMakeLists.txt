@@ -156,6 +156,7 @@ add_library(native_x_renderer STATIC
     src/primitives.cpp
     src/shaders.cpp
     src/spirv_patch.cpp
+    src/diag.cpp
     src/pipelines.cpp
     src/textures.cpp
     src/gamma.cpp

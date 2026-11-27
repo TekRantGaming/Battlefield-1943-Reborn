@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { report, screenshot } from './bf_reports.js';
+import { report, screenshot, wholeLog } from './bf_reports.js';
 
 const out = process.argv[2];
 const port = Number(process.argv[3] || 18493);
@@ -66,6 +66,7 @@ http.createServer(async (req, res) => {
   try {
     if (req.url === '/v1/bf/reports' && req.method === 'POST') response = await report(request, env, Date.now(), json);
     else if (req.url.startsWith('/v1/bf/reports/shot/') && req.method === 'GET') response = await screenshot(request, env, json);
+    else if (req.url.startsWith('/v1/bf/reports/log/') && req.method === 'GET') response = await wholeLog(request, env, json);
     else response = json({ error: 'Not found' }, 404);
   } catch (error) {
     console.error(error);

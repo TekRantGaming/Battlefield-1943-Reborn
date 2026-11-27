@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -56,7 +57,8 @@ struct Part {
   std::string name;     // "Crash report"
   std::string summary;  // one line for the review page
   std::string text;     // the Markdown it adds (already scrubbed)
-  fs::path file;        // the screenshot's file
+  fs::path file;        // the screenshot's file; the whole log's file
+  std::string data;     // the whole log: its gzip (sent as log_gz; the relay keeps it and links it from the issue)
   bool on = true;
   bool available = true;  // false: nothing to attach (no crash report)
 };
@@ -64,6 +66,9 @@ struct Part {
 // The parts for this type (system details are read once a run and kept). The screenshot's text is empty: it goes as a
 // file (the relay) or is dragged in by hand (the browser).
 std::vector<Part> Gather(const Context& c, int type);
+// The system in one line for the log (diagnostics_health.cpp): "Windows 11 ... · CPU, cores, threads · RAM · GPU,
+// driver (API)".
+std::string SystemLine(const fs::path& user_dir);
 
 // Private data out of a text: the Windows user and PC names, the user folder's paths, IP addresses, the recovery code,
 // the install id, keys and tokens, e-mail addresses. ScrubSelfTest checks it (dev builds: BF_DEV_REPORT_SELFTEST=1).
@@ -75,6 +80,13 @@ struct Scrubber {
 Scrubber MakeScrubber(const Context& c);
 std::string Scrub(const std::string& text, const Scrubber& s);
 bool ScrubSelfTest(std::string& failures);
+// The same rules for the log file as it is written (diagnostics.cpp AnonymizeLine): compiled once (MakeLogScrub
+// throws when a rule cannot be built), each line's addresses handed to `ip_label` for their replacement ("[ip 3]";
+// null: "[ip]").
+struct LogScrubRules;
+std::shared_ptr<const LogScrubRules> MakeLogScrub(const Scrubber& s);
+std::string ScrubLogLine(const std::string& line, const LogScrubRules& rules,
+                         const std::function<std::string(const std::string&)>& ip_label);
 
 // The issue.
 std::string Title(const Draft& d);                                   // "[Crash] Game closes when..."

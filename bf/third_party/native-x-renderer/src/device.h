@@ -13,6 +13,8 @@
 #include "SwapChain.h"
 #include "recorder.h"
 
+#include <native_x_renderer/native_x_renderer.h>
+
 namespace native_x_renderer {
 
 // D135: the pipeline compilation threads (DiligentCore's pool) register themselves; below normal priority once the
@@ -84,6 +86,8 @@ class Device {
     uint64_t frames_presented, frames_completed, queue_next, queue_completed;
   };
   FenceState GetFenceState();
+  // The video memory as the driver reports it (native_x_renderer.h QueryVideoMemory). Any thread.
+  bool QueryVideoMemory(VideoMemory* out);
   // Frames presented so far, and the last one the GPU finished.
   uint64_t frames_presented() const { return frame_; }
   uint64_t frames_completed() const { return frame_fence_->GetCompletedValue(); }

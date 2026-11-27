@@ -1,5 +1,6 @@
 // NativeXRenderer - see storage.h.
 
+#include "diag.h"
 #include "storage.h"
 
 #include <rex/logging.h>
@@ -133,6 +134,7 @@ void PipelineStorage::AddShader(uint8_t type, uint64_t hash, const uint32_t* uco
   Put(pending_, hash);
   const uint8_t* bytes = reinterpret_cast<const uint8_t*>(ucode);
   pending_.insert(pending_.end(), bytes, bytes + size_t(dwords) * 4);
+  diag::NoteStored(0, size_t(dwords) * 4);
 }
 
 void PipelineStorage::AddTranslation(uint8_t type, uint64_t hash, uint64_t modification) {
@@ -141,6 +143,7 @@ void PipelineStorage::AddTranslation(uint8_t type, uint64_t hash, uint64_t modif
   Put(pending_, type);
   Put(pending_, hash);
   Put(pending_, modification);
+  diag::NoteStored(1, 0);
 }
 
 void PipelineStorage::AddPipeline(const PipelineRecord& record) {
@@ -151,6 +154,7 @@ void PipelineStorage::AddPipeline(const PipelineRecord& record) {
   if (!pipeline_keys_.insert(XXH3_64bits(&stored, sizeof(stored))).second) return;
   pending_.push_back(kPipelineTag);
   Put(pending_, stored);
+  diag::NoteStored(2, sizeof(stored));
 }
 
 void PipelineStorage::Flush() {
@@ -159,6 +163,7 @@ void PipelineStorage::Flush() {
   file.write(reinterpret_cast<const char*>(pending_.data()), pending_.size());
   if (!file) {
     REXLOG_WARN("[native_x_renderer] pipeline storage: cannot append to {}; not stored any more", path_.string());
+    diag::NoteStorageFailed();
     open_ = false;
   }
   pending_.clear();

@@ -5,6 +5,7 @@
 // (keybind_push_to_talk, B) is read here. Who is speaking shows under the chat, and MIC while your voice goes out.
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cfloat>
 #include <cmath>
@@ -20,10 +21,16 @@
 
 #include "clan_tags.h"
 #include "comms.h"
+#include "diagnostics.h"
 #include "voice_mute.h"
 #include "paste_keys.h"
 
 REXCVAR_DEFINE_STRING(keybind_chat_all, "T", "Input/Keybinds/Chat", "Text chat to everyone on the server");
+// Settings > Diagnostics: the player marks a problem for the log (diagnostics.h MarkProblem: a line and the black
+// box's last 30 s). F10: no game action, menu or panel of ours uses it (F2 metrics, F6/F7 in the F8 panel, F8, F9 the
+// admin's camera, F12 screenshots, F5 only on the name page).
+REXCVAR_DEFINE_STRING(keybind_mark_problem, "F10", "Input/Keybinds/Diagnostics",
+                      "Mark a problem for the log (the last 30 seconds go into it, for a report)");
 REXCVAR_DEFINE_STRING(keybind_chat_team, "Y", "Input/Keybinds/Chat", "Text chat to your team");
 REXCVAR_DEFINE_STRING(keybind_chat_squad, "U", "Input/Keybinds/Chat", "Text chat to your squad");
 REXCVAR_DECLARE(std::string, keybind_push_to_talk);
@@ -127,12 +134,37 @@ ImU32 ChannelColor(Channel c, float alpha) {
   return IM_COL32(235, 235, 228, a);
 }
 
+// A mark's notice at the top of the screen for 3 s, so the player knows it was taken.
+void DrawMarkNotice(ImGuiIO& io) {
+  const int64_t at = bf1943::diagnostics::LastMarkUs();
+  if (!at) return;
+  const int64_t now = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch()).count();
+  const double age = (now - at) / 1e6;
+  if (age < 0 || age > 3) return;
+  const float alpha = age > 2.5 ? float((3 - age) / 0.5) : 1.0f;
+  const std::string text = "MARKED FOR THE LOG (" + std::to_string(bf1943::diagnostics::Marks()) +
+                           "): Report an issue on the main menu sends it";
+  ImDrawList* d = ImGui::GetForegroundDrawList();
+  const float size = std::max(16.0f, io.DisplaySize.y / 45.0f);
+  ImFont* font = ImGui::GetFont();
+  const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0, text.c_str());
+  const ImVec2 at_px(io.DisplaySize.x * 0.5f - extent.x * 0.5f, io.DisplaySize.y * 0.06f);
+  d->AddRectFilled(ImVec2(at_px.x - size * 0.6f, at_px.y - size * 0.3f),
+                   ImVec2(at_px.x + extent.x + size * 0.6f, at_px.y + extent.y + size * 0.3f),
+                   IM_COL32(0, 0, 0, int(170 * alpha)), size * 0.2f);
+  d->AddText(font, size, at_px, IM_COL32(235, 235, 228, int(255 * alpha)), text.c_str());
+}
+
 class CommsOverlay final : public rex::ui::ImGuiDialog {
  public:
   explicit CommsOverlay(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
 
  protected:
   void OnDraw(ImGuiIO& io) override {
+    // The mark key works everywhere (menus, loading, play); not while typing a chat line.
+    if (!comms::Typing() && BindPressed(REXCVAR_GET(keybind_mark_problem))) bf1943::diagnostics::MarkProblem();
+    DrawMarkNotice(io);
     DrawBroadcast(io);  // over everything, our menus too: a restart's warning is for a player in the pause as well
     if (!InMatch() || GameMenuOpen()) {
       if (comms::Typing()) Close();

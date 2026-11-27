@@ -537,6 +537,7 @@ void ReXApp::OnKeyDown(ui::KeyEvent& e) {
 void ReXApp::OnClosing(ui::UIEvent& e) {
   (void)e;
   REXLOG_INFO("Window closing, shutting down...");
+  OnClosingWindow();
   shutting_down_.store(true, std::memory_order_release);
   if (runtime_ && runtime_->kernel_state()) {
     runtime_->kernel_state()->TerminateTitle();

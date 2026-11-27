@@ -124,6 +124,11 @@ set(BF1943_SOURCES
     src/modern_mode.cpp
     src/pipeline_upload.cpp
     src/report.cpp
+    src/diagnostics.cpp
+    src/diagnostics_health.cpp
+    src/diagnostics_blackbox.cpp
+    src/diagnostics_extra.cpp
+    src/diagnostics_profiler.cpp
     src/game_options.cpp
     src/recoil.cpp
     src/game_install.cpp
@@ -339,10 +344,27 @@ set_source_files_properties(src/report.cpp PROPERTIES INCLUDE_DIRECTORIES
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/native-x-renderer/thirdparty/diligent-core/ThirdParty/stb")
 # The version the graphics pipelines are sent with (src/pipeline_upload.cpp), on that file alone.
 set_source_files_properties(src/pipeline_upload.cpp PROPERTIES COMPILE_DEFINITIONS "BF_VERSION_STRING=\"${BF_VERSION}\"")
+# Settings > Diagnostics' build line (diagnostics_extra.cpp): the commit and whether the tree had local changes, as of
+# this configure (a build after a new commit without configuring again keeps the old one).
+execute_process(COMMAND git rev-parse --short=10 HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE BF_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git status --porcelain --untracked-files=no WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE _bf_git_status OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT BF_GIT_COMMIT)
+    set(BF_GIT_COMMIT "unknown")
+endif()
+if(_bf_git_status)
+    set(_bf_git_dirty 1)
+else()
+    set(_bf_git_dirty 0)
+endif()
+set_source_files_properties(src/diagnostics_extra.cpp PROPERTIES COMPILE_DEFINITIONS
+                            "BF_GIT_COMMIT=\"${BF_GIT_COMMIT}\";BF_GIT_DIRTY=${_bf_git_dirty}")
 
 if(WIN32)
     target_link_libraries(bf1943 PRIVATE ws2_32)  # src/socket_fixes.cpp: WSAGetLastError
     target_link_libraries(bf1943 PRIVATE pdh)  # src/perf_overlay.cpp: the GPU counters
+    target_link_libraries(bf1943 PRIVATE powrprof)  # src/diagnostics_health.cpp: the CPU's clock (CallNtPowerInformation)
     target_link_libraries(bf1943 PRIVATE dbghelp winmm bcrypt ole32 oleaut32 comdlg32)  # dev_profiler.cpp; game_install.cpp (SHA1), the setup pickers; gm_host.cpp (UPnP)
     target_link_libraries(bf1943 PRIVATE winhttp)  # src/pipeline_upload.cpp
     target_link_libraries(bf1943 PRIVATE d3d12 dxgi)  # src/gpu_preference.cpp: the high-performance GPU

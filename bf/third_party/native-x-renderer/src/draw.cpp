@@ -4907,7 +4907,7 @@ DrawPath::Stats DrawPath::TakeStats() {
     stats.analyses = times.analysis;
     stats.translations = times.translation;
   }
-  if (pipelines_) stats.pipelines = pipelines_->TakeTime();
+  if (pipelines_) stats.pipelines = pipelines_->TakeTime(), pipelines_->PollPending();
   ObjectMotion::Stats motion = object_motion_.TakeStats();
   stats.motion_matched = motion.matched;
   stats.motion_moved = motion.moved;

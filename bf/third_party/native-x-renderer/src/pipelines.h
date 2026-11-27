@@ -31,6 +31,7 @@
 #include <rex/graphics/pipeline/shader/spirv.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -114,6 +115,7 @@ struct Pipeline {
   Diligent::RefCntAutoPtr<Diligent::IPipelineState> pso;
   // Compiled and its resources set up (PipelineCache::Ready); failed: compilation failed (logged).
   bool ready = false, failed = false;
+  std::chrono::steady_clock::time_point created_at{};  // for the diagnostics (diag.h)
   std::array<const rex::graphics::SpirvShader*, 2> shaders{};  // owned by the shader cache
   Diligent::RefCntAutoPtr<Diligent::IShaderResourceBinding> srb;
   // Per stage (0 vertex, 1 pixel), in the order of the shader's texture and sampler bindings. An entry
@@ -186,6 +188,10 @@ class PipelineCache {
     return variables;
   }
   // Pipelines created since the last call.
+  // The diagnostics (diag.h): the pipelines still compiling, checked once a frame (the renderer's thread), so each
+  // one's time to compiled is known within a frame whether or not a draw asks for it again.
+  void PollPending();
+
   internal::CreationTime TakeTime() {
     internal::CreationTime time = time_;
     time_ = {};
@@ -202,6 +208,7 @@ class PipelineCache {
   bool binding_cache_ = false;  // D111
   uint32_t binding_set_count_ = 0, set_variables_ = 0;
   internal::CreationTime time_;
+  std::vector<Pipeline*> pending_;  // created, not yet compiled or failed (PollPending)
   std::unordered_map<PipelineState, std::unique_ptr<Pipeline>, PipelineStateHash> pipelines_;
 };
 

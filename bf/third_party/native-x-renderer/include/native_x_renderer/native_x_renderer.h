@@ -564,4 +564,114 @@ void SetObjectMotionBlurPaused();
 // color and depth, and the game's post-processing then reads the antialiased image.
 void EndViewGeometry();
 
+// ---- Diagnostics (a game's players' logs: Battlefield 1943 Reborn's Settings > Diagnostics, its black box)
+
+// One presented frame as the renderer saw it: the time since the last present and where it went, and what the frame
+// made or loaded. Given to the FrameDiagnosticsFn after each present, on the renderer's thread.
+// The renderer's thread's time, every part of it named (FrameDiagnostics::slice_ms): the commands it ran by kind, and
+// the frame end's steps (a part of "frame end"). With idle_ms (waiting for the game's next commands) they make the
+// whole time between two frames; what no slice covers is "not covered" (none, unless something is not timed yet).
+enum FrameSlice : int {
+  kSliceDraws, kSliceClears, kSliceResolves, kSliceTiling, kSliceQueries, kSlicePresents, kSliceFrameEnd, kSliceBeginView,
+  kSliceEndViewGeometry, kSliceAspectBox, kSliceTopCount,  // the commands (they cover the thread's busy time)
+  // The frame end's steps (inside kSliceFrameEnd).
+  kSliceFrameEndDeviceCheck = kSliceTopCount, kSliceFrameEndSdk, kSliceFrameEndFreeTargets, kSliceFrameEndQueries,
+  kSliceFrameEndStats, kSliceFrameEndLogs, kSliceFrameEndDrawPath, kSliceCount
+};
+const char* FrameSliceName(int slice);
+
+struct FrameDiagnostics {
+  uint64_t frame = 0;
+  float interval_ms = 0;     // since the last present
+  float gpu_wait_ms = 0;     // waiting for the GPU (the frames in flight)
+  float renderer_ms = 0;     // the renderer's own work on its thread
+  float swap_ms = 0, submit_ms = 0;
+  uint32_t draws = 0, drawn = 0;
+  uint32_t skipped_translating = 0, skipped_compiling = 0, failed_draws = 0;
+  uint32_t waited_draws = 0;  // draws that waited for their shaders or pipeline
+  float waited_ms = 0;
+  uint32_t pipelines = 0;     // pipelines created (the call on this thread; compiling goes on on workers)
+  float pipelines_ms = 0;
+  uint32_t analyses = 0, translations = 0;
+  float analyses_ms = 0, translations_ms = 0;
+  uint32_t texture_loads = 0;
+  uint32_t texture_load_kb = 0;
+  float texture_load_ms = 0;     // the loads' time on the renderer's thread
+  uint32_t largest_load_kb = 0;  // this frame's largest texture load and its size
+  uint16_t largest_load_width = 0, largest_load_height = 0;
+  uint32_t hd_made = 0;          // HD or upscaled copies made (a pack's picture, the upscalers', the patcher's)
+  float hd_ms = 0;
+  uint32_t uploaded_kb = 0;      // guest memory uploaded for draws
+  // The game's thread and the renderer's: the game's waits for room in the renderer's queue (the renderer behind), the
+  // command processor's waits at its signals for the queue to empty, and how many frames the game has ended that the
+  // renderer has not shown yet.
+  float game_waited_ms = 0, gate_waited_ms = 0;
+  uint16_t frames_behind = 0;
+  // The renderer's thread by phase (its own work: draws, clears, resolves, effects, present with the swap chain's
+  // acquire and present), and the CPU time the thread actually ran in the frame (less than its work: it waited, or the
+  // OS gave its core to someone else).
+  float draws_ms = 0, resolves_ms = 0, effects_ms = 0, present_ms = 0;
+  float thread_cpu_ms = -1;
+  // The thread's whole time since the last frame: each slice (FrameSlice), waiting for commands, and the wall time.
+  float slice_ms[kSliceCount] = {};
+  float idle_ms = 0, wall_ms = 0;
+};
+using FrameDiagnosticsFn = void (*)(const FrameDiagnostics& frame);
+// Null: none (the default). From any thread.
+void SetFrameDiagnostics(FrameDiagnosticsFn fn);
+
+// The renderer's totals since the start, for a game's per-scene summaries (the difference of two calls). Any thread.
+struct DiagnosticsTotals {
+  uint64_t frames = 0;
+  // Pipelines: made, and of those ready within kQuickPipelineMs of their creation (most likely from the driver's
+  // cache or the stored ones), the slower ones (compiled: a new one on this PC), the ones that failed.
+  uint64_t pipelines = 0, pipelines_quick = 0, pipelines_slow = 0, pipelines_failed = 0;
+  double pipelines_slow_ms = 0, pipeline_slowest_ms = 0;
+  uint64_t shader_failures = 0;  // a guest shader that could not be analysed or translated
+  uint64_t texture_loads = 0, texture_load_bytes = 0;
+  double texture_load_ms = 0;
+  uint64_t hd_made = 0, hd_remade = 0;  // HD copies made; remade after RepatchTextures
+  uint64_t swap_chain_resizes = 0, swap_chain_rebuilds = 0;
+  // HD copies made again whose picture is the same as one made before this run (a cache would have kept it), and
+  // the time they took.
+  uint64_t hd_same_again = 0;
+  double hd_same_again_ms = 0;
+  // HD copies put back from the patched pictures' cache instead of made again, and the time that took.
+  uint64_t hd_reused = 0;
+  double hd_reused_ms = 0;
+  // The pipeline storage (kept between runs): shaders, translations and pipelines added to it this run, the bytes
+  // written, and whether a write failed.
+  uint64_t stored_shaders = 0, stored_translations = 0, stored_pipelines = 0, stored_bytes = 0;
+  bool storage_failed = false;
+};
+inline constexpr double kQuickPipelineMs = 20.0;
+DiagnosticsTotals GetDiagnosticsTotals();
+
+// The video memory (the GPU's device-local heaps) as the driver reports it (VK_EXT_memory_budget where the GPU has
+// it: how much is used, by this process, and how much it may use before the driver starts moving memory out); false
+// when the renderer does not draw or the driver says nothing. Any thread (a query, never a wait).
+struct VideoMemory {
+  uint64_t used = 0, budget = 0;  // bytes, this process's use and its budget (0: not known)
+  uint64_t heap_size = 0;         // the device-local heaps' size
+};
+bool QueryVideoMemory(VideoMemory* out);
+
+// The GPU time of the renderer's own passes (sky, fog, grass, GTAO, SSGI, upscaler, ...) in one frame, as the duration
+// queries measured it (native_x_renderer_gpu_sections; read a few frames later, so a recent frame may have none yet):
+// up to `max` (name, ms) pairs, the largest first. The frame is FrameDiagnostics::frame's. Any thread.
+struct GpuSection {
+  const char* name;
+  float ms;
+};
+uint32_t GpuSectionsOfFrame(uint64_t frame, GpuSection* out, uint32_t max);
+// The calling thread's CPU time so far, in ms (-1 not known): for a game's per-frame "ran X ms of the frame" (a clock
+// read; on Windows it moves in scheduler ticks).
+double ThreadCpuMs();
+
+// The diagnostics' own lines in the log (the game's Settings > Diagnostics > Rendering; native_x_renderer_diagnostics):
+// each pipeline that took over 50 ms to compile with its shaders' hashes (at most 30 a minute), the HD textures remade
+// after RepatchTextures as one line per call with its reason, swap chain resizes.
+// RepatchTextures with what changed, for that line ("the prompts' style"). The string lives for the whole run.
+void RepatchTextures(const char* why);
+
 }  // namespace native_x_renderer

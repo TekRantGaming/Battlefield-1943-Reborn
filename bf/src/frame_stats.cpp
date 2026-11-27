@@ -10,10 +10,15 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <thread>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include <rex/logging.h>
+
+#include "diagnostics.h"
 #include <rex/ppc/context.h>
 
 #if defined(_WIN32)
@@ -44,11 +49,12 @@ PPCFunc* RuntimeExport(const char* name) {
 }
 
 bool StatsOn() {
-  static const bool on = [] {
+  // Every 5 s with Settings > Diagnostics > Rendering (diagnostics.h) too: as it is now (a row can change in the game).
+  static const bool env = [] {
     const char* v = std::getenv("BF_FRAME_STATS");
     return v && *v && *v != '0';
   }();
-  return on;
+  return env || bf1943::diagnostics::Want(bf1943::diagnostics::Area::kRender, bf1943::diagnostics::Level::kNormal);
 }
 
 using Clock = std::chrono::steady_clock;
@@ -56,10 +62,12 @@ using Clock = std::chrono::steady_clock;
 // BF_HITCH_MS=<ms>: a game frame (VdSwap to VdSwap) longer than that is logged, for play tests (stutter on the
 // game's own thread, next to NativeXRenderer's hitch lines from its render thread).
 void NoteHitch() {
-  static const double threshold = [] {
+  static const double env = [] {
     const char* v = std::getenv("BF_HITCH_MS");
-    return v && *v ? std::atof(v) : 0.0;
+    return v && *v ? std::atof(v) : -1.0;
   }();
+  // Settings > Diagnostics > Rendering: the game's own frames over 100 ms (the renderer's from 50 ms, its own lines).
+  const double threshold = env >= 0 ? env : bf1943::diagnostics::On(bf1943::diagnostics::Area::kRender) ? 100.0 : 0.0;
   if (threshold <= 0) return;
   static Clock::time_point last{};
   static uint64_t frame = 0;
@@ -111,8 +119,12 @@ void NoteFrame() {
   static std::vector<float> times;
   std::lock_guard<std::mutex> lock(mutex);
   const auto now = Clock::now();
-  if (last.time_since_epoch().count()) times.push_back(std::chrono::duration<float, std::milli>(now - last).count());
-  else window = now;
+  if (last.time_since_epoch().count()) {
+    times.push_back(std::chrono::duration<float, std::milli>(now - last).count());
+    bf1943::diagnostics::NoteFrameTime(times.back());  // the scene's frames (diagnostics.h)
+  } else {
+    window = now;
+  }
   last = now;
   if (now - window < std::chrono::seconds(StatsOn() ? 5 : 30) || times.empty()) return;
   // BF_FRAME_TIMES=<file>: every frame's time (ms, one a line) appended there too, for the 1% and 0.1% lows of a
@@ -133,10 +145,12 @@ void NoteFrame() {
   const float seconds = std::chrono::duration<float>(now - window).count();
   // Our limit's wait, a frame on average: the average less this is the time the frames took (the room under the cap).
   const double waited = double(bf1943::TakeLimitWaitedUs()) / 1000.0 / double(times.size());
+  // The scene at the end (diagnostics.h): the line's start stays as tools read it ("BF FPS <fps>:").
   REXLOG_INFO("BF FPS {:.1f}: {} frames, average {:.1f} ms, 99% {:.1f} ms, longest {:.1f} ms, {} over 50 ms; our limit "
-              "waited {:.1f} ms a frame",
+              "waited {:.1f} ms a frame{}",
               times.size() / seconds, times.size(), sum / times.size(),
-              sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)], sorted.back(), long_frames, waited);
+              sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)], sorted.back(), long_frames, waited,
+              bf1943::diagnostics::SceneTag());
   times.clear();
   window = now;
 }
@@ -162,17 +176,57 @@ void DevProfileFrame();  // dev_profiler.cpp: BF_DEV_PROFILE's long frames
 #endif
 }
 
+#if defined(BF_DEV_TOOLS)
+namespace {
+// Tests of the diagnostics' black box and crash reports (dev builds): BF_DEV_STALL_AT=<s>:<ms> stalls the game's thread
+// that long once (a slow frame, or with 22000 ms the hang watchdog); BF_DEV_CRASH_AT=<s> writes to a null pointer
+// (a crash report).
+void DevStallOrCrash() {
+  static const auto start = Clock::now();
+  static double stall_at = -1, stall_ms = 0, crash_at = -1;
+  static bool read = false, stalled = false;
+  if (!read) {
+    read = true;
+    if (const char* v = std::getenv("BF_DEV_STALL_AT"); v && *v) {
+      stall_at = std::atof(v);
+      if (const char* c = std::strchr(v, ':')) stall_ms = std::atof(c + 1);
+    }
+    if (const char* v = std::getenv("BF_DEV_CRASH_AT"); v && *v) crash_at = std::atof(v);
+  }
+  const double t = std::chrono::duration<double>(Clock::now() - start).count();
+  if (stall_at >= 0 && !stalled && t >= stall_at) {
+    stalled = true;
+    REXLOG_INFO("BF dev stall: the game's thread stops for {:.0f} ms", stall_ms);
+    std::this_thread::sleep_for(std::chrono::milliseconds(int64_t(stall_ms)));
+  }
+  if (crash_at >= 0 && t >= crash_at) {
+    REXLOG_INFO("BF dev crash: writing to a null pointer");
+    *static_cast<volatile int*>(nullptr) = 1;
+  }
+}
+}  // namespace
+#endif
+
 extern "C" REX_FUNC(__imp__VdSwap) {
   static PPCFunc* original = RuntimeExport("__imp__VdSwap");
-  LimitFrame();
-  if (original) original(ctx, base);
-  NoteRecent();
-  NoteHitch();
-  bf1943::LookFrame();  // look.cpp
-  bf1943::TickBlendFrame();
-  bf1943::NoteGuestFrame();
-  bf1943::GameOptionsFrame();
 #if defined(BF_DEV_TOOLS)
+  {
+    bf1943::diagnostics::OursTimer t(bf1943::diagnostics::Ours::kDevTools);  // a test stall is ours, not the game's
+    DevStallOrCrash();
+  }
+#endif
+  using bf1943::diagnostics::Ours;
+  using bf1943::diagnostics::OursTimer;
+  // Each part timed by name (diagnostics.h Ours): the black box's account of a game frame.
+  { OursTimer t(Ours::kFrameLimit); LimitFrame(); }
+  { OursTimer t(Ours::kSdkSwap); if (original) original(ctx, base); }
+  { OursTimer t(Ours::kFrameStats); NoteRecent(); NoteHitch(); }
+  { OursTimer t(Ours::kLook); bf1943::LookFrame(); }  // look.cpp
+  { OursTimer t(Ours::kTickBlend); bf1943::TickBlendFrame(); }
+  { OursTimer t(Ours::kWatchdog); bf1943::NoteGuestFrame(); }
+  { OursTimer t(Ours::kGameOptions); bf1943::GameOptionsFrame(); }
+#if defined(BF_DEV_TOOLS)
+  std::optional<OursTimer> dev_timer(std::in_place, Ours::kDevTools);
   bf1943::LookDevLog(base);
 #if defined(_WIN32)
   bf1943::RenderDocFrame();
@@ -182,8 +236,9 @@ extern "C" REX_FUNC(__imp__VdSwap) {
 #if defined(_WIN32)
   bf1943::DevProfileFrame();
 #endif
+  dev_timer.reset();
 #endif
-  NoteFrame();
+  { OursTimer t(Ours::kFrameStats); NoteFrame(); }
 }
 
 namespace bf1943 {
