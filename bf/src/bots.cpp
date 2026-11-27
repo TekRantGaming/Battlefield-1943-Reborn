@@ -336,7 +336,17 @@ struct Bot {
   // Riding (Ride): the vehicle it sits in, where it got on, where the vehicle last moved and when, when its driver's
   // seat went empty, and the enter/exit button (digital concept 13, B: run boatbtn2) held until press_until.
   uint32_t ride = 0;
+  // A place in a vehicle where the soldier keeps its own weapon (a landing craft's standing places): the game leaves
+  // the soldier as what the player controls (+312), so it is found by the vehicle's seats instead (StandingIn).
+  uint32_t standing = 0;
+  int standing_seat = -1, standing_tries = 0;
+  Clock::time_point standing_check{};
   float ride_from[3] = {}, ride_last[3] = {};
+  // Where the vehicle was 5 and 10 s ago (its way over 10 s): a boat grinding in the surf moves a little all the
+  // time, so "not moved 0.75 m" never came for it (27 Nov 2026).
+  float ride_was5[3] = {}, ride_was10[3] = {};
+  Clock::time_point ride_win_at{};
+  bool ride_slow = false;  // under 4 m in the last 10 s
   Clock::time_point ride_at{}, ride_moved{}, no_driver_since{}, press_until{}, next_press{};
   uint32_t off_vehicle = 0;          // the vehicle it just got off: not boarded again until off_until
   Clock::time_point off_until{};
@@ -3234,14 +3244,31 @@ void Drive(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t soldier, double 
 // step reads the entry's player at +284 and runs only for the entity that player controls, sub_822F05C8), so the
 // enter/exit button (digital concept 13) does what it does for a player: the game takes it out of its seat.
 // Off when: the vehicle has come 25 m or more from where it got on and stood still 2 s (a landing craft at the
-// beach); its driver's seat has been empty 1 s (the driver got off: the boat goes nowhere); or it has sat 3 minutes
-// with the vehicle still 5 s.
+// beach); its driver's seat has been empty 1 s (the driver got off: the boat goes nowhere); the vehicle has not moved
+// for 20 s (27 Nov 2026, whoever drives); or it has sat 3 minutes with the vehicle still 5 s. A place where the soldier
+// keeps its own weapon goes by StandingRide instead.
+std::string SeatsText(PPCContext& ctx, uint8_t* base, uint32_t v, uint32_t soldier_of_bot);  // below
+// The vehicle's way over the last 10 s, every 5 s (ride_slow), from a bot's seat.
+void RideWindow(Bot& bot, const float at[3], Clock::time_point now) {
+  if (bot.ride_win_at == Clock::time_point{}) {
+    bot.ride_win_at = now;
+    std::copy(at, at + 3, bot.ride_was5), std::copy(at, at + 3, bot.ride_was10);
+    bot.ride_slow = false;
+    return;
+  }
+  if (now - bot.ride_win_at < std::chrono::seconds(5)) return;
+  bot.ride_win_at = now;
+  bot.ride_slow = now - bot.ride_at > std::chrono::seconds(12) && Dist2D(at, bot.ride_was10) < 4.0f;
+  std::copy(bot.ride_was5, bot.ride_was5 + 3, bot.ride_was10);
+  std::copy(at, at + 3, bot.ride_was5);
+}
 void Ride(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t vehicle, Clock::time_point now, double dt) {
   float at[3] = {};
   if (!CachedPosition(outer, base, vehicle, at)) return;
   if (bot.ride != vehicle) {
     bot.ride = vehicle, bot.ride_at = bot.ride_moved = now, bot.no_driver_since = {}, bot.boated = true;
     bot.press_until = bot.next_press = {};
+    bot.ride_win_at = {};
     std::memcpy(bot.ride_from, at, 12);
     std::memcpy(bot.ride_last, at, 12);
   }
@@ -3255,13 +3282,28 @@ void Ride(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t vehicle, Clock::t
   const uint32_t count = Readable(entries, 4) ? std::min<uint32_t>((Load32(base, vehicle + 148) - entries) / 4, 16) : 0;
   for (uint32_t i = 0; i < count; ++i)
     if (SeatPlayer(base, vehicle, i) == bot.player) seat = int(i);
-  if (seat < 0) return;
+  if (seat < 0) {
+    static std::map<uint32_t, Clock::time_point> said;
+    if (REXCVAR_GET(bf_bots_log_detail) && now - said[bot.player] > std::chrono::seconds(5)) {
+      said[bot.player] = now;
+      REXLOG_INFO("BF bots: {} controls {:08X} ({}), not one of its seats ({} entries)", bot.name, vehicle,
+                  VehicleName(base, vehicle), count);
+    }
+    return;
+  }
   const uint32_t driver = SeatPlayer(base, vehicle, 0);
   if (driver) bot.no_driver_since = {};
   else if (bot.no_driver_since == Clock::time_point{}) bot.no_driver_since = now;
   const auto still = now - bot.ride_moved;
+  RideWindow(bot, at, now);
   const char* why = nullptr;
   float throttle = 0, steer = 0, brake = 0;
+  if (seat != 0 && REXCVAR_GET(bf_bots_log_detail) && now >= bot.boat_log) {
+    bot.boat_log = now + std::chrono::seconds(3);
+    REXLOG_INFO("BF bots: {} rides {} (seat {}) at {:.0f} {:.0f}, still {:.1f} s; seats:{}", bot.name,
+                VehicleName(base, vehicle), seat, at[0], at[2], std::chrono::duration<double>(still).count(),
+                SeatsText(outer, base, vehicle, Load32(base, bot.player + 288)));
+  }
   if (seat == 0 && IsBoat(base, vehicle)) {
     // Driving a boat: passengers first (bots of its side on their way to it, 8 s at most, or till it is full), then
     // along the way the players drove (BoatRoute) to the beach nearest its flag, or straight for the flag. Ran into
@@ -3300,7 +3342,7 @@ void Ride(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t vehicle, Clock::t
         throttle = std::fabs(diff) > 1.2f ? 0.4f : 1.0f;
       }
       const bool at_end = bot.boat_path.size() == 1 && Dist2D(at, bot.boat_path.front().data()) < 20.0f;
-      if (still > std::chrono::seconds(3) && now >= bot.reverse_until) {
+      if ((still > std::chrono::seconds(3) || bot.ride_slow) && now >= bot.reverse_until) {
         if (Dist2D(at, goal) < 200.0f || at_end || bot.boat_path.size() == 1 && Dist2D(at, goal) < 260.0f)
           why = "on the beach";
         else if (bot.reverses < 3) {
@@ -3325,6 +3367,10 @@ void Ride(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t vehicle, Clock::t
     }
   } else if (bot.no_driver_since != Clock::time_point{} && now - bot.no_driver_since > std::chrono::seconds(1))
     why = "its driver got off";
+  else if (still > std::chrono::seconds(20) || (bot.ride_slow && now - bot.ride_at > std::chrono::seconds(20)))
+    why = "the vehicle has not moved for 20 s";  // 27 Nov 2026: never a whole match in a parked vehicle
+  else if (Dist2D(at, bot.ride_from) > 25.0f && bot.ride_slow)
+    why = "the vehicle stopped";  // in the surf: under 4 m in 10 s
   else if (driver && IsBot(driver))
     ;  // a bot drives: off when it gets off, on the beach
   else if (Dist2D(at, bot.ride_from) > 25.0f && still > std::chrono::seconds(2))
@@ -3364,6 +3410,138 @@ void Ride(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t vehicle, Clock::t
   call.r3.u64 = vehicle, call.r4.u64 = uint32_t(seat);
   CostTimer t(&cost.input_step);
   CallGuest(call, base, Load32(base, vtable + 260));
+}
+
+// A bot in a place where it keeps its own weapon (TekRantGaming, 27 Nov 2026: "when bots use boats when they reach land
+// and stop not all the bots exit and it results in bots just sitting in boats the full match doing nothing"). A landing
+// craft's fourth place keeps the soldier as what its player controls (+312), so the bot was taken for one on foot: it
+// rode along, then walked against the beached boat the rest of the match and never pressed to get off (run fx_wakeD:
+// one bot, 128 stuck checks at one spot by the south beach). Found by the vehicles' seats, a quarter second apart.
+// Tests' detail (bf_bots_log_detail): a vehicle's seats, each one's player and what that player controls.
+std::string SeatsText(PPCContext& ctx, uint8_t* base, uint32_t v, uint32_t soldier_of_bot) {
+  std::string out;
+  const uint32_t n = SeatCount(ctx, base, v);
+  for (uint32_t i = 0; i < n; ++i) {
+    const uint32_t p = SeatPlayer(base, v, i);
+    if (!p || !Readable(p, 0x140)) continue;
+    const uint32_t ctl = Load32(base, p + 312), so = Load32(base, p + 288);
+    out += fmt::format(" [{}: {} ctl {}{}]", i, PlayerName(base, p), ctl == v ? "the vehicle" : ctl == so ? "its soldier" : fmt::format("{:08X}", ctl),
+                       so == soldier_of_bot ? " (this bot)" : "");
+  }
+  return out;
+}
+uint32_t StandingIn(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, Clock::time_point now) {
+  if (now < bot.standing_check) return bot.standing;
+  bot.standing_check = now + std::chrono::milliseconds(250);
+  std::vector<uint32_t> vs;
+  {
+    std::lock_guard lock(g.mutex);
+    vs.assign(g.vehicles.begin(), g.vehicles.end());
+  }
+  bot.standing = 0, bot.standing_seat = -1;
+  float sp[3];
+  if (!CachedPosition(ctx, base, soldier, sp)) return 0;
+  for (uint32_t v : vs) {
+    float vp[3];
+    if (!Readable(v, 0x100) || !CachedPosition(ctx, base, v, vp) || Dist2D(vp, sp) > 6.0f) continue;  // on it, or not
+    const uint32_t n = SeatCount(ctx, base, v);
+    for (uint32_t i = 0; i < n; ++i)
+      if (SeatPlayer(base, v, i) == bot.player) {
+        // A seat's player is left there after it got off (run fx_boat1: a bot off seat 2 still named in seat 5 while
+        // it swam and fought 100 m away): only a soldier on the vehicle itself counts.
+        if (std::fabs(vp[1] - sp[1]) > 4.0f) continue;
+        bot.standing = v, bot.standing_seat = int(i);
+        return v;
+      }
+  }
+  return 0;
+}
+
+// Such a bot, each tick: it stands still in its place and gets off where a seated passenger would (Ride's rules), with
+// the enter/exit button on its soldier's own input (Drive presses it while press_until).
+void StandingRide(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t vehicle, uint32_t soldier, Clock::time_point now,
+                  double dt) {
+  float at[3] = {};
+  if (!CachedPosition(ctx, base, vehicle, at)) return;
+  if (bot.ride != vehicle) {
+    bot.ride = vehicle, bot.ride_at = bot.ride_moved = now, bot.no_driver_since = {}, bot.boated = true;
+    bot.press_until = bot.next_press = {};
+    bot.ride_win_at = {};
+    std::memcpy(bot.ride_from, at, 12);
+    std::memcpy(bot.ride_last, at, 12);
+    bot.boat = 0;  // (on its way to a boat: this is one)
+    bot.standing_tries = 0;
+    REXLOG_INFO("BF bots: {} rides in {} standing (seat {}, its own weapon in hand)", bot.name, VehicleName(base, vehicle),
+                bot.standing_seat);
+  }
+  const float d[3] = {at[0] - bot.ride_last[0], at[1] - bot.ride_last[1], at[2] - bot.ride_last[2]};
+  if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 0.75f * 0.75f) {
+    std::memcpy(bot.ride_last, at, 12);
+    bot.ride_moved = now;
+  }
+  const uint32_t driver = SeatPlayer(base, vehicle, 0);
+  if (driver) bot.no_driver_since = {};
+  else if (bot.no_driver_since == Clock::time_point{}) bot.no_driver_since = now;
+  const auto still = now - bot.ride_moved;
+  RideWindow(bot, at, now);
+  const char* why = nullptr;
+  if (bot.no_driver_since != Clock::time_point{} && now - bot.no_driver_since > std::chrono::seconds(1))
+    why = "its driver got off";
+  else if (Dist2D(at, bot.ride_from) > 25.0f && still > std::chrono::seconds(2))
+    why = "the vehicle stopped";
+  else if (Dist2D(at, bot.ride_from) > 25.0f && bot.ride_slow)
+    why = "the vehicle stopped";
+  else if (still > std::chrono::seconds(20) || (bot.ride_slow && now - bot.ride_at > std::chrono::seconds(20)))
+    why = "the vehicle has not moved for 20 s";
+  if (why && now >= bot.next_press) {
+    bot.press_until = now + std::chrono::milliseconds(250);
+    bot.next_press = now + std::chrono::milliseconds(1500);  // still in its place then: pressed again
+    ++bot.standing_tries;
+    REXLOG_INFO("BF bots: {} gets off {} (standing, seat {}, try {}): {}", bot.name, VehicleName(base, vehicle),
+                bot.standing_seat, bot.standing_tries, why);
+    // No button gets a soldier out of such a place (run fx_boat3: its own input, the vehicle's input step for the
+    // place, and a jump, 17 tries). The server's seating moves it to a seat of the vehicle that is free (the others
+    // have got off), and from a seat it gets off as any passenger (Ride).
+    const uint32_t n = SeatCount(ctx, base, vehicle);
+    for (uint32_t seat : {1u, 2u}) {  // (not the driver's: it would drive the boat off the beach)
+      if (seat >= n || int(seat) == bot.standing_seat || SeatPlayer(base, vehicle, seat)) continue;
+      PPCContext call = ctx;
+      call.r3.u64 = bot.player, call.r4.u64 = vehicle, call.r5.u64 = seat;
+      sub_82398B98(call, base);
+      const bool moved = Load32(base, bot.player + 312) == vehicle;
+      REXLOG_INFO("BF bots: {} moves to seat {} of {} to get off: {}", bot.name, seat, VehicleName(base, vehicle),
+                  moved ? "seated" : "refused");
+      if (moved) {
+        bot.standing = 0, bot.standing_seat = -1, bot.ride = 0;  // Ride takes it from here (its own start)
+        bot.press_until = {};
+        return;
+      }
+    }
+  }
+  if (REXCVAR_GET(bf_bots_log_detail) && now >= bot.boat_log) {
+    bot.boat_log = now + std::chrono::seconds(3);
+    float sp[3] = {};
+    CachedPosition(ctx, base, soldier, sp);
+    REXLOG_INFO("BF bots: {} standing in {} at {:.0f} {:.0f}, its soldier {:.1f} m from it at {:.1f} {:.1f} {:.1f}; seats:{}",
+                bot.name, VehicleName(base, vehicle), at[0], at[2], Dist2D(sp, at), sp[0], sp[1], sp[2],
+                SeatsText(ctx, base, vehicle, soldier));
+  }
+  bot.forward = bot.strafe = 0, bot.sprint = bot.ads = bot.fire = false;
+  bot.want_yaw = bot.yaw, bot.want_pitch = 0;
+  // Getting off: the enter/exit button on its soldier's input (Drive), and every other press A (a jump) as well.
+  if (why && now < bot.press_until && (bot.standing_tries % 2) == 1) bot.chute_press_until = bot.press_until;
+  Drive(ctx, base, bot, soldier, dt);
+  // And the same button through the vehicle's own input step for that place, as a seated passenger's (Ride).
+  if (now < bot.press_until) {
+    const uint32_t cur = Load32(base, bot.input + 352);
+    if (Readable(cur, 176)) base[cur + 126] |= 0x20;
+    const uint32_t vtable = Load32(base, vehicle);
+    if (InImage(vtable) && bot.standing_seat >= 0) {
+      PPCContext call = ctx;
+      call.r3.u64 = vehicle, call.r4.u64 = uint32_t(bot.standing_seat);
+      CallGuest(call, base, Load32(base, vtable + 260));
+    }
+  }
 }
 
 // Bailing out (the user, 22 Nov 2026: "Bots should also be able to bail out of vehicles if they have the chance to
@@ -4717,6 +4895,10 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       Ride(ctx, base, bot, controls, now, dt);
       continue;
     }
+    if (const uint32_t carrier = StandingIn(ctx, base, bot, soldier, now)) {  // in a vehicle with its own weapon in hand
+      StandingRide(ctx, base, bot, carrier, soldier, now, dt);
+      continue;
+    }
     if (bot.hp_vehicle) {
       if (bot.bailing) REXLOG_INFO("BF bots: {} got out of {}", bot.name, VehicleName(base, bot.hp_vehicle));
       bot.hp_vehicle = 0, bot.bailing = false;
@@ -4789,7 +4971,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
         if (!CachedPosition(ctx, base, v, at) || Dist2D(at, pos) > 6.0f || std::fabs(at[1] - pos[1]) > 4.0f) continue;
         // Every free seat in turn (the game refuses some: US Central 20 Nov, a landing craft's seats 3 to 5); none
         // taken: the enter/exit button, as a player at the boat's side would press it, the game's own pick.
-        const uint32_t n = SeatCount(ctx, base, v);
+        const uint32_t n = IsBoat(base, v) ? std::min<uint32_t>(SeatCount(ctx, base, v), 3) : SeatCount(ctx, base, v);
         bool seated = false, tried = false;
         for (uint32_t seat = 1; seat < n && !seated; ++seat) {
           if (SeatPlayer(base, v, seat)) continue;
@@ -4802,7 +4984,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
                         seated ? "seated" : "refused");
           tried = true;
         }
-        if (!seated && tried && now >= bot.next_press) {
+        if (!seated && tried && now >= bot.next_press && !IsBoat(base, v)) {  // (a boat: see the boats below)
           bot.press_until = now + std::chrono::milliseconds(250);
           bot.next_press = now + std::chrono::milliseconds(1500);
           REXLOG_INFO("BF bots: {} presses enter at {}", bot.name, VehicleName(base, v));
@@ -4872,7 +5054,9 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       const uint32_t driver = keep ? SeatPlayer(base, bot.boat, 0) : 0;
       keep = keep && (!driver || IsBot(driver));
       if (keep && Dist2D(at, pos) < 5.0f && std::fabs(at[1] - pos[1]) < 6.0f) {
-        const uint32_t n = SeatCount(ctx, base, bot.boat);
+        // Seats 0 to 2 only (the driver's and the two guns'): the server's seating sometimes takes a landing craft's
+        // places 3 to 5 too, where the soldier keeps its own weapon and no button gets it out (run fx_boat5).
+        const uint32_t n = std::min<uint32_t>(SeatCount(ctx, base, bot.boat), 3);
         for (uint32_t seat = 0; seat < n; ++seat) {
           if (SeatPlayer(base, bot.boat, seat)) continue;
           PPCContext call = ctx;
@@ -4888,11 +5072,21 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
           bot.boat = 0;
           continue;
         }
-        if (now >= bot.next_press) {
+        // Every seat the server's seating takes is full (it refuses a landing craft's places 3 to 5): no enter button
+        // either, the game's own pick, which put the bot in a place where it keeps its own weapon and which it then
+        // never left (27 Nov 2026, run fx_boat2: pressed to get off for three minutes on the beach). It walks or swims.
+        // BF_BOT_STANDTEST=1 (developer builds, tests of the way out of such a place): the button as before.
+        bool stand_test = false;
+#if defined(BF_DEV_TOOLS)
+        static const bool stand_env = std::getenv("BF_BOT_STANDTEST") != nullptr;
+        stand_test = stand_env;
+#endif
+        if (!stand_test) keep = false;
+        else if (now >= bot.next_press) {
           bot.press_until = now + std::chrono::milliseconds(250);
           bot.next_press = now + std::chrono::milliseconds(1500);
-          if (++bot.presses > 4) keep = false;  // the game will not have it in that boat
-          else REXLOG_INFO("BF bots: {} presses enter at {}", bot.name, VehicleName(base, bot.boat));
+          if (++bot.presses > 4) keep = false;
+          else REXLOG_INFO("BF bots: {} presses enter at {} (BF_BOT_STANDTEST)", bot.name, VehicleName(base, bot.boat));
         }
       }
       if (!keep) {
