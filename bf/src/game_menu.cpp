@@ -4955,21 +4955,21 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "edges. Applies at once.",
                           "native_x_renderer_soft_shadows", {{"Off", "off"}, {"Soft", "soft"}, {"Softer", "softer"}}));
     // Reflections (the user, 19 Nov 2026: "an option for planar reflections. This is be in the enhancements tab as
-    // \"Reflections\" with Off / SSR / Planar"): moved here from Graphics > Sky's Sea reflections. D252: Planar, the
-    // world drawn again mirrored in the water (native_x_renderer_reflection_mode; before it, the SSR switch).
+    // \"Reflections\" with Off / SSR / Planar"): moved here from Graphics > Sky's Sea reflections. D252: the world drawn
+    // again mirrored in the water (native_x_renderer_reflection_mode). D253 (the user, 28 Nov 2026: "New planar
+    // reflections replace regular SSR as well. And in-game options, \"Reflections\" will just be a simple
+    // \"Original\" for off, and \"Enhanced\" for on"): two choices; a setting saved as SSR shows as Enhanced.
     {
       SettingRow reflections = Choice("Lighting", "Reflections",
-                          "How the sea reflects. Planar: the world drawn a second time as a mirror in the water shows "
-                          "it, also what is off the screen or behind other things, with ripples; costs the most. SSR: "
-                          "what is around it from what is on the screen, the shore, ships and the sky as it is now, day "
-                          "or night. Off: the game's own water with the sky of the hour. Needs the volumetric sky. "
-                          "Applies at once.",
-                          "native_x_renderer_reflection_mode", {{"Off", "0"}, {"SSR", "1"}, {"Planar", "2"}});
-      const int mode = std::atoi(Cvar("native_x_renderer_reflection_mode").c_str());
-      reflections.index = mode >= 0 && mode <= 2 && !Cvar("native_x_renderer_reflection_mode").empty() &&
-                                  Cvar("native_x_renderer_reflection_mode") != "-1"
-                              ? mode
-                              : (Truthy(Cvar("native_x_renderer_reflections")) ? 1 : 0);
+                          "How the sea reflects. Enhanced: the world drawn a second time as a mirror in the water shows "
+                          "it, the shore, ships and the sky as they are now, day or night, also what is off the screen, "
+                          "with ripples. Original: the game's own water with the sky of the hour. Needs the volumetric "
+                          "sky. Applies at once.",
+                          "native_x_renderer_reflection_mode", {{"Original", "0"}, {"Enhanced", "2"}});
+      const std::string saved = Cvar("native_x_renderer_reflection_mode");
+      const int mode = saved.empty() || saved == "-1" ? (Truthy(Cvar("native_x_renderer_reflections")) ? 2 : 0)
+                                                      : std::atoi(saved.c_str());
+      reflections.index = mode >= 1 ? 1 : 0;
       rows.push_back(reflections);
     }
     // Ambient occlusion: King Kong's three rows (GTAO, NativeXRenderer D132), all applied at once.
