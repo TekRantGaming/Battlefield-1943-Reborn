@@ -111,6 +111,12 @@ REXCVAR_DEFINE_BOOL(bf_bots_log_detail, false, "BF1943/Server",
 REXCVAR_DEFINE_BOOL(bf_bots_dynamic_aggression, true, "BF1943/Server",
                     "Bots: losing to the players (kills and flags), they press harder: squads attack together, flank, "
                     "share what they see, regroup before an attack, aim a little better");
+// The bots' wait while no human is on the server (BotsTickImpl): off for a test server that must run as a full one around
+// the clock (the Linux server optimisation of 27 Nov 2026, US Central at 64 bots: TekRantGaming, "Ensure bots remain
+// active even when no human players are connected"). Also BF_BOTS_PLAY_ALONE=1 in the server's environment.
+REXCVAR_DEFINE_BOOL(bf_bots_play_alone, false, "BF1943/Server",
+                    "Bots: play on while no human is on the server (tests of a full server; off: they wait until a "
+                    "player joins)");
 REXCVAR_DEFINE_BOOL(bf_bots_squad_humans, false, "BF1943/Server",
                     "Bots: a human in no squad is put into a squad with bots (off: players choose their own; bots fill "
                     "theirs)");
@@ -4787,7 +4793,11 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
   // No human on the server (TekRantGaming, 20 Nov 2026: "Yes, pause them"): the bots stand still and do not think,
   // steer, spawn or learn until a player joins (about 10% of a core saved on an empty server with 24 bots; the bots
   // play as backfill all the time). The level's mapping goes on meanwhile, so a map is ready when players come.
-  const bool pause = g.humans == 0;
+  static const bool alone_env = [] {
+    const char* v = std::getenv("BF_BOTS_PLAY_ALONE");
+    return v && *v == '1';
+  }();
+  const bool pause = g.humans == 0 && !alone_env && !REXCVAR_GET(bf_bots_play_alone);
   static bool told_pause = false;
   if (pause != told_pause) {
     told_pause = pause;
