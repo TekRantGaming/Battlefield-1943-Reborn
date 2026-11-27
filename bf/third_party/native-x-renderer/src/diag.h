@@ -57,6 +57,8 @@ void NoteSwapChainResize(uint32_t width, uint32_t height);
 void NoteSwapChainRebuild();
 // An HD copy made again (after RepatchTextures): its picture's hash, so one the same as before is counted (diag.h).
 void NoteHdAgainPicture(uint64_t hash, double ms);
+// An HD picture put back from the cache (GuestTextures::PatchHd) and the time it took.
+void NoteHdReused(double ms);
 // The pipeline storage's additions (storage.cpp) and a failed write.
 void NoteStored(int kind, uint64_t bytes);  // 0 shader, 1 translation, 2 pipeline
 void NoteStorageFailed();

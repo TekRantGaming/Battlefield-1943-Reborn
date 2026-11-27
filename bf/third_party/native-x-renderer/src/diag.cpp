@@ -43,6 +43,7 @@ FrameDiagnostics g_pending_frame;
 bool g_have_pending = false;
 std::chrono::steady_clock::time_point g_last_flush{};
 std::atomic<uint64_t> g_same_again{0}, g_same_again_us{0};
+std::atomic<uint64_t> g_hd_reused{0}, g_hd_reused_us{0};
 std::atomic<uint64_t> g_stored[3] = {}, g_stored_bytes{0};
 std::atomic<bool> g_storage_failed{false};
 // GPU section times by frame (a ring of the last 512 frames).
@@ -191,6 +192,11 @@ void NoteHdAgainPicture(uint64_t hash, double ms) {
   g_same_again_us.fetch_add(uint64_t(ms * 1000), std::memory_order_relaxed);
 }
 
+void NoteHdReused(double ms) {
+  g_hd_reused.fetch_add(1, std::memory_order_relaxed);
+  g_hd_reused_us.fetch_add(uint64_t(ms * 1000), std::memory_order_relaxed);
+}
+
 void NoteStored(int kind, uint64_t bytes) {
   if (kind >= 0 && kind < 3) g_stored[kind].fetch_add(1, std::memory_order_relaxed);
   g_stored_bytes.fetch_add(bytes, std::memory_order_relaxed);
@@ -259,6 +265,8 @@ DiagnosticsTotals GetDiagnosticsTotals() {
   out.swap_chain_rebuilds = get(t.swap_chain_rebuilds);
   out.hd_same_again = diag::g_same_again.load(std::memory_order_relaxed);
   out.hd_same_again_ms = diag::g_same_again_us.load(std::memory_order_relaxed) / 1000.0;
+  out.hd_reused = diag::g_hd_reused.load(std::memory_order_relaxed);
+  out.hd_reused_ms = diag::g_hd_reused_us.load(std::memory_order_relaxed) / 1000.0;
   out.stored_shaders = diag::g_stored[0].load(std::memory_order_relaxed);
   out.stored_translations = diag::g_stored[1].load(std::memory_order_relaxed);
   out.stored_pipelines = diag::g_stored[2].load(std::memory_order_relaxed);

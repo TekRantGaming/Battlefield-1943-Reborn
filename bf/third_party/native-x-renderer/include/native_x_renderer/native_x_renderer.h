@@ -636,6 +636,9 @@ struct DiagnosticsTotals {
   // the time they took.
   uint64_t hd_same_again = 0;
   double hd_same_again_ms = 0;
+  // HD copies put back from the patched pictures' cache instead of made again, and the time that took.
+  uint64_t hd_reused = 0;
+  double hd_reused_ms = 0;
   // The pipeline storage (kept between runs): shaders, translations and pipelines added to it this run, the bytes
   // written, and whether a write failed.
   uint64_t stored_shaders = 0, stored_translations = 0, stored_pipelines = 0, stored_bytes = 0;

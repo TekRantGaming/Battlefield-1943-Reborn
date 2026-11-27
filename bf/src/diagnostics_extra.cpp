@@ -577,10 +577,11 @@ void LogRunSummary() {
               g_run.taps_missed.load(), g_run.late_presents.load(), g_run.game_waited_us.load() / 1e6,
               g_run.slow_streams.load());
   REXLOG_INFO("BF summary: renderer: {} pipelines ({} compiled here, {} failed), {} shader failures; HD copies {} made, "
-              "{} made again ({} the same picture as before: {:.0f} ms a cache would have saved); pipeline storage: {} "
-              "pipelines, {} shaders added ({:.1f} MB){}",
+              "{} made again ({} the same picture as before: {:.0f} ms), {} put back from the cache ({:.0f} ms); "
+              "pipeline storage: {} pipelines, {} shaders added ({:.1f} MB){}",
               r.pipelines, r.pipelines_slow, r.pipelines_failed, r.shader_failures, r.hd_made, r.hd_remade,
-              r.hd_same_again, r.hd_same_again_ms, r.stored_pipelines, r.stored_shaders, r.stored_bytes / 1048576.0,
+              r.hd_same_again, r.hd_same_again_ms, r.hd_reused, r.hd_reused_ms, r.stored_pipelines, r.stored_shaders,
+              r.stored_bytes / 1048576.0,
               r.storage_failed ? ", a WRITE FAILED: the next start compiles them again" : "");
   std::map<std::string, int64_t> warns;
   {

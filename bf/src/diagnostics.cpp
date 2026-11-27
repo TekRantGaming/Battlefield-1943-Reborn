@@ -362,9 +362,11 @@ std::string TakeRollup(double secs, int scene) {
                           render.texture_loads - g_scene_render.texture_loads,
                           (render.texture_load_bytes - g_scene_render.texture_load_bytes) / 1048576.0,
                           render.texture_load_ms - g_scene_render.texture_load_ms);
-    if (render.hd_made != g_scene_render.hd_made || render.hd_remade != g_scene_render.hd_remade)
-      what += fmt::format("; HD copies {} made, {} made again", render.hd_made - g_scene_render.hd_made,
-                          render.hd_remade - g_scene_render.hd_remade);
+    if (render.hd_made != g_scene_render.hd_made || render.hd_remade != g_scene_render.hd_remade ||
+        render.hd_reused != g_scene_render.hd_reused)
+      what += fmt::format("; HD copies {} made, {} made again, {} put back from the cache ({:.1f} ms)",
+                          render.hd_made - g_scene_render.hd_made, render.hd_remade - g_scene_render.hd_remade,
+                          render.hd_reused - g_scene_render.hd_reused, render.hd_reused_ms - g_scene_render.hd_reused_ms);
     if (render.swap_chain_resizes != g_scene_render.swap_chain_resizes ||
         render.swap_chain_rebuilds != g_scene_render.swap_chain_rebuilds)
       what += fmt::format("; swap chain resized {}, rebuilt {}", render.swap_chain_resizes - g_scene_render.swap_chain_resizes,

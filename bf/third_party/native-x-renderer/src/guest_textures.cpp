@@ -474,7 +474,7 @@ void GuestTextures::RequestTextures(uint32_t used_texture_mask) {
     if (diag::LinesOn() && !textures.empty()) {
       const char* why = diag::RepatchReason();
       REXLOG_INFO("[native_x_renderer] diagnostics: the game's pictures changed ({}): {} patched textures made again "
-                  "in {:.1f} ms on the renderer's thread, {} more at their next load",
+                  "or put back from the cache in {:.1f} ms on the renderer's thread, {} more at their next load",
                   why ? why : "no reason given", now, diag::MsSince(start), later);
     }
   }
@@ -1140,11 +1140,12 @@ void GuestTextures::Patch(HostTexture& host_texture, bool again) {
   patched_.insert(&host_texture);
   if (rgba.size() != size_t(w) * h * 4) {
     // Left as it is at the game's size: its larger picture all the same (D200), the patcher's at that size.
-    if (g_texture_upscaler_rgba.load(std::memory_order_acquire)) PatchHd(host_texture, again);
+    if (g_texture_upscaler_rgba.load(std::memory_order_acquire)) PatchHd(host_texture, again, 0);  // no picture to key on: not cached
     else drop_hd();
     return;
   }
-  PatchHd(host_texture, again);
+  // The patcher's picture at the game's size names its HD picture (with the texture's content): the cache's key.
+  PatchHd(host_texture, again, XXH3_64bits(rgba.data(), rgba.size()) | 1);
   Box box;
   box.MaxX = w, box.MaxY = h;
   TextureSubResData data;
@@ -1160,7 +1161,7 @@ void GuestTextures::Patch(HostTexture& host_texture, bool again) {
 // its size (Battlefield 1943's HUD and deploy screen atlases: the pack's copy alone would show the Xbox 360's buttons
 // and no flag letters). The texture's own HD texture, made again at each patch; its smaller levels are made here
 // (colour weighted by alpha, so a transparent surround does not darken an edge).
-void GuestTextures::PatchHd(HostTexture& host_texture, bool again) {
+void GuestTextures::PatchHd(HostTexture& host_texture, bool again, uint64_t picture) {
   const auto made_start = std::chrono::steady_clock::now();
   auto none = [&] {
     if (!host_texture.hd_patched) return;
@@ -1179,6 +1180,20 @@ void GuestTextures::PatchHd(HostTexture& host_texture, bool again) {
   if (e && (e->bc != 0 || e->width != w || e->height != h || e->hd_width % w != 0 || e->hd_width / w < 2 ||
             e->hd_width / w > 8 || e->hd_height != h * (e->hd_width / w)))
     e = nullptr;
+  // A picture made before (the prompts switching back): put back at once.
+  const uint64_t cache_key =
+      picture ? (picture * 0x9E3779B97F4A7C15ull) ^ content ^ (e ? 0x5041434Bull /* "PACK" */ : 0x55505343ull) : 0;
+  // Only while its source is still there (the pack's picture, or the upscaler: a setting can turn either off).
+  if (cache_key && (e || g_texture_upscaler_rgba.load(std::memory_order_acquire))) {
+    if (auto it = hd_patch_cache_.find(cache_key); it != hd_patch_cache_.end()) {
+      it->second.used = ++hd_cache_clock_;
+      host_texture.hd_patched = it->second.texture;
+      host_texture.hd_view = it->second.texture->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+      host_texture.hd_own = it->second.own;
+      diag::NoteHdReused(diag::MsSince(made_start));
+      return;
+    }
+  }
   uint32_t scale = 0;
   std::vector<uint8_t> base;
   if (e) {
@@ -1238,6 +1253,15 @@ void GuestTextures::PatchHd(HostTexture& host_texture, bool again) {
   // A picture made again that is the same as one made before (the prompts switching back and forth: 27 Nov 2026's
   // match had 182 remakes): counted, so the log says what a cache would save.
   if (again) diag::NoteHdAgainPicture(XXH3_64bits(chain[0].data(), chain[0].size()) ^ content, diag::MsSince(made_start));
+  if (cache_key) {
+    if (hd_patch_cache_.size() >= kHdCacheEntries) {
+      auto oldest = hd_patch_cache_.begin();
+      for (auto it = hd_patch_cache_.begin(); it != hd_patch_cache_.end(); ++it)
+        if (it->second.used < oldest->second.used) oldest = it;
+      hd_patch_cache_.erase(oldest);
+    }
+    hd_patch_cache_[cache_key] = CachedHd{texture, !e, ++hd_cache_clock_};
+  }
   host_texture.hd_own = !e;  // the upscaler's: drawn while SetUpscaledTextures is on; a pack's while the pack is
   REXLOG_INFO("[native_x_renderer] HD texture {:016X}: {}x{} with the game's pictures for its {}x{} texture at {:08X}{}{}",
               content, hw, hh, w, h, uint32_t(key.base_page) << 12, again ? " (again)" : "",

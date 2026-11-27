@@ -106,7 +106,20 @@ class GuestTextures final : public rex::graphics::TextureCache {
   // D142, D160: the game's patcher over a texture whose base level is loaded (`again`: offered again, its data the
   // same); the textures it took are kept in `patched_` for RepatchTextures.
   void Patch(HostTexture& texture, bool again);
-  void PatchHd(HostTexture& texture, bool again);  // the HD pack's picture of a patched texture, patched at its size
+  // The HD pack's (or the upscaler's) picture of a patched texture, patched at its size. `picture`: a hash of the
+  // patcher's picture at the game's size (with the texture's content it names the HD picture exactly), 0 none.
+  void PatchHd(HostTexture& texture, bool again, uint64_t picture);
+  // 27 Nov 2026 (a match's log: the button prompts switching between on foot and seated made 4 HD atlases again each
+  // time, about 78 ms on this thread, 55 of 64 the same picture as before): the patched HD pictures kept by `picture`
+  // and content, so a picture seen before is put back at once. At most kHdCacheEntries, the least recently used out.
+  struct CachedHd {
+    Diligent::RefCntAutoPtr<Diligent::ITexture> texture;
+    bool own = false;
+    uint64_t used = 0;
+  };
+  static constexpr size_t kHdCacheEntries = 32;
+  std::unordered_map<uint64_t, CachedHd> hd_patch_cache_;
+  uint64_t hd_cache_clock_ = 0;
   std::unordered_set<HostTexture*> patched_;
   uint32_t repatched_ = 0;  // the RepatchTextures count last served
   // D149: the HD pack's texture for a game texture's current data, or null.

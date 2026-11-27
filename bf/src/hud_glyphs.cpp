@@ -432,7 +432,12 @@ void HudGlyphsTick(bool seated) {
   static Clock::time_point checked{};
   static std::string shown;
   const auto now = Clock::now();
-
+#if defined(BF_DEV_TOOLS)
+  // BF_DEV_PROMPT_FLIP=1 (tests of the patched pictures' cache, guest_textures.cpp): seated and on foot by turns every
+  // 2 s, as getting in and out of a vehicle does.
+  static const bool flip = std::getenv("BF_DEV_PROMPT_FLIP") != nullptr;
+  if (flip) seated = (std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count() / 2) % 2 == 1;
+#endif
   if (seated == was_seated && checked.time_since_epoch().count() && now - checked < std::chrono::milliseconds(500))
     return;
   was_seated = seated, checked = now;
