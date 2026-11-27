@@ -222,6 +222,12 @@ class BaseHeap {
   // range.
   rex::memory::PageAccess QueryRangeAccess(uint32_t low_address, uint32_t high_address);
 
+  // True when every page of [low_address, high_address] (both in this heap) is committed and readable. Looks only at
+  // those pages (27 Nov 2026, the Linux server optimisation): QueryRegionInfo walks the whole region the address lies
+  // in to measure it, thousands of pages in the game's big heaps, and the game's own code checked one or two pages
+  // that way per read of a guest object (5% of a 62-bot server's main thread).
+  bool QueryRangeCommittedReadable(uint32_t low_address, uint32_t high_address);
+
   bool Save(stream::ByteStream* stream);
   bool Restore(stream::ByteStream* stream);
 

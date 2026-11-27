@@ -1865,6 +1865,26 @@ rex::memory::PageAccess BaseHeap::QueryRangeAccess(uint32_t low_address, uint32_
   }
 }
 
+bool BaseHeap::QueryRangeCommittedReadable(uint32_t low_address, uint32_t high_address) {
+  if (low_address > high_address || low_address < heap_base_ || (high_address - heap_base_) >= heap_size_) {
+    return false;
+  }
+  const uint32_t low_page_number = (low_address - heap_base_) >> page_size_shift_;
+  const uint32_t high_page_number = (high_address - heap_base_) >> page_size_shift_;
+  if (high_page_number >= page_table_.size()) {
+    return false;
+  }
+  std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  for (uint32_t i = low_page_number; i <= high_page_number; ++i) {
+    const auto& page_entry = page_table_[i];
+    if (!(page_entry.state & memory::kMemoryAllocationCommit) ||
+        !(page_entry.current_protect & memory::kMemoryProtectRead)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 VirtualHeap::VirtualHeap() = default;
 
 VirtualHeap::~VirtualHeap() = default;

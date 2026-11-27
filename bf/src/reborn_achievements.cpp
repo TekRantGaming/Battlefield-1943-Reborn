@@ -8,6 +8,7 @@
 #include <initializer_list>
 #include <iterator>
 
+#include "guest_readable.h"
 #include "seat_info.h"
 
 #include <rex/logging.h>
@@ -132,16 +133,7 @@ bool Has(const std::string& t, std::initializer_list<const char*> keys) {
 bool Plausible(uint32_t a) { return a >= 0x00100000u && a < 0xFFF00000u && !(a & 3); }
 bool Readable(rex::memory::Memory* memory, uint32_t address, uint32_t size) {
   if (!memory || address < 0x00100000u || address + size < address) return false;
-  for (uint32_t page = address & ~0xFFFu; page < address + size;) {
-    rex::memory::BaseHeap* heap = memory->LookupHeap(page);
-    rex::memory::HeapAllocationInfo info{};
-    if (!heap || !heap->QueryRegionInfo(page, &info)) return false;
-    if (!(info.state & rex::memory::kMemoryAllocationCommit) || !(info.protect & rex::memory::kMemoryProtectRead)) return false;
-    const uint32_t next = info.base_address + info.region_size;
-    if (next <= page) return false;
-    page = next;
-  }
-  return true;
+  return bf1943::GuestCommittedReadable(memory, address, size);  // guest_readable.h (was a QueryRegionInfo walk)
 }
 uint32_t Load(rex::memory::Memory* memory, uint32_t a) {
   if (!Readable(memory, a, 4)) return 0;
