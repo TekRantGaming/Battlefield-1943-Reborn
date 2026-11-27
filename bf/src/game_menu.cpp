@@ -199,8 +199,8 @@ const std::vector<GraphicsPreset>& GraphicsPresets() {
   // PresetValueMatches, ApplyGraphicsPreset, NoteNisSupport), Ultra too; Soft shadows and SSR reflections on High and
   // Ultra only. Transparent edges, Animation smoothing, HUD scale and Storm shake are the same on every preset, so
   // they are defaults instead (NewInstallDefaults, install_defaults 7) and a preset leaves the player's choice alone.
-  // Transparent edges is Original on every preset and for everyone since 27 Nov 2026 (install_defaults 8: Smooth left
-  // the palms' fronds out up close).
+  // Since hotfix 0.4.8.1 (install_defaults 9) Transparent edges is Smooth and Animation smoothing off on every preset and
+  // for everyone (0.4.8 had Original, install_defaults 8).
   static const std::vector<GraphicsPreset> kPresets = {
       {"Potato",
        {{"bf_post_aa", "off"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
@@ -6634,8 +6634,8 @@ std::string StartupGpuPlugin(const fs::path&) {
 // High and Ultra presets have them (`high`) or the others. The settings file's keys.
 std::vector<std::pair<std::string, std::string>> GraphicsDefaults048(bool high) {
   return {{"cvar.bf_upscaler_mode", "quality"},
-          {"cvar.native_x_renderer_alpha_to_coverage", "auto"},   // Transparent edges: Original (install_defaults 8)
-          {"cvar.bf_smooth_bones", "true"},                        // Animation smoothing: on
+          {"cvar.native_x_renderer_alpha_to_coverage", "blend"},  // Transparent edges: Smooth (install_defaults 9)
+          {"cvar.bf_smooth_bones", "false"},                       // Animation smoothing: off (install_defaults 9)
           {"cvar.bf_hud_scale", "high"},                           // HUD scale: High-Res
           {"cvar.native_x_renderer_storm_sway", "false"},          // Storm shake: off
           {"cvar.native_x_renderer_soft_shadows", high ? "soft" : "off"},
@@ -6725,8 +6725,8 @@ void NewInstallDefaults(Settings& settings) {
     settings.values["upscaler_auto"] = "1";
     settings.values["install_defaults"] = "7";
     settings.Save();
-    REXLOG_INFO("BF settings: v0.4.8's graphics defaults: the spatial upscaler at Quality, Transparent edges Original, "
-                "Animation smoothing on, HUD scale High-Res, Storm shake off, Soft shadows and SSR {} (preset {})",
+    REXLOG_INFO("BF settings: v0.4.8's graphics defaults: the spatial upscaler at Quality, Transparent edges Smooth, "
+                "Animation smoothing off, HUD scale High-Res, Storm shake off, Soft shadows and SSR {} (preset {})",
                 high ? "on" : "off", preset.empty() ? "none chosen" : preset);
   }
   // Transparent edges back to Original for everyone (TekRantGaming, 27 Nov 2026: "the leves of the pam trees dont show
@@ -6740,6 +6740,22 @@ void NewInstallDefaults(Settings& settings) {
     settings.values["install_defaults"] = "8";
     settings.Save();
     REXLOG_INFO("BF settings: Transparent edges Original for everyone (it was {})", was == "blend" ? "Smooth" : "Original");
+  }
+  // Hotfix 0.4.8.1 (TekRantGaming, 27 Nov 2026: "by default, regardless of preset ... Transparent edges set to smooth.
+  // And animation smoothing off"): Transparent edges Smooth (blend) and Animation smoothing off for everyone. With
+  // 0.4.8's Original the palms still lost leaves in his game; Animation smoothing (tick_blend.cpp bf_smooth_bones,
+  // the experimental one, off until 0.4.8's defaults turned it on) places every skeleton's bones itself, and the palms'
+  // fronds sway on a skeleton of 64 bones. Once, for every settings file; the player can still change both in
+  // Settings, Graphics, and a preset leaves them alone.
+  if (settings.Get("install_defaults", "") == "8") {
+    const std::string was_edges = settings.Get("cvar.native_x_renderer_alpha_to_coverage", "auto");
+    const std::string was_bones = settings.Get("cvar.bf_smooth_bones", "false");
+    settings.values["cvar.native_x_renderer_alpha_to_coverage"] = "blend";
+    settings.values["cvar.bf_smooth_bones"] = "false";
+    settings.values["install_defaults"] = "9";
+    settings.Save();
+    REXLOG_INFO("BF settings: hotfix 0.4.8.1's defaults for everyone: Transparent edges Smooth (it was {}), Animation "
+                "smoothing off (it was {})", was_edges == "blend" ? "Smooth" : "Original", was_bones == "true" ? "on" : "off");
   }
   if (REXCVAR_GET(server) || !settings.Get("launcher_setup", "").empty() || !settings.Get("install_defaults", "").empty())
     return;
@@ -6771,7 +6787,7 @@ void NewInstallDefaults(Settings& settings) {
   for (const auto& [key, value] : GraphicsDefaults048(true)) settings.values[key] = value;
   settings.values["fullscreen_mode"] = "desktop";  // Borderless (a test window stays a window)
   if (!test_window) settings.values["fullscreen"] = "on";
-  settings.values["install_defaults"] = "8";  // 0.4.8's: nothing to move (above)
+  settings.values["install_defaults"] = "9";  // 0.4.8.1's: nothing to move (above)
   settings.values["upscaler_auto"] = "1";     // NVIDIA NIS on a GPU that runs it (NoteNisSupport)
   settings.values["gi_full_capped"] = "1";    // a new install never had the menus' Full (above)
   std::error_code ec;
