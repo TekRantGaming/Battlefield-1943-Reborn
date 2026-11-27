@@ -329,6 +329,7 @@ header { background: url(logo) right center / contain no-repeat, #111; }
       <div class="paper">
         <h3>Starting</h3>
         <label class="check"><input type="checkbox" id="start-servers"><span>Start my servers when the manager starts</span></label>
+        <label class="check"><input type="checkbox" id="shared-bot-data"><span>Bots start from the shared bot data (what bots learned from players on the official servers, in every update). Off: they learn only on your servers. Applies when a server starts again.</span></label>
         <label class="check" id="autostart-box"><input type="checkbox" id="autostart"><span>Start the manager when I sign in to Windows</span></label>
         <div id="systemd-box" style="display:none"><p class="hint">To start the manager with a Linux machine, save this as a systemd user unit (~/.config/systemd/user/bf1943-server.service), then run: systemctl --user enable --now bf1943-server</p><pre id="systemd-unit"></pre></div>
         <div class="row"><button class="btn go" id="save-settings">Save</button></div>
@@ -669,6 +670,7 @@ function fillForms() {
   if (![0, 1, 2, 5, 10, 15, 30, 60].includes(c.update_warning_minutes)) warn.append(h('option', { value: c.update_warning_minutes, text: words(c.update_warning_minutes * 60) }));
   warn.value = c.update_warning_minutes;
   $('start-servers').checked = c.start_servers; $('web-remote').checked = c.web_remote;
+  $('shared-bot-data').checked = c.shared_bot_data !== false;
   $('autostart').checked = !!state.autostart;
   const time = $('msg-time');
   time.replaceChildren(h('option', { value: 0, text: 'Now, once' }), ...[30, 60, 120, 300, 600, 900, 1800, 3600].map(t => h('option', { value: t, text: words(t) })));
@@ -881,7 +883,7 @@ $('log-refresh').onclick = loadLog; $('log-which').onchange = loadLog;
 
 // ---- settings
 $('save-settings').onclick = async () => {
-  if (!await saveConfig({ start_servers: $('start-servers').checked, web_remote: $('web-remote').checked }, 'Saved')) return;
+  if (!await saveConfig({ start_servers: $('start-servers').checked, web_remote: $('web-remote').checked, shared_bot_data: $('shared-bot-data').checked }, 'Saved')) return;
   if (state.platform === 'windows' && $('autostart').checked !== !!state.autostart) act('/api/autostart', { on: $('autostart').checked });
 };
 $('pw-save').onclick = async () => {

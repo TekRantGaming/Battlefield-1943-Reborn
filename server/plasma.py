@@ -1583,6 +1583,152 @@ class Promoted:
         return bool(key) and key in self.keys
 
 
+class BotData:
+    """The shared bot data (botdata.py; TekRantGaming, 26 Nov 2026: the official servers only, live; community servers
+    get it with each release). The official servers' hand-offs come in over their registry links in parts
+    (gmhost.py BotShare: a file zlib-compressed, base64, at most CHUNK characters a line) and are kept for the merge;
+    the merge runs in its own process every --bot-data-every seconds when something came in (so this loop never waits
+    on it), and a new set goes to every official server over the same links (they check its signature)."""
+
+    CHUNK = 48000         # base64 characters in a line: well under a reader's 64 KiB line limit
+    MOST_PARTS = 900      # a hand-off's parts: about 32 MB of base64
+    MOST_OPEN = 64        # hand-offs coming in at a time
+    BIGGEST = 64 << 20    # a hand-off, uncompressed
+
+    def __init__(self, root, key_file, every, note):
+        self.root, self.key_file, self.every, self.note = root, key_file, every, note
+        os.makedirs(root, exist_ok=True)
+        self.parts = {}       # (gid, id) -> {'name', 'parts', 'got': {i: text}, 'at'}
+        self.version = self.latest()
+        self.lines = None     # (version, the encoded lines of its set), made once a version
+        self.sending = set()  # gids a set is going to now
+        note('bot data: %s, set %d' % (root, self.version))
+
+    def latest(self):
+        try:
+            with open(os.path.join(self.root, 'out', 'latest.txt'), encoding='utf-8') as f:
+                return int(f.read().strip() or 0)
+        except (OSError, ValueError):
+            return 0
+
+    def put(self, gid, server, m):
+        """One part of a hand-off; the acknowledgement when it is whole (or refused), else None."""
+        import zlib
+        import botdata
+        ident = str(m.get('id', ''))[:32]
+
+        def refuse(why):
+            return {'op': 'bot_data_ack', 'id': ident, 'ok': False, 'why': why}
+        try:
+            name, part, parts, data = str(m.get('name', ''))[:80], int(m.get('part')), int(m.get('parts')), m.get('data')
+        except (TypeError, ValueError):
+            return refuse('a part that cannot be read')
+        if len(ident) < 8 or any(c not in '0123456789abcdef' for c in ident) or not 0 <= part < parts <= self.MOST_PARTS \
+                or not isinstance(data, str) or len(data) > self.CHUNK + 16:
+            return refuse('a part that cannot be read')
+        now = time.time()
+        for k in [k for k, e in self.parts.items() if now - e['at'] > 600]:
+            del self.parts[k]
+        key = (gid, ident)
+        e = self.parts.get(key)
+        if e is None:
+            if len(self.parts) >= self.MOST_OPEN:
+                return refuse('too many hand-offs coming in')
+            e = self.parts[key] = {'name': name, 'parts': parts, 'got': {}, 'at': now}
+        if e['name'] != name or e['parts'] != parts:
+            del self.parts[key]
+            return refuse('parts of two hand-offs')
+        e['got'][part] = data
+        e['at'] = now
+        if len(e['got']) < parts:
+            return None
+        del self.parts[key]
+        try:
+            packed = base64.b64decode(''.join(e['got'][i] for i in range(parts)), validate=True)
+            z = zlib.decompressobj()
+            raw = z.decompress(packed, self.BIGGEST)
+            if z.unconsumed_tail or not z.eof:
+                return refuse('a hand-off that is too big or cut short')
+        except (ValueError, zlib.error):
+            return refuse('a hand-off that cannot be unpacked')
+        why = botdata.ingest(self.root, server, name, raw)
+        self.note('bot data: game %s handed in %s (%d KB)%s' % (gid, name, len(raw) // 1024,
+                                                                ': refused, %s' % why if why else ''))
+        return {'op': 'bot_data_ack', 'id': ident, 'ok': not why, 'why': why}
+
+    async def run(self):
+        while True:
+            await asyncio.sleep(self.every)
+            try:
+                await self.merge()
+            except Exception as e:  # never the backend's end
+                self.note('bot data: the merge failed (%r)' % e)
+
+    async def merge(self):
+        if not os.path.exists(os.path.join(self.root, 'in', '.changed')):
+            return
+        args = [sys.executable, '-I', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'botdata.py'), 'merge',
+                '--root', self.root, '--key-file', self.key_file,
+                # the package's shipped set (bin/data/bots): totals that start empty start from it (botdata.py _seed)
+                '--seed', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bin', 'data', 'bots')]
+        proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+        for line in out.decode('utf-8', 'replace').splitlines()[-12:]:
+            self.note('bot data: %s' % line)
+        v = self.latest()
+        if v > self.version:
+            self.version, self.lines = v, None
+            for g in list(GAMES.values()):
+                if g.get('official'):
+                    self.offer(g)
+
+    def encoded(self):
+        """The newest set as the lines that send it: its manifest and signature, then each file in parts."""
+        import zlib
+        if self.lines and self.lines[0] == self.version:
+            return self.lines[1]
+        d = os.path.join(self.root, 'out', str(self.version))
+        with open(os.path.join(d, 'manifest.json'), encoding='utf-8') as f:
+            manifest = f.read()
+        with open(os.path.join(d, 'manifest.sig'), encoding='utf-8') as f:
+            sig = f.read().strip()
+        lines = [{'op': 'bot_data', 'version': self.version, 'manifest': manifest, 'sig': sig}]
+        for name in sorted(json.loads(manifest)['files']):
+            with open(os.path.join(d, name), 'rb') as f:
+                b64 = base64.b64encode(zlib.compress(f.read(), 6)).decode()
+            parts = max(1, -(-len(b64) // self.CHUNK))
+            for i in range(parts):
+                lines.append({'op': 'bot_data_file', 'version': self.version, 'name': name, 'part': i, 'parts': parts,
+                              'data': b64[i * self.CHUNK:(i + 1) * self.CHUNK]})
+        lines = [(json.dumps(x) + '\n').encode() for x in lines]
+        self.lines = (self.version, lines)
+        return lines
+
+    def offer(self, g):
+        if self.version <= 0 or self.version <= int(g.get('bot_data_have') or 0) or g['GID'] in self.sending:
+            return
+        if not isinstance(g.get('gmhost'), RemoteHost):
+            return
+        asyncio.get_running_loop().create_task(self.send(g))
+
+    async def send(self, g):
+        gid, version = g['GID'], self.version
+        self.sending.add(gid)
+        try:
+            lines = self.encoded()
+            writer = g['gmhost'].writer
+            for line in lines:
+                writer.write(line)
+                await writer.drain()
+            g['bot_data_have'] = version
+            self.note('bot data: set %d sent to game %s (%d KB)' % (version, gid, sum(len(x) for x in lines) // 1024))
+        except (OSError, ValueError, RuntimeError, KeyError) as e:
+            self.note('bot data: set %d not sent to game %s (%r)' % (version, gid, e))
+        finally:
+            self.sending.discard(gid)
+
+
 class Registry:
     """Dedicated servers register here (server/gmhost.py run by the server package) and stay listed while their
     connection lasts. One JSON object per line:
@@ -1710,6 +1856,10 @@ class Registry:
         trusted = gmhost.trusted_broadcast_keys(self.key) if self.key else []
         self.network = gmhost.NetworkCheck(trusted)
         self.admin = gmhost.NetworkCheck(trusted, per_minute=30)
+        # The shared bot data (botdata.py, --bot-data): only with official.key, which signs the merged set.
+        self.bot_data = None
+        if args and getattr(args, 'bot_data', '') and self.key:
+            self.bot_data = BotData(args.bot_data, args.official_key_file, max(30.0, args.bot_data_every), self.note)
 
     def refresh_promoted(self):
         """Each listed community server's promotion, from the promoted list as it is now (said in the log when it
@@ -2061,6 +2211,24 @@ class Registry:
                         self.note('%s game %s: its server\'s %d waiting players wait on for it' % (peer, gid, len(moved)))
                     asyncio.get_running_loop().create_task(self.probe(writer, host, int(port), local))
                     self.refresh_promoted()
+                elif op == 'bot_data_put' and gid in GAMES:
+                    # The shared bot data (botdata.py): an official server's hand-off, in parts. Never a community
+                    # server's: theirs is not asked for and is refused.
+                    if self.bot_data and GAMES[gid].get('official'):
+                        reply = self.bot_data.put(gid, GAMES[gid].get('N', ''), m)
+                    else:
+                        reply = {'op': 'bot_data_ack', 'id': str(m.get('id', ''))[:32], 'ok': False,
+                                 'why': 'only the official servers hand bot data in'}
+                    if reply:
+                        writer.write((json.dumps(reply) + '\n').encode())
+                elif op == 'bot_data_have' and gid in GAMES and GAMES[gid].get('official'):
+                    # The set an official server has: a newer one goes to it at once.
+                    try:
+                        GAMES[gid]['bot_data_have'] = max(0, int(m.get('version') or 0))
+                    except (TypeError, ValueError):
+                        GAMES[gid]['bot_data_have'] = 0
+                    if self.bot_data:
+                        self.bot_data.offer(GAMES[gid])
                 elif op == 'server_bans' and gid in GAMES:
                     # Moderation: this server's own ban list (gmhost.py bans_summary), for this server only.
                     GAMES[gid]['bans'] = clean_server_bans(m)
@@ -2881,6 +3049,11 @@ async def main():
     ap.add_argument('--network-bans', default='',
                     help="the Reborn network's ban list (the official manager's network_bans.json; server/bans.py): "
                          'read again when it changes')
+    ap.add_argument('--bot-data', default='',
+                    help="the shared bot data's folder (botdata.py): the official servers' hand-offs and the merged "
+                         "set; needs --official-key-file (empty: off)")
+    ap.add_argument('--bot-data-every', type=float, default=600.0,
+                    help='seconds between two merges of the bot data (only when something came in)')
     ap.add_argument('--log', default='runs/plasma.log')
     ap.add_argument('--leaderboard', default='', help="a file keeping the players' totals (our Leaderboards)")
     ap.add_argument('--player-stats', default='',
@@ -2963,6 +3136,8 @@ async def main():
             if registry.check:
                 registry.check.reload()
                 asyncio.get_running_loop().create_task(registry.check.watch())
+            if registry.bot_data:
+                asyncio.get_running_loop().create_task(registry.bot_data.run())
         if args.http_port:
             servers.append(await asyncio.start_server(lambda r, w: http_client(r, w, log), args.host, args.http_port))
             log.write('%s HTTP on %s:%d\n' % (time.strftime('%H:%M:%S'), args.host, args.http_port))

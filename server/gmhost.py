@@ -1844,6 +1844,165 @@ class GameHost(asyncio.DatagramProtocol):
                     del self.players[ticket]
 
 
+class BotShare:
+    """The shared bot data on an official server (botdata.py; TekRantGaming, 26 Nov 2026: the official servers share
+    live, community servers get the set with each release). The game (bf/src/bots.cpp, --bf_bots_share) writes what its
+    bots learned since the last hand-off into <user>/bots/outbox/; this sends each file to the main backend over the
+    registry link (zlib, base64, in parts of CHUNK characters) and deletes it once the backend has it. A new merged set
+    from the backend is checked (the official machine's signature, every file's checksum) and written to
+    <user>/bots/network/, version.txt last: the bots use it from their next level, no restart."""
+
+    CHUNK = 48000      # base64 characters in a line (plasma.py BotData: a reader takes lines up to 64 KiB)
+    BIGGEST = 64 << 20
+
+    def __init__(self, folder, keys, note):
+        self.folder, self.keys, self.note = folder, keys, note
+        self.acks = {}         # hand-off id -> the future its acknowledgement resolves
+        self.incoming = None   # the set coming in: {'version', 'manifest', 'm', 'got': {name: {i: text}}, 'files'}
+
+    def have(self):
+        try:
+            with open(os.path.join(self.folder, 'network', 'version.txt'), encoding='utf-8') as f:
+                word, v = f.read().split()[:2]
+            return int(v) if word == 'version' else 0
+        except (OSError, ValueError):
+            return 0
+
+    def outbox(self):
+        import botdata
+        d = os.path.join(self.folder, 'outbox')
+        try:
+            names = [n for n in os.listdir(d) if botdata.NAME_RE.match(n)]
+        except OSError:
+            return []
+        return sorted(names, key=lambda n: int(n.split('.')[-2]))  # oldest first
+
+    async def run(self, send, writer):
+        while True:
+            await asyncio.sleep(20)
+            for name in self.outbox():
+                if not await self.upload(name, send, writer):
+                    break  # no answer: the rest waits for the next look
+
+    async def upload(self, name, send, writer):
+        """One hand-off to the backend: True when it has been answered (taken or refused), False when not."""
+        import base64
+        import zlib
+        path = os.path.join(self.folder, 'outbox', name)
+        try:
+            with open(path, 'rb') as f:
+                data = f.read(self.BIGGEST + 1)
+        except OSError:
+            return True
+        if len(data) > self.BIGGEST:
+            self.refused(path, name, 'too big')
+            return True
+        b64 = base64.b64encode(zlib.compress(data, 6)).decode()
+        ident = os.urandom(8).hex()
+        parts = max(1, -(-len(b64) // self.CHUNK))
+        future = asyncio.get_running_loop().create_future()
+        self.acks[ident] = future
+        try:
+            for i in range(parts):
+                send({'op': 'bot_data_put', 'id': ident, 'name': name, 'part': i, 'parts': parts,
+                      'data': b64[i * self.CHUNK:(i + 1) * self.CHUNK]})
+                await writer.drain()
+            m = await asyncio.wait_for(future, 120)
+        except (asyncio.TimeoutError, OSError):
+            return False
+        finally:
+            self.acks.pop(ident, None)
+        if m.get('ok'):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            self.note('bot data: %s handed to the shared set (%d KB)' % (name, len(data) // 1024))
+        else:
+            self.refused(path, name, str(m.get('why', ''))[:200])
+        return True
+
+    def refused(self, path, name, why):
+        """A hand-off the backend will not take: kept aside (the last 50), never sent again."""
+        aside = os.path.join(self.folder, 'outbox', 'refused')
+        os.makedirs(aside, exist_ok=True)
+        try:
+            os.replace(path, os.path.join(aside, name))
+            for old in sorted(os.listdir(aside))[:-50]:
+                os.remove(os.path.join(aside, old))
+        except OSError:
+            pass
+        self.note('bot data: %s refused by the backend (%s)' % (name, why))
+
+    def ack(self, m):
+        future = self.acks.get(str(m.get('id', '')))
+        if future and not future.done():
+            future.set_result(m)
+
+    def receive(self, m):
+        """A part of a new set from the backend: checked, gathered, and written when whole."""
+        import base64
+        import zlib
+        import botdata
+        if m.get('op') == 'bot_data':
+            why, man = botdata.check_manifest(str(m.get('manifest', '')), str(m.get('sig', '')), self.keys)
+            if not why and man['version'] != m.get('version'):
+                why = 'a version that is not its manifest\'s'
+            if why:
+                self.incoming = None
+                self.note('bot data: a set from the backend refused (%s)' % why)
+                return
+            self.incoming = {'version': man['version'], 'manifest': m['manifest'], 'sig': m['sig'], 'm': man,
+                             'got': {}, 'files': {}}
+            return
+        s = self.incoming
+        if not s or m.get('version') != s['version']:
+            return
+        name = str(m.get('name', ''))
+        try:
+            part, parts = int(m.get('part')), int(m.get('parts'))
+        except (TypeError, ValueError):
+            return
+        if name not in s['m']['files'] or not 0 <= part < parts <= 2000 or not isinstance(m.get('data'), str):
+            return
+        got = s['got'].setdefault(name, {})
+        got[part] = m['data']
+        if len(got) < parts:
+            return
+        try:
+            z = zlib.decompressobj()
+            data = z.decompress(base64.b64decode(''.join(got[i] for i in range(parts)), validate=True), self.BIGGEST)
+        except (ValueError, zlib.error, KeyError):
+            data = b''
+        why = botdata.check_file(s['m'], name, data)
+        if why:
+            self.incoming = None
+            self.note('bot data: set %d refused: %s %s' % (s['version'], name, why))
+            return
+        s['files'][name] = data
+        del s['got'][name]
+        if len(s['files']) == len(s['m']['files']):
+            self.install(s)
+            self.incoming = None
+
+    def install(self, s):
+        import botdata
+        d = os.path.join(self.folder, 'network')
+        os.makedirs(d, exist_ok=True)
+        for n in os.listdir(d):  # a map the new set no longer has
+            if n not in s['files'] and n not in ('manifest.json', 'manifest.sig') and not n.endswith('.new'):
+                try:
+                    os.remove(os.path.join(d, n))
+                except OSError:
+                    pass
+        for n in sorted(s['files'], key=lambda n: n == 'version.txt'):  # version.txt last: the game looks at it
+            botdata.write_whole(os.path.join(d, n), s['files'][n])
+        botdata.write_whole(os.path.join(d, 'manifest.json'), s['manifest'])
+        botdata.write_whole(os.path.join(d, 'manifest.sig'), s['sig'])
+        self.note('bot data: set %d installed (%s): the bots use it from their next level' % (
+            s['version'], ', '.join('%s %d KB' % (n, len(b) // 1024) for n, b in sorted(s['files'].items()))))
+
+
 async def start(address, server, user_id, pid, name, log, public=None, sock=None):
     host = GameHost(address, server, user_id, pid, name, log, public)
     await asyncio.get_running_loop().create_datagram_endpoint(lambda: host, sock=sock or udp_socket(address))
@@ -1871,6 +2030,9 @@ async def serve(args):
     official_key = read_key(args.official_key_file) if args.official_key_file else None
     network = None  # NetworkCheck, made at the first registration
     host = None  # the GameHost, kept through a lost backend link (its players stay)
+    # The game's bots folder (bots.cpp: <user data>/bots), beside the rotation's current_map.txt unless given.
+    bot_folder = args.bot_data_dir or (os.path.join(os.path.dirname(args.map_file), 'bots') if args.map_file else '')
+    bot_share = None
     host_seed = None
     if args.host_key_file:
         try:
@@ -1996,6 +2158,14 @@ async def serve(args):
         write_status(args, state)
         host.backend_send = send
         host.send_bans()  # the backend refuses this server's banned players before their join, with the pop-up
+        # The shared bot data (BotShare): an official server only, with its game's bots folder.
+        share_task = None
+        if state['official'] and official_key and bot_folder:
+            if bot_share is None:
+                bot_share = BotShare(bot_folder, network.keys, host.note)
+            bot_share.note = host.note
+            send({'op': 'bot_data_have', 'version': bot_share.have()})
+            share_task = asyncio.get_running_loop().create_task(bot_share.run(send, writer))
 
         reported = [args.map]
 
@@ -2114,6 +2284,10 @@ async def serve(args):
                                           kind='network' if network else str(m.get('kind', ''))[:8],
                                           ban=None if network else str(m.get('ban', ''))[:16],
                                           network=True if network else None, where='backend')
+                elif m.get('op') == 'bot_data_ack' and bot_share and share_task:
+                    bot_share.ack(m)
+                elif m.get('op') in ('bot_data', 'bot_data_file') and bot_share and share_task:
+                    bot_share.receive(m)
                 elif m.get('op') == 'network_broadcast':
                     # A broadcast from the official machine, through the main backend (sign_network): checked here
                     # again, whoever passed it on.
@@ -2130,6 +2304,8 @@ async def serve(args):
         else:
             host.note('backend link lost (closed by the backend)')
         beat.cancel()
+        if share_task:
+            share_task.cancel()
         host.backend_send = None
         writer.close()
         await asyncio.sleep(2)  # the host keeps its players; the next registration asks to keep its ids
@@ -2226,6 +2402,8 @@ def main():
     ap.add_argument('--region', default='', help="the server's region code, e.g. gb, de, us-east (shown in the browser)")
     ap.add_argument('--tick', type=int, default=60, help="the server's tick rate in Hz (shown in the browser; 60 by default since 14 Nov 2026)")
     ap.add_argument('--map-file', default='', help="the server's current_map.txt (its map rotation)")
+    ap.add_argument('--bot-data-dir', default='',
+                    help="the game's bots folder (bots.cpp: its outbox and the shared set); empty: beside --map-file")
     ap.add_argument('--bots-file', default='',
                     help="the server's bots.txt (bots.cpp: its bots now, for the browser); empty: beside --map-file")
     ap.add_argument('--match-file', default='',

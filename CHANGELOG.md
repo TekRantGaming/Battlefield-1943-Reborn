@@ -23,6 +23,11 @@
 - **Bots use their kit:** the anti tank weapon and the rifle grenade against tanks, and grenades. A bot with nothing
   that can hurt a tank leaves it alone and goes on to its flag instead of shooting at it.
 - **Bot tank drivers back off when they get stuck** and steer round what is in front of them.
+- **Bots learn together on the official servers.** What the bots learn from players on every official server is
+  merged into one set and shared between them as they play, with no restart. Every update brings the latest set to
+  community servers and Custom Match too, so bots know each map from their first match. It holds no names or
+  addresses: only how often each patch of ground is walked, fought over and captured from. Server owners can turn it
+  off in the server manager's Settings.
 
 ## 0.4.7.4 (18 November 2026): a hotfix
 

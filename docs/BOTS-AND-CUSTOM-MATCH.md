@@ -247,6 +247,93 @@ c18846b4, ed504263, 22a68ecd). It is kept in the match server's user folder, und
   120 seconds) make bots route away from them and watch that way.
 - Kills from vehicles are kept apart from the soldiers' kill spots and the infantry style. What is learned about the
   players' vehicles is used by the bots' tanks (the ground players drove a tank over).
+- Every value read back is checked: finite, not negative, cells within range (a weight of -1 or less made the route
+  search's costs -inf or NaN). A step left of x = 0 is written as x + 2^29 (`CellX(key >> 3)` keeps 29 bits); the
+  readers turn it back.
+
+### The shared bot data
+
+TekRantGaming, 26 Nov 2026: "we do this for the official servers only, and then we can, when we do like hot fixes and
+releases, also include updated bot information for community servers". The plan and the reasons are in the shared
+notes (`bots-shared-learning-plan.md`).
+
+**The flow.** On an official server the game hands what its bots learned since the last hand-off to the main
+backend; the backend merges every official server's hand-offs into one set and sends it back to them; the bots use
+the newest set from their next level (the next map or round), so a server never restarts for it. Every release
+carries the latest set beside the program, so community servers and offline Custom Matches start from it too.
+Nothing is sent by, or to, a community server.
+
+```
+ official server: bots.cpp ──► bots/outbox/ ──► gmhost.py (BotShare) ──► main backend: plasma.py (BotData)
+                                                                              │ botdata.py merge (own process)
+ bots/network/ ◄── gmhost.py checks the signature ◄── signed set (out/<v>/) ◄─┘
+ every package: bf/data/bots (botdata.py install) ──► <program>/data/bots/ ──► community servers, Custom Match
+```
+
+**The layers** (`bots.cpp` LoadLearned). `own` is the server's own learning (`bots/<map>.txt`, as before). The bots use
+own + the shared set − `sent` (what of own an official server already handed in: `bots/sent/<map>.txt`), so nothing
+counts twice. The shared set is the newer (its `version.txt`) of `bots/network/` (an official server's, written by its
+host) and `<program>/data/bots/` (shipped). A server whose own grid is missing or only scanned in part takes the
+shared set's finished grid: no scan of its own (it saves 0.5 to 2 ms a tick until a map is mapped).
+
+**Hand-offs** (`bots.cpp` ShareLearned, only with `bf_bots_share`, which the server manager sets on an official
+package): every `bf_bots_share_minutes` (15) and at each level change, `own − sent` goes into
+`bots/outbox/<map>.<ms>.txt`, and the match's style since the last one into `bots/outbox/style.<ms>.txt`; a finished
+level grid goes once into `bots/outbox/<map>.<ms>.grid`. A hand-off waits until `bf_bots_share_min_players` (3)
+different human players have played the map since the last one, so none is one player's routes; the names are
+counted in memory as hashes, never written. The host sends the outbox (zlib, base64, lines under 48,000 characters)
+and deletes each file when the backend has it; a file the backend refuses goes to `bots/outbox/refused/`.
+
+**The merge** (`server/botdata.py`, under the main backend's `--bot-data` folder; the manager gives
+`<data>/botdata` on the official machine). The backend keeps each hand-off as it came (`in/<day>/<server>/`) and,
+every `--bot-data-every` seconds (600) when something came in, runs `botdata.py merge` in its own process: every line
+is checked again, the totals are faded (each count times 0.97 a day: about half after three weeks) and the new
+hand-offs added; the most complete finished grid of each map is kept. The set goes to `out/<version>/` (each map's
+`.txt` and `.grid`, `style.txt`, `version.txt`, `manifest.json` with each file's size and SHA-256, and
+`manifest.sig`, signed with the network key made from `official.key`); the last three are kept. Hand-offs are deleted
+after 90 days (the privacy page). `botdata.py rebuild --exclude <server>` makes the totals again from the hand-offs
+kept, leaving one server out. Totals that start empty (a new machine, or the folder lost) start from the set shipped in
+the backend's own package (`bin/data/bots`, `--seed`), so a new set never holds less than the last release's.
+**A deploy to a new folder copies `<data>\botdata\` from the old one**, like the accounts and leaderboard files.
+
+**Sending it back.** A new set goes to every official server over its registry link; a server that registers says
+which set it has (`bot_data_have`) and gets a newer one at once. The host checks the manifest's signature against the
+official machine's keys and every file's checksum, then writes `bots/network/`, `version.txt` last.
+
+**A release.** Copy the newest set from the official machine (`<data>\botdata\out\<latest.txt's version>`), then
+`python server/botdata.py install --from <that folder> --to bf/data/bots` (checks the signature; replaces the old set)
+and commit `bf/data/bots`. The build copies it into `data/bots` beside the program; `tools/make_packages.ps1`, the
+AppImage and `tools/linux/build_server.sh` carry it (both packages; a build without it warns). With no set there, the
+bots learn as before.
+
+**Size.** A set holds each map's learning (Wake from one busy server: about 280 KB of text), its finished grid (Wake:
+5.3 MB) and the style: a few MB in all. A hand-off is a few KB to a few hundred KB.
+
+**Privacy.** No names, ids, addresses or times are in any of it: counts per 2 m cell, sides 1 and 2, flag and vehicle
+names. The backend keeps which official server handed each file in (its folder name) for 90 days, for `rebuild`.
+
+**Switches.**
+
+| Setting | Where | Default | What it does |
+|---|---|---|---|
+| `bf_bots_shared_data` | cvar; manager Settings "Bots start from the shared bot data" | on | Off: the bots use this server's own learning only. |
+| `bf_bots_share` | cvar (the manager sets it on an official package) | off | Hand what is learned here to the shared set. |
+| `bf_bots_share_minutes` | cvar | 15 | Minutes between two hand-offs. |
+| `bf_bots_share_min_players` | cvar | 3 | Different human players on the map before a hand-off. |
+| `--bot-data`, `--bot-data-every` | `plasma.py` | off, 600 s | The merge's folder (needs `--official-key-file`), and how often it runs. |
+| `--bot-data-dir` | `gmhost.py` | beside `--map-file` | The game's `bots` folder. |
+
+**Tests** (26 to 27 Nov 2026):
+- `botdata.py` offline: bad lines left out, fading, the signature, a changed file caught, install, rebuild without a
+  server, 90 days, an empty backend seeded once from the shipped set.
+- A test backend and two hosts on 127.0.0.5 with a TEST key: the official host's outbox in, merged, the signed set back
+  and installed in 33 s; the community host handed nothing in and got nothing.
+- In game (run bs2: a dedicated server on Wake with 8 bots, one client, the test backend and an official test host;
+  hand-offs every minute, a round ended by `BF_DEV_TICKETS`): round 1 took the shipped set (17,408 entries) and its
+  finished grid (353,897 cells, no scan); five hand-offs went in, each merged and sent back within 10 s and checked;
+  round 2 took "the official servers' latest" set (no restart), with its own learning counted once (own 3,541 entries,
+  all handed). The bots' cost stayed at about 0.7 ms a tick; a level's load (the 5 MB grid read) took about 120 ms of
+  one tick, as reading a server's own grid did before.
 
 ### Bot settings
 
@@ -484,6 +571,10 @@ Reported by the player on 19 Nov 2026 and not yet fixed or not yet confirmed fix
 |---|---|---|
 | `bf_bots` | `bots.cpp` | 0 (clamped to 0 to 24) |
 | `bf_bots_squad_humans` | `bots.cpp` | true |
+| `bf_bots_shared_data` | `bots.cpp` | true |
+| `bf_bots_share` | `bots.cpp` | false (the server manager sets it on an official package) |
+| `bf_bots_share_minutes` | `bots.cpp` | 15 |
+| `bf_bots_share_min_players` | `bots.cpp` | 3 |
 | `bf_bot_chat` | `bot_chat.cpp` | true |
 | `bf_match_tickets` | `match_rules.cpp` | 0, automatic (clamped to -1 to 9999) |
 | `bf_match_time_limit` | `match_rules.cpp` | 0 minutes (clamped to 0 to 600) |
