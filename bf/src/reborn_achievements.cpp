@@ -2,6 +2,7 @@
 
 #include "reborn_achievements.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -67,7 +68,12 @@ bool Ensure() {
   if (!k) return g_ready = false;
   auto& m = k->achievements();
   bool missing = false;
-  for (const Ours& o : kOurs) missing |= !m.FindAchievement(o.id).has_value();
+  {
+    // v0.11's achievement manager has no FindAchievement: the list, searched.
+    const auto list = m.ListAchievements();
+    for (const Ours& o : kOurs)
+      missing |= std::none_of(list.begin(), list.end(), [&](const auto& a) { return a.id == o.id; });
+  }
   if (!missing) return g_ready = true;
   // Only after the game's own are in: until then a register would be wiped by the SDK's load of them.
   if (m.ListAchievements().empty()) return g_ready = false;

@@ -16,6 +16,7 @@
 #pragma once
 
 #include <rex/graphics/primitive_processor.h>
+#include <rex/guest.h>
 
 #include <cstdint>
 #include <functional>
@@ -34,8 +35,9 @@ class GuestMemory;
 
 class Primitives final : public rex::graphics::PrimitiveProcessor {
  public:
-  Primitives(const rex::graphics::RegisterFile& registers, rex::memory::Memory& memory, GuestMemory& guest_memory,
-             Diligent::IRenderDevice* device, Recorder* recorder);
+  // SDK v0.11+: on the title's physical memory and write watches, with the bfnative driver's gpu.xenos settings.
+  Primitives(const rex::graphics::RegisterFile& registers, rex::IPhysicalMemory& memory, rex::IPhysicalWriteWatch& watch,
+             GuestMemory& guest_memory, Diligent::IRenderDevice* device, Recorder* recorder);
   ~Primitives() override;
 
   bool Initialize();
@@ -43,6 +45,10 @@ class Primitives final : public rex::graphics::PrimitiveProcessor {
   // Uploads what the last Process converted. Call before binding its index buffer. Returns whether it
   // recorded a copy.
   bool UploadConverted();
+  // The title detaches (SDK v0.11+: the bfnative driver's detach observer, after its command processor stopped): the
+  // write listeners on the title's memory released, which the title's unload waits for. Nothing reads guest memory
+  // afterwards.
+  void DetachTitle();
   // Between frames: forgets the frame's conversions.
   void EndFrame();
 

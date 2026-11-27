@@ -7,7 +7,7 @@
     },
     "configurePresets": [
         {
-            "name": "windows-base",
+            "name": "win-base",
             "hidden": true,
             "generator": "Ninja Multi-Config",
             "binaryDir": "${sourceDir}/out/build/${presetName}",
@@ -21,6 +21,7 @@
                 "CMAKE_CROSS_CONFIGS": "all",
                 "CMAKE_DEFAULT_BUILD_TYPE": "Debug",
                 "CMAKE_DEFAULT_CONFIGS": "all",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}"
             },
             "condition": {
@@ -37,15 +38,14 @@
             "cacheVariables": {
                 "CMAKE_C_COMPILER": "clang",
                 "CMAKE_CXX_COMPILER": "clang++",
-                "CMAKE_C_FLAGS": "-march=x86-64-v2 -fno-semantic-interposition -fno-plt",
-                "CMAKE_CXX_FLAGS": "-march=x86-64-v2 -fno-semantic-interposition -fno-plt",
-                "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld -Wl,-O2 -Wl,--icf=safe",
-                "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld -Wl,-O2 -Wl,--icf=safe",
+                "CMAKE_C_FLAGS": "-march=x86-64-v2",
+                "CMAKE_CXX_FLAGS": "-march=x86-64-v2",
                 "CMAKE_CXX_STANDARD": "23",
                 "CMAKE_CONFIGURATION_TYPES": "Debug;Release;RelWithDebInfo",
                 "CMAKE_CROSS_CONFIGS": "all",
                 "CMAKE_DEFAULT_BUILD_TYPE": "Debug",
                 "CMAKE_DEFAULT_CONFIGS": "all",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}"
             },
             "condition": {
@@ -69,6 +69,7 @@
                 "CMAKE_CROSS_CONFIGS": "all",
                 "CMAKE_DEFAULT_BUILD_TYPE": "Debug",
                 "CMAKE_DEFAULT_CONFIGS": "all",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
                 "CMAKE_OSX_ARCHITECTURES": "x86_64"
             },
@@ -79,9 +80,9 @@
             }
         },
         {
-            "name": "windows-arm64-base",
+            "name": "win-arm64-base",
             "hidden": true,
-            "inherits": "windows-base",
+            "inherits": "win-base",
             "cacheVariables": {
                 "CMAKE_C_FLAGS": "-march=armv8-a",
                 "CMAKE_CXX_FLAGS": "-march=armv8-a"
@@ -110,19 +111,28 @@
             "name": "win-amd64",
             "displayName": "Windows AMD64",
             "description": "Multi-config build for Windows AMD64 using Clang",
-            "inherits": "windows-base"
+            "inherits": "win-base"
         },
         {
             "name": "win-arm64",
             "displayName": "Windows ARM64",
             "description": "Multi-config build for Windows ARM64 using Clang",
-            "inherits": "windows-arm64-base"
+            "inherits": "win-arm64-base"
         },
         {
             "name": "linux-amd64",
             "displayName": "Linux AMD64",
             "description": "Multi-config build for Linux AMD64 using Clang",
             "inherits": "linux-base"
+        },
+        {
+            "name": "linux-amd64-tsan",
+            "displayName": "Linux AMD64 ThreadSanitizer",
+            "description": "Multi-config build for Linux AMD64 using Clang with ThreadSanitizer",
+            "inherits": "linux-amd64",
+            "cacheVariables": {
+                "REXGLUE_ENABLE_TSAN": "ON"
+            }
         },
         {
             "name": "linux-arm64",
@@ -188,6 +198,11 @@
             "name": "linux-amd64-relwithdebinfo",
             "configurePreset": "linux-amd64",
             "configuration": "RelWithDebInfo"
+        },
+        {
+            "name": "linux-amd64-tsan",
+            "configurePreset": "linux-amd64-tsan",
+            "configuration": "Debug"
         },
         {
             "name": "linux-arm64-debug",
@@ -280,6 +295,11 @@
             "name": "linux-amd64-relwithdebinfo",
             "configurePreset": "linux-amd64",
             "configuration": "RelWithDebInfo"
+        },
+        {
+            "name": "linux-amd64-tsan",
+            "configurePreset": "linux-amd64-tsan",
+            "configuration": "Debug"
         },
         {
             "name": "linux-arm64-debug",

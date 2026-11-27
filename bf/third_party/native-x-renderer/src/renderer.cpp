@@ -4,9 +4,9 @@
 // Xenos emulation:
 //   - the SDK's command processor keeps executing the game's command buffer for synchronization only
 //     (the SDK's recomp change 27: fences, interrupts, swaps, queries with fake sample counts), and
-//     draws nothing on the host;
-//   - the SDK's presenter is detached from the game's window, and NativeXRenderer presents there through
-//     its own DiligentCore (Vulkan) swap chain. The SDK's ImGui overlays (its dialogs) are drawn over the frame
+//     draws nothing on the host (SDK v0.11+: the Xenos driver "bfnative", rex/gpu/bfnative_hooks.h);
+//   - the game's window has no presenter of the SDK's, and NativeXRenderer presents there through its own
+//     DiligentCore (Vulkan) swap chain. The SDK's ImGui overlays (its dialogs) are drawn over the frame
 //     there (overlay.h, D75).
 //
 // Every D3D call is captured on the game's render thread, after the original ran, in the game's order, from
@@ -62,7 +62,6 @@
 #include <rex/ui/window.h>
 #if !defined(_WIN32)
 #include <SDL3/SDL.h>
-#include <rex/ui/window_sdl.h>
 #endif
 
 #include "Query.h"
@@ -160,6 +159,15 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_horizon_haze, true, "NativeXRenderer",
 REXCVAR_DEFINE_BOOL(native_x_renderer_sea_sky, true, "NativeXRenderer",
                     "The sea reflects the hour's sky (the renderer's), not the game's day sky cube map, also without "
                     "native_x_renderer_reflections (D240)");
+REXCVAR_DEFINE_INT32(native_x_renderer_reflection_mode, -1, "NativeXRenderer",
+                     "The sea's reflection (D252): 0 off (the game's), 1 SSR, 2 planar (the world drawn again, mirrored "
+                     "in the water); -1 as native_x_renderer_reflections says (off or SSR)");
+REXCVAR_DEFINE_INT32(native_x_renderer_planar_every, 2, "NativeXRenderer",
+                     "The planar reflection drawn every this many frames (1 to 4; the last one shown between; D252)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_planar_cull, true, "NativeXRenderer",
+                    "The planar reflection leaves out small models whose mirror image is out of sight (D252)");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_planar_scale, 0.5, "NativeXRenderer",
+                      "The planar reflection's size over the view's (0.25 to 1; D252)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_glass_reflections, false, "NativeXRenderer",
                     "Experimental (D191): the window glass's reflections of the renderer's own in place of the game's "
                     "day sky cube map; with native_x_renderer_reflections");
@@ -361,6 +369,8 @@ constexpr uint32_t kRbDepthClear = 0x231D;
 
 const Profile* g_profile = nullptr;
 std::unique_ptr<Device> g_device;
+// The title detached and the window's swap chain released (OnTitleDetached): the game's calls draw nothing more.
+std::atomic<bool> g_window_released{false};
 RenderTargets g_targets;
 // The order of the writes to host targets: each draw or clear stamps the targets it writes (D95).
 uint64_t g_target_writes = 0;
@@ -422,6 +432,10 @@ bool g_night_pending = false;  // the scene's copy was made: the night follows t
 Diligent::RefCntAutoPtr<Diligent::ITexture> g_night_world;
 Diligent::RefCntAutoPtr<Diligent::ITexture> g_glass_mask;  // D191: the window glass's depth, for its reflection
 Diligent::RefCntAutoPtr<Diligent::ITexture> g_sea_mask;  // D190: where the sea is drawn, for its reflection
+// D252: the planar reflection, the world drawn again mirrored in the sea (its colour, its depth: 0 where nothing is).
+Diligent::RefCntAutoPtr<Diligent::ITexture> g_planar_color, g_planar_depth;
+bool g_planar_mode = false;         // Reflections: Planar this frame
+uint64_t g_planar_drawn_frame = 0;  // the frame it was last drawn (shown on the frames between)
 uint64_t g_night_world_frame = ~0ull;
 float g_night_world_uv[2] = {1.0f, 1.0f};  // the view's share of it
 // D163: the effects' layer (the game's half size pass of its emissive particles, copied with its mips), its frame.
@@ -563,6 +577,7 @@ bool GrassOn() {
 }
 TerrainFrame g_terrain;  // this frame's terrain draws, for it
 TerrainFrame g_fog_terrain;  // D231: the last terrain seen (its heightmap kept), for the ground fog's ground
+TerrainFrame g_planar_terrain;  // D252: this frame's terrain's depth partitions, for the planar reflection
 bool g_scene_antialiased = false;  // this frame's scene copy antialiased already (Profile::scene_resolve_once, D94)
 Upscaler g_upscaler;   // NVIDIA DLSS (Phase 5, D46)
 // Motion blur (motion_blur.h, 0.4.2): made at its first use; the view's camera vote kept for it (the ambient
@@ -2052,7 +2067,16 @@ void ExecuteDraw(const Command& c) {
       SetSkyLightning(REXCVAR_GET(native_x_renderer_lightning));
       SetCloudShadows(REXCVAR_GET(native_x_renderer_cloud_shadows));  // D214
       SetStormSway(REXCVAR_GET(native_x_renderer_storm_sway));
-      SetSeaReflection(REXCVAR_GET(native_x_renderer_reflections) && SkyOn());
+      // D252: Off / SSR / Planar (native_x_renderer_reflection_mode; -1, from before it, as the old switch says).
+      const int32_t reflection_mode = REXCVAR_GET(native_x_renderer_reflection_mode) >= 0
+                                          ? REXCVAR_GET(native_x_renderer_reflection_mode)
+                                          : (REXCVAR_GET(native_x_renderer_reflections) ? 1 : 0);
+      SetSeaReflection(reflection_mode >= 1 && SkyOn());
+      // (Drawn every native_x_renderer_planar_every frames: the draws kept only on those.)
+      g_planar_mode = reflection_mode == 2 && SkyOn();
+      const uint64_t planar_every = uint64_t(std::clamp(REXCVAR_GET(native_x_renderer_planar_every), 1, 4));
+      g_draw->SetPlanarReflection(g_planar_mode && g_device->frames_presented() % planar_every == 0);
+      g_draw->SetPlanarCull(REXCVAR_GET(native_x_renderer_planar_cull));
       SetHorizonHaze(REXCVAR_GET(native_x_renderer_horizon_haze) && SkyOn());  // D238
       g_draw->SetOwnSeaReflection(SeaReflection());
       // D240: the sea's cube maps as the hour's sky with the renderer's sky on, with or without its reflection.
@@ -3099,6 +3123,7 @@ void ApplyOpaqueEffects() {
   }
   NoteNightCamera();  // D163
   if (g_terrain.valid && g_terrain.height && g_terrain.height_size) g_fog_terrain = g_terrain;  // D231
+  if (g_terrain.partition_count > 0) g_planar_terrain = g_terrain;  // D252 (the fog's pass comes after this)
   g_terrain.Reset();
   GtaoSettings ao = GtaoSettings::FromCvars();
   ao.temporal_upscaler = g_temporal;
@@ -3631,6 +3656,67 @@ void ApplyFog() {
   if (g_draw->sea_after_due()) g_draw->TakeSeaAfter();
   // The clouds over what the view holds (planes in them, the ground under them), then the fog over all.
   const bool over = SkyOn() && Timed(SectionTimers::kCloudsOver, [&] { return g_own_sky.CloudsOver(g_device->context(), g_fog_in); });
+  // D252: the planar reflection, the world's draws of this frame drawn again mirrored in the sea, before the fog's
+  // pass reads it.
+  g_own_sky.planar = nullptr;
+  g_own_sky.planar_depth = nullptr;
+  // (Only with the sea in view: inland, where the game drew none of its sea this frame, nothing is drawn again.)
+  if (SeaReflection() && g_draw->planar_draw_count() > 0 && !g_draw->sea_seen()) {
+    g_draw->DrawPlanar(nullptr, nullptr, 0.0f, 0, nullptr);  // (the kept draws let go)
+  } else if (SeaReflection() && g_draw->planar_draw_count() > 0) {
+    const TextureDesc& cd = g_scene_color->texture->GetDesc();
+    float sea = 0.0f;
+    const float planar_scale = float(std::clamp(REXCVAR_GET(native_x_renderer_planar_scale), 0.25, 1.0));
+    const uint32_t pw = std::max(1u, uint32_t(std::lround(float(cd.Width) * planar_scale)));
+    const uint32_t ph = std::max(1u, uint32_t(std::lround(float(cd.Height) * planar_scale)));
+    if (!g_planar_color || g_planar_color->GetDesc().Width != pw || g_planar_color->GetDesc().Height != ph) {
+      g_planar_color.Release();
+      g_planar_depth.Release();
+      TextureDesc t;
+      t.Name = "NativeXRenderer planar reflection";
+      t.Type = RESOURCE_DIM_TEX_2D;
+      t.Width = pw, t.Height = ph;
+      t.Format = TEX_FORMAT_RGBA16_FLOAT;
+      t.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+      g_device->device()->CreateTexture(t, nullptr, &g_planar_color);
+      t.Name = "NativeXRenderer planar reflection depth";
+      t.Format = TEX_FORMAT_D32_FLOAT;
+      t.BindFlags = BIND_SHADER_RESOURCE | BIND_DEPTH_STENCIL;
+      g_device->device()->CreateTexture(t, nullptr, &g_planar_depth);
+    }
+    if (g_planar_color && g_planar_depth && g_own_sky.SeaLevel(&sea)) {
+      static const int planar_debug = [] {
+        const char* v = std::getenv("NXR_PLANAR_DEBUG");
+        return v && *v ? std::atoi(v) : 0;
+      }();
+      ITextureView* rtv = g_planar_color->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET);
+      ITextureView* dsv = g_planar_depth->GetDefaultView(TEXTURE_VIEW_DEPTH_STENCIL);
+      const float zero[4] = {};
+      g_device->context()->SetRenderTargets(1, &rtv, dsv, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      g_device->context()->ClearRenderTarget(rtv, zero, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      g_device->context()->ClearDepthStencil(dsv, CLEAR_DEPTH_FLAG, 0.0f, 0, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      if (g_draw->DrawPlanar(rtv, dsv, sea, planar_debug, &g_planar_terrain, float(pw) / float(cd.Width)) > 0) {
+        g_planar_drawn_frame = g_device->frames_presented();
+        g_own_sky.planar = g_planar_color->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+        g_own_sky.planar_depth = g_planar_depth->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+        g_own_sky.sea_mask_uv[0] = float(g_fog_in.width) / float(cd.Width);  // (its share, as the sea mask's)
+        g_own_sky.sea_mask_uv[1] = float(g_fog_in.height) / float(cd.Height);
+      }
+      g_draw->TargetsChanged();
+      g_device->context();  // (what was recorded is done before the fog reads it)
+    } else {
+      g_draw->DrawPlanar(nullptr, nullptr, 0.0f, 0, nullptr);  // (the kept draws let go)
+    }
+  }
+  // The frames between: the last one drawn, if it is recent and of this size.
+  if (!g_own_sky.planar && g_planar_mode && SeaReflection() && g_planar_color && g_planar_depth && g_draw->sea_seen() &&
+      g_device->frames_presented() - g_planar_drawn_frame <= 4) {
+    const TextureDesc& cd = g_scene_color->texture->GetDesc();
+    g_own_sky.planar = g_planar_color->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+    g_own_sky.planar_depth = g_planar_depth->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+    g_own_sky.sea_mask_uv[0] = float(g_fog_in.width) / float(cd.Width);
+    g_own_sky.sea_mask_uv[1] = float(g_fog_in.height) / float(cd.Height);
+  }
   // D190: where the sea is drawn, from its draws drawn again (flat ground at its height is not it).
   g_own_sky.sea_mask = nullptr;
   g_own_sky.sea_after = nullptr;
@@ -4371,7 +4457,10 @@ void ExecuteResolve(const Command& c) {
     write.slice = slice;
     GuestMemory* memory = g_resolved.memory();
     memory->EnsureMirror(write.address, uint32_t(std::min<uint64_t>(uint64_t((write.pitch + 31) & ~31u) * ((write.height + 31) & ~31u) * 16, 0x20000000u)));  // D174
-    if (g_blit.WriteToMirror(g_device->context(), target->ArrayView(), memory->buffer(), memory->uav(), write)) {
+    uint32_t write_base = 0;  // a window of the mirror where it is bound in parts (GuestMemory::WriteView)
+    IBufferView* write_view = memory->WriteView(write.address, &write_base);
+    write.address -= write_base;
+    if (g_blit.WriteToMirror(g_device->context(), target->ArrayView(), memory->buffer(), write_view, write)) {
       ++g_stats.mirror_writes;
       static const bool log = std::getenv("NXR_D140_LOG") != nullptr;  // a diagnosis aid: each one
       if (log) REXLOG_INFO("[native_x_renderer] D140: resolve at {:#x} written to the mirror", address);
@@ -5549,15 +5638,17 @@ namespace {
 // SDK's only window on Linux), for DiligentCore's swap chain; its size in pixels as the SDK tracks it.
 rex::ui::Window* g_host_window = nullptr;
 uint32_t HostPixelSize(bool height) {
-  if (!g_host_window) return 0;
-  return height ? g_host_window->GetActualPhysicalHeight() : g_host_window->GetActualPhysicalWidth();
+  SDL_Window* sdl = g_host_window ? g_host_window->sdl_window() : nullptr;
+  int width = 0, pixel_height = 0;
+  if (!sdl || !SDL_GetWindowSizeInPixels(sdl, &width, &pixel_height)) return 0;
+  return uint32_t(std::max(height ? pixel_height : width, 0));
 }
 // D159: the window's real size (its X11 surface's) when the SDK's is out of date: an SDL pixel size event of our
-// own, which the SDK takes on its UI thread as it takes SDL's (WindowSDL::HandleWindowEvent), so its size, ImGui's
+// own, which the SDK takes on its UI thread as it takes SDL's (its SDL UI driver's event loop), so its size, ImGui's
 // and ours agree again. SDL_PushEvent is safe from the renderer's thread.
 void HostRealPixelSize(uint32_t width, uint32_t height) {
   if (!g_host_window || !width || !height) return;
-  SDL_Window* sdl = static_cast<rex::ui::WindowSDL*>(g_host_window)->sdl_window();
+  SDL_Window* sdl = g_host_window->sdl_window();
   if (!sdl) return;
   SDL_Event event{};
   event.type = SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED;
@@ -5567,7 +5658,7 @@ void HostRealPixelSize(uint32_t width, uint32_t height) {
   if (!SDL_PushEvent(&event)) REXLOG_WARN("[native_x_renderer] the window's real size not sent: {}", SDL_GetError());
 }
 void WaitForFullscreenSize(rex::ui::Window* window, Device& device) {
-  SDL_Window* sdl = static_cast<rex::ui::WindowSDL*>(window)->sdl_window();
+  SDL_Window* sdl = window->sdl_window();
   if (!sdl || !window->IsFullscreen()) return;
   const bool synced = SDL_SyncWindow(sdl);
   int width = 0, height = 0;
@@ -5578,7 +5669,7 @@ void WaitForFullscreenSize(rex::ui::Window* window, Device& device) {
 }
 void* LinuxHostWindow(rex::ui::Window* window) {
   static HostWindow host;
-  SDL_Window* sdl = window ? static_cast<rex::ui::WindowSDL*>(window)->sdl_window() : nullptr;
+  SDL_Window* sdl = window ? window->sdl_window() : nullptr;
   if (!sdl) return nullptr;
   const SDL_PropertiesID props = SDL_GetWindowProperties(sdl);
   host = HostWindow{};
@@ -5597,7 +5688,36 @@ void* LinuxHostWindow(rex::ui::Window* window) {
   return &host;
 }
 }  // namespace
+// The same for the pages' presenter before the renderer starts (pregame.cpp).
+void* PreGameHostWindow(rex::ui::Window* window) { return LinuxHostWindow(window); }
 #endif
+
+// SDK v0.11+: the title detaches (the bfnative driver's detach observer), its command processor stopped. The renderer
+// lets go of the title's memory: its write listeners (the guest memory mirror's, the primitive processor's, the
+// resolved textures') hold the title context, whose release waits for them. Without this, quitting the game hung in
+// TitleContext's destructor until the process was killed (the port's smoke runs, 25 Nov 2026).
+void OnTitleDetached(void*) {
+  g_queue.WaitIdle();  // what the command processor sent before it stopped
+  if (g_draw) {
+    g_draw->DetachTitle();
+  } else {
+    g_resolved.Watch(nullptr);
+  }
+  REXLOG_INFO("[native_x_renderer] the title detached: its memory let go");
+  // The window's swap chain released now, while the window exists (Device::ReleaseSwapChain: on Linux, released by the
+  // static destructor after the UI system closed the window's X connection, it aborted the exit). The renderer's
+  // threads first: a thread that did not stop (stuck in the driver) may still use the swap chain, which is then left.
+  g_window_released.store(true, std::memory_order_seq_cst);
+  if (!g_device) return;
+  const bool stopped = g_queue.Stop();
+  g_device->recorder().Stop();
+  if (stopped) {
+    g_device->ReleaseSwapChain();
+    REXLOG_INFO("[native_x_renderer] the window's swap chain released");
+  } else {
+    REXLOG_WARN("[native_x_renderer] the renderer's thread did not stop: the window's swap chain is left");
+  }
+}
 
 bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, rex::ui::Window* window,
                 const std::filesystem::path& cache_root) {
@@ -5621,20 +5741,21 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
 #else
   void* native_window = LinuxHostWindow(window);
 #endif
+  // SDK v0.11+: the graphics system is the bfnative driver's hooks (rex/system/interfaces/graphics.h), there once the
+  // title is attached (Bf1943App::OnTitleLaunch).
+  if (!graphics) graphics = rex::system::bfnative_graphics();
   if (!graphics || !native_window) {
-    REXLOG_ERROR("[native_x_renderer] renderer: needs the graphics system and the game's window; off");
+    REXLOG_ERROR("[native_x_renderer] renderer: needs the bfnative driver and the game's window; nothing draws");
     return false;
   }
 
-  // The window can hold one swap chain: take it from the SDK's presenter. If NativeXRenderer cannot start, the
-  // presenter gets it back and the Xenos path draws (D56: NativeXRenderer can be a game's default).
-  window->SetPresenter(nullptr);
+  // The window's swap chain is NativeXRenderer's: the bfnative driver has no presenter (SDK v0.11+). It draws
+  // nothing either, so without NativeXRenderer nothing draws (under v0.10 the Xenos path did, D56).
   auto device = std::make_unique<Device>();
   auto fall_back = [&](const char* reason) {
     g_blit = Blitter();
     device.reset();
-    window->SetPresenter(graphics->presenter());
-    REXLOG_ERROR("[native_x_renderer] renderer: {}; the Xenos path draws", reason);
+    REXLOG_ERROR("[native_x_renderer] renderer: {}; nothing draws", reason);
     return false;
   };
   // FSR 3.1 picks 16-bit shaders where the GPU has them: the device enables them then (D116).
@@ -5642,14 +5763,11 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
   if (!device->Create(native_window, fsr) || !g_blit.Initialize(device->device())) {
     return fall_back("no host device");
   }
+  graphics->SetDetachObserver(&OnTitleDetached, nullptr);
   if (!graphics->SetHostRendering(false)) {
     return fall_back("the graphics system cannot turn host rendering off (SDK patch missing?)");
   }
-  // The SDK's backend draws nothing now. Its shader storage holds the Xenos path's pipelines, which the
-  // runtime creates before the game starts: GRAW waited more than 14 s for 400 of them (D60).
-  if (rex::cvar::Query<bool>("store_shaders") && rex::cvar::SetFlagByName("store_shaders", "false")) {
-    REXLOG_INFO("[native_x_renderer] store_shaders set to false: the SDK's shader storage is for the Xenos path");
-  }
+  // (Under v0.10 store_shaders was turned off here, D60: the bfnative driver builds no pipelines to store.)
   // The render scale (D37): the largest at which the game's image fits the output, which is the swap chain
   // (the monitor in fullscreen, the window's client area otherwise), at least 1, at most what the largest
   // texture allows; or the native_x_renderer_resolution_scale override.
@@ -5986,6 +6104,7 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
 }
 
 void OnEnter(Call call, PPCContext& ctx, uint8_t* base, bool nested) {
+  if (g_window_released.load(std::memory_order_relaxed)) return;
   if (call == Call::kClearF) {
     // Captured right away (ClearF is also called from inside Clear): the bound targets are the ones to clear.
     CaptureClear(ctx, base);
@@ -6019,6 +6138,7 @@ void OnEnter(Call call, PPCContext& ctx, uint8_t* base, bool nested) {
 
 void OnLeave(const TrackedCall& tracked, StateTracker& tracker, PPCContext& ctx, uint8_t* base) {
   (void)ctx;
+  if (g_window_released.load(std::memory_order_relaxed)) return;
   if (tracked.call != g_call.call) return;
   if (tracked.draw) {
     CaptureDraw(tracked, tracker, base);
@@ -6073,7 +6193,7 @@ bool DispatchReplay(Call call, StateTracker& tracker, const uint8_t* base) {
 }
 
 void OnFrameEnd(uint32_t frame) {
-  if (!g_device) return;
+  if (!g_device || g_window_released.load(std::memory_order_relaxed)) return;
   Capture capture(Command::Type::kFrameEnd);
   capture.command.frame = frame;
   capture.command.captured = g_captured;

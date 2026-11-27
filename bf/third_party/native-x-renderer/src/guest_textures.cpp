@@ -9,6 +9,7 @@
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/hash.h>
+#include <rex/system/interfaces/graphics.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -157,10 +158,6 @@ namespace texture_util = rex::graphics::texture_util;
 
 namespace {
 
-using rex::graphics::xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA;
-using rex::graphics::xenos::XE_GPU_TEXTURE_SWIZZLE_RGBB;
-using rex::graphics::xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG;
-using rex::graphics::xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR;
 
 // Swaps red and blue in a host format swizzle: for formats whose DiligentCore Vulkan format stores them in
 // the opposite order to the DXGI format the load shader writes (RGB10A2_UNORM is A2R10G10B10 there).
@@ -338,14 +335,15 @@ class GuestTextures::HostTexture final : public rg::TextureCache::Texture {
       }
     }
     SetHostMemoryUsage(size);
+    host_bytes_ = size;
     ++cache.stats_.textures;
     cache.stats_.host_bytes += size;
   }
   ~HostTexture() override {
-    auto& cache = static_cast<GuestTextures&>(texture_cache());
+    auto& cache = static_cast<GuestTextures&>(GetTextureCache());
     auto& stats = cache.stats_;
     --stats.textures;
-    stats.host_bytes -= GetHostMemoryUsage();
+    stats.host_bytes -= host_bytes_;
     cache.patched_.erase(this);  // D160
   }
   ITexture* texture() const { return texture_; }
@@ -369,11 +367,12 @@ class GuestTextures::HostTexture final : public rg::TextureCache::Texture {
   ITextureView* view_ = nullptr;
   RefCntAutoPtr<ITextureView> signed_view_;
   RefCntAutoPtr<ITextureView> unsigned_view_;
+  uint64_t host_bytes_ = 0;  // what SetHostMemoryUsage was given (SDK v0.11+ has no getter)
 };
 
 GuestTextures::GuestTextures(const rg::RegisterFile& registers, GuestMemory& memory, ResolvedTextures& resolved,
                              IRenderDevice* device, Recorder* recorder)
-    : TextureCache(registers, memory, 1, 1),
+    : TextureCache(registers, *rex::system::bfnative_graphics()->xenos_settings(), memory, 1, 1),
       memory_(memory),
       resolved_(resolved),
       device_(device),
@@ -392,28 +391,28 @@ bool GuestTextures::Initialize() {
   };
 #define XN_LOAD_SHADER(index, array) {index, load_shaders::array, sizeof(load_shaders::array), #array}
   const Code codes[] = {
-      XN_LOAD_SHADER(kLoadShaderIndex8bpb, texture_load_8bpb_cs),
-      XN_LOAD_SHADER(kLoadShaderIndex16bpb, texture_load_16bpb_cs),
-      XN_LOAD_SHADER(kLoadShaderIndex32bpb, texture_load_32bpb_cs),
-      XN_LOAD_SHADER(kLoadShaderIndex64bpb, texture_load_64bpb_cs),
-      XN_LOAD_SHADER(kLoadShaderIndex128bpb, texture_load_128bpb_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexR5G5B5A1ToB5G5R5A1, texture_load_r5g5b5a1_b5g5r5a1_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexR5G6B5ToRGBA8, texture_load_r5g6b5_rgba8_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexR5G5B6ToB5G6R5WithRBGASwizzle, texture_load_r5g5b6_b5g6r5_swizzle_rbga_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexRGBA4ToRGBA8, texture_load_r4g4b4a4_rgba8_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexGBGR8ToRGB8, texture_load_gbgr8_rgb8_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexBGRG8ToRGB8, texture_load_bgrg8_rgb8_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexR10G11B11ToRGBA16, texture_load_r10g11b11_rgba16_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexR11G11B10ToRGBA16, texture_load_r11g11b10_rgba16_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexDXT1ToRGBA8, texture_load_dxt1_rgba8_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexDXT3ToRGBA8, texture_load_dxt3_rgba8_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexDXT5ToRGBA8, texture_load_dxt5_rgba8_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexDXNToRG8, texture_load_dxn_rg8_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexDXT3A, texture_load_dxt3a_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexDXT5AToR8, texture_load_dxt5a_r8_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexCTX1, texture_load_ctx1_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexDepthUnorm, texture_load_depth_unorm_cs),
-      XN_LOAD_SHADER(kLoadShaderIndexDepthFloat, texture_load_depth_float_cs),
+      XN_LOAD_SHADER(kLoadShaderIndex8bpb, kTextureLoad8BPBCS),
+      XN_LOAD_SHADER(kLoadShaderIndex16bpb, kTextureLoad16BPBCS),
+      XN_LOAD_SHADER(kLoadShaderIndex32bpb, kTextureLoad32BPBCS),
+      XN_LOAD_SHADER(kLoadShaderIndex64bpb, kTextureLoad64BPBCS),
+      XN_LOAD_SHADER(kLoadShaderIndex128bpb, kTextureLoad128BPBCS),
+      XN_LOAD_SHADER(kLoadShaderIndexR5G5B5A1ToB5G5R5A1, kTextureLoadR5G5B5A1B5G5R5A1CS),
+      XN_LOAD_SHADER(kLoadShaderIndexR5G6B5ToRGBA8, kTextureLoadR5G6B5RGBA8CS),
+      XN_LOAD_SHADER(kLoadShaderIndexR5G5B6ToB5G6R5WithRBGASwizzle, kTextureLoadR5G5B6B5G6R5SwizzleRBGACS),
+      XN_LOAD_SHADER(kLoadShaderIndexRGBA4ToRGBA8, kTextureLoadR4G4B4A4RGBA8CS),
+      XN_LOAD_SHADER(kLoadShaderIndexGBGR8ToRGB8, kTextureLoadGBGR8RGB8CS),
+      XN_LOAD_SHADER(kLoadShaderIndexBGRG8ToRGB8, kTextureLoadBGRG8RGB8CS),
+      XN_LOAD_SHADER(kLoadShaderIndexR10G11B11ToRGBA16, kTextureLoadR10G11B11RGBA16CS),
+      XN_LOAD_SHADER(kLoadShaderIndexR11G11B10ToRGBA16, kTextureLoadR11G11B10RGBA16CS),
+      XN_LOAD_SHADER(kLoadShaderIndexDXT1ToRGBA8, kTextureLoadDXT1RGBA8CS),
+      XN_LOAD_SHADER(kLoadShaderIndexDXT3ToRGBA8, kTextureLoadDXT3RGBA8CS),
+      XN_LOAD_SHADER(kLoadShaderIndexDXT5ToRGBA8, kTextureLoadDXT5RGBA8CS),
+      XN_LOAD_SHADER(kLoadShaderIndexDXNToRG8, kTextureLoadDXNRG8CS),
+      XN_LOAD_SHADER(kLoadShaderIndexDXT3A, kTextureLoadDXT3ACS),
+      XN_LOAD_SHADER(kLoadShaderIndexDXT5AToR8, kTextureLoadDXT5AR8CS),
+      XN_LOAD_SHADER(kLoadShaderIndexCTX1, kTextureLoadCTX1CS),
+      XN_LOAD_SHADER(kLoadShaderIndexDepthUnorm, kTextureLoadDepthUNormCS),
+      XN_LOAD_SHADER(kLoadShaderIndexDepthFloat, kTextureLoadDepthFloatCS),
   };
 #undef XN_LOAD_SHADER
   for (const Code& code : codes) {
@@ -463,13 +462,13 @@ void GuestTextures::RequestTextures(uint32_t used_texture_mask) {
     repatched_ = repatch;
     const std::vector<HostTexture*> textures(patched_.begin(), patched_.end());
     for (HostTexture* texture : textures) {
-      if (texture->outdated_mask() & Texture::kOutdatedBitBase) texture->repatch = true;
+      if (texture->GetOutdatedMask() & Texture::kOutdatedBitBase) texture->repatch = true;
       else Patch(*texture, true);
     }
   }
   // Marking all 32 written computed every used binding again in every draw (BindingInfoFromFetchConstant, the
   // host format's swizzle): about 5 % of the renderer thread in Kameo's first level (D83).
-  const uint32_t* fetch_constants = &register_file()[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0];
+  const uint32_t* fetch_constants = &GetRegisterFile()[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0];
   uint32_t remaining = used_texture_mask;
   uint32_t index;
   while (rex::bit_scan_forward(remaining, &index)) {
@@ -487,7 +486,7 @@ void GuestTextures::RequestTextures(uint32_t used_texture_mask) {
   memory_.EndTextureRequests();
 }
 
-void GuestTextures::UpdateTextureBindingsImpl(uint32_t fetch_constant_mask) {
+void GuestTextures::UpdateHostTextureBindings(uint32_t fetch_constant_mask) {
   for (uint32_t mask = fetch_constant_mask; mask; mask &= mask - 1) ++bindings_changed_[std::countr_zero(mask)];
 }
 
@@ -544,7 +543,7 @@ ITextureView* GuestTextures::HdView(HostTexture& host_texture) {
     }
   }
   if (!REXCVAR_GET(native_x_renderer_hd_textures)) return nullptr;
-  const TextureKey key = host_texture.key();
+  const TextureKey key = host_texture.GetKey();
   const uint32_t format = uint32_t(key.format), w = key.GetWidth(), h = key.GetHeight();
   if ((format != 18 && format != 19 && format != 20 && format != 6) ||
       key.dimension != xenos::DataDimension::k2DOrStacked || key.GetDepthOrArraySize() != 1 ||
@@ -626,7 +625,7 @@ ITextureView* GuestTextures::HdView(HostTexture& host_texture) {
 // D200: the upscaler's copy of a k_8 2D texture with a single mip, made the first time for its data (kept for the
 // session, by its key, as the HD pack's), or null.
 ITextureView* GuestTextures::Upscaled(HostTexture& host_texture, TextureUpscaleFn upscale) {
-  const TextureKey key = host_texture.key();
+  const TextureKey key = host_texture.GetKey();
   const uint32_t w = key.GetWidth(), h = key.GetHeight();
   if (uint32_t(key.format) != 2 /* k_8 */ || key.dimension != xenos::DataDimension::k2DOrStacked ||
       key.GetDepthOrArraySize() != 1 || key.mip_max_level != 0 || host_texture.GetGuestBaseSize() < uint64_t(w) * h)
@@ -668,7 +667,7 @@ ITextureView* GuestTextures::Upscaled(HostTexture& host_texture, TextureUpscaleF
 // D200: the image upscaler's copy of a k_8_8_8_8 or DXT4_5 2D texture with a single mip (RGBA8), made the first time
 // for its data and kept for the session, or null.
 ITextureView* GuestTextures::UpscaledImage(HostTexture& host_texture, TextureUpscaleImageFn upscale) {
-  const TextureKey key = host_texture.key();
+  const TextureKey key = host_texture.GetKey();
   const uint32_t w = key.GetWidth(), h = key.GetHeight(), format = uint32_t(key.format);
   if ((format != 6 && format != 20) || key.dimension != xenos::DataDimension::k2DOrStacked ||
       key.GetDepthOrArraySize() != 1 || key.mip_max_level != 0)
@@ -810,11 +809,13 @@ bool GuestTextures::TryLoadTextureDataFromResolveCache(Texture& texture, bool lo
   // Resolve destinations hold no data in guest memory (resolves write host textures only): skip the load.
   // GetView's callers bind the resolved texture instead, unless it was invalidated or the format is one a resolve
   // does not write (D70).
-  return load_base && ResolvableFormat(uint32_t(texture.key().format)) &&
-         resolved_.FindNewest(texture.key().base_page << 12) != nullptr;
+  return load_base && ResolvableFormat(uint32_t(texture.GetKey().format)) &&
+         resolved_.FindNewest(texture.GetKey().base_page << 12) != nullptr;
 }
 
-bool GuestTextures::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base, bool load_mips) {
+bool GuestTextures::LoadHostTextureDataFromResidentMemory(Texture& texture, bool load_base, bool load_mips) {
+  // SDK v0.11+: no TryLoadTextureDataFromResolveCache hook; a resolve destination is skipped here first.
+  if (TryLoadTextureDataFromResolveCache(texture, load_base, load_mips)) return true;
   // SharedMemory invalidates a whole 256 KB block around a CPU write (fewer access violations to catch), so
   // CPU data that a game keeps next to a texture and writes every frame makes the texture outdated with its
   // data intact. What did not change is not loaded again.
@@ -824,7 +825,7 @@ bool GuestTextures::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool
   // thread can write the data in between. Hashed from guest memory, the texture then took the new data's hash with
   // the old data (zeros: Battlefield 1943's soldier textures drew black), and every later load found it unchanged.
   auto& host_texture = static_cast<HostTexture&>(texture);
-  TextureKey key = host_texture.key();
+  TextureKey key = host_texture.GetKey();
   uint64_t base_hash = 0, mips_hash = 0;
   if (load_base) {
     base_hash = memory_.MirrorHash(key.base_page << 12, host_texture.GetGuestBaseSize());
@@ -877,7 +878,7 @@ bool GuestTextures::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool
 // shader reads the guest memory mirror and writes the host layout into a scratch buffer, which is then
 // copied into the texture level by level.
 bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bool load_mips) {
-  TextureKey key = host_texture.key();
+  TextureKey key = host_texture.GetKey();
   const HostFormat& host_format = GetHostFormat(key);
   LoadShaderIndex load_shader = host_format.load_shader;
   if (load_shader == kLoadShaderIndexUnknown) return false;
@@ -885,7 +886,7 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
   if (!pipeline.pso) return false;
   const LoadShaderInfo& load_shader_info = GetLoadShaderInfo(load_shader);
 
-  const texture_util::TextureGuestLayout& guest_layout = host_texture.guest_layout();
+  const texture_util::TextureGuestLayout& guest_layout = host_texture.GetGuestLayout();
   bool is_3d = key.dimension == xenos::DataDimension::k3D;
   uint32_t width = key.GetWidth(), height = key.GetHeight();
   uint32_t depth_or_array_size = key.GetDepthOrArraySize();
@@ -893,7 +894,7 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
   uint32_t array_size = is_3d ? 1 : depth_or_array_size;
   const rg::FormatInfo* guest_format_info = rg::FormatInfo::Get(key.format);
   uint32_t block_width = guest_format_info->block_width, block_height = guest_format_info->block_height;
-  uint32_t bytes_per_block = guest_format_info->bytes_per_block();
+  uint32_t bytes_per_block = guest_format_info->GetBytesPerBlock();
   uint32_t level_first = load_base ? 0 : 1;
   uint32_t level_last = load_mips ? key.mip_max_level : 0;
   if (level_first > level_last) return true;
@@ -938,7 +939,7 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
       level_z_texels = std::max(depth >> level, UINT32_C(1));
     }
     level_host_layout.x_pitch_blocks =
-        rex::round_up((level_x_texels + (host_block_width - 1)) / host_block_width, host_x_blocks_per_thread);
+        rex::RoundUp((level_x_texels + (host_block_width - 1)) / host_block_width, host_x_blocks_per_thread);
     level_host_layout.y_pitch_blocks = (level_y_texels + (host_block_height - 1)) / host_block_height;
     level_host_layout.slice_size_bytes = uint64_t(load_shader_info.bytes_per_host_block) *
                                          level_host_layout.x_pitch_blocks * level_host_layout.y_pitch_blocks *
@@ -972,7 +973,7 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
   // The guest data: views of the guest memory mirror at the base and mip pages.
   uint64_t source_alignment = UINT64_C(1) << load_shader_info.source_bpe_log2;
   auto make_source_view = [&](uint32_t start, uint32_t size) -> RefCntAutoPtr<IBufferView> {
-    uint64_t range = rex::align(uint64_t(size), std::max(source_alignment, uint64_t(16)));
+    uint64_t range = rex::RoundUpPow2(uint64_t(size), std::max(source_alignment, uint64_t(16)));
     if (!size || range > uint64_t(rg::SharedMemory::kBufferSize) - start) return {};
     BufferViewDesc view_desc;
     view_desc.ViewType = BUFFER_VIEW_SHADER_RESOURCE;
@@ -1010,7 +1011,7 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
     uint32_t level_guest_pitch = level_guest_layout.row_pitch_bytes;
     if (key.tiled) level_guest_pitch /= bytes_per_block;
     constants.guest_pitch_aligned = level_guest_pitch;
-    constants.guest_z_stride_block_rows_aligned = level_guest_layout.z_slice_stride_block_rows;
+    constants.guest_z_stride_block_rows_aligned = level_guest_layout.z_layer_stride_block_rows;
     uint32_t level_width, level_height, level_depth;
     if (level == level_packed) {
       level_width = level_guest_layout.x_extent_blocks * block_width;
@@ -1037,7 +1038,7 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
       context->CommitShaderResources(pipeline.srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
       DispatchComputeAttribs dispatch{group_count_x, group_count_y, constants.size_blocks[2]};
       context->DispatchCompute(dispatch);
-      constants.guest_offset += level_guest_layout.array_slice_stride_bytes;
+      constants.guest_offset += level_guest_layout.array_layer_stride_bytes;
       constants.host_offset += uint32_t(level_host_layout.slice_size_bytes);
     }
   }
@@ -1090,7 +1091,7 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
 // before its load) is dropped.
 void GuestTextures::Patch(HostTexture& host_texture, bool again) {
   host_texture.repatch = false;
-  const TextureKey key = host_texture.key();
+  const TextureKey key = host_texture.GetKey();
   // Its own HD picture (below) is of the patcher's last pictures: without them, the pack's as it is.
   auto drop_hd = [&] {
     if (!host_texture.hd_patched) return;
@@ -1149,7 +1150,7 @@ void GuestTextures::PatchHd(HostTexture& host_texture, bool again) {
   TexturePatchFn patch = g_texture_patcher.load(std::memory_order_acquire);
   if (!patch) return none();
   HdPack* pack = REXCVAR_GET(native_x_renderer_hd_textures) ? HdPackOpen() : nullptr;
-  const TextureKey key = host_texture.key();
+  const TextureKey key = host_texture.GetKey();
   const uint32_t w = key.GetWidth(), h = key.GetHeight();
   const uint8_t* guest = memory_.memory().TranslatePhysical<const uint8_t*>(key.base_page << 12);
   const size_t hashed = size_t(std::min<uint64_t>(host_texture.GetGuestBaseSize(), 65536));

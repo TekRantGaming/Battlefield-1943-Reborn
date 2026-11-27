@@ -35,6 +35,7 @@
 #include <rex/system/kernel_state.h>
 
 #include "capture_points.h"
+#include "compat/sdk_module.h"
 #include "clan_tags.h"
 #include "voice_mute.h"
 #include "comms.h"
@@ -75,6 +76,7 @@ void SkinMatchRoundOver();   // fov.cpp: the electric skin's unlock, one full Ni
 void SkinMatchNewLevel();
 void SpawnMouseRoundOver();  // flash_mouse.cpp: the end of round scoreboard is not the deploy screen
 void SeatZoomPad(uint8_t left_trigger);  // fov.cpp: a gun seat's zoom
+void SeatKeysPad(uint8_t* gamepad);      // vehicle_binds.cpp: the seat keys
 #if defined(BF_DEV_TOOLS)
 extern std::atomic<float> g_dev_camera[3];                       // look.cpp: the local camera's position
 extern std::atomic<float> g_dev_view_pos[3];                     // dev_matscan.cpp: the rendered camera's
@@ -106,7 +108,7 @@ using Clock = std::chrono::steady_clock;
 
 PPCFunc* RuntimeExport(const char* name) {
 #if defined(_WIN32)
-  static HMODULE runtime = GetModuleHandleA("rexruntime.dll");
+  static HMODULE runtime = bf1943::SdkModule("rexkernel");  // v0.11: the kernel and XAM exports (__imp__*) are rexkernel's
   return reinterpret_cast<PPCFunc*>(GetProcAddress(runtime, name));
 #else
   return reinterpret_cast<PPCFunc*>(dlsym(RTLD_NEXT, name));
@@ -1448,6 +1450,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   bf1943::SquadColorsTick(base);  // squad_colors.cpp: the squad's icons a brighter green
   if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4, seated);
   if (seated && !menu && !bf1943::g_walking) bf1943::SeatZoomPad(p[6]);  // fov.cpp: a gun seat's zoom (the left trigger)
+  if (seated && !menu && !bf1943::g_walking) bf1943::SeatKeysPad(p + 4);  // vehicle_binds.cpp: the seat keys (issue 80)
   // The admin's free camera (free_cam.cpp, F9): while it flies it takes the pad and the game gets an empty one.
   bf1943::freecam::Pad(ctx, base, p + 4, !hidden);
   // Capture native navigation before the mouse helper adds any kit/button pulses.

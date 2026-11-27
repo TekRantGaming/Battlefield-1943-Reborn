@@ -19,6 +19,7 @@
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
+#include <rex/system/kernel_state.h>  // (v0.10's generated precompiled header brought it)
 
 REXCVAR_DEFINE_BOOL(bf_spawn_mouse_direct, true, "BF1943/Controls",
                     "Select a clicked spawn by its UI name once (false: "
@@ -233,7 +234,7 @@ private:
            (info.state & rex::memory::kMemoryAllocationCommit) &&
            (info.protect & rex::memory::kMemoryProtectRead) &&
            uint64_t(a) + n <=
-               uint64_t(a & ~(heap->page_size() - 1)) + info.region_size;
+               uint64_t(a & ~(heap->GetPageSize() - 1)) + info.region_size;
   }
   uint32_t Load(uint32_t a) const {
     return uint32_t(base_[a]) << 24 | uint32_t(base_[a + 1]) << 16 |

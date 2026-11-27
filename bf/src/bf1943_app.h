@@ -1,23 +1,33 @@
 // bf1943 - ReXGlue Recompiled Project
 //
-// Customize your app by overriding virtual hooks from rex::ReXApp.
+// The game's app on the SDK's TitleApp (SDK v0.11+ port, phase 3; .handoff/SDK-0.11-PORT-PLAN.md). Under v0.10 it was a
+// ReXApp with our SDK copy's extra hooks; their work now sits in TitleApp's hooks and in GameMain (main.cpp):
+//   v0.10 OnConfigurePaths, OnPreSetup     -> OnConfigure (paths, logs, the renderer, settings at the title layer),
+//                                             OnSettingsSettled (the player's folder read: the command line applied)
+//   v0.10 OnPostSetup, OnCreateDialogs     -> OnInit (the window and the UI system run; our menus and overlays)
+//   v0.10 OnFinalizePaths (setup, name, launcher before the game)  -> GameMain: RunFrame until the pages are done
+//   v0.10 OnPreLaunchModule, OnPostLoadXexImage                    -> OnTitleLaunch (loaded, not yet started)
+//   v0.10 OnShutdown (the player told why the game did not start)  -> ReportError, OnTitleExit
+//   v0.10 OnWindowMinimized, OnWindowRestored, OnWindowFocusChanged -> a UI event listener
+//   v0.10 CreateAchievementNotificationDialog -> our toast, given the title's achievement events (OnTitleLaunch)
 
 #pragma once
 
-#include <rex/audio/sdl/sdl_audio_system.h>
+#include <rex/app/title_app.h>
 #include <rex/cvar.h>
-#if !defined(_WIN32)
-#include <rex/input/device_assignment.h>
-#include <rex/input/input_system.h>
-#endif
+#include <rex/kernel/title_exit.h>
+#include <rex/kernel/title_runtime.h>
+#include <rex/logging.h>
 #include <rex/rex_app.h>
-#include <rex/runtime.h>
-#include <rex/system/gpu_plugin.h>
+#include <rex/settings_registry.h>
 #include <rex/ui/keybinds.h>
 #include <rex/ui/ui_event.h>
+#include <rex/ui/ui_system.h>
+#include <rex/xam/achievement_manager.h>
 
 #include <native_x_renderer/native_x_renderer.h>
 
+#include "compat/ui_compat.h"
 #include "gpu_preference.h"
 #include "game_install.h"
 #include "private_match.h"
@@ -29,11 +39,16 @@
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <string>
 #include <thread>
 #include <utility>
 
 namespace bf1943 {
 void InstallFpeGuard();  // fpe_guard.cpp
+#if defined(BF_DEV_TOOLS)
+bool DevPadOn();                 // dev_pad.cpp: BF_DEV_PAD is set
+rex::IModule* DevPadModule();    // dev_pad.cpp: its input driver's module (null without BF_DEV_PAD)
+#endif
 void RaiseTimerResolution();  // frame_rate.cpp
 void SetPacingWindow(void* native_window);  // frame_rate.cpp: the frame limit while minimised
 void NoteWindowMinimized(bool minimized);   // frame_rate.cpp (not Windows: from the window's events)
@@ -82,19 +97,7 @@ void CreateGameMenu(rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& u
                     std::function<std::filesystem::path()> game_dir);  // game_menu.cpp
 void WatchGpuDeviceLoss(std::function<void(std::function<void()>)> in_ui, std::function<void()> close);  // gpu_lost.cpp
 #if defined(BF_DEV_TOOLS)
-std::unique_ptr<rex::system::IInputSystem> CreateInputSystem(bool tool_mode);  // dev_pad.cpp
 void StartStackSampler();  // dev_stacks.cpp
-#endif
-#if !defined(_WIN32)
-// Linux: every controller drives the one player, merged with the keyboard and mouse (the runtime's own assignment
-// gives each pad a player of its own, and the game reads player 1's only). A handheld shows several pads at once: on
-// the ROG Ally InputPlumber presents its built in controller beside other virtual ones, and the game read none of
-// its presses on the menus (TekRantGaming, 11 Nov 2026). Battlefield 1943 has one player a console, so nothing is lost.
-inline std::unique_ptr<rex::system::IInputSystem> CreateSharedInputSystem(bool tool_mode) {
-  auto system = rex::input::CreateDefaultInputSystem(tool_mode);
-  system->SetDeviceAssignment(std::make_unique<rex::input::SharedAssignment>());
-  return system;
-}
 #endif
 }  // namespace bf1943
 
@@ -108,350 +111,76 @@ inline bool AbOff(const char* piece) {
   return v && std::string(v).find(piece) != std::string::npos;
 }
 
-class Bf1943App : public rex::ReXApp {
+namespace bf1943 {
+// A setting of the SDK's, as text (empty when there is none).
+inline std::string SdkSetting(std::string_view name) {
+  auto found = REX_SETTINGS().Find(name);
+  return found.has_value() && *found ? (*found)->GetText() : std::string();
+}
+}  // namespace bf1943
+
+class Bf1943App : public rex::app::TitleApp {
  public:
-  using rex::ReXApp::ReXApp;
+  Bf1943App();
 
-  static std::unique_ptr<rex::ui::WindowedApp> Create(
-      rex::ui::WindowedAppContext& ctx) {
-    return std::unique_ptr<Bf1943App>(new Bf1943App(ctx, "bf1943",
-        PPCImageConfig));
+  // The pages before the game (the first start's setup, the player's name, the launcher): true once one is showing,
+  // and PreGameDone() turns true when it hands the start over (GameMain runs frames until then).
+  bool BeginPreGame();
+  bool PreGameDone() const { return pre_game_done_; }
+  void NoteLaunched() { launched_at_ = std::chrono::steady_clock::now(); }
+  // Before Shutdown: what the game registered on the title (its achievement events, OnTitleAttached) let go while the
+  // title is still loaded. Shutdown unloads it (TitleApp::OnStop, final) before OnShutdown runs, and a registration
+  // released after that reached the freed achievement manager (the port's quit, 25 Nov 2026: a crash in rexxam).
+  void ReleaseTitleHooks() {
+    toast_events_.Reset();
+    title_attached_.Reset();
   }
+  // The game folder the pages settled on, for TitleRuntime::Load (title.game_root).
+  void ApplyGameRoot();
 
-  void OnPreSetup(rex::RuntimeConfig& config) override {
-    bf1943::InstallCrashReports(paths_.user_data_root);  // first: a crash from here on leaves a report
-    bf1943::RaiseTimerResolution();  // 1 ms sleeps for the game's waits and our frame limit (frame_rate.cpp)
-    bf1943::ApplyStartupDisplaySettings(paths_.user_data_root);  // before the window is made
-    bf1943::ApplyPlayerIdentity(paths_.user_data_root);          // the player's own name and XUID
-    // A dedicated server skips a guest call through a broken function pointer instead of stopping with every player in
-    // it (our SDK copy's guest_invalid_call_skip; All Maps 3, 14 and 15 Nov 2026: four such stops, by null, freed and
-    // stack addresses). Logged with the caller; the client keeps the SDK's stop.
-    if (REXCVAR_GET(server)) rex::cvar::SetFlagByName("guest_invalid_call_skip", "true");
-    // Every graphics device on the high-performance GPU (King Kong's fix, gpu_preference.cpp): before the GPU plugin
-    // makes its provider below, unless the player chose one (vulkan_device, d3d12_adapter). Hybrid laptops ran the game
-    // on the integrated GPU (TekRantGaming, 11 Nov 2026). NativeXRenderer's own device takes the same vulkan_device.
-    if (!REXCVAR_GET(server)) {
-      bf1943::PreferHighPerformanceGpu(bf1943::GpuApi::kVulkan);
-#if defined(_WIN32) && defined(BF_DEV_TOOLS)
-      bf1943::PreferHighPerformanceGpu(bf1943::GpuApi::kD3D12);  // the Xenos plugin's D3D12 backend (developer builds)
-#endif
-    }
-    // The renderer: our Vulkan one (rexgpu-bfnative); a dedicated server's draws nothing (its null backend). In the
-    // developer build a gpu_plugin on the command line or in bf1943.toml still wins (xenos: reference frames).
-    // A dedicated server's window is never shown (our SDK copy's window_start), so nothing pops up over the player's
-    // screen; before, it showed and was hidden a second later (server_mode.cpp).
-    if (REXCVAR_GET(server)) rex::cvar::SetFlagByName("window_start", "hidden");
-    // Keyboard & mouse is on by default for players (our SDK copy); a dedicated server has no player.
-    if (REXCVAR_GET(server)) rex::cvar::SetFlagByName("mnk_mode", "false");
-    if (REXCVAR_GET(server) && !config.graphics) {
-      config.graphics = rex::system::LoadGpuPlugin("bfnative", "null");
-      config.gpu_plugin = "bfnative";
-    }
-#if !defined(BF_DEV_TOOLS)
-    config.gpu_plugin = "bfnative";
-#endif
-    if (!config.graphics && config.gpu_plugin.empty()) config.gpu_plugin = bf1943::StartupGpuPlugin(paths_.user_data_root);
-#if defined(BF_DEV_TOOLS)
-    // BF_GPU_BACKEND=vulkan or d3d12: the Xenos plugin's backend for A/B tests (the default picks D3D12 first).
-    if (const char* backend = std::getenv("BF_GPU_BACKEND"); backend && *backend && !config.graphics) {
-      config.graphics = rex::system::LoadGpuPlugin(config.gpu_plugin, backend);
-      REXLOG_INFO("BF GPU backend: {}", backend);
-    }
-#endif
-    if (!config.audio_factory)
-      config.audio_factory = REX_AUDIO_BACKEND(rex::audio::sdl::SDLAudioSystem);
-    // Arcade games run as their trial unless the license says the game was bought. Players install from their own
-    // copy, so the full game is always unlocked.
-    rex::cvar::SetFlagByName("license_mask", "1");
-#if defined(BF_DEV_TOOLS)
-    // BF_DEV_PAD scripted pad; without BF_DEV_PAD this is the runtime's default input system (on Linux every pad is
-    // the one player's, as below).
-    config.input_factory = bf1943::CreateInputSystem;
-#elif !defined(_WIN32)
-    config.input_factory = bf1943::CreateSharedInputSystem;
-#endif
+ protected:
+  rex::Result<void> OnConfigure(rex::SettingsRegistry& settings) override;
+  // The work that reads the player's folder: every settings layer applied by then (our SDK copy's hook).
+  rex::Result<void> OnSettingsSettled(rex::SettingsRegistry& settings) override;
+  // A dedicated server needs no window (TitleApp's own requirements do): a Linux VPS has no display, and v0.11's UI
+  // module refused to start there ("the app needs a window"). With ui.driver = none (OnConfigure) SDL's video is not
+  // started at all, so its offscreen driver's event loop (800 wakeups a second, v0.10) is gone too.
+  rex::AppSysRequirements GetRequirements() const override {
+    rex::AppSysRequirements needs = TitleApp::GetRequirements();
+    if (REXCVAR_GET(server)) needs.ui = false;
+    return needs;
   }
-
-  void OnPostSetup() override {
-    // The window's title (TekRantGaming, 10 Nov 2026): the game's name, not the SDK's "bf1943" and its build stamp.
-    if (window()) window()->SetTitle("Battlefield 1943 Reborn");
-    if (window()) bf1943::SetPacingWindow(window()->GetNativeWindowHandle());
-    bf1943::InstallFpeGuard();  // after the runtime's own signal handlers
-    bf1943::HideServerWindows();  // a dedicated server shows no window (server_mode.cpp)
-    // NativeXRenderer (native_x_renderer_bf1943.cpp), before the guest starts. Off unless its settings are on
-    // (--native_x_renderer, _trace, _verify); a dedicated server draws nothing at all.
-    if (!REXCVAR_GET(server)) {
-      native_x_renderer::Initialize(bf1943::NativeXRendererProfile(), runtime() ? runtime()->graphics_system() : nullptr,
-                                    window(), runtime() ? runtime()->cache_root() : std::filesystem::path());
-    }
-#if defined(BF_DEV_TOOLS)
-    bf1943::StartStackSampler();  // BF_DEV_STACKS
-#endif
-  }
-
-  // The player's download starts from bf1943.exe itself (TekRantGaming, 7 Nov 2026: an exe, never a .bat or script; the old
-  // play.ps1 passed these). Without --user_data_root the player's data goes beside the exe in "user" (cache and log
-  // there too), and the release always draws with our Vulkan renderer. The server package still passes its own.
-  // Just before the game starts: the backend's answer to the player's name (game_menu.cpp, a number added when another
-  // player online has it), so the game only ever sees one name.
-  void OnPreLaunchModule() override { bf1943::FinishNameCheck(); }
-
-  // The frame limit while minimised (frame_rate.cpp; Windows reads the window's own state instead).
-  void OnWindowMinimized() override { bf1943::NoteWindowMinimized(true); }
-  void OnWindowRestored() override { bf1943::NoteWindowMinimized(false); }
-  void OnWindowFocusChanged(bool focused) override {
-    if (focused) bf1943::NoteWindowMinimized(false);
-    rex::ReXApp::OnWindowFocusChanged(focused);
-  }
-
-  // The game's module is launched: the time, for a game that ends while it is still starting (OnShutdown).
-  void OnPostLaunchModule(rex::system::XThread* thread) override {
-    (void)thread;
-    launched_at_ = std::chrono::steady_clock::now();
-  }
-
-  // The app is quitting by itself (the SDK copy's ReXApp::OnDestroy; a window close never comes here). When that is
-  // because the game could not start, the player is told, with where the log is (start_failure.cpp; TekRantGaming,
-  // 13 Nov 2026: a player's game closed 2 s after its launcher came up and said nothing). A dedicated server has
-  // nobody to tell.
-  void OnShutdown() override {
-    if (REXCVAR_GET(server)) return;
-    const double since_launch =
-        launched_at_ == std::chrono::steady_clock::time_point{}
-            ? -1.0
-            : std::chrono::duration<double>(std::chrono::steady_clock::now() - launched_at_).count();
-    std::filesystem::path log = rex::cvar::GetFlagByName("log_file");
-    if (log.empty() && !paths_.user_data_root.empty()) log = paths_.user_data_root / "bf1943.log";
-    bf1943::TellStartFailure(rex::SelfQuitWhy(), rex::SelfQuitReason(), since_launch, log, rex::SelfQuitCode(),
-                             window() ? window()->GetNativeWindowHandle() : nullptr);
-  }
-
-  void OnConfigurePaths(rex::PathConfig& paths) override {
-#if !defined(BF_DEV_TOOLS)
-    if (REXCVAR_GET(user_data_root).empty() && !REXCVAR_GET(server)) {
-      const std::filesystem::path user = bf1943::PlayerRoot() / "user";
-      std::error_code ec;
-      std::filesystem::create_directories(user, ec);
-      paths.user_data_root = user;
-      if (REXCVAR_GET(cache_root).empty()) paths.cache_root = user / "cache";
-      rex::cvar::SetFlagByName("log_file", (user / "bf1943.log").string());
-    }
-    if (!REXCVAR_GET(server)) {
-      rex::cvar::SetFlagByName("native_x_renderer", "true");
-      rex::cvar::SetFlagByName("bf_engine_d3d_path", "true");
-      // A player's log names every frame over 100 ms and what it waited on (NativeXRenderer's hitch lines), for play
-      // test reports.
-      if (std::atof(rex::cvar::GetFlagByName("native_x_renderer_hitch_ms").c_str()) <= 0.0)
-        rex::cvar::SetFlagByName("native_x_renderer_hitch_ms", "100");
-    }
-#endif
-    // The last run's log kept as bf1943.previous.log before this one opens over it: a crash's report sends the log of
-    // the run that crashed (report.cpp, Report an issue).
-    if (!REXCVAR_GET(server)) {
-      std::filesystem::path log = rex::cvar::GetFlagByName("log_file");
-      if (log.empty() && !paths.user_data_root.empty()) log = paths.user_data_root / "bf1943.log";
-      bf1943::report::KeepPreviousLog(log);
-    }
-    paths_ = paths;
-  }
-
-  // --install_game (the server package's setup) or --install_progress (RecompLauncher's, which leaves the package out
-  // once the game is installed): the game unpacked into its folder, then the process ends.
-  void OnPostInitLogging() override {
-    if (!REXCVAR_GET(install_game).empty() || REXCVAR_GET(install_progress))
-      std::exit(bf1943::install::InstallFromCommandLine(GameDir(paths_)));
-  }
-
-  // The game folder: --game_data_root, else the folder chosen at setup (an unpacked game used where it is), else
-  // "game" beside the exe (the player's download: <root>\bf1943.exe, <root>\game), or beside its bin folder (the
-  // server package: <root>\bin\bf1943.exe, <root>\game). Where "game" holds another game (King Kong Recompiled's
-  // AppImage keeps its own there: both AppImages in Downloads), ours is "bf1943-game" (game_install.h GameFolderIn).
-  std::filesystem::path GameDir(const rex::PathConfig& p) const {
-    if (!p.game_data_root.empty()) return p.game_data_root;
-    const std::filesystem::path saved = bf1943::SavedGameDir(p.user_data_root);
-    if (bf1943::install::Installed(saved) && !bf1943::install::OtherGame(saved)) return saved;
-    const std::filesystem::path exe = bf1943::PlayerRoot();
-    const std::filesystem::path root = exe.filename() == "bin" ? exe.parent_path() : exe;
-    const std::filesystem::path game = bf1943::install::GameFolderIn(root);
-    if (bf1943::install::OtherGame(root / "game"))
-      REXLOG_INFO("BF setup: {} holds another game (title {:08X}), so ours is {}", (root / "game").string(),
-                  bf1943::install::XexTitleId(root / "game" / "default.xex"), game.string());
-    return game;
-  }
-
-  // The first start (King Kong's setup idea): without the game installed, our menu's setup page asks for the
-  // player's package and installs it, then the runtime starts as on every later start. A dedicated server is
-  // installed by its package's setup (--install_game) and never asks.
-  std::optional<rex::PathConfig> OnFinalizePaths(const rex::PathConfig& defaults,
-                                                 std::function<void(rex::PathConfig)> resume) override {
-    rex::PathConfig paths = defaults;
-    paths.game_data_root = GameDir(defaults);
-    paths_ = paths;
-    bf1943::NotePrivateMatchPaths(paths.game_data_root, paths.user_data_root);  // our private match's server
-    const bool installed = bf1943::install::Installed(paths.game_data_root) || REXCVAR_GET(server);
-    const bool name = bf1943::NameNeeded(paths.user_data_root);
-    // A player's start: the launcher before the game (TekRantGaming, 8 Nov evening), which starts it at Play.
-    const bool launcher = !REXCVAR_GET(server) && bf1943::LauncherFirst();
-    // Pictures and the menu music for our menus from the player's game files, once, on a worker: before the game runs,
-    // so the launcher already has them (shader_prep.cpp, game_music.cpp).
-    auto extract = [](const rex::PathConfig& p) {
-      if (REXCVAR_GET(server)) return;
-      const auto cache = p.cache_root.empty() ? p.user_data_root / "cache" : p.cache_root;
-      bf1943::ExtractGameArt(p.game_data_root, cache / "extracted");
-      // The level's water height for the grass, read when the game opens a level (shader_prep.cpp).
-      bf1943::SetLevelGameRoot(p.game_data_root);
-      bf1943::HdExport(p.game_data_root);  // developer: BF_DEV_HD_EXPORT, the HD pack's source pictures
-      bf1943::HdExportUi(p.game_data_root);  // BF_HD_EXPORT_UI: the menu and HUD pictures for the pack
-      // NXR_SHADER_TEST=1 (a developer's check): the renderer's CMAA shaders compiled, the count of failures the
-      // exit code, and no game.
-      if (const char* v = std::getenv("NXR_SHADER_TEST"); v && *v == '1') std::_Exit(native_x_renderer::TestUtilityShaders());
-      // An imported HD texture pack (Settings > Graphics): the renderer reads it when HD textures are on (D149). Benched
-      // since v0.4.7.4 (game_menu.cpp kHdTexturesShown): no pack is given, so a player who had them on draws the game's own.
-      if (false) {
-        std::error_code ec;
-        const auto pack = p.user_data_root / "hd" / "bf1943-hd.bfhd";
-        if (std::filesystem::exists(pack, ec)) rex::cvar::SetFlagByName("native_x_renderer_hd_pack", pack.string());
-      }
-      // The grass's plants from the game's own textures (made there, NativeXRenderer grass.cpp loads them).
-      rex::cvar::SetFlagByName("native_grass_textures", (cache / "extracted" / "vegetation-2.bin").string());
-    };
-    if (installed) extract(paths);
-    if (installed && !name && !launcher) return paths;
-    // The pages finish inside the menu's drawing: the runtime starts after that paint (the renderer takes the window
-    // from the presenter; done in the paint, the presenter's swap chain went away under it, a driver crash).
-    // The player's name comes after the install (TekRantGaming, 7 Nov 2026: the launcher offers to create a username).
-    auto start = [this, resume](rex::PathConfig p) {
-      paths_ = p;
-      app_context().CallInUIThreadDeferred([p, resume] { resume(p); });
-    };
-    auto then_name = [start, name, launcher, extract, installed, user = paths.user_data_root](rex::PathConfig p) {
-      if (!installed) extract(p);  // just installed by the first start's setup
-      if (name && bf1943::NameNeeded(user)) bf1943::BeginNameSetup([start, p] { start(p); });
-      else if (launcher) bf1943::BeginLauncher([start, p] { start(p); });
-      else start(p);
-    };
-    if (installed) {
-      then_name(paths);
-      return std::nullopt;
-    }
-    REXLOG_INFO("BF setup: no game in {}: the first start's setup", paths.game_data_root.string());
-    bf1943::BeginGameSetup(paths.game_data_root, [paths, then_name](std::filesystem::path game) mutable {
-      paths.game_data_root = std::move(game);
-      then_name(paths);
-    });
-    return std::nullopt;
-  }
-
-  void OnConfigureFonts(ImFontAtlas* atlas) override { bf1943::LoadMenuFonts(atlas); }
-
-  // Our main menu inside the game (game_menu.cpp), drawn over BF's own menu scene.
-  void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
-    // The achievement popup made now, not at the game's launch (ReXApp::LaunchModule asks for it only then): the
-    // Achievements page's Test the popup works on Home before the game runs. Handed to the SDK when it asks.
-    if (!REXCVAR_GET(server) && drawer) {
-      bf1943::SetAchievementUserDir(paths_.user_data_root);
-      early_toast_ = std::make_unique<bf1943::AchievementToast>(drawer);
-    }
-    bf1943::CreateGameMenu(
-        drawer, paths_.user_data_root,
-        [this](bool on) {
-          app_context().CallInUIThreadDeferred([this, on] {
-            if (window()) window()->SetFullscreen(on);
-          });
-        },
-        // Quit as the window's close button does (ReXApp::OnClosing: the title ended, the log flushed, a hard exit):
-        // the runtime's own quit waited on the running game for ever (run quit2).
-        [this] {
-          app_context().CallInUIThreadDeferred([this] {
-            if (window()) window()->RequestClose();
-            else app_context().QuitFromUIThread();
-          });
-        },
-        [this] { return window(); }, [this] { return paths_.game_data_root; });
-    // A graphics driver reset (gpu_lost.cpp): the player told, and the game closed as the close button does, instead of
-    // a frozen picture.
-    if (!REXCVAR_GET(server))
-      bf1943::WatchGpuDeviceLoss(
-          [this](std::function<void()> job) { app_context().CallInUIThreadDeferred(std::move(job)); },
-          [this] {
-            if (window()) window()->RequestClose();
-            else app_context().QuitFromUIThread();
-          });
-    if (!AbOff("overlay")) bf1943::CreatePerfOverlay(drawer);  // Settings > Gameplay > Performance metrics, F2
-    if (!REXCVAR_GET(server)) bf1943::CreateCommsOverlay(drawer);  // text chat top left, voice chat (comms_ui.cpp)
-    if (!REXCVAR_GET(server)) bf1943::CreateWorldAdminPanel(drawer);  // F9, a match's admin (world_sync.cpp)
-    if (!REXCVAR_GET(server)) bf1943::CreateSpawnMouseOverlay(drawer);  // the deploy screen's pointer
-    if (!REXCVAR_GET(server)) bf1943::CreateGraphicsPanel(drawer, window());  // F8 (f8_panel.cpp)
-    if (!REXCVAR_GET(server)) bf1943::CreateUiHider(drawer);  // last of our overlays: it hides them (free_cam.cpp)
-    if (!REXCVAR_GET(server)) bf1943::InstallHudGlyphs();  // the game's prompts in the chosen style (hud_glyphs.cpp)
-    if (!REXCVAR_GET(server)) bf1943::InstallSharpText(paths_.game_data_root);  // the game's text sharper (sharp_text.cpp)
-    if (!REXCVAR_GET(server)) bf1943::InstallVehicleBinds();  // each vehicle kind's keys (vehicle_binds.cpp)
-    bf1943::InstallLook(window());  // the camera and look system (look.cpp)
-    bf1943::InstallPlaytestMark(window());  // R marks a moment in a watched play test (playtest_mark.cpp)
-    // The SDK's own overlays stay shut (TekRantGaming, 10 Nov 2026): F3 its debug overlay, F4 its settings and the backtick
-    // its console (both of those change any setting). Their binds lose their actions, so no key saved in a settings
-    // file or given on the command line brings them back. (F7, its achievements, is the F8 panel's compare key.)
-    // BF_DEV_SDK_BINDS=1 (tests): kept, to show the old behaviour.
-#if defined(BF_DEV_TOOLS)
-    const bool keep_sdk_binds = std::getenv("BF_DEV_SDK_BINDS") != nullptr;
-#else
-    constexpr bool keep_sdk_binds = false;
-#endif
-    if (!keep_sdk_binds)
-      for (const char* bind : {"bind_debug_overlay", "bind_settings", "bind_console"}) rex::ui::UnregisterBind(bind);
-#if defined(BF_DEV_TOOLS)
-    // BF_DEV_KEY_PROBE=<s> (tests): that long after start, F3, F4 and the backtick go to the binds as a key press in the
-    // window does (ReXApp::OnKeyDown), then F2 (ours, the check); whether a bind took each is logged.
-    if (const char* v = std::getenv("BF_DEV_KEY_PROBE"); v && *v) {
-      const double after = std::atof(v);
-      std::thread([this, after] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(int64_t(after * 1000)));
-        app_context().CallInUIThreadDeferred([this] {
-          const std::pair<const char*, rex::ui::VirtualKey> keys[] = {{"F3", rex::ui::VirtualKey::kF3},
-                                                                      {"F4", rex::ui::VirtualKey::kF4},
-                                                                      {"Backtick", rex::ui::VirtualKey::kOem3},
-                                                                      {"F2", rex::ui::VirtualKey::kF2}};
-          for (const auto& [name, vk] : keys) {
-            rex::ui::KeyEvent e(window(), vk, 0, false, false, false, false, false);
-            const bool taken = rex::ui::ProcessKeyEvent(e);
-            REXLOG_INFO("BF dev key probe: {} {}", name, taken ? "taken by a bind" : "does nothing");
-          }
-        });
-      }).detach();
-    }
-#endif
-  }
-
-  // Shaders from the player's game files into the runtime's storage, before the runtime opens it.
-  void OnPostLoadXexImage() override {
-    const auto cache = paths_.cache_root.empty() ? paths_.user_data_root / "cache" : paths_.cache_root;
-    // First, from the marker and the storage as they were: after an update the old shader cache is deleted and the
-    // shader page builds a fresh set; a version already prepared shows no shader page (game_menu.cpp, update.cpp).
-    if (!REXCVAR_GET(server)) bf1943::CheckShadersAfterUpdate(paths_.user_data_root, cache);
-    bf1943::PrepareShaders(bf1943::ExecutableDir() / "data" / "shaders", paths_.game_data_root, cache);
-    // The pipelines this game builds, for the next update's shader list (Settings > Gameplay > Share graphics data).
-    bf1943::StartPipelineUploads(paths_.user_data_root, cache);
-  }
-
-  // The achievement popup and its chime (achievement_toast.h, his pick M1 of 16 Nov 2026), in place of the SDK's toast.
-  // None on a dedicated server (no window).
-  std::unique_ptr<rex::ui::AchievementNotificationDialog> CreateAchievementNotificationDialog() override {
-    if (REXCVAR_GET(server) || !imgui_drawer()) return nullptr;
-    if (early_toast_) return std::move(early_toast_);  // made with the menus (OnCreateDialogs)
-    bf1943::SetAchievementUserDir(paths_.user_data_root);
-    return std::make_unique<bf1943::AchievementToast>(imgui_drawer());
-  }
-
-  // Override virtual hooks for customization:
-  // void OnPostInitLogging() override {}
-  // void OnLoadXexImage(std::string& xex_image) override {}
-  // void OnPostLoadXexImage() override {}
-  // std::unique_ptr<rex::ui::ImGuiDialog> CreateAchievementsOverlay() override;
-  // std::unique_ptr<rex::ui::AchievementNotificationDialog>
-  // CreateAchievementNotificationDialog() override;
+  rex::Result<void> OnInit() override;
+  void OnRegisterModules(std::vector<rex::IModule*>& modules) override;
+  rex::Result<void> OnTitleLaunch(rex::kernel::TitleRuntime& title) override;
+  void OnTitleExit(rex::kernel::TitleExitReason reason) override;
+  void OnShutdown() override;
+  void ReportError(std::string_view message) override;
 
  private:
-  rex::PathConfig paths_;
-  std::unique_ptr<bf1943::AchievementToast> early_toast_;  // the popup until the SDK takes it (at the game's launch)
-  std::chrono::steady_clock::time_point launched_at_{};  // OnPostLaunchModule; zero while the game was never launched
+  // The window's events the game follows: minimised and restored (the frame limit while minimised).
+  class WindowEvents final : public rex::ui::IUIEventListener {
+   public:
+    void OnUIEvent(const rex::ui::UIEvent& event) override;
+    void OnInputEvent(rex::InputEvent& event) override { (void)event; }
+  };
+
+  std::filesystem::path UserRoot() const { return rex::cvar::GetFlagByName("user_data_root"); }
+  std::filesystem::path CacheRoot() const;
+  std::filesystem::path LogFile() const;
+  std::filesystem::path GameDir() const;
+  void ExtractArt(const std::filesystem::path& game) const;
+  void TellFailure(rex::SelfQuitCause cause, const char* reason);
+
+  std::filesystem::path game_dir_;
+  bool pre_game_done_ = false;
+  std::unique_ptr<bf1943::AchievementToast> toast_;  // our achievement popup (none on a dedicated server)
+  rex::ScopeGuard toast_events_;                      // the title's achievement events to the toast
+  rex::ScopeGuard title_attached_;                    // NativeXRenderer's start (TitleRuntime::OnTitleAttached)
+  WindowEvents window_events_;
+  rex::ScopeGuard window_listener_;
+  std::chrono::steady_clock::time_point launched_at_{};  // NoteLaunched; zero while the game was never launched
 };
+
+// main.cpp: the program's start (REX_TITLE_APP_MAIN).
+int Bf1943Main(Bf1943App& app, const rex::CLIArgList& args);

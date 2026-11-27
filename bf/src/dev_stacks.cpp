@@ -17,7 +17,8 @@
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/thread_state.h>
-#include <rex/system/xthread.h>
+#include <rex/kernel/object/kernel_thread.h>
+#include <rex/kernel/thread_registry.h>
 
 #include "dev_guest_memory.h"
 
@@ -28,9 +29,9 @@ void DumpThreads() {
   auto* kernel = REX_KERNEL_STATE();
   if (!kernel) return;
   const uint8_t* base = REX_KERNEL_MEMORY()->virtual_membase();
-  for (auto& thread : REX_KERNEL_OBJECTS()->GetObjectsByType<rex::system::XThread>()) {
-    auto* ts = thread->thread_state();
-    PPCContext* ctx = ts ? ts->context() : nullptr;
+  for (auto& thread : kernel->runtime().GetThreadRegistry().All()) {  // (SDK v0.11: the thread registry)
+    auto* ts = thread->GetThreadState();
+    PPCContext* ctx = ts ? ts->GetContext() : nullptr;
     if (!ctx) continue;
     std::string stack;
     uint32_t sp = ctx->r1.u32;
@@ -44,9 +45,9 @@ void DumpThreads() {
     // it was given, to tell the game's worker threads apart.
     REXLOG_INFO("BF STACKS thread {}{}{} handle={:08X} start={:08X}({:08X}) '{}' lr={:08X} ctr={:08X} r1={:08X} "
                 "r3={:08X}:{}",
-                thread->thread_id(), thread->main_thread() ? " main" : "", thread->is_guest_thread() ? " guest" : "",
-                thread->handle(), thread->creation_params()->start_address, thread->creation_params()->start_context,
-                thread->name(), static_cast<uint32_t>(ctx->lr), ctx->ctr.u32, ctx->r1.u32, ctx->r3.u32, stack);
+                thread->GetThreadID(), thread->IsMainThread() ? " main" : "", thread->IsGuestThread() ? " guest" : "",
+                thread->GetHandle(), thread->GetCreationParams()->start_address,
+                thread->GetCreationParams()->start_context, thread->GetName(), static_cast<uint32_t>(ctx->lr), ctx->ctr.u32, ctx->r1.u32, ctx->r3.u32, stack);
   }
 }
 

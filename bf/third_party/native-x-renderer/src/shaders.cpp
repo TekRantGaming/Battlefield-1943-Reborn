@@ -2,10 +2,15 @@
 
 #include "shaders.h"
 
+#include "device.h"
+
 #include "spirv_patch.h"
 #include "storage.h"
 
 #include <rex/logging.h>
+#include <rex/system/interfaces/graphics.h>
+
+#include "gpu/xenos/xenos_settings.h"
 
 #include <algorithm>
 #include <chrono>
@@ -22,20 +27,27 @@ namespace rg = rex::graphics;
 
 namespace {
 
+// Where the SDK's analysis dumps the microcode: the bfnative driver's gpu.xenos dump_shaders, empty for no dump.
+std::string DumpShadersPath() {
+  auto* graphics = rex::system::bfnative_graphics();
+  const rex::gpu::XenosSettings* settings = graphics ? graphics->xenos_settings() : nullptr;
+  return settings ? std::string(settings->dump_shaders.Get()) : std::string();
+}
+
 // The SDK's analysis throws on some invalid microcode and dereferences null on other (a texture fetch
 // whose filter has no name): the access violation becomes a failure here, like the exceptions (which
 // the filter lets through to the caller's catch).
 bool AnalyzeProtected(rg::Shader& shader, rex::string::StringBuffer& disassembly) {
 #ifdef _WIN32
   __try {
-    shader.AnalyzeUcode(disassembly);
+    shader.AnalyzeUcode(disassembly, DumpShadersPath());
     return true;
   } __except (_exception_code() == 0xC0000005u ? 1 /* EXCEPTION_EXECUTE_HANDLER */
                                                 : 0 /* EXCEPTION_CONTINUE_SEARCH */) {
     return false;
   }
 #else
-  shader.AnalyzeUcode(disassembly);
+  shader.AnalyzeUcode(disassembly, DumpShadersPath());
   return true;
 #endif
 }
@@ -65,7 +77,10 @@ bool ShaderCache::Initialize(IRenderDevice* device, const RenderScale& scale) {
   } else if (info.APIVersion >= Version{1, 1}) {
     features_.spirv_version = spv::Spv_1_3;
   }
-  features_.max_storage_buffer_range = UINT32_MAX;  // one binding for the whole 512 MB
+  // One binding for the whole 512 MB where the device allows it; else the translator's 2 or 4 (the mirror's views:
+  // GuestMemory::SetBindingCount, DrawPath::Initialize).
+  const uint32_t range = MaxStorageBufferRange(device);
+  features_.max_storage_buffer_range = range >= 512u * 1024 * 1024 ? UINT32_MAX : range;
   features_.full_draw_index_uint32 = true;
   features_.image_view_format_swizzle = false;
   translator_ = std::make_unique<rg::SpirvShaderTranslator>(features_, true, true, false);
@@ -134,7 +149,7 @@ IShader* ShaderCache::GetHostShader(rg::SpirvShader& shader, uint64_t modificati
     // New: to a worker. The translation's shader is analyzed and stays as it is; the queue's lock makes
     // the analysis visible to the worker.
     it = host_shaders_.emplace(translation, std::make_unique<HostShader>()).first;
-    if (storage_) storage_->AddTranslation(uint8_t(shader.type()), shader.ucode_data_hash(), modification);
+    if (storage_) storage_->AddTranslation(uint8_t(shader.GetType()), shader.GetUcodeDataHash(), modification);
     {
       std::lock_guard<std::mutex> lock(jobs_mutex_);
       jobs_.push_back({translation, it->second.get(), false});
@@ -198,9 +213,9 @@ void ShaderCache::Worker() {
 // objects from any thread).
 void ShaderCache::Translate(rg::SpirvShaderTranslator& translator, const Job& job) {
   rg::Shader::Translation* translation = job.translation;
-  const rg::Shader& shader = translation->shader();
-  uint64_t modification = translation->modification();
-  bool vertex = shader.type() == rg::xenos::ShaderType::kVertex;
+  const rg::Shader& shader = translation->GetShader();
+  uint64_t modification = translation->GetModification();
+  bool vertex = shader.GetType() == rg::xenos::ShaderType::kVertex;
   auto finish = [&](uint32_t state) { job.host->state.store(state, std::memory_order_release); };
   bool translated = false;
   try {
@@ -210,16 +225,16 @@ void ShaderCache::Translate(rg::SpirvShaderTranslator& translator, const Job& jo
   }
   if (!translated) {
     REXLOG_ERROR("[native_x_renderer] {} shader {:016X} (modification {:016X}): translation failed",
-                 vertex ? "vertex" : "pixel", shader.ucode_data_hash(), modification);
+                 vertex ? "vertex" : "pixel", shader.GetUcodeDataHash(), modification);
     return finish(kFailed);
   }
-  if (!translation->is_valid()) return finish(kFailed);
+  if (!translation->IsValid()) return finish(kFailed);
   // The translator writes no OpSource, which DiligentCore requires (D18).
-  const std::vector<uint8_t>& binary = translation->translated_binary();
+  const std::vector<uint8_t>& binary = translation->GetTranslatedBinary();
   std::vector<uint32_t> spirv =
       spirv::PrepareForDiligent(reinterpret_cast<const uint32_t*>(binary.data()), binary.size() / 4);
 
-  std::string name = std::string(vertex ? "VS " : "PS ") + std::to_string(shader.ucode_data_hash()) + " mod " +
+  std::string name = std::string(vertex ? "VS " : "PS ") + std::to_string(shader.GetUcodeDataHash()) + " mod " +
                      std::to_string(modification);
   ShaderCreateInfo create_info;
   create_info.Desc.Name = name.c_str();
@@ -240,19 +255,19 @@ void ShaderCache::Translate(rg::SpirvShaderTranslator& translator, const Job& jo
 void ShaderCache::MakeMotionShader(const Job& job) {
   const rg::Shader::Translation* translation = job.translation;
   auto finish = [&](uint32_t state) { job.host->state.store(state, std::memory_order_release); };
-  const std::vector<uint8_t>& binary = translation->translated_binary();
+  const std::vector<uint8_t>& binary = translation->GetTranslatedBinary();
   std::vector<uint32_t> motion =
       spirv::MakeMotionVertexShader(reinterpret_cast<const uint32_t*>(binary.data()), binary.size() / 4,
                                     kMotionPreviousLocation, kMotionCurrentLocation);
   if (motion.empty()) {
     // Not an error: the shader has no float constants, for one. Its draws get the camera's motion.
     REXLOG_DEBUG("[native_x_renderer] VS {:016X} (modification {:016X}): no motion vertex shader",
-                 translation->shader().ucode_data_hash(), translation->modification());
+                 translation->GetShader().GetUcodeDataHash(), translation->GetModification());
     return finish(kFailed);
   }
   std::vector<uint32_t> spirv = spirv::PrepareForDiligent(motion.data(), motion.size());
-  std::string name = "Motion VS " + std::to_string(translation->shader().ucode_data_hash()) + " mod " +
-                     std::to_string(translation->modification());
+  std::string name = "Motion VS " + std::to_string(translation->GetShader().GetUcodeDataHash()) + " mod " +
+                     std::to_string(translation->GetModification());
   ShaderCreateInfo create_info;
   create_info.Desc.Name = name.c_str();
   create_info.Desc.ShaderType = SHADER_TYPE_VERTEX;

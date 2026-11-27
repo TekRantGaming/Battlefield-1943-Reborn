@@ -1240,6 +1240,29 @@ REX_HOOK_RAW(sub_82201188) {
     bf1943::g_dev_camera[1].store(LoadF(base, out + 52), std::memory_order_relaxed);
     bf1943::g_dev_camera[2].store(LoadF(base, out + 56), std::memory_order_relaxed);
     bf1943::g_dev_camera_valid.store(true, std::memory_order_release);
+    // BF_DEV_SNAPS=1 (issue 81, rubber banding): the local camera's jumps of more than 0.4 m from one update to the
+    // next within 100 ms (a walking soldier moves a few centimetres): the server pulling the player back. Every 10 s.
+    if (static const bool snaps = std::getenv("BF_DEV_SNAPS") != nullptr; snaps) {
+      static float last[3] = {};
+      static auto last_at = std::chrono::steady_clock::time_point{}, log_at = std::chrono::steady_clock::now();
+      static int updates = 0, jumps = 0;
+      static double biggest = 0, moved = 0;
+      const auto now = std::chrono::steady_clock::now();
+      const float p[3] = {LoadF(base, out + 48), LoadF(base, out + 52), LoadF(base, out + 56)};
+      if (now - last_at < std::chrono::milliseconds(100)) {
+        const double d = std::sqrt(double(p[0] - last[0]) * (p[0] - last[0]) + double(p[1] - last[1]) * (p[1] - last[1]) +
+                                   double(p[2] - last[2]) * (p[2] - last[2]));
+        ++updates, moved += d;
+        if (d > 0.4 && d < 50.0) ++jumps, biggest = std::max(biggest, d);
+      }
+      std::memcpy(last, p, sizeof(last));
+      last_at = now;
+      if (now - log_at >= std::chrono::seconds(10)) {
+        REXLOG_INFO("BF dev snaps: {} camera updates, {:.1f} m moved, {} jumps over 0.4 m (the biggest {:.2f} m)",
+                    updates, moved, jumps, biggest);
+        updates = jumps = 0, biggest = moved = 0, log_at = now;
+      }
+    }
   }
   // BF_DEV_CAMFRAMES=1: every local camera transform: the frame, the game tick count, refreshed or not, the
   // position (row 3) and the heading (row 2), and the aim matrix's position, for the walk and turn judder.

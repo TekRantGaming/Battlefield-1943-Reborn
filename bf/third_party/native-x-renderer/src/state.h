@@ -39,9 +39,7 @@
 #include <utility>
 #include <vector>
 
-namespace rex::graphics {
-class RegisterFile;
-}  // namespace rex::graphics
+#include <rex/graphics/compat.h>  // rex::graphics::RegisterFile (SDK v0.11+: rex::xenos::RegisterFile)
 
 namespace native_x_renderer {
 

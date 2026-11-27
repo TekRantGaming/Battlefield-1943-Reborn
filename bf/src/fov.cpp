@@ -26,6 +26,7 @@
 #include <fmt/format.h>
 #include <rex/logging.h>
 #include <set>
+#include <tuple>
 #include <vector>
 #include <cstdlib>
 #include <mutex>
@@ -290,6 +291,42 @@ REX_HOOK_RAW(sub_82583248) {
       g_seat_factor.store(kind && native > 0.0 && native < kPi ? std::tan(ctx.f1.f64 * 0.5) / std::tan(native * 0.5) : 1.0,
                           std::memory_order_relaxed);
       g_seat_factor_at.store(kind ? now : 0, std::memory_order_relaxed);
+    }
+    // Issue 79 (0.4.8: a vehicle's view widening and going back by itself, in planes and, with their own sliders, in
+    // tanks and cars; not seen in runs veh1 and plane1): what the mapping goes by (seated, first person, the seat view's
+    // kind, the slider chosen). More than 6 changes in 10 s are logged with the states, so a player's report says which
+    // one flickers. BF_DEV_FOV_FLIP=1 (developer builds): every change, the first 400.
+    {
+      static std::tuple<bool, int, int, long> last{};
+      static int changes = 0, said = 0;
+      static int64_t window_at = 0;
+      static std::string seen;
+      bf1943::SeatInfo seat;
+      const auto now_state = std::make_tuple(bf1943::LocalSeatedNow(), bf1943::FirstPersonView(),
+                                             REXCVAR_GET(bf_seat_fov_as_is) ? GunSeatView(seat) : 0, std::lround(Chosen()));
+      const int64_t t = TicksNow();
+      if (now_state != last) {
+        last = now_state, ++changes;
+        if (seen.size() < 200)
+          seen += fmt::format("{}{}/{}/{}/{}", seen.empty() ? "" : " ", std::get<0>(now_state) ? 1 : 0,
+                              std::get<1>(now_state), std::get<2>(now_state), std::get<3>(now_state));
+#if defined(BF_DEV_TOOLS)
+        if (static const bool flips = std::getenv("BF_DEV_FOV_FLIP") != nullptr; flips && said < 400) {
+          ++said;
+          REXLOG_INFO("BF dev fov flip: seated {}, first person {}, seat view {}, slider {}; the view {:.1f} degrees "
+                      "high (the game's {:.1f})", std::get<0>(now_state), std::get<1>(now_state), std::get<2>(now_state),
+                      std::get<3>(now_state), ctx.f1.f64 * 180.0 / kPi, native * 180.0 / kPi);
+        }
+#endif
+      }
+      if (t - window_at >= Ticks(10000)) {
+        if (changes > 6 && said < 1000) {
+          ++said;
+          REXLOG_WARN("BF fov: the view's inputs changed {} times in 10 s (seated/first person/seat view/slider: {})",
+                      changes, seen);
+        }
+        changes = 0, window_at = t, seen.clear();
+      }
     }
 #if defined(BF_DEV_TOOLS)
     if (static const bool callers = std::getenv("BF_DEV_FOV_CALLERS") != nullptr; callers) {

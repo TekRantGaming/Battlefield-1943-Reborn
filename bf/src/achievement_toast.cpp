@@ -22,7 +22,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
-#include <rex/system/util/xdbf_utils.h>
+#include <rex/filesystem/xdbf.h>
 
 #include "launcher_kit.h"
 #include "reborn_achievements.h"
@@ -309,9 +309,9 @@ std::map<uint32_t, uint64_t> ReadUnlockFile() {
 
 // One of the game's pictures (an image of its title data, a PNG) written to <file>; empty when it was, else why not.
 const char* WriteTitlePicture(rex::system::KernelState* k, uint32_t image_id, const fs::path& file) {
-  const auto db = k->title_xdbf();
-  if (!db.is_valid()) return "the game's title data is not there";
-  const auto block = db.GetEntry(rex::system::util::XdbfSection::kImage, image_id);
+  const auto db = k->title_xdbf();  // (SDK v0.11: rex::filesystem::IXDBFTitleData)
+  if (!db || !db->IsValid()) return "the game's title data is not there";
+  const auto block = db->GetEntry(rex::filesystem::XDBFSection::kImage, image_id);
   if (!block.buffer || block.size < 8) return "not in the title data";
   if (std::memcmp(block.buffer, "\x89PNG", 4)) return "not a PNG";
   std::error_code ec;
@@ -390,7 +390,7 @@ std::vector<AchievementEntry> AchievementList(bool* from_game, bool* has_games) 
       AchievementEntry e;
       e.info = a;
       e.unlocked = m.IsUnlocked(a.id);
-      e.when = e.unlocked ? m.GetUnlockTime(a.id) : 0;
+      e.when = e.unlocked ? m.GetUnlockTime(a.id).value_or(0) : 0;  // (v0.11: an optional)
       games |= !reborn_achievements::IsOurs(a.id);
       out.push_back(std::move(e));
     }

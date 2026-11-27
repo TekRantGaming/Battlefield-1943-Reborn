@@ -1,19 +1,14 @@
 // bf1943 - ReXGlue Recompiled Project
 
-#include "generated/default/bf1943_init.h"
-
 #include "bf1943_app.h"
 
-REX_DEFINE_APP(bf1943, Bf1943App::Create)
+// The game's app (bf1943_app.h) and its start (Bf1943Main, bf1943_app.cpp): the pages before the game run between
+// App::Init and TitleApp::LaunchTitle.
+REX_TITLE_APP_MAIN(Bf1943App, Bf1943Main)
 
-#ifdef _WIN32
-// Hybrid laptops (Intel/AMD iGPU + NVIDIA/AMD dGPU): the drivers start an exe that exports these on the discrete GPU
-// (King Kong's fix, its commit 371e6771; TekRantGaming, 11 Nov 2026: players' games ran on the integrated GPU).
-extern "C" {
-__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
-__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
-}
-#endif
+// Hybrid laptops (Intel/AMD iGPU + NVIDIA/AMD dGPU): the drivers start an exe that exports NvOptimusEnablement and
+// AmdPowerXpressRequestHighPerformance on the discrete GPU (King Kong's fix; TekRantGaming, 11 Nov 2026). SDK v0.11+
+// exports them itself (rexglue_optimus.cpp.in, the same values), so the game's own copies went (a duplicate symbol).
 
 #if defined(__linux__)
 #include <execinfo.h>

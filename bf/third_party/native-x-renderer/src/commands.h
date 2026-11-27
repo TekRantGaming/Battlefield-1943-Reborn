@@ -138,8 +138,9 @@ class CommandQueue {
   void SetRaisePriority(bool on) { raise_priority_ = on; }
   // From any thread: the renderer's thread runs the poller soon, even with no command to run (D86).
   void Wake();
-  // Stops the thread after the command it is running (at exit), waiting for it up to a second.
-  void Stop();
+  // Stops the thread after the command it is running (at exit), waiting for it up to a second. Returns false if the
+  // thread did not stop in that time (left running, stuck in the driver); true if it stopped, or none ran.
+  bool Stop();
   bool threaded() const { return threaded_; }
 
   // The producer, the game's render thread: the next command to fill (reset), then Publish. Waits while the
@@ -177,6 +178,7 @@ class CommandQueue {
   Poller poll_ = nullptr;
   bool threaded_ = false;
   bool raise_priority_ = false;  // D136
+  bool stuck_ = false;           // Stop left the thread running
   // Each side writes its own position on a cache line of its own; the producer reads the consumer's only when its
   // last reading says the queue is full (D72).
   alignas(64) std::atomic<uint64_t> produced_{0};

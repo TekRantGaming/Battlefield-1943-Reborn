@@ -15,7 +15,7 @@
 
 #include <rex/graphics/pipeline/shader/spirv.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
-#include <rex/string/buffer.h>
+#include <rex/string/text.h>
 
 #include <atomic>
 #include <condition_variable>

@@ -54,6 +54,10 @@ sync_sources() {
 }
 
 build_sdk() {
+  # SDK v0.11+ (the port, 27 Nov 2026): the SDK is built inside the game's build (bf/CMakeLists.txt REXSDK_DIR,
+  # add_subdirectory), its libraries beside the program. Nothing to build or install on its own any more.
+  step "SDK: built with the game (SDK v0.11, REXSDK_DIR)"
+  return 0
   step "SDK configure (clang 20, Vulkan, the native renderer plugin)"
   local S="$BASE/src/sdk/src-bf"
   if [ ! -f "$S/out/build/linux-amd64/CMakeCache.txt" ]; then
@@ -76,13 +80,15 @@ build_game() {
   local B="$BASE/src/bf/out/build/$P"
   step "game configure ($P${BF_DEV_TOOLS:+, dev tools $BF_DEV_TOOLS})"
   if [ ! -f "$B/CMakeCache.txt" ]; then
-    (cd "$BASE/src/bf" && cmake --preset "$P" -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF \
-       -DCMAKE_PREFIX_PATH="$BASE/sdk" -Drexglue_DIR="$BASE/sdk/lib/cmake/rexglue" \
-       -DBF_DEV_TOOLS="${BF_DEV_TOOLS:-OFF}") > "$BASE/game-configure.log" 2>&1 ||
+    # SDK v0.11: the SDK from $BASE/src/sdk/src-bf (REXSDK_DIR's default, ../sdk/src-bf), built in the game's build.
+    (cd "$BASE/src/bf" && cmake --preset "$P" -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
+       -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF -DBF_DEV_TOOLS="${BF_DEV_TOOLS:-OFF}") > "$BASE/game-configure.log" 2>&1 ||
       { tail -40 "$BASE/game-configure.log"; exit 1; }
   fi
   # The release's version (BfVersion(): the pipeline sharing, the updater's comparison), as the Windows package's.
-  cmake "$B" -DBF_VERSION="${BF_VERSION:-0.1.33-preview}" -DBF_DEV_TOOLS="${BF_DEV_TOOLS:-OFF}" -DBF_NIGHT_OPS="${BF_NIGHT_OPS:-ON}" >> "$BASE/game-configure.log" 2>&1 ||
+  # Tracy (the SDK's profiler, on by default; it listens on the network) is never in a player's build.
+  cmake "$B" -DBF_VERSION="${BF_VERSION:-0.1.33-preview}" -DBF_DEV_TOOLS="${BF_DEV_TOOLS:-OFF}" -DBF_NIGHT_OPS="${BF_NIGHT_OPS:-ON}" \
+    -DREXGLUE_ENABLE_TRACY="${BF_TRACY:-OFF}" >> "$BASE/game-configure.log" 2>&1 ||
     { tail -20 "$BASE/game-configure.log"; exit 1; }
   step "game build ($JOBS jobs)"
   cmake --build "$B" -j "$JOBS" -- -k 0 > "$BASE/game-build.log" 2>&1 ||

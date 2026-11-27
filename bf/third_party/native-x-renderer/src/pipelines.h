@@ -93,6 +93,9 @@ struct PipelineStateHash {
 // The buffers every pipeline binds.
 struct PipelineBuffers {
   Diligent::IBufferView* shared_memory = nullptr;
+  // The mirror in parts, for a device that binds less than 512 MB (GuestMemory::SetBindingCount); null: whole.
+  Diligent::IDeviceObject* const* shared_memory_parts = nullptr;
+  uint32_t shared_memory_part_count = 0;
   Diligent::IBuffer* system_constants = nullptr;
   Diligent::IBuffer* bool_loop_constants = nullptr;
   Diligent::IBuffer* fetch_constants = nullptr;

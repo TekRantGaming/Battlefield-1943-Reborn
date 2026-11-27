@@ -1135,6 +1135,8 @@ layout(set = 0, binding = 13) uniform sampler2D stormConvTex;   // D229: its con
 layout(set = 0, binding = 14) uniform sampler2D groundTex;      // D231: the ground fog pushed about (b: how much is there)
 layout(set = 0, binding = 15) uniform sampler2DArray heightTex; // D231: the terrain's heightmap (grass.cpp reads it so)
 layout(set = 0, binding = 16) uniform sampler2D cloudMassTex;   // D232: the clouds' mass as particles (cloud_mass.h)
+layout(set = 0, binding = 17) uniform sampler2D planarTex;      // D252: the world mirrored in the sea (DrawPlanar)
+layout(set = 0, binding = 18) uniform sampler2D planarDepthTex; // D252: its depth (0: nothing there)
 // How much of the clouds' mass is over a place of the world (a half at rest; outside its grid, at rest).
 float MassAt(vec2 xz) {
   vec2 muv = (xz - mass_w.xy) * mass_w.z;
@@ -1282,7 +1284,7 @@ void main() {
   // from the ground under what is seen, not the sea (2 m under it: so over the island too, not only the shore).
   float tau_low = 0.0;
   float top = fog_a.w;
-  int fog_off = int(bolt.w + 0.5);  // BF_FOG_PARTS (tests): 8 the ground fog off, 16 the shafts, 32 the rain here, 64 the sea, 128 the horizon's haze (D238)
+  int fog_off = int(bolt.w + 0.5);  // BF_FOG_PARTS (tests): 8 the ground fog off, 16 the shafts, 32 the rain here, 64 the sea, 128 the horizon's haze (D238); 256: the planar reflection is there (D252)
   if (fog_a.z > 0.0 && fog_b.z > 0.5 && (fog_off & 8) == 0) {
     float floor_h = nothing ? 0.0 : max(eye_h + rd.y * L - 2.0, 0.0) * gale.x;
     float eh = eye_h - floor_h;  // the eye over the layer's floor
@@ -1660,7 +1662,22 @@ void main() {
       float got = 0.0;
       vec3 X = S + R * 0.05;
       float step_len = 0.4 + ts * 0.004;
-      for (int i = 0; i < 40; ++i) {
+      // D252: the planar reflection, in place of the march. A point along the rippled reflected ray, D from the water,
+      // seen in the mirror is the eye's look through the water to its mirror image: S plus that ray with its height
+      // turned down. Flat (R the plain reflection), that is the pixel itself; the ripples move it by their tilt.
+      // (D: a nominal distance to what is reflected, longer far out where a pixel covers more water.)
+      if ((fog_off & 256) != 0) {
+        float D = 20.0 + 0.2 * ts;
+        vec3 cm = to_clip * (S + vec3(R.x, -R.y, R.z) * D - eye_world.xyz);
+        if (cm.z > 0.05) {
+          vec2 uv = clamp((cm.xy / cm.z - to_ndc.zw) / to_ndc.xy, vec2(0.0), vec2(1.0));
+          if (textureLod(planarDepthTex, uv * ssr.w, 0.0).r > 0.0) {
+            found = textureLod(planarTex, uv * ssr.w, 0.0).rgb;
+            got = 1.0;
+          }
+        }
+      }
+      for (int i = 0; i < 40 && (fog_off & 256) == 0; ++i) {
         X += R * step_len;
         vec3 c = to_clip * (X - eye_world.xyz);
         if (c.z <= 0.05) break;
@@ -1736,6 +1753,11 @@ void main() {
         if (fz > 1e-6) {
           float under = (fog_b.x / fz * rl - ts) * -rd.y;  // the water's depth straight down
           sea_f *= smoothstep(0.1, 0.6, under);  // (to 1.2 m a sandbar out at sea showed as a dark ring: run shore_on5)
+        } else if (terr.z > 0.5) {
+          // D252: without the world's depth under the sea (it is copied for the night's pass only), the terrain's
+          // heightmap gives the water's depth there (the user, 25 Nov 2026: "Make sure we're rendering the shoreline
+          // wash effects from the game": by day the reflection lay over the wash round the beach's obstacles).
+          sea_f *= smoothstep(0.1, 0.6, S.y - TerrainHeight(S.xz));
         }
         vec3 own = texelFetch(sceneTex, ivec2(gl_FragCoord.xy), 0).rgb;
         float most = max(max(own.r, own.g), own.b), least = min(min(own.r, own.g), own.b);
@@ -1945,6 +1967,12 @@ void main() {
       }
     }
     if (h > 0.001) out_color = vec4(out_color.rgb * (1.0 - h) + at_horizon * view.z * h, out_color.a * (1.0 - h));
+  }
+  // D252 (NXR_PLANAR_DEBUG): the planar reflection itself over the whole view (magenta where nothing was drawn).
+  if ((fog_off & 512) != 0) {
+    vec2 uv = gl_FragCoord.xy / view.xy * ssr.w;
+    out_color = vec4(textureLod(planarDepthTex, uv, 0.0).r > 0.0 ? textureLod(planarTex, uv, 0.0).rgb
+                                                                 : vec3(0.5, 0.0, 0.5) * view.z, 0.0);
   }
 }
 )";
@@ -3685,7 +3713,9 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
                                        {SHADER_TYPE_PIXEL, "stormConvTex", clamp_linear},
                                        {SHADER_TYPE_PIXEL, "groundTex", clamp_linear},  // D231
                                        {SHADER_TYPE_PIXEL, "heightTex", point},
-                                       {SHADER_TYPE_PIXEL, "cloudMassTex", clamp_linear}};  // D232
+                                       {SHADER_TYPE_PIXEL, "cloudMassTex", clamp_linear},  // D232
+                                       {SHADER_TYPE_PIXEL, "planarTex", clamp_linear},  // D252
+                                       {SHADER_TYPE_PIXEL, "planarDepthTex", point}};
     GraphicsPipelineStateCreateInfo info;
     info.PSODesc.Name = name;
     info.PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
@@ -3768,6 +3798,14 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
   Fill(in, k);
   k.bolt[3] = (in.old_rain_order ? 4.0f : 0.0f) + float(in.fog_parts_off);  // BF_FOG_AB, BF_FOG_PARTS (tests)
   if (!HorizonHaze() && (in.fog_parts_off & 128) == 0) k.bolt[3] += 128.0f;  // D238 off
+  if (planar && planar_depth) {  // D252
+    k.bolt[3] += 256.0f;
+    static const bool shown = [] {
+      const char* v = std::getenv("NXR_PLANAR_DEBUG");
+      return v && *v && *v != '0';
+    }();
+    if (shown) k.bolt[3] += 512.0f;
+  }
   // D221: 2 when the clouds were laid over the view this frame (their textures bound below).
   // (D229: laid this frame, the textures it laid still the clouds' own.)
   const bool over_known = clouds_over && clouds_over_frame_ == frames_ && over_tex_[0] && over_tex_[1];
@@ -3958,6 +3996,15 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
     ITextureView* none = no_scene_ ? no_scene_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
     if (sea_after) v->Set(sea_after);
     else if (none) v->Set(none);
+  }
+  // D252: the planar reflection (a black texel without one: the pass then marches as before).
+  for (const auto& [name, view] : {std::pair<const char*, ITextureView*>{"planarTex", planar},
+                                   std::pair<const char*, ITextureView*>{"planarDepthTex", planar_depth}}) {
+    if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, name)) {
+      ITextureView* none = no_scene_ ? no_scene_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
+      if (view && planar && planar_depth) v->Set(view);
+      else if (none) v->Set(none);
+    }
   }
   if (auto* v = fog_srb_->GetVariableByName(SHADER_TYPE_PIXEL, "seaMaskTex")) {
     ITextureView* none = no_scene_ ? no_scene_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : nullptr;
