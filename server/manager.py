@@ -1275,13 +1275,14 @@ class Manager:
             host += ['--official-key-file', self.official_key()]
         env = dict(os.environ)
         env.update({'BF_LOOPBACK_ONLY': '1', 'BF_LOOPBACK_ADDR': address, 'SDL_WINDOW_ACTIVATE_WHEN_SHOWN': '0'})
+        # No sound card on a server (27 Nov 2026, SDK v0.11): SDL 3's audio needs libasound.so.2 on Linux, which a
+        # server has no reason to have, and a Windows server often has no audio device at all (the official machine:
+        # none); v0.11 stops the game when no audio driver starts ("module 'rexapu' failed to init, no audio driver is
+        # available"). A server plays nothing anyway: SDL's dummy driver, on every platform.
+        env.setdefault('SDL_AUDIO_DRIVER', 'dummy')
         if not WINDOWS:  # no display on a server: SDL's offscreen video driver; the program's own libraries first
             env.setdefault('SDL_VIDEO_DRIVER', 'offscreen')
             env.setdefault('SDL_VIDEODRIVER', 'offscreen')
-            # No sound card either (27 Nov 2026, SDK v0.11 on US Central): SDL 3's audio needs libasound.so.2, which a
-            # server has no reason to have, and v0.11 stops the game when no audio driver starts ("module 'rexapu'
-            # failed to init, no audio driver is available"): SDL's dummy driver, which plays nothing.
-            env.setdefault('SDL_AUDIO_DRIVER', 'dummy')
             env['LD_LIBRARY_PATH'] = os.pathsep.join(x for x in (os.path.dirname(game_exe()), env.get('LD_LIBRARY_PATH')) if x)
         return game, host, env, directory
 
@@ -1677,10 +1678,10 @@ class Manager:
             out = os.path.join(LOGS, 'install', 'install.out')
             os.makedirs(os.path.dirname(out), exist_ok=True)
             env = dict(os.environ)
+            env.setdefault('SDL_AUDIO_DRIVER', 'dummy')  # as the servers' (commands): no sound card on a server
             if not WINDOWS:
                 env.setdefault('SDL_VIDEO_DRIVER', 'offscreen')
                 env.setdefault('SDL_VIDEODRIVER', 'offscreen')
-                env.setdefault('SDL_AUDIO_DRIVER', 'dummy')  # as the servers' (commands): no sound card on a server
             proc = spawn([game_exe(), '--install_game=' + source, '--game_data_root=' + game,
                           '--user_data_root=' + os.path.join(LOGS, 'install'), '--server'], env=env,
                          cwd=os.path.dirname(game_exe()), output=out)
