@@ -369,6 +369,7 @@ struct Bot {
   Clock::time_point select_until{}, switch_done{}, heavy_next{}, heavy_fire_until{};
   int heavy_shots[3] = {};
   bool leaving = false;           // backfill: a player needs its slot; it leaves when dead (now, or when it next dies)
+  bool evening = false;           // leaving to even the teams (with leaving): a bot joins the other side in its place
   bool defending = false;  // its goal is a flag its side holds
   std::vector<std::array<float, 3>> path;  // the way to its goal (cell centres), the next first
   float path_goal[3] = {};
@@ -445,6 +446,8 @@ struct State {
   int searches_left = 0;     // path searches this tick may still make (kSearchesPerTick)
   uint8_t* base = nullptr;   // guest memory (BotsTick), for BotsLevelChange
   int humans = 0;            // human players on the server
+  bool making = false;       // MakeBot is seating a new bot (its team pick is the bot's, not a real player's)
+  Clock::time_point evened_at{};  // the last bot sent to even the teams (one every 10 s at most)
   uint32_t soldier_data_vtable = 0;  // the kits' soldier data's class (LiveKit), from the first level's kits
   uint64_t rays = 0;         // ray tests made, and the time they took (logged every 10 s)
   double ray_ms = 0;
@@ -3823,6 +3826,27 @@ REX_HOOK_RAW(sub_827796E0) {
 
 namespace bf1943 {
 
+// Team balance (team_balance.cpp): whether a listed player is one of our bots (balance counts the real players).
+bool IsBotPlayer(uint32_t player) { return IsBot(player); }
+// Team balance moving a real player to `team`, which the game refused (the side at its cap): a bot there leaves to even
+// the teams (a dead one first, else at its next death), as the even teams rule above does. While a bot is leaving, a
+// real player's team pick passes over the cap (the sub_82399AE8 hook), so the move then goes through; the bot's place
+// is filled on the other side. True when a bot of that side is leaving (now or already).
+bool BotsMakeRoom(uint8_t* base, int team) {
+  Bot* pick = nullptr;
+  for (Bot& b : g.bots) {
+    if (int(Load32(base, b.player + 48)) != team) continue;
+    if (b.leaving) return true;
+    if (b.life_at == Clock::time_point{}) continue;  // not spawned yet: never taken out (the even teams rule's note)
+    if (!pick || (!Load32(base, b.player + 288) && Load32(base, pick->player + 288))) pick = &b;
+  }
+  if (!pick) return false;
+  pick->leaving = true, pick->evening = true;
+  REXLOG_INFO("BF bots: {} will leave to make room on {} for a real player (team balance)", pick->name,
+              team == 1 ? "the US" : "Japan");
+  return true;
+}
+
 // A kill (server_stats.cpp's hook on the game's kill handling, before it): where the killer stood and where the victim
 // fell, by side (a human killer's counts 1, a bot's 0.5).
 // A player as the chat names it: its name, team, squad (the chat's: 0 none, else the game's + 1), whether a bot and a
@@ -4151,7 +4175,8 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     } else if (it->leaving && !Load32(base, it->player + 288)) {
       // Backfill: out through the game's own removal, as a player who left; dead, so no soldier of its own is left
       // behind. Its input is ours (Alloc): taken off the player first and freed after.
-      REXLOG_INFO("BF bots: {} leaves ({})", it->name, g.sit_out ? "the bots sit this level out" : "room for a player");
+      REXLOG_INFO("BF bots: {} leaves ({})", it->name,
+                  g.sit_out ? "the bots sit this level out" : it->evening ? "to even the teams" : "room for a player");
       const uint32_t input = it->input, state = it->state;
       Store32(base, it->player + 280, 0);
       if (const uint32_t scoring = Load32(base, kGameContext + 68); Readable(scoring, 16)) {
@@ -4216,7 +4241,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       }
       // A player left again: a bot that was leaving and is still here stays after all.
       for (Bot& b : g.bots)
-        if (b.leaving && staying < target) {
+        if (b.leaving && !b.evening && staying < target) {
           b.leaving = false, ++staying;
           REXLOG_INFO("BF bots: {} stays after all (a player left)", b.name);
         }
@@ -4227,9 +4252,36 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       REXLOG_INFO("BF bots: {} wanted, room for {} beside {} human player(s) ({} at most)", wanted, target, humans,
                   REXCVAR_GET(bf_gm_max_players));
     }
+    // Even teams (TekRantGaming, 27 Nov 2026, hotfix 0.4.8.1: "one team can have lots of real players, and the other
+    // team can have like 3 real players and the rest filled by bots. We need to be able to team balance between real
+    // players and bots as well"): team balance (team_balance.cpp) evens the real players; the bots keep the totals even.
+    // A side with 2 or more players more than the other gives up one bot (a dead one first, else one at its next
+    // death), and the fill below puts a new bot on the other side once it has left. One at a time.
+    // Only with real players on (the bots wait otherwise), at most one every 10 s, and never a bot that has not
+    // spawned yet (test bal1: one taken out in the tick it was made crashed the server in the game's removal).
+    if (!g.sit_out && humans > 0 && now - g.evened_at >= std::chrono::seconds(10)) {
+      bool pending = false;
+      for (const Bot& b : g.bots) pending = pending || (b.leaving && b.evening);
+      if (!pending && std::abs(side[1] - side[2]) >= 2) {
+        const int more = side[1] > side[2] ? 1 : 2;
+        Bot* pick = nullptr;
+        for (Bot& b : g.bots) {
+          if (b.leaving || b.life_at == Clock::time_point{} || int(Load32(base, b.player + 48)) != more) continue;
+          if (!pick || (!Load32(base, b.player + 288) && Load32(base, pick->player + 288))) pick = &b;
+        }
+        if (pick) {
+          pick->leaving = true, pick->evening = true, g.evened_at = now;
+          REXLOG_INFO("BF bots: {} will leave to even the teams ({} US, {} Japan); a bot joins {} in its place", pick->name,
+                      side[1], side[2], more == 1 ? "Japan" : "the US");
+        }
+      }
+    }
     while (int(g.bots.size()) < target) {  // (the leaving ones are counted: they are still in the list)
       const int team = side[1] <= side[2] ? 1 : 2;
-      if (!MakeBot(ctx, base, manager, int(g.bots.size()), team, listed)) break;
+      g.making = true;
+      const bool made = MakeBot(ctx, base, manager, int(g.bots.size()), team, listed);
+      g.making = false;
+      if (!made) break;
       ++side[team];
     }
   }
