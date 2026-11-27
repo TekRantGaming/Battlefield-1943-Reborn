@@ -53,7 +53,7 @@ offline or LAN play and for real servers.
 
 ### How bots join
 
-- **How many:** the Bots row of Custom Match (0 to 24), or `--bf_bots=<n>` on a dedicated server. 0 (the default)
+- **How many:** the Bots row of Custom Match (0 to the match's size), or `--bf_bots=<n>` on a dedicated server. 0 (the default)
   means no bots.
 - **When:** about 10 seconds after a level is up. A bot that dies spawns again about 5 seconds later.
 - **Which side:** each bot joins the side with fewer players at that moment, human players counted, so they come out
@@ -364,16 +364,20 @@ dynamic storm (D209), beside the Bots row of 18 Nov. The page's list scrolls whe
 
 The rows in order: Server name, Password, **Game mode**, Map (only while the rotation is off), **Map rotation**,
 **Tickets**, **Match time**, Tick rate, **Bots**, Weather and time, Network type, then Show in browser and UPnP (not for
-LAN), Port and Host the match.
+LAN), Port and Host the match. Since 27 Nov 2026 (hotfix 0.4.8.1) the Match tab's rows are Server name, Password,
+**Server type**, **Server size**, Tickets, Match time, Bots, Tick rate, Show in browser, UPnP (Port) and Weather and
+time; the game mode and the rotation are in the page's middle and right columns.
 
 | Row | Choices | Default |
 |---|---|---|
 | Game mode | Conquest, Air Superiority, All modes | Conquest |
 | Map | the maps of the game mode | as last chosen |
 | Map rotation | opens its own list: Rotation, Rotate all maps, one row a map | off (all maps ticked) |
-| Tickets | 25, 50, 75, 100, the map's own (130, Coral Sea 100), 150, 200, 250, 300, 400, 500, 750, 1000 | the map's own |
+| Server type (27 Nov 2026) | Classic, Night Ops (18:30), Daybreak (06:10) | Classic |
+| Server size (27 Nov 2026) | 24 (original), 32 (default), 64 | 32 |
+| Tickets | Auto, the map's own (130, Coral Sea 100), 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000 | Auto |
 | Match time | off (tickets only), 5, 10, 15, 20, 25, 30, 40, 45, 60, 90, 120 minutes | off |
-| Bots | 0 to 24, in steps of 1, shown as "8 - 4 A SIDE" | none |
+| Bots | 0 to the server size, in steps of 1, shown as "8 - 4 A SIDE" | none |
 | Dynamic storm (in Weather and time) | on or off | off |
 | Storm type (in Weather and time, D224) | Storm (a thunderstorm), Hurricane | Storm |
 
@@ -409,7 +413,26 @@ turn, the next one after each round's end screen (45 seconds for a Custom Match)
 Each team's tickets at a round's start. "The map's own" keeps the level's count: 130 on the Conquest maps, 100 on
 Coral Sea. The server writes the chosen count into the game's own ticket counters, so the ticket bleed, the "tickets
 low" warnings and the end of round all use it. Players' HUD ticket bars are scaled to the match's count.
-A Custom Match holds 24 players, so "the map's own" is never scaled (it passes `--bf_match_tickets=-1`).
+Since 27 Nov 2026 "Auto" is the default, as on the servers of the server manager: the map's own grown with the
+server size (175 at 32, 345 at 64; `--bf_match_tickets=0`); "the map's own" passes `-1`. A setting saved as 0 before
+(the map's own at 24 players, the only size then) now reads as Auto, the same count at 24.
+
+### Server type and server size
+
+(TekRantGaming, 27 Nov 2026: "custom match screen parity in settings and bot counts ... a toggle for daybreak and
+nightops presets like the servers have".) **Server type** runs the server package's events in the match's own host
+(`gm_host.cpp`, `--bf_world_event` 1 or 2; the schedules are `server/gmhost.py`'s `NIGHT_OPS_STAGES` and
+`DAYBREAK_STAGES`): the clock held at 18:30 or 06:10, a clear sky that clouds over from 40% of the round (the share of
+its tickets the team with fewer has lost, `match_rules.cpp`), the storm rolling in from 55% and full from 80%; each new
+round clear again. The host answers every player's game with the event's flags (4, 8 while an admin holds a setting, 16
+Daybreak), so their games draw it, the F9 panel shows "Back to Night Ops" and the browser's TYPE says it (`night` or
+`daybreak` in the registration). With an event the Weather tab is closed (the schedule sets the world). Only in builds
+with `BF_NIGHT_OPS` (all of them since 0.4.8). Tests: `BF_DEV_EVENT_RAMP=<s>` runs the whole build in that many
+seconds (dev builds; passed on to the match's server).
+
+**Server size** passes `--bf_gm_max_players` (24, 32, 64) as the server manager does: the players' connections and each
+team's cap grow with it (docs/SERVER-SIZES.md), the bots fill up to it (two places always kept free) and Auto tickets
+follow it. The rail's plain rows share its height (26 to 37 units) so both new rows fit.
 
 ### Match time
 
@@ -429,7 +452,7 @@ The F9 panel shows the weather moving and can switch the storm; moving the Weath
 
 ### Where the choices are kept
 
-In the game's settings file, as `private_match_bots`, `private_match_mode`, `private_match_rotation`,
+In the game's settings file, as `private_match_bots`, `private_match_size`, `private_match_event`, `private_match_mode`, `private_match_rotation`,
 `private_match_rotation_maps` (one bit a map), `private_match_tickets`, `private_match_time_limit` and
 `private_match_dynamic_storm`. Hosting passes them to the match's server as command-line flags.
 

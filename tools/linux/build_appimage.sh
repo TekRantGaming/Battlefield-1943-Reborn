@@ -25,15 +25,23 @@ echo "== AppDir ($B)"
 rm -rf "$A"
 mkdir -p "$A/usr/bin" "$A/usr/lib"
 cp "$B/bf1943" "$A/usr/bin/"
-# The two libraries the game loads: the runtime (linked) and our renderer's GPU plugin (bfnative, the only one a
-# release build opens), the build's own copies beside the program, then the SDK install's, which win (the build
-# refreshes the ones beside the program only when it relinks). Not everything beside the program (15 Nov 2026: a stale
-# librexgpu-xenos.so, a developer build's, rode along) and not libTracyClient.so (nothing links or opens it).
-for lib in librexruntime.so librexgpu-bfnative.so; do
-  [ -e "$B/$lib" ] && cp -aL "$B/$lib" "$A/usr/bin/"
-  f="$(find "$SDK" -name "$lib" -print -quit)"
-  [ -z "$f" ] || cp -aL "$f" "$A/usr/bin/"
+# SDK v0.11+ (the port, 27 Nov 2026): one library per SDK module (librexkernel.so, librexxam.so, librexapp.so,
+# librexgpu-xenos-bfnative.so...; "rd" after the name in a RelWithDebInfo build) and SDL 3's, all built beside the
+# program (the SDK inside the game's build). The game opens some of them only by name, from its settings (the audio,
+# GPU, input and window drivers), so every one goes in. Tracy's client never does: a build that links it is refused
+# (build it with REXGLUE_ENABLE_TRACY off, build_linux.sh's default).
+if readelf -d "$B/bf1943" "$B"/librex*.so 2>/dev/null | grep -q 'libTracyClient'; then
+  echo "error: the build links Tracy (libTracyClient): build it with -DREXGLUE_ENABLE_TRACY=OFF" >&2; exit 1
+fi
+n=0
+for f in "$B"/librex*.so "$B"/libSDL3*.so*; do
+  [ -e "$f" ] || continue
+  cp -a "$f" "$A/usr/bin/" && n=$((n + 1))
 done
+for need in librexkernel librexapp librexgpu-xenos-bfnative libSDL3; do
+  ls "$A/usr/bin/" | grep -q "^$need" || { echo "error: no $need library in $B (an SDK v0.11 build?)" >&2; exit 1; }
+done
+echo "  $n SDK and SDL libraries"
 for d in data fonts glyphs; do cp -a "$B/$d" "$A/usr/bin/"; done
 [ -d "$LICENCES" ] && cp -a "$LICENCES" "$A/usr/bin/licences" || echo "warning: no licences folder at $LICENCES"
 # The port's own licence from the source tree (25 Nov 2026): GPL 3 only, its section 7 permission, the earlier MIT notice.

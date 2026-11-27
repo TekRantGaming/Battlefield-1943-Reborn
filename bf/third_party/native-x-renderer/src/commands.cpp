@@ -47,8 +47,8 @@ void CommandQueue::Start(bool threaded, Executor execute, Poller poll) {
   thread_ = std::thread([this] { Run(); });
 }
 
-void CommandQueue::Stop() {
-  if (!thread_.joinable()) return;
+bool CommandQueue::Stop() {
+  if (!thread_.joinable()) return !stuck_;
   stop_.store(true, std::memory_order_seq_cst);
   bool finished;
   {
@@ -61,7 +61,9 @@ void CommandQueue::Stop() {
     thread_.join();
   } else {
     thread_.detach();
+    stuck_ = true;
   }
+  return finished;
 }
 
 Command& CommandQueue::Next() {

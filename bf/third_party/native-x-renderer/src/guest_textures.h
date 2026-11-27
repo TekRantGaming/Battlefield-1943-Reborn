@@ -84,9 +84,14 @@ class GuestTextures final : public rex::graphics::TextureCache {
   uint32_t GetMaxHostTextureWidthHeight(rex::graphics::xenos::DataDimension dimension) const override;
   uint32_t GetMaxHostTextureDepthOrArraySize(rex::graphics::xenos::DataDimension dimension) const override;
   std::unique_ptr<Texture> CreateTexture(TextureKey key) override;
-  bool TryLoadTextureDataFromResolveCache(Texture& texture, bool load_base, bool load_mips) override;
-  bool LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base, bool load_mips) override;
-  void UpdateTextureBindingsImpl(uint32_t fetch_constant_mask) override;
+  bool LoadHostTextureDataFromResidentMemory(Texture& texture, bool load_base, bool load_mips) override;
+  void UpdateHostTextureBindings(uint32_t fetch_constant_mask) override;
+
+ private:
+  // v0.10's hook, which v0.11 dropped: called first by LoadHostTextureDataFromResidentMemory.
+  bool TryLoadTextureDataFromResolveCache(Texture& texture, bool load_base, bool load_mips);
+
+ protected:
 
  private:
   struct HostFormat {

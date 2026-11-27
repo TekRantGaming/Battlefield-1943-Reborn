@@ -293,6 +293,16 @@ struct Removed {
   double at = -1000;
 } g_removed;
 std::once_flag g_started;
+// The engine's thread is stopped before the program's exit destroys the globals above (StartOnce's atexit): it ran on
+// and read g_joined after its destruction, and the quit after a match ended in "free(): invalid pointer" and SIGABRT
+// (0.4.8.11 on the ROG Ally, 27 Nov 2026: Engine::Step on the comms thread while the title shut down).
+std::atomic<bool> g_stop{false};
+std::atomic<bool> g_stopped{false};
+void StopAtExit() {
+  g_stop.store(true);
+  // The loop sleeps 5 ms between steps and a step does not block (the socket is non-blocking): 0.5 s at most.
+  for (int i = 0; i < 250 && !g_stopped.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+}
 
 double NowS() { return std::chrono::duration<double>(Clock::now() - kStart).count(); }
 
@@ -504,10 +514,11 @@ class Engine {
  public:
   void Run() {
     REXLOG_INFO("BF comms: ready (voice {}, text chat {})", REXCVAR_GET(bf_voice_mode), REXCVAR_GET(bf_text_chat) ? "on" : "off");
-    while (true) {
+    while (!g_stop.load()) {
       Step();
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    g_stopped.store(true);  // the program is exiting (StopAtExit): nothing of the globals is touched from here on
   }
 
  private:
@@ -1083,6 +1094,8 @@ class Engine {
 void StartOnce() {
   std::call_once(g_started, [] {
     if (REXCVAR_GET(server)) return;  // a dedicated server has no voice or chat of its own
+    // Registered after this file's globals were made, so it runs before the exit destroys them.
+    std::atexit(StopAtExit);
     std::thread([] { Engine().Run(); }).detach();
   });
 }

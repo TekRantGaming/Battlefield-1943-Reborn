@@ -84,4 +84,6 @@ inline std::filesystem::path GameFolderIn(const std::filesystem::path& root) {
 namespace bf1943::install {
 // --install_game: installs into game_dir and returns the process's exit code.
 int InstallFromCommandLine(const std::filesystem::path& game_dir);
+// Ends the install's process with `code` at once: output flushed, no runtime shutdown (game_install.cpp says why).
+[[noreturn]] void EndInstallProcess(int code);
 }  // namespace bf1943::install

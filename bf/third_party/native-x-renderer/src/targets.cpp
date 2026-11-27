@@ -479,7 +479,8 @@ void ResolvedTextures::RecheckKept() {
     // Marked a resolve's again while released, it was watched nowhere, and the data the game put there after
     // allocating it again never reached the mirror (Battlefield 1943's soldier textures, in its loading screen's
     // memory, drew black).
-    if (!AllocatedForWrites(memory_->memory(), first, last) || HashGuest(texture) != texture.guest_hash) {
+    auto* kernel_memory = REX_KERNEL_STATE() ? REX_KERNEL_MEMORY() : nullptr;  // (SDK v0.11+: the address space's heaps)
+    if (!kernel_memory || !AllocatedForWrites(*kernel_memory, first, last) || HashGuest(texture) != texture.guest_hash) {
       Invalidate(texture, false, first, last);
       continue;
     }

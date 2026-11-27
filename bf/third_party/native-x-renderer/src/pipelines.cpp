@@ -2,6 +2,9 @@
 
 #include "pipelines.h"
 
+#include <mutex>
+#include <set>
+
 #include "targets.h"
 
 #include <rex/cvar.h>
@@ -25,7 +28,7 @@ namespace {
 
 // The names the SDK's translator gives its texture and sampler variables (spirv_translator_fetch.cpp,
 // FindOrAddTextureBinding and FindOrAddSamplerBinding).
-std::string TextureName(const rg::SpirvShader::TextureBinding& binding) {
+std::string TextureName(const rg::SpirvShader::TranslatedTextureBinding& binding) {
   const char* dimension = "2d";
   if (binding.dimension == rg::xenos::FetchOpDimension::k3DOrStacked) dimension = "3d";
   if (binding.dimension == rg::xenos::FetchOpDimension::kCube) dimension = "cube";
@@ -158,13 +161,13 @@ Pipeline* PipelineCache::Get(const PipelineState& s, const rg::SpirvShader& vert
   device_->CreateGraphicsPipelineState(create_info, &pipeline->pso);
   if (!pipeline->pso) {
     REXLOG_ERROR("[native_x_renderer] could not create {} (VS {:016X}, PS {:016X})", name,
-                 vertex_shader.ucode_data_hash(), pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+                 vertex_shader.GetUcodeDataHash(), pixel_shader ? pixel_shader->GetUcodeDataHash() : 0);
     return nullptr;
   }
   pipeline->shaders = {&vertex_shader, pixel_shader};
   const auto& shaders = pipeline->shaders;
   for (uint32_t stage = 0; stage < 2; ++stage) {
-    uint32_t float_count = shaders[stage] ? shaders[stage]->constant_register_map().float_count : 0;
+    uint32_t float_count = shaders[stage] ? shaders[stage]->GetConstantRegisterMap().float_count : 0;
     BufferDesc desc;
     desc.Name = stage ? "NativeXRenderer PS float constants" : "NativeXRenderer VS float constants";
     desc.Size = 16 * std::max(float_count, 1u);
@@ -192,7 +195,7 @@ bool PipelineCache::Ready(Pipeline& p) {
   if (status != PIPELINE_STATE_STATUS_READY) {
     p.failed = true;
     REXLOG_ERROR("[native_x_renderer] {} failed to compile (VS {:016X}, PS {:016X})", p.pso->GetDesc().Name,
-                 p.shaders[0]->ucode_data_hash(), p.shaders[1] ? p.shaders[1]->ucode_data_hash() : 0);
+                 p.shaders[0]->GetUcodeDataHash(), p.shaders[1] ? p.shaders[1]->GetUcodeDataHash() : 0);
     return false;
   }
   Pipeline* pipeline = &p;
@@ -204,7 +207,26 @@ bool PipelineCache::Ready(Pipeline& p) {
         variable->Set(object);
       }
     };
-    set("XeSharedMemory", buffers_.shared_memory);
+    // The mirror whole, or in its parts where the shader takes an array of them (the translator's split shared memory).
+    if (IShaderResourceVariable* variable = pipeline->pso->GetStaticVariableByName(kStages[stage], "XeSharedMemory")) {
+      ShaderResourceDesc desc;
+      variable->GetResourceDesc(desc);
+      if (buffers_.shared_memory_parts) {  // each kind once: how the shaders take the mirror where it is in parts
+        static std::mutex logged_mutex;
+        static std::set<std::pair<uint32_t, int>> logged;
+        std::lock_guard<std::mutex> lock(logged_mutex);
+        if (logged.emplace(desc.ArraySize, int(desc.Type)).second) {
+          REXLOG_INFO("[native_x_renderer] guest memory mirror in parts: {} takes XeSharedMemory as {} (resource type "
+                      "{}; {} parts)",
+                      pipeline->pso->GetDesc().Name, desc.ArraySize, int(desc.Type), buffers_.shared_memory_part_count);
+        }
+      }
+      if (desc.ArraySize > 1 && buffers_.shared_memory_parts && desc.ArraySize == buffers_.shared_memory_part_count) {
+        variable->SetArray(buffers_.shared_memory_parts, 0, desc.ArraySize);
+      } else {
+        variable->Set(buffers_.shared_memory);
+      }
+    }
     set("XeSystemConstants", buffers_.system_constants);
     set("XeFloatConstants", pipeline->float_constants[stage]);
     set("XeBoolLoopConstants", buffers_.bool_loop_constants);

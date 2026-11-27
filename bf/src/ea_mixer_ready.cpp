@@ -59,4 +59,5 @@ REX_HOOK_RAW(sub_82190390) {
   g_base.store(base, std::memory_order_relaxed);
   g_last_tick_us.store(NowUs(), std::memory_order_relaxed);
   __imp__sub_82190390(ctx, base);
+  rex::audio::NotifyGameMixerTick();  // its packet is queued now: a render callback waiting for it goes on
 }

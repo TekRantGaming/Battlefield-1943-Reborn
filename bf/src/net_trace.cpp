@@ -19,7 +19,7 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
-#include <rex/system/xsocket.h>
+#include <rex/kernel/object/object.h>
 
 #include "dev_guest_memory.h"
 
@@ -31,12 +31,13 @@
 #else
 #include <dlfcn.h>
 #endif
+#include "compat/sdk_module.h"
 
 namespace {
 
 PPCFunc* RuntimeExport(const char* name) {
 #if defined(_WIN32)
-  static HMODULE runtime = GetModuleHandleA("rexruntime.dll");
+  static HMODULE runtime = bf1943::SdkModule("rexkernel");  // v0.11: the kernel and XAM exports (__imp__*) are rexkernel's
   return reinterpret_cast<PPCFunc*>(GetProcAddress(runtime, name));
 #else
   return reinterpret_cast<PPCFunc*>(dlsym(RTLD_NEXT, name));
@@ -173,9 +174,14 @@ bool HandleTraceOn() {
   return on;
 }
 
+bool IsXamObject(uint32_t handle) {
+  auto object = REX_KERNEL_OBJECTS()->Get(handle);
+  return object && object.GetType() == rex::kernel::ObjectType::kXAM;
+}
+
 std::string ObjectText(uint32_t handle) {
-  auto object = REX_KERNEL_OBJECTS()->LookupObject<rex::system::XObject>(handle);
-  return object ? fmt::format("type {}", static_cast<uint32_t>(object->type())) : "nothing";
+  auto object = REX_KERNEL_OBJECTS()->Get(handle);
+  return object ? fmt::format("type {}", static_cast<uint32_t>(object.GetType())) : "nothing";
 }
 
 // BF_HANDLE_TRACE=1: a host thread checks the live socket handles every 2 ms and logs the moment one stops naming
@@ -192,7 +198,7 @@ void StartSocketWatch() {
           handles = socket_handles;
         }
         for (uint32_t h : handles) {
-          if (REX_KERNEL_OBJECTS()->LookupObject<rex::system::XSocket>(h)) continue;
+          if (IsXamObject(h)) continue;  // (v0.11: a socket is a XAM object, its type private to rexxam)
           REXLOG_INFO("BF HANDLE socket {:08X} gone, the handle holds {}", h, ObjectText(h));
           std::lock_guard<std::mutex> lock(socket_handles_mutex);
           socket_handles.erase(h);
@@ -227,9 +233,7 @@ extern "C" REX_FUNC(__imp__NtClose) {
       tracked = socket_handles.count(handle) != 0;
     }
     if (tracked) {
-      auto object = REX_KERNEL_OBJECTS()->LookupObject<rex::system::XObject>(handle);
-      REXLOG_INFO("BF NET NtClose on socket handle {:08X} holding {} (lr {:08X}) stack:{}", handle,
-                  object ? fmt::format("type {}", static_cast<uint32_t>(object->type())) : "nothing",
+      REXLOG_INFO("BF NET NtClose on socket handle {:08X} holding {} (lr {:08X}) stack:{}", handle, ObjectText(handle),
                   static_cast<uint32_t>(ctx.lr), GuestStackText(ctx, base));
     }
   }
@@ -239,7 +243,7 @@ extern "C" REX_FUNC(__imp__NtClose) {
 // WSACloseEvent releases whatever handle it gets; on a socket handle that would kill the socket.
 extern "C" REX_FUNC(__imp__NetDll_WSACloseEvent) {
   static PPCFunc* original = RuntimeExport("__imp__NetDll_WSACloseEvent");
-  if (TraceOn() && REX_KERNEL_OBJECTS()->LookupObject<rex::system::XSocket>(ctx.r3.u32))
+  if (TraceOn() && IsXamObject(ctx.r3.u32))
     REXLOG_INFO("BF NET WSACloseEvent on socket {:08X} (lr {:08X})", ctx.r3.u32, static_cast<uint32_t>(ctx.lr));
   if (original) original(ctx, base);
 }

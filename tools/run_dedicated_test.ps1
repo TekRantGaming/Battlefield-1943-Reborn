@@ -22,6 +22,7 @@ param(
     [int]$StopServerAt = 0,  # stop the dedicated server this many seconds after the client starts
     [string]$GpuPlugin = "",  # run_game.ps1 -GpuPlugin
     [string]$Preset = "bf-dev",  # the client's build (bf-relwithdebinfo: the players' one; no dev pad there)
+    [string]$BuildDir = "",  # run_game.ps1 -BuildDir: a build folder instead of the preset's (the SDK v0.11 port)
     [switch]$NoNetTrace,  # no network trace in the client's log (as players run; for frame time tests)
     [string]$Level = "",  # the server's level, e.g. Levels/Guadal_Canal (both teams start on land); Wake by default
     [string]$UserFrom = "",  # run_game.ps1 -UserFrom: an earlier run's user folder (a finished launcher setup, say)
@@ -69,8 +70,9 @@ if ($BuiltInHost) {
     $log = $gmLog
 }
 Start-Sleep 1
+$buildArgs = @{}; if ($BuildDir) { $buildArgs.BuildDir = $BuildDir }
 try {
-    & (Join-Path $PSScriptRoot "run_game.ps1") -Name $Name -Seconds $Seconds -Preset $Preset -NetTrace:(-not $NoNetTrace) -WithServer `
+    & (Join-Path $PSScriptRoot "run_game.ps1") -Name $Name -Seconds $Seconds -Preset $Preset @buildArgs -NetTrace:(-not $NoNetTrace) -WithServer `
         -ServerCl $(if ($Level) { "-dedicated -level $Level" } else { "-dedicated" }) -ServerWarmup 25 -DevPad $DevPad -Shots $Shots -SeedCache $SeedCache -PeerPad $PeerPad -Peer2Pad $Peer2Pad -PeerArgs $PeerArgs -ServerArgs $ServerArgs -RuntimeDll $RuntimeDll -GameArgs $GameArgs -Launcher:$Launcher -StopServerAt $StopServerAt -GpuPlugin $GpuPlugin -UserFrom $UserFrom -Stacks $Stacks -FollowRestart:$FollowRestart | Select-Object -Last 3
 } finally {
     Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue

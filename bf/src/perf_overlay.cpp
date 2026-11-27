@@ -41,6 +41,7 @@
 #include <pdh.h>
 #include <pdhmsg.h>
 #include <psapi.h>
+#include "compat/sdk_module.h"
 #endif
 
 REXCVAR_DEFINE_STRING(bf_performance_metrics, "off", "BF1943", "Performance metrics: off, fps, full");
@@ -265,7 +266,7 @@ class SystemSampler {  // Linux: to follow (King Kong reads /proc and the amdgpu
 // Graphics chose it), else the SDK's Direct3D 12 one.
 bool UsingVulkan() {
 #if defined(_WIN32)
-  static const bool vulkan = GetModuleHandleA("rexgpu-bfnative.dll") != nullptr;
+  static const bool vulkan = bf1943::SdkModule("rexgpu-xenos-bfnative") != nullptr;  // (v0.11: the driver module)
   return vulkan;
 #else
   return true;

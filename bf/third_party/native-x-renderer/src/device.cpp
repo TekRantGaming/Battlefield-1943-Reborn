@@ -315,6 +315,14 @@ bool Device::Create(void* native_window, bool half_precision) {
   }
   if (fault_report_) StartBindingReport();
   if (fault_report_) StartMarkers();
+  // The guest memory mirror is one 512 MB storage buffer. A device that binds less in one binding (Mesa's lavapipe: 128
+  // MB; some mobile GPUs) gets it in 2 or 4 bindings: bound whole, a shader read above the limit crashed in the driver's
+  // compiled shader code (the port's Linux client on lavapipe, 25 Nov 2026). Desktop GPUs bind 1 GB or more: unchanged.
+  if (const uint32_t range = MaxStorageBufferRange(device_); range < 512u * 1024 * 1024) {
+    REXLOG_INFO("[native_x_renderer] this GPU binds at most {} MB of a storage buffer (maxStorageBufferRange): the guest "
+                "memory mirror's 512 MB bound in parts of {} MB (the translator's split shared memory)",
+                range >> 20, range >= (256u << 20) ? 256 : 128);
+  }
   if (const char* race = std::getenv("NXR_RACE_CHECK"); race && *race == '1') {
     RefCntAutoPtr<IRenderDeviceVk> device_vk(device_, IID_RenderDeviceVk);
     InstallRaceCheck(&recorder_, device_vk ? device_vk->GetVkDevice() : VK_NULL_HANDLE);
@@ -1434,6 +1442,14 @@ std::atomic<uint32_t> g_marker_count{0};
 const char* g_marker_names[64] = {};
 }  // namespace
 
+uint32_t MaxStorageBufferRange(IRenderDevice* device) {
+  RefCntAutoPtr<IRenderDeviceVk> device_vk(device, IID_RenderDeviceVk);
+  if (!device_vk) return UINT32_MAX;
+  VkPhysicalDeviceProperties properties{};
+  vkGetPhysicalDeviceProperties(device_vk->GetVkPhysicalDevice(), &properties);
+  return properties.limits.maxStorageBufferRange;
+}
+
 void Device::StartMarkers() {
   RefCntAutoPtr<IRenderDeviceVk> device_vk(device_, IID_RenderDeviceVk);
   if (!device_vk || !vkCmdWriteBufferMarkerAMD) {
@@ -1814,6 +1830,16 @@ double Device::FinishHiddenFrame() {
   context_->FinishFrame();
   device_->ReleaseStaleResources();
   return WaitForFramesInFlight();
+}
+
+void Device::ReleaseSwapChain() {
+  if (!swap_chain_) return;
+  if (Diligent::IDeviceContext* context = recorder_.context()) {
+    context->Flush();
+    context->WaitForIdle();
+  }
+  device_->IdleGPU();
+  swap_chain_.Release();
 }
 
 double Device::WaitForFramesInFlight() {

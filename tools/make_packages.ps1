@@ -49,14 +49,33 @@ New-Item -ItemType Directory -Force $out | Out-Null
 # Since 0.4.7 not the temporal upscalers' libraries (NVIDIA's DLSS, AMD's FSR SDK loader and upscaler, Intel's XeSS,
 # 161 MB): none is offered since 0.4.4 and the game no longer loads them to ask what the GPU runs (D171). The updater
 # removes them from players' folders (bf-retired.txt).
-$binFiles = @("bf1943.exe", "rexruntime.dll", "rexgpu-bfnative.dll")
+# SDK v0.11+ (the port, 27 Nov 2026): the runtime is one DLL per module (rexkernel, rexxam, rexapp, rexgpu-xenos-bfnative
+# and the others: about twenty, "rd" after the name in the RelWithDebInfo build), and SDL 3 is a DLL of its own. The game
+# loads some of them only by name, from its settings (the audio, GPU, input and window drivers), so every module the
+# build made goes in. v0.10's rexruntime.dll and rexgpu-bfnative.dll are gone: the updater removes them from players'
+# folders through bf-retired.txt (made from the earlier release zips, below). The Tracy profiler's client (on in the
+# SDK's own builds; it listens on the network) must not be in a player's build: build with -DREXGLUE_ENABLE_TRACY=OFF.
+if (Get-ChildItem $build -Filter "TracyClient*.dll" -ErrorAction SilentlyContinue) {
+    throw "the build has Tracy (TracyClient*.dll): not for players; build it with -DREXGLUE_ENABLE_TRACY=OFF"
+}
+$runtimeFiles = @(Get-ChildItem $build -File | Where-Object { $_.Name -match '^(rex[a-z0-9-]*|SDL3[a-z]*)\.dll$' } |
+    ForEach-Object { $_.Name } | Sort-Object)
+foreach ($need in @('rexkernel', 'rexapp', 'rexgpu-xenos-bfnative', 'SDL3')) {
+    if (-not ($runtimeFiles | Where-Object { $_ -match "^$([regex]::Escape($need))(rd|d)?\.dll$" })) {
+        throw "no $need DLL in the build ($build): is it an SDK v0.11 build of the game?"
+    }
+}
+$binFiles = @("bf1943.exe") + $runtimeFiles
+"runtime: $($runtimeFiles.Count) DLLs ($($runtimeFiles -join ', '))"
 # The Visual C++ runtime the three need (15 Nov 2026), from the build machine's Visual Studio redistributable folder,
 # beside them ("app-local", as Microsoft allows for these files): without it a PC that never installed the Visual C++
 # Redistributable could not start the game ("MSVCP140.dll was not found"), and one with an older runtime than our
 # toolset's (14.40 or newer) crashes on a std::mutex (Visual Studio 17.10's changed constructor). The game's folder
 # comes first in Windows' search, so these are the ones used.
 $crtFiles = @("msvcp140.dll", "msvcp140_atomic_wait.dll", "vcruntime140.dll", "vcruntime140_1.dll")
-$crtDir = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT" -Directory -ErrorAction SilentlyContinue |
+# (Visual Studio 2022 is 64-bit and installs under Program Files by default; older layouts used Program Files (x86).)
+$crtDir = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT",
+                        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT" -Directory -ErrorAction SilentlyContinue |
     Where-Object { Test-Path (Join-Path $_.FullName "msvcp140.dll") } | Sort-Object { [version]($_.Parent.Parent.Name) } | Select-Object -Last 1
 if (-not $crtDir) { throw "no Visual C++ redistributable folder (VC\Redist\MSVC\<version>\x64\Microsoft.VC143.CRT) on this machine" }
 "Visual C++ runtime from $($crtDir.FullName)"
@@ -173,6 +192,11 @@ function New-Bin([string]$dest, [switch]$Shaders, [switch]$Flat) {
         if (-not (Get-ChildItem $ach -Filter *.png -ErrorAction SilentlyContinue)) { throw "no achievement pictures in the build: $ach" }
         New-Item -ItemType Directory -Force (Join-Path $bin "data\achievements") | Out-Null
         Get-ChildItem $ach -Filter *.png | Copy-Item -Destination (Join-Path $bin "data\achievements")
+        # The server type page's four cards (bf\src\game_menu_modes.inc): stills from the 0.4.8 trailer's own footage.
+        $modes = Join-Path $build "data\modes"
+        if (-not (Get-ChildItem $modes -Filter *.jpg -ErrorAction SilentlyContinue)) { throw "no server type pictures in the build: $modes" }
+        New-Item -ItemType Directory -Force (Join-Path $bin "data\modes") | Out-Null
+        Get-ChildItem $modes -Filter *.jpg | Copy-Item -Destination (Join-Path $bin "data\modes")
     }
     # The main backend players and servers use (bf_online_host): the official one, or this PC for tests.
     Set-Content (Join-Path $bin "bf1943.toml") -Encoding ascii -Value @"
@@ -202,7 +226,7 @@ A fan project: not made, endorsed or supported by Electronic Arts or DICE. No ga
 
 Settings: our menu (Settings). Crash and hang reports go to user\crashes. Licences: the folder 'licences'.
 
-If Windows says "rexruntime.dll is either not designed to run on Windows or it contains an error" (Bad Image,
+If Windows says a file such as "rexkernel.dll is either not designed to run on Windows or it contains an error" (Bad Image,
 0xc0e90002), Windows 11's Smart App Control has not cleared this build's files yet. It is not a broken download.
 "@
 # RecompLauncher's file (the repository's recomplauncher.json) beside bf1943.exe: how the launcher installs, sets up and
@@ -317,6 +341,15 @@ foreach ($dir in @($c) + $serverDirs) {
 # The updater's lists (bf\src\update_files.h): every file of the player download with its hash (bf-files.txt), and the
 # files earlier downloads had that this one does not (bf-retired.txt). An installed update follows them exactly.
 & (Join-Path $PSScriptRoot "make_manifest.ps1") -Root $c -Version $Version
+# The first SDK v0.11 release (the port): v0.10's runtime (rexruntime.dll, rexgpu-bfnative.dll, rexgpu-xenos.dll)
+# leaves players' folders only through bf-retired.txt, which make_manifest.ps1 makes from the earlier release zips in
+# runs\release. Packaged where they are missing, every player keeps the old DLLs (harmless: nothing loads them).
+$retiredText = Get-Content (Join-Path $c "bf-retired.txt") -Raw -ErrorAction SilentlyContinue
+if (-not ($retiredText -match ' rexruntime\.dll')) {
+    Write-Warning ("bf-retired.txt names no rexruntime.dll: no earlier release zip in $(Join-Path $root 'runs\release'), so " +
+                   "players keep v0.10's runtime DLLs. Package where the earlier releases are, or copy their " +
+                   "*windows-x64.zip into runs\release\<version>\ first.")
+}
 Compress-Archive -Path $c -DestinationPath (Join-Path $out "$name.zip")
 # The Linux game, one file: its name ENDS with linux-x86_64.AppImage (the updater's asset, bf\src\update.cpp) and has no
 # version, the same in every release (see the top).
@@ -335,17 +368,18 @@ Get-ChildItem $out -Filter *.zip | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name,
 
 # For the Microsoft developer submission (microsoft.com/wdsi/filesubmission, "Software developer"), which clears new
 # files for Smart App Control and Defender (King Kong's procedure; testers got "Bad Image 0xc0e90002" without it):
-# our three unsigned files in a zip with the password "infected", and the hashes of everything for VirusTotal.
+# our unsigned files (the exe, the SDK's modules and SDL 3) in a zip with the password "infected", and the hashes of
+# everything for VirusTotal.
 $sub = Join-Path $out "ms-submission"
 New-Item -ItemType Directory -Force $sub | Out-Null
-$ours = @("bf1943.exe", "rexruntime.dll", "rexgpu-bfnative.dll") | ForEach-Object { Join-Path $c $_ }
+$ours = $binFiles | ForEach-Object { Join-Path $c $_ }
 # A DLL whose hash changed since the last release has no reputation yet: it needs this submission before testers get
 # it (Kong: put the released DLL back unless the code really changed). The exe changes every release.
 $last = Get-ChildItem (Join-Path $root "runs\release") -Directory | Where-Object { $_.Name -ne $Version -and (Test-Path (Join-Path $_.FullName "SHA256SUMS.txt")) } |
     Sort-Object LastWriteTime | Select-Object -Last 1
 if ($last) {
     $before = Get-Content (Join-Path $last.FullName "SHA256SUMS.txt")
-    foreach ($dll in @("rexruntime.dll", "rexgpu-bfnative.dll")) {
+    foreach ($dll in $runtimeFiles) {
         $h = (Get-FileHash (Join-Path $c $dll) -Algorithm SHA256).Hash.ToLower()
         if ($before -notcontains "$h  $dll") { "NEW $dll since $($last.Name) ($($h.Substring(0, 8))): submit it to Microsoft before testers get this build" }
         else { "$dll unchanged since $($last.Name) ($($h.Substring(0, 8)))" }

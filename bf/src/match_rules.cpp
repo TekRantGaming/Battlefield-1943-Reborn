@@ -95,6 +95,7 @@ struct State {
 
 std::atomic<uint32_t> g_round{0};         // counts the rounds started (the match's world restarts its storm)
 std::atomic<float> g_seconds_left{-1.0f};  // the round's time left; -1: no limit or no round
+std::atomic<float> g_left{1.0f};          // the share of its tickets the team with fewer still has this round (1 at its start)
 std::atomic<int> g_tickets_now{0};        // each team's tickets at this round's start; 0: no round's counters yet
 
 // The setting: > 0 a count the server's owner chose, 0 automatic, -1 the level's own.
@@ -155,6 +156,7 @@ void CounterStarts(uint8_t* base, uint32_t counter, bool reset) {
     // The two counters of a round start within the same moment: one new round.
     if (!g.running || now - g.round_start > std::chrono::seconds(5)) {
       g_round.fetch_add(1);
+      g_left = 1.0f;
       g.tie_said = false;
     }
     g.round_start = now, g.running = true, g.ended = false;
@@ -174,6 +176,7 @@ struct MatchClock {
   int time_limit = 0;       // minutes; 0: none
   float seconds_left = -1;  // -1: no limit, or no round running
   uint32_t round = 0;       // counts the rounds started
+  float left = 1;           // the share of its tickets the team with fewer still has (Night Ops' and Daybreak's build)
 };
 MatchClock CurrentMatchClock() {
   MatchClock c;
@@ -184,6 +187,7 @@ MatchClock CurrentMatchClock() {
   c.time_limit = int(std::lround(LimitSeconds() / 60.0));
   c.seconds_left = g_seconds_left.load();
   c.round = g_round.load();
+  c.left = g_left.load();
   return c;
 }
 
@@ -227,6 +231,7 @@ void WriteMatchProgress(uint8_t* base) {
     ++found;
   }
   if (!found) return;
+  g_left = float(left);  // the game's own host (gm_host.cpp) reads it here; gmhost.py from match.txt
   const std::filesystem::path dir = REXCVAR_GET(user_data_root);
   if (dir.empty()) return;
   char line[64];

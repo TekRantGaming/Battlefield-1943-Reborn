@@ -20,6 +20,10 @@ namespace native_x_renderer {
 void RegisterCompileThread();
 void SetCompileThreadsLow(bool low);
 
+// The most of a storage buffer one binding may cover (Vulkan's maxStorageBufferRange): the guest memory mirror is
+// bound whole where it is 512 MB or more, else split (shaders.cpp, guest_memory.h). Mesa's lavapipe: 128 MB.
+uint32_t MaxStorageBufferRange(Diligent::IRenderDevice* device);
+
 #if !defined(_WIN32)
 // The game window on Linux (renderer.cpp fills it from the SDK's SDL window): Wayland's display and surface, or X11's
 // display and window id, and the window's size in pixels as the SDK last saw it.
@@ -69,6 +73,12 @@ class Device {
   // work submitted and the frame finished as Present does, so DiligentCore releases the frame's dynamic memory and
   // stale resources, then the same wait for the GPU (D125). Returns the time waited, in milliseconds.
   double FinishHiddenFrame();
+
+  // At the program's end, while the window still exists: the GPU's work finished and the swap chain released (its
+  // surface is the window's). Nothing may present after it. On Linux the surface talks to the window's X connection,
+  // which the UI system closes with the window: released only by the device's static destructor after that, xcb
+  // aborted the exit ("buffer overflow detected", a SIGABRT and a core of many GB; the port's Linux client, 25 Nov 2026).
+  void ReleaseSwapChain();
 
   static constexpr uint64_t kMaxFramesInFlight = 2;
   // V-Sync whatever native_x_renderer_present_mode says (frame generation, D123: FIFO shows the generated frame and

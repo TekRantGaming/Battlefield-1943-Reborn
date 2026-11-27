@@ -46,6 +46,17 @@ stage() {
   cp "$WT/tools/linux/server/bf1943-server" "$T/bf1943-server"
   chmod +x "$T/bf1943-server" "$T/bin/bf1943"
   echo "$VERSION" > "$T/version.txt"
+  # package.json: the game has Night Ops and Daybreak (server/manager.py package_flags: the hosts' --night and
+  # --daybreak, and the Night Ops box), as tools/make_packages.ps1 writes for Windows. 0.4.8's Linux package had none,
+  # so its servers ran without them (TekRantGaming, 27 Nov 2026, from community server owners). A build without Night
+  # Ops is refused, as the Windows packager does.
+  local night
+  night="$(grep -h '^BF_NIGHT_OPS:BOOL=' "$BASE"/src/bf/out/build/linux-amd64-*/CMakeCache.txt 2>/dev/null | head -1 | cut -d= -f2)"
+  case "$night" in
+    OFF|FALSE|0) echo "the Linux build has no Night Ops (BF_NIGHT_OPS $night): players' games would draw Night Ops and Daybreak servers by day; build it with BF_NIGHT_OPS=ON" >&2; exit 1 ;;
+    "") echo "warning: no CMake cache under $BASE/src/bf/out/build to check BF_NIGHT_OPS (build_linux.sh's default is ON)" ;;
+  esac
+  printf '{"night_ops":true}' > "$T/package.json"
   printf '{"version": 3, "upnp": true, "backend": "%s", "servers": [{"name": "Battlefield 1943 Reborn", "description": "", "maps": ["wake", "guadalcanal", "iwo", "coral"], "round_end_delay": 45, "listed": true, "port": 18300}]}\n' \
     "$ONLINE_HOST" > "$T/server.default.json"
   # The C++ runtime from GCC 13, for systems with an older one, and the X11 and Wayland client libraries the program

@@ -15,10 +15,12 @@ Layers, outermost first (see docs/02-dedicated-server-join.md):
               (value + 0x80, + 0x8000, + 0x80000000); strings are an i32 length and the bytes.
 """
 import asyncio
+import contextlib
 import json
 import math
 import os
 import random
+import re
 import socket
 import struct
 import sys
@@ -148,6 +150,11 @@ def official_code(key, name, stamp=None, nonce=None):
 BUILD_FOLDERS = ('bin', 'server', 'python')
 # Files an older official package had and a later one dropped: an update in place leaves them, so they are not counted.
 RETIRED_FILES = ('bin/amd_fidelityfx_vk.dll',)
+# Crash dumps a Linux kernel wrote as plain files into the server's working folder (bin/) when its core_pattern is a
+# file name ("core", "core.%p"; Debian's default): never package files, so never counted (27 Nov 2026, a community
+# host: a 7.2 GB bin/core made every start hash it for 30 s and then fail the official check). Found ones are listed.
+CORE_FILE = re.compile(r'^(core|vgcore)(\.[0-9]+)?$')
+STRAY_CORES = []
 
 
 def build_files(root):
@@ -164,6 +171,10 @@ def build_files(root):
                     continue
                 path = os.path.join(base, n)
                 if os.path.relpath(path, root).replace(os.sep, '/') in RETIRED_FILES:
+                    continue
+                if CORE_FILE.match(n):
+                    with contextlib.suppress(OSError):
+                        STRAY_CORES.append((os.path.relpath(path, root).replace(os.sep, '/'), os.path.getsize(path)))
                     continue
                 h = hashlib.sha256()
                 with open(path, 'rb') as f:
@@ -2024,6 +2035,9 @@ async def serve(args):
         build = build_report()
         print('%s build %s (%s, %d files): %s' % (time.strftime('%H:%M:%S'), build['version'] or '?', build['platform'],
                                                   build['files'], build['digest']), flush=True)
+        for path, size in STRAY_CORES:
+            print('%s build check: %s is a crash dump (%.0f MB), not a package file: not counted; it can be deleted' %
+                  (time.strftime('%H:%M:%S'), path, size / 1e6), flush=True)
     except OSError as e:
         build = None
         print('%s build check: the package could not be read (%s)' % (time.strftime('%H:%M:%S'), e), flush=True)

@@ -2339,21 +2339,34 @@
                        // 21 Nov 2026, the page of its own: Weather and time (the Weather tab's switch).
                        kPmWeatherOn = 35,
                        // D224 (20 Nov 2026): the storm's type, in the Weather tab's rows.
-                       kPmStormType = 36, kPmRows = 37;
+                       kPmStormType = 36,
+                       // 27 Nov 2026 (TekRantGaming: "custom match screen parity in settings and bot counts ... a toggle
+                       // for daybreak and nightops presets like the servers have"): the server type (Classic, Night
+                       // Ops, Daybreak) and the server size (24, 32, 64), as the server manager offers them.
+                       kPmType = 37, kPmSize = 38, kPmRows = 39;
+  static constexpr const char* kPmTypeNames[] = {"CLASSIC", "NIGHT OPS", "DAYBREAK"};
   // The game modes. Each map has one in the game's data (its level holds that mode's objects and no other's: Wake
   // Island, Guadalcanal and Iwo Jima Conquest, Coral Sea Air Superiority), so the mode chooses the maps that play it.
   static constexpr const char* kPmModeNames[] = {"CONQUEST", "AIR SUPERIORITY", "ALL MODES"};
   static bool PmMapInMode(int mode, int map) { return mode == 2 || (mode == 0 ? map < 3 : map == 3); }
-  // The map's own (0: 130, Coral Sea 100) in its place among the counts (24 Nov 2026: first in the list, right from it
-  // went down to 25).
-  static constexpr int kPmTicketSteps[] = {25, 50, 75, 100, 0, 150, 200, 250, 300, 400, 500, 750, 1000};
-  static int PmTicketAt(int now) {  // the step at or under `now`, the map's own counted as 130
-    const auto count = [](int v) { return v == 0 ? 130 : v; };
-    int at = 0;
-    for (int k = 0; k < int(std::size(kPmTicketSteps)); ++k)
-      if (count(kPmTicketSteps[k]) <= count(now)) at = k;
+  // 27 Nov 2026, as the server manager's "Tickets, each team": Auto first (0: the map's own scaled to the match's size,
+  // match_rules.cpp AutoTickets: 130 at 24, 175 at 32, 345 at 64), then the map's own (-1: 130, Coral Sea 100, whatever
+  // the size), then the counts. (Before, 0 was the map's own: the same as Auto at 24 players, the only size then.)
+  static constexpr int kPmTicketSteps[] = {0, -1, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000};
+  static int PmTicketAt(int now) {  // Auto, the map's own, or the count's step at or under `now`
+    if (now <= 0) return now == 0 ? 0 : 1;
+    int at = 2;
+    for (int k = 2; k < int(std::size(kPmTicketSteps)); ++k)
+      if (kPmTicketSteps[k] <= now) at = k;
     return at;
   }
+  // Auto's count for a map's own (match_rules.cpp AutoTickets at the page's size).
+  int PmAutoTickets(int own) const {
+    if (pm_size_ <= 24) return own;
+    return std::clamp(int(std::lround(double(own) * pm_size_ / 24.0 / 5.0)) * 5, 1, 9999);
+  }
+  // The Weather tab: Weather and time on, and the match no event (Night Ops' and Daybreak's schedules set the world).
+  bool PmWeatherTab() const { return pm_weather_on_ && pm_event_ == 0; }
   static constexpr int kPmTimeSteps[] = {0, 5, 10, 15, 20, 25, 30, 40, 45, 60, 90, 120};
   int pm_mode_ = 0;            // kPmModeNames
   bool pm_rotation_ = false;   // the maps in turn (pm_rot_maps_) rather than the one map
@@ -2430,6 +2443,8 @@
     return 0;
   }
   int pm_bots_ = 0;  // bots in the match, each on the smaller side, within the room the players leave (0: none)
+  int pm_size_ = 32;   // the match's size (kServerSizes; the servers' default, 32)
+  int pm_event_ = 0;   // kPmTypeNames: 0 Classic, 1 Night Ops, 2 Daybreak (gm_host.cpp bf_world_event)
   bool pm_world_view_ = false;  // the rail shows the world's rows
   bool pm_dn_ = false;          // day and night
   float pm_time_ = 16.0f;       // the hour the match starts at
@@ -2572,13 +2587,17 @@
     pm_pass_on_ = settings_.Get("private_match_password_on", "0") == "1";
     pm_pass_ = settings_.Get("private_match_password", "");
     pm_tick_ = std::atoi(settings_.Get("private_match_tick", "60").c_str());
-    pm_bots_ = std::clamp(std::atoi(settings_.Get("private_match_bots", "0").c_str()), 0, 24);
+    pm_size_ = std::atoi(settings_.Get("private_match_size", "32").c_str());
+    if (std::find(std::begin(bf1943::kServerSizes), std::end(bf1943::kServerSizes), pm_size_) == std::end(bf1943::kServerSizes))
+      pm_size_ = 32;
+    pm_event_ = kNightOps ? std::clamp(std::atoi(settings_.Get("private_match_event", "0").c_str()), 0, 2) : 0;
+    pm_bots_ = std::clamp(std::atoi(settings_.Get("private_match_bots", "0").c_str()), 0, pm_size_);
     pm_mode_ = std::clamp(std::atoi(settings_.Get("private_match_mode", "0").c_str()), 0, 2);
     pm_rotation_ = settings_.Get("private_match_rotation", "0") == "1";
     pm_rot_maps_ = std::clamp(std::atoi(settings_.Get("private_match_rotation_maps", "15").c_str()), 0, 15);
     if (pm_map_ == 4) pm_map_ = 0, pm_rotation_ = true, pm_rot_maps_ = 0xF, pm_mode_ = 2;  // before 19 Nov: all four in turn
     if (!PmMapInMode(pm_mode_, pm_map_)) pm_mode_ = pm_map_ == 3 ? 1 : 0;  // the map chosen keeps its mode
-    pm_tickets_ = std::clamp(std::atoi(settings_.Get("private_match_tickets", "0").c_str()), 0, 9999);
+    pm_tickets_ = std::clamp(std::atoi(settings_.Get("private_match_tickets", "0").c_str()), -1, 9999);
     pm_time_limit_ = std::clamp(std::atoi(settings_.Get("private_match_time_limit", "0").c_str()), 0, 600);
     pm_storm_ = settings_.Get("private_match_dynamic_storm", "0") == "1";
     pm_storm_type_ = std::clamp(std::atoi(settings_.Get("private_match_storm_type", "0").c_str()), 0, 1);
@@ -2622,6 +2641,8 @@
     settings_.values["private_match_port"] = pm_port_text_;
     settings_.values["private_match_tick"] = std::to_string(pm_tick_);
     settings_.values["private_match_bots"] = std::to_string(pm_bots_);
+    settings_.values["private_match_size"] = std::to_string(pm_size_);
+    settings_.values["private_match_event"] = std::to_string(pm_event_);
     settings_.values["private_match_mode"] = std::to_string(pm_mode_);
     settings_.values["private_match_rotation"] = pm_rotation_ ? "1" : "0";
     settings_.values["private_match_rotation_maps"] = std::to_string(pm_rot_maps_);
@@ -2659,8 +2680,9 @@
     bf1943::PrivateMatchOptions o;
     PmFitOrder();
     for (int m : PmMatchMaps()) o.maps.push_back(kPmMapKeys[m]);
-    o.tickets = pm_tickets_, o.time_limit = pm_time_limit_, o.dynamic_storm = pm_weather_on_ && pm_storm_;
-    o.storm_type = pm_weather_on_ ? pm_storm_type_ : 0;
+    o.tickets = pm_tickets_, o.time_limit = pm_time_limit_, o.dynamic_storm = PmWeatherTab() && pm_storm_;
+    o.storm_type = PmWeatherTab() ? pm_storm_type_ : 0;
+    o.size = pm_size_, o.event = pm_event_;
     o.upnp = pm_upnp_;
     // The test launcher (tools	est_progression.py: the test_progression setting, its own backend on this PC's
     // loopback) already answers sign-in, matchmaking and the server list on the ports a LAN match's own backend
@@ -2691,16 +2713,18 @@
     pm_pass_on_ = !pm_pass_.empty();  // a password typed is on; empty, anybody joins
     o.password = pm_pass_;
     o.tick = pm_tick_;
-    o.bots = pm_bots_;
+    o.bots = std::clamp(pm_bots_, 0, pm_size_);
     // The match always has its clock's light and sky (16 Nov 2026: the switch "should just pause the time progression",
     // not bring the game's own afternoon back): off, the time stands still at the time of day.
     o.day_night = true, o.time = pm_time_, o.day_minutes = pm_dn_ ? pm_daylen_ : 0;
     o.cloud_cover = pm_cloud_ / 100.0f, o.cloud_rate = pm_rate_ / 100.0f, o.weather = pm_weather_ / 100.0f;
     o.fog = pm_fog_ / 100.0f, o.ground_fog = pm_ground_fog_ / 100.0f, o.wind = pm_wind_ / 100.0f;
     o.cloud_height = float(pm_cloud_height_);
-    if (!pm_weather_on_) {  // Weather and time off: the map's usual afternoon (the page's starting values)
+    if (!PmWeatherTab()) {  // Weather and time off (or an event's): the map's usual afternoon (the page's starting values)
       o.time = 16.0f, o.day_minutes = 0, o.cloud_cover = 0.35f, o.cloud_rate = 0.33f, o.weather = 0, o.fog = 0, o.ground_fog = 0;
       o.wind = 0, o.cloud_height = 450.0f;  // the wind with the weather, as the page's starting values
+      // Night Ops and Daybreak: the wind a server of the manager has by default (30%; Daybreak's build drives its own).
+      if (pm_event_) o.wind = 0.3f;
     }
     // The host's own game runs at the match's rate, set before its timers are made. Once a match was played at
     // another, this run cannot change: the server would start, and the host's join would have to start the game again,
@@ -2730,9 +2754,11 @@
     }
     pm_hosting_ = true, pm_joining_ = false, pm_started_at_ = ImGui::GetTime(), pm_read_at_ = -100;
     pm_status_ = {};
-    REXLOG_INFO("BF private match: hosting ({}, {}; tickets {}, time limit {} min, dynamic storm {}, storm type {})",
-                PmHeadline(), kPmModeNames[pm_mode_], pm_tickets_ ? std::to_string(pm_tickets_) : std::string("the map's own"),
-                pm_time_limit_, pm_storm_ ? "on" : "off", kPmStormTypeNames[pm_storm_type_]);
+    REXLOG_INFO("BF private match: hosting ({}, {}, {}, size {}, {} bots; tickets {}, time limit {} min, dynamic storm {}, "
+                "storm type {})",
+                PmHeadline(), kPmModeNames[pm_mode_], kPmTypeNames[pm_event_], pm_size_, o.bots,
+                pm_tickets_ > 0 ? std::to_string(pm_tickets_) : pm_tickets_ == 0 ? std::string("auto") : std::string("the map's own"),
+                pm_time_limit_, o.dynamic_storm ? "on" : "off", kPmStormTypeNames[pm_storm_type_]);
   }
 
   void EndPrivateMatch() {
@@ -2799,6 +2825,8 @@
     switch (row) {
       case kPmName: return "SERVER NAME";
       case kPmPassText: return "PASSWORD";
+      case kPmType: return "SERVER TYPE";
+      case kPmSize: return "SERVER SIZE";
       case kPmTickets: return "TICKETS";
       case kPmTimeLimit: return "MATCH TIME";
       case kPmBots: return "BOTS";
@@ -2830,16 +2858,24 @@
       case kPmPassText:
         return "The password players type to join: up to 24 letters, digits or signs, no spaces. Empty, anybody who sees the "
                "match can join; the browser shows a padlock by a match with one. Y (F2) shows it.";
+      case kPmType:
+        return "The match's type, as on our servers. Classic: the time and weather you set. Night Ops: 18:30 under the stars, "
+               "the clouds gather as the tickets fall and a storm rolls in for the end. Daybreak: sunrise at 06:10 and the same "
+               "building storm. Every round starts clear again; F9 still changes the weather for the round.";
+      case kPmSize:
+        return "How many players the match holds: 24 as in the original game, 32 as our servers by default, or 64. The bots fill "
+               "up to it and Auto tickets grow with it. Each player's game needs this version or later for 32 or 64.";
       case kPmTickets:
         return "Each team's tickets at a round's start: a team loses one for each of its soldiers who dies, and more while the "
-               "other team holds most flags. A team with none left loses. The map's own is 130 (Coral Sea 100).";
+               "other team holds most flags. Auto, as on our servers: the map's own (130, Coral Sea 100) grown with the "
+               "match's size, 175 at 32 and 345 at 64. The map's own keeps 130 whatever the size.";
       case kPmTimeLimit:
         return "How long a round lasts: when it is up, the team with fewer tickets loses. Every player sees the time left over the "
                "ticket bars. Off, a round ends only when a team has no tickets left.";
       case kPmBots:
-        return "Computer players who fill the match, half on each side: they take flags and fight like players and keep out of "
-               "everybody's stats. Early days: they fight on foot only, so Guadalcanal suits them best and they sit out "
-               "Coral Sea.";
+        return "Computer players who fill the match, half on each side, up to its size: they take flags, drive, fly and fight "
+               "like players and keep out of everybody's stats. A player who joins takes a bot's place (two places are always "
+               "kept free). They sit out Coral Sea.";
       case kPmTick:
         return "How many times a second the match is simulated. 60 is the default; 30 is the original game's and asks less of your "
                "PC and of every player's connection. A player's game takes the match's rate when it joins.";
@@ -2854,7 +2890,8 @@
                "For an Online match, open it on your router for friends outside your home. Type it, or A for the on screen keys.";
       case kPmWeatherOn:
         return "Off: the map's usual afternoon, 16:00 and fair, and no Weather tab. On: a Weather tab appears beside Match with the "
-               "time of day, clouds, weather, wind and fog. F9 changes them while the match runs.";
+               "time of day, clouds, weather, wind and fog. F9 changes them while the match runs. Night Ops and Daybreak set "
+               "them by their own schedule.";
       case kPmTime:
         return "The hour the match starts at: left and right move the sun, or the moon at night, a quarter hour; drag it with the "
                "mouse, or type it (18:30).";
@@ -2918,7 +2955,7 @@
     const ImVec2 ba = st.P(48, 589), bb = st.P(1232, 645);   // the chosen row's help
     const ImU32 rail = IM_COL32(13, 15, 11, 214), edge = IM_COL32(241, 234, 211, 30), rule = IM_COL32(241, 234, 211, 18);
     const ImU32 dim_ink = IM_COL32(120, 116, 100, 150);
-    if (!pm_weather_on_) pm_tab_ = 0;
+    if (!PmWeatherTab()) pm_tab_ = 0;
     PmFitOrder();
     int n = int(pm_order_.size());
     pm_rot_row_ = std::clamp(pm_rot_row_, 0, n + 1);
@@ -2977,7 +3014,7 @@
           cues.push_back({kit::Button::kA, pm_tab_ == 1 && PmSlideRow(pm_row_) && device_ == Device::kKeyboard ? "TYPE IT" : "CHANGE"});
         else if (device_ != Device::kKeyboard) cues.push_back({kit::Button::kA, "EDIT"});
         if (pm_row_ == kPmPassText) cues.push_back({kit::Button::kY, pm_pass_shown_ ? "HIDE" : "SHOW", "F2"});
-        if (pm_weather_on_) cues.push_back({kit::Button::kLB, "MATCH / WEATHER"});
+        if (PmWeatherTab()) cues.push_back({kit::Button::kLB, "MATCH / WEATHER"});
       } else if (pm_col_ == 1) {
         if (pm_lv_row_ >= 0 && PmMapInMode(pm_mode_, pm_lv_row_))
           cues.push_back({kit::Button::kA, PmInOrder(pm_lv_row_) ? (n > 1 ? "TAKE OUT" : "THE ONLY MAP") : "ADD TO ROTATION"});
@@ -3008,7 +3045,7 @@
       pm_tab_ = t, pm_col_ = 0, pm_row_ = t ? kPmTime : kPmWeatherOn, pm_slide_edit_ = -1;
       REXLOG_INFO("BF private match: the {} tab", t ? "Weather" : "Match");
     };
-    if (!editing && pm_weather_on_ && (in.prev_tab || in.next_tab)) set_tab(1 - pm_tab_);
+    if (!editing && PmWeatherTab() && (in.prev_tab || in.next_tab)) set_tab(1 - pm_tab_);
     if (!editing && in.view) pm_col_ = (pm_col_ + 1) % 3, pm_grab_ = false, pm_slide_edit_ = -1;
     if (!editing && in.start) {
       host(false);
@@ -3018,7 +3055,9 @@
     // ---- the settings' rows of the tab shown
     std::vector<int> order;
     if (pm_tab_ == 0) {
-      order = {kPmName, kPmPassText, kPmTickets, kPmTimeLimit, kPmBots, kPmTick, kPmListed, kPmUpnp};
+      order = {kPmName, kPmPassText};
+      if (kNightOps) order.push_back(kPmType);  // night_ops.h: not in every build
+      for (const int r : {kPmSize, kPmTickets, kPmTimeLimit, kPmBots, kPmTick, kPmListed, kPmUpnp}) order.push_back(r);
       if (!pm_upnp_) order.push_back(kPmPort);
       order.push_back(kPmWeatherOn);
     } else {
@@ -3110,7 +3149,20 @@
       if (row == kPmTickets)
         pm_tickets_ = kPmTicketSteps[std::clamp(PmTicketAt(pm_tickets_) + step, 0, int(std::size(kPmTicketSteps)) - 1)];
       if (row == kPmTimeLimit) pm_time_limit_ = PmStep(kPmTimeSteps, int(std::size(kPmTimeSteps)), pm_time_limit_, step);
-      if (row == kPmBots) pm_bots_ = std::clamp(pm_bots_ + step, 0, 24);
+      if (row == kPmBots) pm_bots_ = std::clamp(pm_bots_ + step, 0, pm_size_);
+      if (row == kPmType && kNightOps) {
+        pm_event_ = (pm_event_ + 3 + step) % 3;
+        REXLOG_INFO("BF private match: server type {}", kPmTypeNames[pm_event_]);
+      }
+      if (row == kPmSize) {
+        const int count = int(std::size(bf1943::kServerSizes));
+        int at = 0;
+        for (int k = 0; k < count; ++k)
+          if (bf1943::kServerSizes[k] == pm_size_) at = k;
+        pm_size_ = bf1943::kServerSizes[(at + count + step) % count];
+        pm_bots_ = std::min(pm_bots_, pm_size_);
+        REXLOG_INFO("BF private match: server size {}", pm_size_);
+      }
       if (row == kPmTick) {
         int at = 0;
         for (int k = 0; k < kPmTickCount; ++k)
@@ -3119,7 +3171,7 @@
       }
       if (row == kPmListed) pm_listed_ = !pm_listed_;
       if (row == kPmUpnp) pm_upnp_ = !pm_upnp_;
-      if (row == kPmWeatherOn) {
+      if (row == kPmWeatherOn && pm_event_ == 0) {
         pm_weather_on_ = !pm_weather_on_;
         REXLOG_INFO("BF private match: Weather and time {}", pm_weather_on_ ? "on: the Weather tab" : "off: the map's usual afternoon");
       }
@@ -3213,11 +3265,11 @@
       const float bump = st(43);
       const float tw = (lb.x - la.x - bump * 2) * 0.5f;
       d->AddRectFilled(ImVec2(la.x, la.y + tab_h - 1), ImVec2(lb.x, la.y + tab_h), edge);
-      if (pm_weather_on_) {
+      if (PmWeatherTab()) {
         kit::Glyph(d, PromptStyle(), kit::Button::kLB, "Q", ImVec2(la.x + st(9), la.y + tab_h * 0.5f), st(17));
         kit::Glyph(d, PromptStyle(), kit::Button::kRB, "E", ImVec2(lb.x - bump + st(9), la.y + tab_h * 0.5f), st(17));
       }
-      for (int t = 0; t < (pm_weather_on_ ? 2 : 1); ++t) {
+      for (int t = 0; t < (PmWeatherTab() ? 2 : 1); ++t) {
         const ImVec2 t0(la.x + bump + tw * t, la.y), t1(t0.x + tw, la.y + tab_h);
         const bool on = pm_tab_ == t;
         const bool hover = ImGui::IsMouseHoveringRect(t0, t1);
@@ -3297,8 +3349,19 @@
                     PmTitle(i));
     };
     if (pm_tab_ == 0) {
+      // The plain rows share what the rail has left (27 Nov 2026: Server type and Server size made two more), at most
+      // their old 37 and at least 26.
+      float fixed = 0;
+      int plain = 0;
       for (const int i : order) {
-        const float h = i == kPmName || i == kPmPassText ? st(57) : i == kPmWeatherOn ? st(44) : i == kPmPort ? st(30) : st(37);
+        if (i == kPmName || i == kPmPassText) fixed += 57;
+        else if (i == kPmWeatherOn) fixed += 44;
+        else if (i == kPmPort) fixed += 30;
+        else ++plain;
+      }
+      const float plain_h = std::clamp((lb.y - la.y - tab_h - st(fixed)) / float(std::max(plain, 1)), st(26), st(37));
+      for (const int i : order) {
+        const float h = i == kPmName || i == kPmPassText ? st(57) : i == kPmWeatherOn ? st(44) : i == kPmPort ? st(30) : plain_h;
         const bool sel = row_frame(i, h);
         const float mid = y + (i == kPmName || i == kPmPassText ? st(15) : i == kPmWeatherOn ? st(16) : h * 0.5f);
         if (i == kPmPort) {
@@ -3326,9 +3389,20 @@
           d->AddText(f.ui_bold, st(11), ImVec2(f0.x + st(8), f0.y + (f1.y - f0.y - st(11) * 1.45f) * 0.5f),
                      hint ? IM_COL32(241, 234, 211, 110) : sel ? kit::kInk : kit::kKhaki, shown.c_str());
           d->PopClipRect();
+        } else if (i == kPmType || i == kPmSize) {
+          std::string v = i == kPmType ? std::string(pm_event_ == 1 ? "NIGHT OPS \xC2\xB7 18:30" : pm_event_ == 2 ? "DAYBREAK \xC2\xB7 06:10" : "CLASSIC")
+                                       : std::to_string(pm_size_) + (pm_size_ == 24 ? " \xC2\xB7 ORIGINAL" : pm_size_ == 32 ? " \xC2\xB7 DEFAULT" : "");
+          if (sel) v = "<  " + v + "  >";
+          const float vw = kit::SpacedWidth(f.typed, st(7.5f), v, st(1.5f));
+          kit::Spaced(d, f.typed, st(7.5f), ImVec2(right - vw, mid - st(5)), sel ? kit::kInk : kit::kKhaki, v, st(1.5f));
+          if (i == kPmSize) unit_text("PLAYERS", right - vw - st(12), mid, sel);
         } else if (i == kPmTickets) {
-          const float u0 = unit_text(pm_tickets_ ? "A TEAM" : pm_mode_ == 2 ? "EACH MAP'S" : "MAP'S OWN", right, mid, sel);
-          const float b0 = value_box(pm_tickets_ ? std::to_string(pm_tickets_) : pm_mode_ == 1 ? "100" : pm_mode_ == 0 ? "130" : "OWN",
+          const int own = pm_mode_ == 1 ? 100 : 130;
+          const float u0 = unit_text(pm_tickets_ > 0 ? "A TEAM" : pm_tickets_ == 0 ? (pm_mode_ == 2 ? "AUTO \xC2\xB7 EACH MAP" : "AUTO \xC2\xB7 A TEAM")
+                                                     : pm_mode_ == 2 ? "EACH MAP'S" : "MAP'S OWN", right, mid, sel);
+          const float b0 = value_box(pm_tickets_ > 0 ? std::to_string(pm_tickets_)
+                                     : pm_mode_ == 2 ? std::string(pm_tickets_ == 0 ? "AUTO" : "OWN")
+                                     : std::to_string(pm_tickets_ == 0 ? PmAutoTickets(own) : own),
                                      u0 - st(8), mid, sel, false, false);
           const int at = PmTicketAt(pm_tickets_);
           const float s = track(i, float(at) / float(std::size(kPmTicketSteps) - 1), b0 - st(118), b0 - st(12), mid, sel, false);
@@ -3342,8 +3416,8 @@
         } else if (i == kPmBots) {
           const float u0 = unit_text(pm_bots_ ? fmt::format("{} A SIDE", (pm_bots_ + 1) / 2) : std::string("NONE"), right, mid, sel);
           const float b0 = value_box(std::to_string(pm_bots_), u0 - st(8), mid, sel, false, false);
-          const float s = track(i, pm_bots_ / 24.0f, b0 - st(118), b0 - st(12), mid, sel, false);
-          if (s >= 0 && int(std::lround(s * 24)) != pm_bots_) pm_bots_ = int(std::lround(s * 24)), SavePrivateMatchChoices();
+          const float s = track(i, float(pm_bots_) / float(pm_size_), b0 - st(118), b0 - st(12), mid, sel, false);
+          if (s >= 0 && int(std::lround(s * pm_size_)) != pm_bots_) pm_bots_ = int(std::lround(s * pm_size_)), SavePrivateMatchChoices();
         } else if (i == kPmTick) {
           std::string v = std::to_string(pm_tick_) + (pm_tick_ == 60 ? " HZ \xC2\xB7 DEFAULT" : " HZ \xC2\xB7 ORIGINAL");
           if (sel) v = "<  " + v + "  >";
@@ -3357,8 +3431,9 @@
           draw_switch(pm_upnp_, mid, sel, b0 - st(10));
         } else if (i == kPmWeatherOn) {
           kit::Spaced(d, f.typed, st(6.5f), ImVec2(la.x + st(38), mid + st(12)), sel ? kit::kInkSection : kit::kKhakiDim,
-                      pm_weather_on_ ? "THE WEATHER TAB IS OPEN" : "ON ADDS A WEATHER TAB", st(1.5f));
-          draw_switch(pm_weather_on_, y + h * 0.5f, sel, right);
+                      pm_event_ ? (pm_event_ == 1 ? "SET BY NIGHT OPS' SCHEDULE" : "SET BY DAYBREAK'S SCHEDULE")
+                      : pm_weather_on_ ? "THE WEATHER TAB IS OPEN" : "ON ADDS A WEATHER TAB", st(1.5f));
+          draw_switch(PmWeatherTab(), y + h * 0.5f, sel, right);
         }
         y += h;
       }

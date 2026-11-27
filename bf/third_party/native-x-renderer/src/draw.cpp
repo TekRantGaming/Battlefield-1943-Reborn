@@ -22,11 +22,13 @@
 #include "weapon_skin.h"
 
 #include <rex/bit.h>
+#include <rex/system/interfaces/graphics.h>
 #include <rex/types.h>
 #include <rex/cvar.h>
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
+#include <rex/graphics/pipeline/texture/util.h>  // D252: GetTiledOffset2D
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
 
@@ -53,11 +55,11 @@
 REXCVAR_DEFINE_INT32(native_x_renderer_draw_log, 0, "NativeXRenderer",
                      "Bring-up: log the first N draws NativeXRenderer processes (primitive, indices, shaders)");
 REXCVAR_DECLARE(int32_t, anisotropic_override);  // the SDK's: forced anisotropic filtering (textures.cpp)
-REXCVAR_DEFINE_STRING(native_x_renderer_alpha_to_coverage, "auto", "NativeXRenderer",
+REXCVAR_DEFINE_STRING(native_x_renderer_alpha_to_coverage, "blend", "NativeXRenderer",
                       "Alpha to coverage on targets without MSAA (D69, D114): auto (blend on surfaces the game draws "
                       "with MSAA, dither on those it draws at 1x), blend (the color blended by its alpha, depth written "
                       "where the alpha is at least 0.5: close to the game's MSAA) or dither (the shader's 2x2 pattern, "
-                      "as on the console without MSAA)");
+                      "as on the console without MSAA). Default blend since hotfix 0.4.8.1 (Transparent edges: Smooth)");
 
 REXCVAR_DEFINE_BOOL(native_x_renderer_keep_pipeline_cache, false, "NativeXRenderer",
                     "Keep DiligentCore's pipeline cache for the whole run (D173). Off: it is let go once the stored "
@@ -325,6 +327,12 @@ struct DrawPath::SkinDraw {
 };
 
 DrawPath::DrawPath() = default;
+void DrawPath::DetachTitle() {
+  if (resolved_) resolved_->Watch(nullptr);
+  if (primitives_) primitives_->DetachTitle();
+  if (memory_) memory_->DetachTitle();
+}
+
 DrawPath::~DrawPath() {
   if (save_thread_.joinable()) save_thread_.join();
   if (resolved_) resolved_->Watch(nullptr);  // before the guest memory mirror goes
@@ -339,12 +347,21 @@ bool DrawPath::Initialize(Device& device, rg::RegisterFile& registers, rex::memo
   IRenderDevice* render_device = device.device();
   Recorder* recorder = &device.recorder();
 
-  memory_ = std::make_unique<GuestMemory>(memory, render_device, recorder);
+  // SDK v0.11+: the mirror is an SDK SharedMemory on the title's physical memory and write watches, which the bfnative
+  // driver hands out (compat/rex/system/interfaces/graphics.h).
+  auto* graphics = rex::system::bfnative_graphics();
+  rex::IPhysicalMemory* physical = graphics ? graphics->physical_memory() : nullptr;
+  rex::IPhysicalWriteWatch* watch = graphics ? graphics->write_watch() : nullptr;
+  if (!physical || !watch) {
+    REXLOG_ERROR("[native_x_renderer] the bfnative driver has no title memory to mirror (no title attached?)");
+    return false;
+  }
+  memory_ = std::make_unique<GuestMemory>(*physical, *watch, render_device, recorder);
   if (!memory_->Initialize()) return false;
   // Resolved textures are invalidated when their guest memory changes, which the mirror's watches report (D70).
   resolved_ = &resolved;
   resolved.Watch(memory_.get());
-  primitives_ = std::make_unique<Primitives>(registers, memory, *memory_, render_device, recorder);
+  primitives_ = std::make_unique<Primitives>(registers, *physical, *watch, *memory_, render_device, recorder);
   if (!primitives_->Initialize()) {
     REXLOG_ERROR("[native_x_renderer] could not initialize primitive processing");
     return false;
@@ -352,6 +369,9 @@ bool DrawPath::Initialize(Device& device, rg::RegisterFile& registers, rex::memo
   shaders_ = std::make_unique<ShaderCache>();
   shaders_->SetSoftShadowFetchConstant(soft_shadow_fetch_constant_);  // D197
   if (!shaders_->Initialize(render_device, scale_)) return false;
+  // The mirror in as many bindings as the translator splits it into on this device (1 on desktop GPUs).
+  memory_->SetBindingCount(1u << rg::SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(
+                               shaders_->features().max_storage_buffer_range));
   guest_textures_ = std::make_unique<GuestTextures>(registers, *memory_, resolved, render_device, recorder);
   if (!guest_textures_->Initialize()) return false;
   // Frame numbers are the device's: frame N is recorded after N - 1 presents and complete when the device's
@@ -374,6 +394,10 @@ bool DrawPath::Initialize(Device& device, rg::RegisterFile& registers, rex::memo
 
   PipelineBuffers buffers;
   buffers.shared_memory = memory_->view();
+  if (memory_->binding_count() > 1) {
+    buffers.shared_memory_parts = memory_->binding_views();
+    buffers.shared_memory_part_count = memory_->binding_count();
+  }
   buffers.system_constants = system_constants_buffer_;
   buffers.bool_loop_constants = bool_loop_constants_buffer_;
   buffers.fetch_constants = fetch_constants_buffer_;
@@ -682,7 +706,7 @@ void DrawPath::AddDrawRanges(const StateTracker::Program& vertex_program, const 
     }
   };
   // Vertices: as DrawInternal requests them.
-  const rg::Shader::ConstantRegisterMap& constants = shader->constant_register_map();
+  const rg::Shader::ConstantRegisterMap& constants = shader->GetConstantRegisterMap();
   for (uint32_t i = 0; i < std::size(constants.vertex_fetch_bitmap); ++i) {
     uint32_t bits = constants.vertex_fetch_bitmap[i];
     uint32_t bit;
@@ -815,8 +839,8 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   Recorder& recorder = device_->recorder();
   const uint64_t copies_at_start = memory_->copies();  // D98
 
-  xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
-  if (edram_mode != xenos::EdramMode::kColorDepth && edram_mode != xenos::EdramMode::kDepthOnly) return false;
+  xenos::EDRAMMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  if (edram_mode != xenos::EDRAMMode::kColorDepth && edram_mode != xenos::EDRAMMode::kDepthOnly) return false;
 
   // Shaders.
   // A program the SDK cannot analyze: where it came from, once (bring-up diagnostics).
@@ -837,14 +861,14 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     ++stats_.failed;
     return false;
   }
-  if (vertex_shader->memexport_eM_written()) {
+  if (vertex_shader->GetMemExportEMWritten()) {
     NATIVE_X_RENDERER_WARN_ONCE("[native_x_renderer] a vertex shader uses memory export: not supported yet");
     return false;
   }
   bool polygonal = draw_util::IsPrimitivePolygonal(regs);
   if (!draw_util::IsRasterizationPotentiallyDone(regs, polygonal)) return false;
   rg::SpirvShader* pixel_shader = nullptr;
-  if (edram_mode == xenos::EdramMode::kColorDepth) {
+  if (edram_mode == xenos::EDRAMMode::kColorDepth) {
     if (!pixel_program.ucode.empty()) {
       pixel_shader = FindShader(xenos::ShaderType::kPixel, pixel_program, &new_failure);
       if (!pixel_shader) {
@@ -852,7 +876,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         ++stats_.failed;
         return false;
       }
-      if (pixel_shader->memexport_eM_written()) {
+      if (pixel_shader->GetMemExportEMWritten()) {
         NATIVE_X_RENDERER_WARN_ONCE("[native_x_renderer] a pixel shader uses memory export: not supported yet");
         return false;
       }
@@ -888,7 +912,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   reg::RB_DEPTHCONTROL depth_control = draw_util::GetNormalizedDepthControl(regs);
   uint32_t param_gen_position = UINT32_MAX;
   uint32_t interpolator_mask =
-      pixel_shader ? vertex_shader->writes_interpolators() &
+      pixel_shader ? vertex_shader->GetWritesInterpolators() &
                          pixel_shader->GetInterpolatorInputMask(regs.Get<reg::SQ_PROGRAM_CNTL>(),
                                                                 regs.Get<reg::SQ_CONTEXT_MISC>(), param_gen_position)
                    : 0;
@@ -910,8 +934,8 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
                 regs[rg::XE_GPU_REG_VGT_DMA_SIZE], uint32_t(primitives.guest_primitive_type),
                 primitives.guest_draw_vertex_count, uint32_t(primitives.host_primitive_type),
                 primitives.host_draw_vertex_count, uint32_t(primitives.index_buffer_type),
-                uint32_t(primitives.host_vertex_shader_type), vertex_shader->ucode_data_hash(),
-                pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+                uint32_t(primitives.host_vertex_shader_type), vertex_shader->GetUcodeDataHash(),
+                pixel_shader ? pixel_shader->GetUcodeDataHash() : 0);
   }
   {
     // Bring-up aids (environment, read once): NXR_DRAWS_AFTER_S=<s> logs 2600 draws (two frames of a busy view) from that many seconds after the
@@ -933,14 +957,14 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       }
       return out;
     }();
-    const uint64_t vs_hash = vertex_shader->ucode_data_hash();
+    const uint64_t vs_hash = vertex_shader->GetUcodeDataHash();
     // The draws that follow a moment the renderer names (DumpNextDraws): the same line for each.
     if (g_dump_next_draws.load(std::memory_order_relaxed) > 0) {
       const int left = g_dump_next_draws.fetch_sub(1, std::memory_order_relaxed);
       REXLOG_INFO("[native_x_renderer] next draw {}: prim {} count {} index type {}; VS {:016X} PS {:016X}; surface "
                   "{:08X} color {:08X} depth {:08X} modecontrol {:08X} depthcontrol {:08X} blend {:08X}",
                   left, uint32_t(primitives.guest_primitive_type), primitives.guest_draw_vertex_count,
-                  uint32_t(primitives.index_buffer_type), vs_hash, pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+                  uint32_t(primitives.index_buffer_type), vs_hash, pixel_shader ? pixel_shader->GetUcodeDataHash() : 0,
                   regs[0x2000], regs[0x2001], regs[0x2002], regs[0x2208], regs[0x2200], regs[0x2201]);
     }
     if (after_s >= 0) {
@@ -954,7 +978,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
                     "{:08X} color {:08X} depth {:08X} modecontrol {:08X} depthcontrol {:08X}; scissor {:08X} {:08X}; "
                     "viewport scale {:.1f} {:.1f} offset {:.1f} {:.1f}",
                     dumped, uint32_t(primitives.guest_primitive_type), primitives.guest_draw_vertex_count,
-                    uint32_t(primitives.index_buffer_type), vs_hash, pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+                    uint32_t(primitives.index_buffer_type), vs_hash, pixel_shader ? pixel_shader->GetUcodeDataHash() : 0,
                     regs[0x2000], regs[0x2001], regs[0x2002], regs[0x2208], regs[0x2200], regs[0x2081], regs[0x2082],
                     vp[0], vp[2], vp[1], vp[3]);
       }
@@ -968,17 +992,17 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     static bool dumped_vs = false;
     if (dump_vs && vs_hash == dump_vs && !dumped_vs) {
       dumped_vs = true;
-      REXLOG_INFO("[native_x_renderer] VS {:016X} disassembly:\n{}", vs_hash, vertex_shader->ucode_disassembly());
+      REXLOG_INFO("[native_x_renderer] VS {:016X} disassembly:\n{}", vs_hash, vertex_shader->GetUcodeDisassembly());
       if (pixel_shader)
-        REXLOG_INFO("[native_x_renderer] its PS {:016X} disassembly:\n{}", pixel_shader->ucode_data_hash(),
-                    pixel_shader->ucode_disassembly());
+        REXLOG_INFO("[native_x_renderer] its PS {:016X} disassembly:\n{}", pixel_shader->GetUcodeDataHash(),
+                    pixel_shader->GetUcodeDisassembly());
       std::string fetch;
       for (uint32_t i = 0; i < 32 * 6; ++i) {
         if (i % 6 == 0) fetch += fmt::format("\n  fetch {:2}:", i / 6);
         fetch += fmt::format(" {:08X}", regs[0x4800 + i]);
       }
       REXLOG_INFO("[native_x_renderer] its fetch constants:{}", fetch);
-      const auto& map = vertex_shader->constant_register_map();
+      const auto& map = vertex_shader->GetConstantRegisterMap();
       std::string used;
       for (uint32_t i = 0; i < std::size(map.vertex_fetch_bitmap); ++i) {
         used += fmt::format(" {:08X}", map.vertex_fetch_bitmap[i]);
@@ -1060,7 +1084,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         if (!listed && std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count() >= list_at) {
           if (!list_frame) list_frame = now_frame + 1;
           if (now_frame == list_frame) {
-            const uint64_t h = pixel_shader->ucode_data_hash();
+            const uint64_t h = pixel_shader->GetUcodeDataHash();
             auto it = std::find_if(seen.begin(), seen.end(), [h](const auto& s) { return s.first == h; });
             if (it == seen.end()) seen.push_back({h, 1});
             else ++it->second;
@@ -1091,10 +1115,10 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       return out;
     }();
     if (!dump_ps.empty() && pixel_shader) {
-      const auto it = std::find(dump_ps.begin(), dump_ps.end(), pixel_shader->ucode_data_hash());
+      const auto it = std::find(dump_ps.begin(), dump_ps.end(), pixel_shader->GetUcodeDataHash());
       if (it != dump_ps.end()) {
         REXLOG_INFO("[native_x_renderer] PS {:016X} (VS {:016X}) disassembly:\n{}", *it, vs_hash,
-                    pixel_shader->ucode_disassembly());
+                    pixel_shader->GetUcodeDisassembly());
         dump_ps.erase(it);
       }
     }
@@ -1113,7 +1137,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       }
       return out;
     }();
-    if (pixel_shader && std::find(skip_ps.begin(), skip_ps.end(), pixel_shader->ucode_data_hash()) != skip_ps.end())
+    if (pixel_shader && std::find(skip_ps.begin(), skip_ps.end(), pixel_shader->GetUcodeDataHash()) != skip_ps.end())
       return false;
   }
   // Battlefield 1943's sky (runs sky4 to skyB, Wake Island, 14 Nov 2026), drawn after the view's opaque draws in
@@ -1122,7 +1146,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   // effects layer, which is laid back over the picture), a tint added over it (471C5A0705715DB7, 240 vertices) and
   // its painted clouds as sprites (E20CB2628975A77D). With a sky of the renderer's own (sky.h) none is drawn; the
   // last two only into a target of the output's size (the effects layer keeps what else they may draw there).
-  if (vertex_shader->ucode_data_hash() == 0x00AB67BFF5297087ull) {  // the sky dome: its camera (DomeCamera)
+  if (vertex_shader->GetUcodeDataHash() == 0x00AB67BFF5297087ull) {  // the sky dome: its camera (DomeCamera)
     std::memcpy(dome_m_, &regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X], sizeof(dome_m_));
     dome_frame_ = device_->frames_presented();
   }
@@ -1140,7 +1164,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       static uint32_t ring_n = 0;
       static int after = 0;
       static std::set<std::pair<uint64_t, uint64_t>> said;
-      const Seen s{pixel_shader->ucode_data_hash(), vertex_shader->ucode_data_hash(), primitives.host_draw_vertex_count,
+      const Seen s{pixel_shader->GetUcodeDataHash(), vertex_shader->GetUcodeDataHash(), primitives.host_draw_vertex_count,
                    targets[0] && targets[0]->guest_width == jitter_size_[0] &&
                        targets[0]->guest_height == jitter_size_[1]};
       auto say = [&](const Seen& x, const char* when) {
@@ -1159,16 +1183,51 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       ring[ring_n++ % 8] = s;
     }
   }
+  // NXR_AFTER_SEA=<seconds> (a diagnosis aid, the beach's wash): from that many seconds after the first draw, in one
+  // frame, the 80 draws after the sea's first, whatever their target or depth test: shaders, vertices, target size, the
+  // depth control and blend control words, and the first texture each samples.
+  {
+    static const double after_sea_at = [] {
+      const char* v = std::getenv("NXR_AFTER_SEA");
+      return v && *v ? std::atof(v) : -1.0;
+    }();
+    if (after_sea_at >= 0 && pixel_shader) {
+      static const auto since = std::chrono::steady_clock::now();
+      static int left = -1;
+      static bool done = false;
+      if (!done && left < 0 && IsSeaShader(pixel_shader->GetUcodeDataHash()) &&
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count() >= after_sea_at) {
+        left = 80;
+      }
+      if (left > 0) {
+        --left;
+        if (!left) done = true;
+        std::string tex = "none";
+        if (const uint32_t mask = pixel_shader->GetUsedTextureMaskAfterTranslation()) {
+          const auto f = regs.GetTextureFetch(uint32_t(std::countr_zero(mask)));
+          tex = fmt::format("f{} fmt {} {}x{} at {:08X}{}", std::countr_zero(mask), uint32_t(f.format),
+                            uint32_t(f.size_2d.width) + 1, uint32_t(f.size_2d.height) + 1, uint32_t(f.base_address),
+                            textures_->Resolved(f) ? " (a resolve)" : "");
+        }
+        REXLOG_INFO("[native_x_renderer] after sea {}: VS {:016X} PS {:016X} {} vertices, target {}x{}, depth control "
+                    "{:08X}, blend control {:08X}, texture {}",
+                    80 - left, vertex_shader->GetUcodeDataHash(), pixel_shader->GetUcodeDataHash(),
+                    primitives.host_draw_vertex_count, targets[0] ? targets[0]->guest_width : 0,
+                    targets[0] ? targets[0]->guest_height : 0, regs.values[rg::XE_GPU_REG_RB_DEPTHCONTROL],
+                    regs.values[rg::XE_GPU_REG_RB_BLENDCONTROL0], tex);
+      }
+    }
+  }
   // D201: the draws since the sky dome's in this frame (the sky's tint and painted clouds come right after it).
   static uint32_t draws_since_dome = ~0u;
-  if (vertex_shader->ucode_data_hash() == 0x00AB67BFF5297087ull) {
+  if (vertex_shader->GetUcodeDataHash() == 0x00AB67BFF5297087ull) {
     draws_since_dome = 0;
   } else if (draws_since_dome != ~0u) {
     ++draws_since_dome;
   }
   if (skip_game_sky_ && pixel_shader) {
-    const uint64_t ps = pixel_shader->ucode_data_hash();
-    const uint64_t vs = vertex_shader->ucode_data_hash();
+    const uint64_t ps = pixel_shader->GetUcodeDataHash();
+    const uint64_t vs = vertex_shader->GetUcodeDataHash();
     const uint32_t vertices = primitives.host_draw_vertex_count;
     const bool full_size = targets[0] && targets[0]->guest_width == jitter_size_[0] &&
                            targets[0]->guest_height == jitter_size_[1];
@@ -1289,7 +1348,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     vertex_modification.vertex.output_point_parameters = uint32_t(param_gen_position != UINT32_MAX);
   } else {
     vertex_modification.vertex.output_point_parameters =
-        uint32_t((vertex_shader->writes_point_size_edge_flag_kill_vertex() & 0b001) &&
+        uint32_t((vertex_shader->GetWritesPointSizeEdgeFlagKillVertex() & 0b001) &&
                  guest_primitive_type == xenos::PrimitiveType::kPointList);
   }
   vertex_modification.vertex.vertex_kill_and = 0;
@@ -1324,8 +1383,8 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     }
     using DepthStencilMode = Translator::Modification::DepthStencilMode;
     pixel_modification.pixel.depth_stencil_mode =
-        pixel_shader->implicit_early_z_write_allowed() &&
-                (!pixel_shader->writes_color_target(0) ||
+        pixel_shader->IsImplicitEarlyZWriteAllowed() &&
+                (!pixel_shader->IsColorTargetWritten(0) ||
                  !draw_util::DoesCoverageDependOnAlpha(regs.Get<reg::RB_COLORCONTROL>()))
             ? DepthStencilMode::kEarlyHint
             : DepthStencilMode::kNoModifiers;
@@ -1376,7 +1435,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   }
 
   // Render targets: the colors the pixel shader writes with a non-empty mask, depth if tested.
-  uint32_t color_mask = pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets()) : 0;
+  uint32_t color_mask = pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->GetWritesColorTargets()) : 0;
   ITextureView* render_target_views[4] = {};
   ITextureView* depth_view = nullptr;
   uint32_t render_target_count = 0, samples = 0;
@@ -1506,10 +1565,36 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     PipelineState::Target& target = state.targets[i];
     target.write_mask = uint8_t((color_mask >> (4 * i)) & 0xF);
     if (!target.write_mask) continue;
-    auto blend = regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
+    auto blend = regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::kRTRegisterIndices[i]);
     target.src = uint8_t(BlendFactor(blend.color_srcblend, false));
     target.dst = uint8_t(BlendFactor(blend.color_destblend, false));
     target.op = uint8_t(BlendOp(blend.color_comb_fcn));
+    // NXR_FOAM=1|2 (a diagnosis aid, the beach's wash): the draws that write the stencil and the wash's own draw
+    // (PS 617653D17C0D6DD5, stencil tested equal), each kind once, with the stencil's state and the depth target's
+    // format; 2: the wash drawn with no stencil test.
+    {
+      static const int foam = [] {
+        const char* v = std::getenv("NXR_FOAM");
+        return v && *v ? std::atoi(v) : 0;
+      }();
+      if (foam && depth_control.stencil_enable && pixel_shader) {
+        const uint64_t ps = pixel_shader->GetUcodeDataHash();
+        const bool writes = state.stencil_write_mask &&
+                            (depth_control.stencilzpass != xenos::StencilOp::kKeep ||
+                             depth_control.stencilfail != xenos::StencilOp::kKeep ||
+                             depth_control.stencilzfail != xenos::StencilOp::kKeep);
+        const bool wash = ps == 0x617653D17C0D6DD5ull;
+        static std::set<std::tuple<uint64_t, uint32_t, uint32_t>> said;
+        if ((writes || wash) && said.size() < 64 &&
+            said.insert({ps, regs.values[rg::XE_GPU_REG_RB_STENCILREFMASK], depth_control.value}).second)
+          REXLOG_INFO("[native_x_renderer] foam: {} PS {:016X} VS {:016X}, stencil ref {} mask {:02X} write {:02X}, depth "
+                      "control {:08X}, depth target format {}, {} vertices, frame {}",
+                      wash ? "the wash" : "a stencil writer", ps, vertex_shader->GetUcodeDataHash(), stencil_reference,
+                      state.stencil_read_mask, state.stencil_write_mask, depth_control.value,
+                      depth ? int(depth->format) : -1, primitives.host_draw_vertex_count, device_->frames_presented());
+        if (wash && foam == 2) state.stencil_enable = 0;
+      }
+    }
     target.src_alpha = uint8_t(BlendFactor(blend.alpha_srcblend, true));
     target.dst_alpha = uint8_t(BlendFactor(blend.alpha_destblend, true));
     target.op_alpha = uint8_t(BlendOp(blend.alpha_comb_fcn));
@@ -1527,7 +1612,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   // somewhat more opaque than the game's MSAA where the alpha is between 0 and 1. On a surface the game draws at 1x,
   // the console dithers too, and its objects are solid there: the dither stays (D114; blending made GH Metallica's
   // hair see-through).
-  bool guest_msaa = regs.Get<reg::RB_SURFACE_INFO>().msaa_samples != xenos::MsaaSamples::k1X;
+  bool guest_msaa = regs.Get<reg::RB_SURFACE_INFO>().msaa_samples != xenos::MSAASamples::k1X;
   bool alpha_to_coverage_blended = (guest_msaa ? alpha_to_coverage_blend_.msaa : alpha_to_coverage_blend_.one) &&
                                    pixel_shader && regs.Get<reg::RB_COLORCONTROL>().alpha_to_mask_enable;
   // How much of the game is drawn this way (13 Nov 2026, the rendering quirks: a dither that shimmers, or none at
@@ -1559,8 +1644,8 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   if (created) {
     // Kept for the next run (D42).
     if (storage_) {
-      storage_->AddPipeline({vertex_shader->ucode_data_hash(), vertex_modification.value,
-                             pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+      storage_->AddPipeline({vertex_shader->GetUcodeDataHash(), vertex_modification.value,
+                             pixel_shader ? pixel_shader->GetUcodeDataHash() : 0,
                              pixel_modification_value, state});
     }
     ++pipelines_unsaved_;
@@ -1598,7 +1683,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   // and shaders compare sampled depth with depth they compute (shadow maps).
   draw_util::ViewportInfo viewport_info;
   draw_util::GetHostViewportInfo(regs, 1, 1, true, 16384, 16384, true, depth_control, false, false,
-                                 pixel_shader && pixel_shader->writes_depth(), viewport_info);
+                                 pixel_shader && pixel_shader->IsDepthWritten(), viewport_info);
   if (!viewport_info.xy_extent[0] || !viewport_info.xy_extent[1]) return false;
   draw_util::Scissor scissor;
   draw_util::GetScissor(regs, scissor);
@@ -1611,7 +1696,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   guest_textures_->RequestTextures(used_texture_mask);
 
   // Vertex data: every vertex fetch constant the vertex shader uses.
-  const rg::Shader::ConstantRegisterMap& vertex_constants = vertex_shader->constant_register_map();
+  const rg::Shader::ConstantRegisterMap& vertex_constants = vertex_shader->GetConstantRegisterMap();
   {
     // A draw that fetches vertices through a constant that is not a vertex fetch (type 2, "invalid") is dropped, as
     // the SDK's command processors drop it (unless gpu_allow_invalid_fetch_constants): its data would not be in the
@@ -1667,7 +1752,10 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
             write.guest_format = l.guest_format, write.tiled = l.tiled, write.endian = l.endian;
             write.scale_x = l.scale_x, write.scale_y = l.scale_y, write.slice = l.slice;
             memory_->EnsureMirror(write.address, uint32_t(std::min<uint64_t>(uint64_t((write.pitch + 31) & ~31u) * ((write.height + 31) & ~31u) * 16, 0x20000000u)));  // D174
-            if (blit_->WriteToMirror(device_->context(), t->ArrayView(), memory_->buffer(), memory_->uav(), write)) {
+            uint32_t write_base = 0;  // a window of the mirror where it is bound in parts (GuestMemory::WriteView)
+            IBufferView* write_view = memory_->WriteView(write.address, &write_base);
+            write.address -= write_base;
+            if (blit_->WriteToMirror(device_->context(), t->ArrayView(), memory_->buffer(), write_view, write)) {
               TargetsChanged();  // the compute pass bound its own
               REXLOG_INFO("[native_x_renderer] D155: the resolve at {:#x} written to the mirror before its first draw",
                           t->address);
@@ -1679,7 +1767,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
                         "guest format {}, {} bytes) as vertices (VS {:016X}): its resolves are written to the guest "
                         "memory mirror from now on",
                         t->address, t->guest_width, t->guest_height, t->guest_format, t->guest_bytes,
-                        vertex_shader->ucode_data_hash());
+                        vertex_shader->GetUcodeDataHash());
         }
       }
     }
@@ -1707,18 +1795,21 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     std::memcpy(map.data(), &system_constants_, sizeof(system_constants_));
   }
   const rg::SpirvShader* stage_shaders[2] = {vertex_shader, pixel_shader};
-  // The vertex shader's are also kept for the object motion (D48).
+  // The vertex shader's are also kept for the object motion (D48); D252: both stages' for the planar reflection.
   vertex_constants_.clear();
   vertex_registers_.clear();
+  pixel_constants_.clear();
   for (uint32_t stage = 0; stage < 2; ++stage) {
     const rg::SpirvShader* shader = stage_shaders[stage];
-    if (!shader || !shader->constant_register_map().float_count) continue;
+    if (!shader || !shader->GetConstantRegisterMap().float_count) continue;
     MappedBuffer map(recorder, pipeline->float_constants[stage], &uploads_);
     uint8_t* out = map.data();
-    const rg::Shader::ConstantRegisterMap& constants = shader->constant_register_map();
+    const rg::Shader::ConstantRegisterMap& constants = shader->GetConstantRegisterMap();
     uint32_t first = stage ? rg::XE_GPU_REG_SHADER_CONSTANT_256_X : rg::XE_GPU_REG_SHADER_CONSTANT_000_X;
-    bool keep = !stage && (object_motion_on_ || camera_vote_on_ || tick_interpolation_ || model_lamp_counts_ ||
-                           (hud_classify_ && aspect_box_));
+    bool keep = (!stage && (object_motion_on_ || camera_vote_on_ || tick_interpolation_ || model_lamp_counts_ ||
+                            (hud_classify_ && aspect_box_))) ||
+                planar_on_;
+    std::vector<uint8_t>& kept_constants = stage ? pixel_constants_ : vertex_constants_;
     uint8_t* const mapped_start = out;
     // A constant that holds the size of a resolved texture the shader samples, as the game wrote it for the guest
     // texture: its host size instead (D93).
@@ -1773,15 +1864,17 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         if (keep) {
           // From the register file, not from `out`: the mapped buffer is write-combined memory, slow to read back
           // (with DLAA in a GH Metallica song, a sixth of the renderer thread's time, D120).
-          size_t kept = vertex_constants_.size();
+          size_t kept = kept_constants.size();
           const auto* source = reinterpret_cast<const uint8_t*>(&regs[first + (first_register << 2)]);
-          vertex_constants_.insert(vertex_constants_.end(), source, source + bytes);
+          kept_constants.insert(kept_constants.end(), source, source + bytes);
           if (sized_constant >= first_register && sized_constant < first_register + count) {
-            std::memcpy(vertex_constants_.data() + kept + size_t(sized_constant - first_register) * 16, host_size, 16);
+            std::memcpy(kept_constants.data() + kept + size_t(sized_constant - first_register) * 16, host_size, 16);
           }
-          size_t registers = vertex_registers_.size();
-          vertex_registers_.resize(registers + count);
-          std::iota(vertex_registers_.begin() + registers, vertex_registers_.end(), uint8_t(first_register));
+          if (!stage) {
+            size_t registers = vertex_registers_.size();
+            vertex_registers_.resize(registers + count);
+            std::iota(vertex_registers_.begin() + registers, vertex_registers_.end(), uint8_t(first_register));
+          }
         }
         out += bytes;
       }
@@ -1802,8 +1895,13 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           if ((*wet_models_)[k] == n) vehicle_draw_ = true;
       }
     }
-    ApplyOutdoorLight(shader->ucode_data_hash(), stage, reinterpret_cast<const uint32_t*>(&regs[0]), first,
+    ApplyOutdoorLight(shader->GetUcodeDataHash(), stage, reinterpret_cast<const uint32_t*>(&regs[0]), first,
                       constants.float_bitmap, mapped_start);
+    // D252: the planar reflection's copy lit the same (the hour's light, the night's): from the register file it held
+    // the game's own afternoon, and at night the mirrored island shone bright under a dark one (run pl_night).
+    if (planar_on_ && kept_constants.size() == size_t(out - mapped_start))
+      ApplyOutdoorLight(shader->GetUcodeDataHash(), stage, reinterpret_cast<const uint32_t*>(&regs[0]), first,
+                        constants.float_bitmap, kept_constants.data());
     // NXR_NEAR_DUMP=<seconds>,<frames> (a diagnosis aid): from that many seconds after the first draw, on that many
     // frames, every draw whose vertex shader's first perspective block is a near projection (near plane under half a
     // metre: first person models and the nearest scenery): its shader, the block's register and every float constant
@@ -1841,7 +1939,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
                 GtaoProjection::FromMatrix(CameraVote::MatrixAt(values.data(), index, transposed), projection) &&
                 projection.near_plane() > 0.0f && projection.near_plane() < 0.5f) {
               std::string line = fmt::format("[native_x_renderer] near draw: frame {} vs {:016X} block c{}{} near {:.3f}:",
-                                             now_frame, shader->ucode_data_hash(), numbers[index],
+                                             now_frame, shader->GetUcodeDataHash(), numbers[index],
                                              transposed ? " (columns)" : "", projection.near_plane());
               for (size_t k = 0; k < numbers.size() && k < 40; ++k) {
                 float f[4];
@@ -1870,11 +1968,11 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       struct {
         uint64_t vertex_shader;
         uint32_t vertex_address, index_address, vertex_count, index_type;
-      } key{vertex_shader->ucode_data_hash(), first_vertex, regs[rg::XE_GPU_REG_VGT_DMA_BASE],
+      } key{vertex_shader->GetUcodeDataHash(), first_vertex, regs[rg::XE_GPU_REG_VGT_DMA_BASE],
             primitives.guest_draw_vertex_count, uint32_t(primitives.index_buffer_type)};
       // The first perspective-looking block only: blending the others too (shadow and light projections) darkened
       // the whole frame (run vcam8).
-      tick_trace_shader_ = vertex_shader->ucode_data_hash();
+      tick_trace_shader_ = vertex_shader->GetUcodeDataHash();
       TickInterpolate(XXH3_64bits(&key, sizeof(key)), vertex_constants_.data(), vertex_registers_.data(),
                       uint32_t(vertex_registers_.size()), mapped_start, 0);
     }
@@ -1947,9 +2045,9 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
             const auto f = regs.GetTextureFetch(binding.fetch_constant);
             if (std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count() > 95.0 &&
                 f.size_2d.width + 1 >= 256 && said2.size() < 400 &&
-                said2.insert(shader->ucode_data_hash() * 131 + binding.fetch_constant * 7 + uint64_t(viewport_info.z_max * 1000)).second) {
+                said2.insert(shader->GetUcodeDataHash() * 131 + binding.fetch_constant * 7 + uint64_t(viewport_info.z_max * 1000)).second) {
               REXLOG_INFO("[native_x_renderer] tex: PS {:016X} z {:.4f} {:.4f} fetch {} format {} {}x{} base {:05X} cam0 {}",
-                          shader->ucode_data_hash(), viewport_info.z_min, viewport_info.z_max, binding.fetch_constant,
+                          shader->GetUcodeDataHash(), viewport_info.z_min, viewport_info.z_max, binding.fetch_constant,
                           uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1, uint32_t(f.base_address),
                           weapon_draw_ ? 1 : 0);
             }
@@ -1963,11 +2061,11 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           }();
           static std::set<uint64_t> said;
           const auto fetch = regs.GetTextureFetch(binding.fetch_constant);
-          const uint64_t key = shader->ucode_data_hash() * 31 + binding.fetch_constant + (uint64_t(fetch.base_address) << 8);
+          const uint64_t key = shader->GetUcodeDataHash() * 31 + binding.fetch_constant + (uint64_t(fetch.base_address) << 8);
           if (log && said.size() < 120 && said.insert(key).second) {
             const TextureDesc& d = static_cast<ITextureView*>(view)->GetTexture()->GetDesc();
             REXLOG_INFO("[native_x_renderer] weapon texture: PS {:016X} fetch {} guest format {} {}x{} base {:05X}; host "
-                        "{}x{} format {} mips {} name {}", shader->ucode_data_hash(), binding.fetch_constant,
+                        "{}x{} format {} mips {} name {}", shader->GetUcodeDataHash(), binding.fetch_constant,
                         uint32_t(fetch.format), fetch.size_2d.width + 1, fetch.size_2d.height + 1,
                         uint32_t(fetch.base_address), d.Width, d.Height, int(d.Format), d.MipLevels, d.Name ? d.Name : "");
           }
@@ -2000,9 +2098,9 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
             const auto f = regs.GetTextureFetch(binding.fetch_constant);
             if (std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count() > 95.0 &&
                 f.size_2d.width + 1 >= 256 && said2.size() < 400 &&
-                said2.insert(shader->ucode_data_hash() * 131 + binding.fetch_constant * 7 + uint64_t(viewport_info.z_max * 1000)).second) {
+                said2.insert(shader->GetUcodeDataHash() * 131 + binding.fetch_constant * 7 + uint64_t(viewport_info.z_max * 1000)).second) {
               REXLOG_INFO("[native_x_renderer] tex: PS {:016X} z {:.4f} {:.4f} fetch {} format {} {}x{} base {:05X} cam0 {}",
-                          shader->ucode_data_hash(), viewport_info.z_min, viewport_info.z_max, binding.fetch_constant,
+                          shader->GetUcodeDataHash(), viewport_info.z_min, viewport_info.z_max, binding.fetch_constant,
                           uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1, uint32_t(f.base_address),
                           weapon_draw_ ? 1 : 0);
             }
@@ -2016,11 +2114,11 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           }();
           static std::set<uint64_t> said;
           const auto fetch = regs.GetTextureFetch(binding.fetch_constant);
-          const uint64_t key = shader->ucode_data_hash() * 31 + binding.fetch_constant + (uint64_t(fetch.base_address) << 8);
+          const uint64_t key = shader->GetUcodeDataHash() * 31 + binding.fetch_constant + (uint64_t(fetch.base_address) << 8);
           if (log && said.size() < 120 && said.insert(key).second) {
             const TextureDesc& d = static_cast<ITextureView*>(view)->GetTexture()->GetDesc();
             REXLOG_INFO("[native_x_renderer] weapon texture: PS {:016X} fetch {} guest format {} {}x{} base {:05X}; host "
-                        "{}x{} format {} mips {} name {}", shader->ucode_data_hash(), binding.fetch_constant,
+                        "{}x{} format {} mips {} name {}", shader->GetUcodeDataHash(), binding.fetch_constant,
                         uint32_t(fetch.format), fetch.size_2d.width + 1, fetch.size_2d.height + 1,
                         uint32_t(fetch.base_address), d.Width, d.Height, int(d.Format), d.MipLevels, d.Name ? d.Name : "");
           }
@@ -2071,7 +2169,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   }
 
   // D190: the picture just after the sea's last draw, taken before the next draw that is not the sea's.
-  if (sea_after_due_ && !(pixel_shader && IsSeaShader(pixel_shader->ucode_data_hash()))) TakeSeaAfter();
+  if (sea_after_due_ && !(pixel_shader && IsSeaShader(pixel_shader->GetUcodeDataHash()))) TakeSeaAfter();
   // Record the draw. The targets are bound only when they change (D30).
   std::array<ITextureView*, 5> views{render_target_views[0], render_target_views[1], render_target_views[2],
                                      render_target_views[3], depth_view};
@@ -2096,7 +2194,18 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   if (set) {
     // D111: the set's binding, its variables written when it was created; committed when it is not the last
     // committed one, or one of its textures is no longer readable.
-    const bool changed = committed_ != set;
+    // NXR_COMMIT_ALWAYS=1 (a diagnosis aid): every draw commits its set, whatever the last one was.
+    static const bool commit_always = [] {
+      const char* v = std::getenv("NXR_COMMIT_ALWAYS");
+      return v && *v == '1';
+    }();
+    // Also when something used the context directly since the last commit: a pass of the renderer's that set its own
+    // pipeline and committed its own resources without TargetsChanged. DiligentCore then unbinds the draw's set when
+    // its pipeline comes back, and a draw ran with no descriptor set bound (VUID-vkCmdDrawIndexed-None-08600): a
+    // GPU reads whatever is there; Mesa's lavapipe crashed (the port's Linux client, 25 Nov 2026).
+    const uint64_t direct_uses = device_->recorder().direct_uses();
+    const bool changed = committed_ != set || direct_uses != committed_direct_uses_ || commit_always;
+    committed_direct_uses_ = direct_uses;
     recorder.Do([set, changed](IDeviceContext* context) {
       if (changed || !TexturesReadable(*set))
         context->CommitShaderResources(set->srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
@@ -2127,7 +2236,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       while (!(mask & (1u << first))) ++first;
       const auto fetch = regs.GetTextureFetch(first);
       auto* kernel = rex::system::kernel_state();
-      const auto& bindings = vertex_shader->vertex_bindings();
+      const auto& bindings = vertex_shader->GetVertexBindings();
       if (uint32_t(fetch.format) == 6 && fetch.size_2d.width + 1 == 256 && fetch.size_2d.height + 1 == 256 && kernel &&
           kernel->memory() && !bindings.empty()) {
         const auto& binding = bindings[0];
@@ -2154,7 +2263,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         }
         // The vertex shader's float constants it uses (the sprite's place on the sheet is a texture matrix there).
         {
-          const auto& cm = vertex_shader->constant_register_map();
+          const auto& cm = vertex_shader->GetConstantRegisterMap();
           int shown = 0;
           verts += " consts";
           for (uint32_t r = 0; r < 256 && shown < 16; ++r) {
@@ -2187,7 +2296,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       if (uint32_t(fetch.format) == 6 && fetch.size_2d.width + 1 == 256 && fetch.size_2d.height + 1 == 256) {
         bool hit_marker = false;
         auto* kernel = rex::system::kernel_state();
-        const auto& bindings = vertex_shader->vertex_bindings();
+        const auto& bindings = vertex_shader->GetVertexBindings();
         const uint32_t count = registers_->values[rg::XE_GPU_REG_VGT_DRAW_INITIATOR] >> 16;
         if (kernel && kernel->memory() && !bindings.empty() && count && count <= 64 && bindings[0].stride_words == 2) {
           const xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(bindings[0].fetch_constant);
@@ -2214,8 +2323,8 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           }
         }
         if (!hit_marker) {
-          NoteRuleSkip("the crosshair while aiming (HideCrosshair)", pixel_shader->ucode_data_hash(),
-                       vertex_shader->ucode_data_hash(), count, 0, 0, ~0u);  // D249
+          NoteRuleSkip("the crosshair while aiming (HideCrosshair)", pixel_shader->GetUcodeDataHash(),
+                       vertex_shader->GetUcodeDataHash(), count, 0, 0, ~0u);  // D249
           return false;
         }
         static bool said = false;
@@ -2438,7 +2547,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       static uint64_t last_frame = 0;
       static std::set<uint64_t> in_frame;
       if (last_frame != hud_frame_) last_frame = hud_frame_, in_frame.clear();
-      if (in_frame.insert(vertex_shader->ucode_data_hash()).second) {
+      if (in_frame.insert(vertex_shader->GetUcodeDataHash()).second) {
         uint32_t matrix = 0;
         bool transposed = false;
         const bool found = CameraVote::FindMatrix(vertex_constants_.data(), vertex_registers_.data(),
@@ -2449,27 +2558,28 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         if (m)
           REXLOG_INFO("[native_x_renderer] sky probe2: frame {} VS {:016X} depth {}{} matrix c{}{} rows {:.3f} {:.3f} {:.3f} {:.1f} | "
                       "{:.3f} {:.3f} {:.3f} {:.1f} | {:.3f} {:.3f} {:.3f} {:.1f} | {:.3f} {:.3f} {:.3f} {:.1f}",
-                      hud_frame_, vertex_shader->ucode_data_hash(), state.depth_enable ? "test" : "off",
+                      hud_frame_, vertex_shader->GetUcodeDataHash(), state.depth_enable ? "test" : "off",
                       state.depth_write ? "+write" : "", matrix, transposed ? " (transposed)" : "", m[0], m[1], m[2],
                       m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
         else
           REXLOG_INFO("[native_x_renderer] sky probe2: frame {} VS {:016X} depth {}{} no matrix", hud_frame_,
-                      vertex_shader->ucode_data_hash(), state.depth_enable ? "test" : "off", state.depth_write ? "+write" : "");
+                      vertex_shader->GetUcodeDataHash(), state.depth_enable ? "test" : "off", state.depth_write ? "+write" : "");
       }
     }
     if (probe && !probe2 && seen.size() < 400) {
-      const uint64_t key = vertex_shader->ucode_data_hash() * 31 + pixel_shader->ucode_data_hash();
+      const uint64_t key = vertex_shader->GetUcodeDataHash() * 31 + pixel_shader->GetUcodeDataHash();
       if (seen.insert(key).second) {
         const float* c = reinterpret_cast<const float*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
         REXLOG_INFO("[native_x_renderer] sky probe: VS {:016X} PS {:016X} depth {}{} frame {} c12 {:.3f} {:.3f} {:.3f} {:.3f} | "
                     "c13 {:.3f} {:.3f} {:.3f} {:.3f} | c14 {:.4f} {:.4f} {:.4f} {:.4f} | c15 {:.3f} {:.3f} {:.3f} {:.3f}",
-                    vertex_shader->ucode_data_hash(), pixel_shader->ucode_data_hash(), state.depth_enable ? "test" : "off",
+                    vertex_shader->GetUcodeDataHash(), pixel_shader->GetUcodeDataHash(), state.depth_enable ? "test" : "off",
                     state.depth_write ? "+write" : "", hud_frame_, c[48], c[49], c[50], c[51], c[52], c[53], c[54], c[55],
                     c[56], c[57], c[58], c[59], c[60], c[61], c[62], c[63]);
       }
     }
   }
   // The grass prototype (grass.h): the main view's terrain draws.
+  terrain_patch_ = false;  // D252 (CaptureTerrain sets it)
   if (terrain_ && output_sized && pixel_shader && render_target_count && state.depth_enable) {
     CaptureTerrain(regs, *vertex_shader, viewport, scissor_rect, state);
   }
@@ -2514,7 +2624,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
                      "(to {:#x}), index buffer type {}, VS {:016X}",
                      index_buffer->GetDesc().Name ? index_buffer->GetDesc().Name : "?", size, index_offset,
                      primitives.host_draw_vertex_count, index_type == VT_UINT16 ? 16 : 32, end,
-                     int(primitives.index_buffer_type), vertex_shader ? vertex_shader->ucode_data_hash() : 0);
+                     int(primitives.index_buffer_type), vertex_shader ? vertex_shader->GetUcodeDataHash() : 0);
       }
     }
   }
@@ -2537,8 +2647,15 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     add(std::max(bl, s.left), s.top, std::min(br, s.right), bt);     // above it
     add(std::max(bl, s.left), bb, std::min(br, s.right), s.bottom);  // below it
   }
+  // NXR_DRAW_TWICE=1 (a measuring aid, the planar reflection's cost): every depth-written draw of the main view's size
+  // but the first person weapon's issued twice, as a second pass over the world would.
+  static const bool draw_twice = [] {
+    const char* v = std::getenv("NXR_DRAW_TWICE");
+    return v && *v == '1';
+  }();
+  const int issues = draw_twice && output_sized && state.depth_write && !weapon_draw_ && !oversize ? 2 : 1;
   recorder.Do([index_buffer, index_offset, index_type, count = primitives.host_draw_vertex_count, oversize,
-               stretched_viewport, bars, bar_count, viewport, scissor_rect, blend_factors,
+               stretched_viewport, bars, bar_count, viewport, scissor_rect, blend_factors, issues,
                stencil = state.stencil_enable, stencil_reference](IDeviceContext* context) {
     if (stencil) context->SetStencilRef(stencil_reference);
     context->SetBlendFactors(blend_factors);
@@ -2562,7 +2679,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       context->SetViewports(1, &viewport, 0, 0);
       context->SetScissorRects(1, &scissor_rect, 0, 0);
     }
-    issue();
+    for (int i = 0; i < issues; ++i) issue();
   });
   // NXR_SKIN_3P_LOG=1 (a developer's): draws that are not the first person weapon's but have its colour texture:
   // another player's gun, or one on the ground. Each pair of shaders once, with its size and its first constants.
@@ -2573,7 +2690,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     }();
     if (log_3p && skin_3p_hit_ && pixel_shader) {
       static std::set<uint64_t> said;
-      const uint64_t key = vertex_shader->ucode_data_hash() * 31 + pixel_shader->ucode_data_hash() + primitives.guest_draw_vertex_count;
+      const uint64_t key = vertex_shader->GetUcodeDataHash() * 31 + pixel_shader->GetUcodeDataHash() + primitives.guest_draw_vertex_count;
       if (said.size() < 40 && said.insert(key).second) {
         const float* c = reinterpret_cast<const float*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
         std::string rows;
@@ -2581,7 +2698,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           rows += fmt::format(" c{} {:.3f} {:.3f} {:.3f} {:.3f};", r, c[r * 4], c[r * 4 + 1], c[r * 4 + 2], c[r * 4 + 3]);
         REXLOG_INFO("[native_x_renderer] skin 3p: a draw with the first person gun's colour texture: VS {:016X} PS {:016X}, {} "
                     "indices, {} vertex constants, depth write {}, c255.x {:.1f};{}",
-                    vertex_shader->ucode_data_hash(), pixel_shader->ucode_data_hash(), primitives.guest_draw_vertex_count,
+                    vertex_shader->GetUcodeDataHash(), pixel_shader->GetUcodeDataHash(), primitives.guest_draw_vertex_count,
                     vertex_registers_.size(), int(state.depth_write), c[255 * 4], rows);
       }
     }
@@ -2601,13 +2718,13 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       textures.push_back({t.fetch, width, height, uint32_t(f.format), static_cast<ITextureView*>(t.view)});
     }
     auto* kernel = rex::system::kernel_state();
-    const auto& bindings = vertex_shader->vertex_bindings();
+    const auto& bindings = vertex_shader->GetVertexBindings();
     if (!hands && squares < 3 && kernel && kernel->memory() && !bindings.empty()) {
       const auto& binding = bindings[0];
       const xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(binding.fetch_constant);
       WeaponExportDraw d;
-      d.vs_hash = vertex_shader->ucode_data_hash();
-      d.ps_hash = pixel_shader->ucode_data_hash();
+      d.vs_hash = vertex_shader->GetUcodeDataHash();
+      d.ps_hash = pixel_shader->GetUcodeDataHash();
       d.vs_constants = reinterpret_cast<const float*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
       d.vertex_address = fetch.address << 2;
       d.vertices = kernel->memory()->TranslatePhysical<const uint8_t*>(d.vertex_address);
@@ -2713,7 +2830,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     struct {
       uint64_t vertex_shader;
       uint32_t vertex_address, index_address, vertex_count, index_type;
-    } key{vertex_shader->ucode_data_hash(), first_vertex_address, regs[rg::XE_GPU_REG_VGT_DMA_BASE],
+    } key{vertex_shader->GetUcodeDataHash(), first_vertex_address, regs[rg::XE_GPU_REG_VGT_DMA_BASE],
           primitives.guest_draw_vertex_count, uint32_t(primitives.index_buffer_type)};
     const uint8_t* matched = nullptr;
     uint32_t count = uint32_t(vertex_registers_.size());
@@ -2753,11 +2870,35 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       }
     }
   }
+  // NXR_SEA_TEX_LOG=1 (a diagnosis aid, the water's effects): each texture the sea's pixel shaders sample, once: the
+  // fetch constant, format, size and address, and whether it is a resolve of the frame (its guest format, frame).
+  {
+    static const bool sea_tex_log = std::getenv("NXR_SEA_TEX_LOG") != nullptr;
+    if (sea_tex_log && pixel_shader && IsSeaShader(pixel_shader->GetUcodeDataHash())) {
+      static std::set<std::tuple<uint64_t, uint32_t, uint32_t, uint32_t>> said;
+      for (uint32_t mask = pixel_shader->GetUsedTextureMaskAfterTranslation(); mask; mask &= mask - 1) {
+        const uint32_t k = uint32_t(std::countr_zero(mask));
+        const auto f = regs.GetTextureFetch(k);
+        if (said.size() < 200 && said.insert({pixel_shader->GetUcodeDataHash(), k, uint32_t(f.base_address), uint32_t(f.format)}).second) {
+          const ResolvedTexture* r = textures_->Resolved(f);
+          REXLOG_INFO("[native_x_renderer] sea texture: PS {:016X} fetch {} format {} {}x{} at {:08X} dim {}; {}",
+                      pixel_shader->GetUcodeDataHash(), k, uint32_t(f.format), uint32_t(f.size_2d.width) + 1,
+                      uint32_t(f.size_2d.height) + 1, uint32_t(f.base_address), uint32_t(f.dimension),
+                      r ? fmt::format("a resolve (guest format {}, {}x{}, host {}x{} format {}, last resolved frame {} of {}, "
+                                      "packed {} shadow {})",
+                                      r->guest_format, r->guest_width, r->guest_height, r->width, r->height, int(r->format),
+                                      r->last_resolve_frame, device_->frames_presented(), r->read_packed, r->shadow)
+                        : std::string("a guest texture"));
+        }
+      }
+    }
+  }
   // D190: the sea's draws, for its reflection's mask (flat ground at the sea's height is not the sea: Guadalcanal's
   // base shone as puddles from the plane alone, run glass_fac).
   if (own_sea_reflection_ && pixel_shader) {
-    if (IsSeaShader(pixel_shader->ucode_data_hash())) {
+    if (IsSeaShader(pixel_shader->GetUcodeDataHash())) {
       static uint32_t seen = 0, skipped = 0;
+      if (output_sized) sea_seen_ = true;  // D252
       if (output_sized && bound_[0]) {
         sea_after_due_ = true;
         sea_after_source_ = bound_[0]->GetTexture();
@@ -2777,9 +2918,15 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       }
     }
   }
+  // D252: the planar reflection's draws: the main view's that write depth, but the first person weapon's and the sea's.
+  if (planar_on_ && output_sized && state.depth_enable && state.depth_write && !weapon_draw_ && binding_sets &&
+      !(pixel_shader && IsSeaShader(pixel_shader->GetUcodeDataHash()))) {
+    KeepPlanarDraw(*vertex_shader, pixel_shader, state, viewport, scissor_rect, index_buffer, index_offset, index_type,
+                   primitives.host_draw_vertex_count, blend_factors);
+  }
   // D191: the window glass (shaders_beach/glass/glass_t01's two shaders), for its reflection's mask.
   if (own_glass_reflection_ && pixel_shader &&
-      (pixel_shader->ucode_data_hash() == 0xA98B19DAA168DDAEull || pixel_shader->ucode_data_hash() == 0x5FD03DF368EEF02Eull)) {
+      (pixel_shader->GetUcodeDataHash() == 0xA98B19DAA168DDAEull || pixel_shader->GetUcodeDataHash() == 0x5FD03DF368EEF02Eull)) {
     static uint32_t seen = 0, not_sized = 0, vertex_textures = 0;
     static uint64_t said_at = 0;
     ++seen;
@@ -2792,7 +2939,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       said_at = device_->frames_presented();
       REXLOG_INFO("[native_x_renderer] glass reflection: {} panes' draws seen, {} not in the view's size, {} with vertex "
                   "textures; VS {:016X}, target {}x{}, view {}x{}; the camera at {:.1f} {:.1f} {:.1f}", seen, not_sized,
-                  vertex_textures, vertex_shader->ucode_data_hash(), sized->guest_width, sized->guest_height,
+                  vertex_textures, vertex_shader->GetUcodeDataHash(), sized->guest_width, sized->guest_height,
                   jitter_size_[0], jitter_size_[1], world_camera_[0], world_camera_[1], world_camera_[2]);
       seen = not_sized = vertex_textures = 0;
     }
@@ -2910,6 +3057,356 @@ void DrawPath::KeepGlassDraw(rg::SpirvShader& vertex_shader, uint64_t vertex_mod
   kept.insert(kept.end(), bool_loop, bool_loop + kBoolLoopConstantsSize);
   kept.insert(kept.end(), fetch, fetch + kFetchConstantsSize);
   draws.push_back(draw);
+}
+
+// D252: one of the main view's world draws, kept for the planar reflection: the mirrored pipeline (the draw's own
+// shaders and state into one RGBA16F target with a depth target of its own, the triangles' winding turned round as a
+// mirror turns it, depth tested and written as the view's: larger is nearer), its constants and its textures.
+void DrawPath::KeepPlanarDraw(rg::SpirvShader& vertex_shader, const rg::SpirvShader* pixel_shader,
+                              const PipelineState& state, const Viewport& viewport, const Rect& scissor,
+                              IBuffer* index_buffer, uint64_t index_offset, VALUE_TYPE index_type, uint32_t vertex_count,
+                              const float blend[4]) {
+  if (planar_draws_.size() >= 8192 || vertex_registers_.empty()) return;
+  // (Not the game's depth pre-pass, its draws without a pixel shader: the mirror's colour draws write its depth.)
+  if (!pixel_shader) return;
+  if (terrain_patch_ && PlanarPatchUnderWater()) {
+    ++planar_under_;
+    return;
+  }
+  uint32_t matrices[4] = {}, matrix_count = 0;
+  bool transposed[4] = {};
+  for (uint32_t start = 0, n = uint32_t(vertex_registers_.size()); start + 4 <= n && matrix_count < 4;) {
+    uint32_t index = 0;
+    bool t = false;
+    if (!CameraVote::FindMatrix(vertex_constants_.data() + size_t(start) * 16, vertex_registers_.data() + start, n - start,
+                                index, t)) {
+      break;
+    }
+    matrices[matrix_count] = start + index, transposed[matrix_count++] = t;
+    start += index + 4;
+  }
+  if (!matrix_count) {
+    ++planar_no_matrix_;
+    return;
+  }
+  PipelineState mirror = state;
+  std::fill(std::begin(mirror.rtv_formats), std::end(mirror.rtv_formats), uint16_t(0));
+  mirror.rtv_formats[0] = uint16_t(TEX_FORMAT_RGBA16_FLOAT);
+  mirror.render_target_count = 1;
+  mirror.dsv_format = uint16_t(TEX_FORMAT_D32_FLOAT);
+  mirror.samples = 1;
+  mirror.front_counter_clockwise = state.front_counter_clockwise ? 0 : 1;
+  mirror.depth_clip = 1;  // (the oblique near plane clips what is under the water)
+  mirror.depth_enable = 1;
+  mirror.depth_write = 1;
+  mirror.depth_func = uint8_t(COMPARISON_FUNC_GREATER_EQUAL);
+  mirror.stencil_enable = 0;
+  mirror.stencil_read_mask = mirror.stencil_write_mask = 0;
+  std::memset(mirror.stencil_front, 0, sizeof(mirror.stencil_front));
+  std::memset(mirror.stencil_back, 0, sizeof(mirror.stencil_back));
+  for (int i = 1; i < 4; ++i) mirror.targets[i] = PipelineState::Target{};
+  if (!mirror.targets[0].write_mask) mirror.targets[0].write_mask = uint8_t(COLOR_MASK_ALL);
+  bool created = false;
+  Pipeline* pipeline = pipelines_->Get(mirror, vertex_shader, pixel_shader, &created);
+  if (created) ++pipelines_unsaved_, frames_since_created_ = 0;
+  if (!pipeline || !pipelines_->Ready(*pipeline) || !pipeline->binding_sets_on) {
+    ++planar_not_ready_;
+    return;
+  }
+  PlanarDraw draw{pipeline, planar_data_.size(), uint32_t(vertex_constants_.size()), uint32_t(pixel_constants_.size()),
+                  {matrices[0], matrices[1], matrices[2], matrices[3]},
+                  {transposed[0], transposed[1], transposed[2], transposed[3]}, matrix_count, uint32_t(planar_objects_.size()), uint32_t(binding_objects_.size()), viewport,
+                  scissor, index_buffer, index_offset, index_type, vertex_count, {blend[0], blend[1], blend[2], blend[3]}};
+  const rg::RegisterFile& regs = *registers_;
+  const auto* system = reinterpret_cast<const uint8_t*>(&system_constants_);
+  const auto* bool_loop = reinterpret_cast<const uint8_t*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031]);
+  const auto* fetch = reinterpret_cast<const uint8_t*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0]);
+  planar_data_.insert(planar_data_.end(), vertex_constants_.begin(), vertex_constants_.end());
+  planar_data_.insert(planar_data_.end(), pixel_constants_.begin(), pixel_constants_.end());
+  planar_data_.insert(planar_data_.end(), system, system + sizeof(system_constants_));
+  planar_data_.insert(planar_data_.end(), bool_loop, bool_loop + kBoolLoopConstantsSize);
+  planar_data_.insert(planar_data_.end(), fetch, fetch + kFetchConstantsSize);
+  planar_objects_.insert(planar_objects_.end(), binding_objects_.begin(), binding_objects_.end());
+  planar_draws_.push_back(draw);
+}
+
+uint32_t DrawPath::DrawPlanar(ITextureView* color, ITextureView* depth, float sea, int debug,
+                              const TerrainFrame* terrain, float scale) {
+  uint32_t drawn = 0, no_partition = 0;
+  const size_t kept = planar_draws_.size();
+  if (color && depth && !planar_draws_.empty() && terrain && terrain->partition_count > 0 && std::isfinite(sea)) {
+    // What takes a draw's world-view-projection A (= VP W) to the mirrored one: the x, y and w rows are VP M W, M the
+    // reflection in y = sea; the depth row is the oblique near plane's, w - k h with h the real point's height over the
+    // water (k 0.05: depth 1 at the water, a point's depth 1 - k h / its distance), so what is under the water (h < 0)
+    // lies in front of the near plane and is clipped. The same depth row for every draw: the depth partitions are all
+    // drawn into one depth range, [0, 1]. VP's x, y and w rows are the terrain's (one camera for every partition); its
+    // depth row is the draw's own partition's, a w + b, read from the draw's matrix (its depth row is a times its w row
+    // plus b in the fourth column, whatever its world matrix), so the near partition (0.1 to 7.5 m, where no terrain is
+    // drawn) is mirrored too.
+    constexpr double k = 0.05;
+    Mat4d vp_terrain{};
+    {
+      const auto& part = terrain->partitions[0];
+      for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) vp_terrain[r * 4 + c] = part.wvp[r][c];
+    }
+    const double scene_py = std::sqrt(vp_terrain[4] * vp_terrain[4] + vp_terrain[5] * vp_terrain[5] + vp_terrain[6] * vp_terrain[6]) /
+                            std::max(1e-12, std::sqrt(vp_terrain[12] * vp_terrain[12] + vp_terrain[13] * vp_terrain[13] +
+                                                      vp_terrain[14] * vp_terrain[14]));
+    const Mat4d reflect{1, 0, 0, 0, 0, -1, 0, 2.0 * sea, 0, 0, 1, 0, 0, 0, 0, 1};
+    Mat4d oblique = vp_terrain;
+    for (int c = 0; c < 4; ++c) oblique[8 + c] = vp_terrain[12 + c];
+    oblique[9] += k;
+    oblique[11] -= k * sea;
+    const Mat4d mirrored = Mat4dMultiply(oblique, reflect);
+    struct Cached {
+      double a = 0.0, b = 0.0;
+      Mat4d r{};
+      bool ok = false;
+    } cached;
+    auto mirror_for = [&](const Mat4d& a_matrix, Mat4d& r) {
+      const double w2 = a_matrix[12] * a_matrix[12] + a_matrix[13] * a_matrix[13] + a_matrix[14] * a_matrix[14];
+      if (!(w2 > 1e-20)) return false;
+      const double a = (a_matrix[8] * a_matrix[12] + a_matrix[9] * a_matrix[13] + a_matrix[10] * a_matrix[14]) / w2;
+      const double b = a_matrix[11] - a * a_matrix[15];
+      if (cached.ok && cached.a == a && cached.b == b) {
+        r = cached.r;
+        return true;
+      }
+      Mat4d vp = vp_terrain;
+      for (int c = 0; c < 4; ++c) vp[8 + c] = a * vp_terrain[12 + c];
+      vp[11] += b;
+      Mat4d inverse;
+      if (!Mat4dInvert(vp, inverse)) return false;
+      cached.a = a, cached.b = b, cached.r = Mat4dMultiply(mirrored, inverse), cached.ok = true;
+      r = cached.r;
+      return true;
+    };
+    Recorder& recorder = device_->recorder();
+    recorder.Do([color, depth](IDeviceContext* context) mutable {
+      context->SetRenderTargets(1, &color, depth, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    });
+    TargetsChanged();
+    uploaded_frame_ = UINT64_MAX;
+    memory_->PrepareForRead();
+    std::vector<uint8_t> vs;
+    const uint64_t frame = device_->frames_presented();
+    // NXR_PLANAR_MAX=<n> (a measuring aid): only the first n kept draws drawn (0: the pass with none).
+    static const uint32_t planar_max = [] {
+      const char* v = std::getenv("NXR_PLANAR_MAX");
+      return v && *v ? uint32_t(std::atoi(v)) : ~0u;
+    }();
+    // NXR_PLANAR_LIST=1 (a measuring aid): the kept draws of one frame 70 s in, in order: shaders and vertices.
+    static const bool planar_list = std::getenv("NXR_PLANAR_LIST") != nullptr;
+    static const auto list_from = std::chrono::steady_clock::now();
+    static bool listed = false;
+    if (planar_list && !listed && std::chrono::steady_clock::now() - list_from > std::chrono::seconds(70)) {
+      listed = true;
+      uint32_t i = 0;
+      for (const PlanarDraw& d : planar_draws_)
+        REXLOG_INFO("[native_x_renderer] planar list {}: VS {:016X} PS {:016X} {} vertices, depth {:.4f}..{:.4f}", i++,
+                    d.pipeline->shaders[0] ? d.pipeline->shaders[0]->GetUcodeDataHash() : 0,
+                    d.pipeline->shaders[1] ? d.pipeline->shaders[1]->GetUcodeDataHash() : 0, d.vertex_count,
+                    d.viewport.MinDepth, d.viewport.MaxDepth);
+    }
+    for (const PlanarDraw& draw : planar_draws_) {
+      if (drawn >= planar_max) break;
+      Pipeline& pipeline = *draw.pipeline;
+      const uint8_t* data = planar_data_.data() + draw.data;
+      vs.assign(data, data + draw.vs_size);
+      // Which of its perspective blocks is the frame's camera's: the one whose field of view is the terrain's (the
+      // length of its y row over its w row's, which a world matrix's scale leaves alone).
+      uint32_t matrix = UINT32_MAX;
+      bool transposed = false;
+      for (uint32_t i = 0; i < draw.matrix_count && matrix == UINT32_MAX; ++i) {
+        if (size_t(draw.matrices[i]) * 16 + 64 > vs.size()) continue;
+        const Mat4d m = CameraVote::MatrixAt(vs.data(), draw.matrices[i], draw.transposed[i]);
+        const double y = std::sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]);
+        const double w = std::sqrt(m[12] * m[12] + m[13] * m[13] + m[14] * m[14]);
+        if (w > 1e-12 && std::abs(y / w - scene_py) < 0.03 * scene_py) matrix = draw.matrices[i], transposed = draw.transposed[i];
+      }
+      if (matrix == UINT32_MAX) {
+        ++no_partition;
+        continue;
+      }
+      if (debug != 1) {
+        const Mat4d a = CameraVote::MatrixAt(vs.data(), matrix, transposed);
+        Mat4d to_mirror;
+        if (!mirror_for(a, to_mirror)) {
+          ++no_partition;
+          continue;
+        }
+        const Mat4d b = Mat4dMultiply(to_mirror, a);
+        // D252: the GPU's cost here is the draws' own (about 1.7 us each on the RX 7900 XTX, the vertices and pixels
+        // hardly count: runs pl_max0 to pl_max60), so a small model whose mirror image cannot be seen is not drawn:
+        // its origin's mirror (the matrix's fourth column) behind the eye, far off the picture's sides or under its
+        // bottom (more than 0.8 of the picture beyond the edge), or beyond 600 m. Large ones (terrain patches, ships,
+        // buildings: 2,000 vertices or more) always are.
+        // (Not a mesh in the world's own coordinates, terrain patches and the islands' rocks and props among them: its
+        // matrix is the camera's own (x, y and w rows), its "origin" the world's, and its mirror far off the picture.)
+        bool own_world = false;
+        for (int r : {0, 1, 3})
+          for (int c = 0; c < 4; ++c)
+            if (std::abs(a[r * 4 + c] - vp_terrain[r * 4 + c]) > 1e-3 * (1.0 + std::abs(vp_terrain[r * 4 + c])))
+              own_world = true;
+        if (planar_cull_ && own_world && draw.vertex_count < 2000) {
+          const double cx = b[3], cy = b[7], cw = b[15];
+          const bool behind = cw <= 0.5;
+          const bool off = !behind && (std::abs(cx / cw) > 1.8 || cy / cw < -1.8 || cy / cw > 1.8);
+          const bool distant = !behind && cw > 600.0 && draw.vertex_count < 600;
+          if (behind || off || distant) {
+            ++planar_culled_;
+            continue;
+          }
+        }
+        // NXR_PLANAR_LOG=1 (a diagnosis aid): the first draws' matrices, before and after, every 1800 frames.
+        static const bool planar_log = [] {
+          const char* v = std::getenv("NXR_PLANAR_LOG");
+          return v && *v == '1';
+        }();
+        static uint64_t logged_frame = 0;
+        static int logged = 0;
+        if (planar_log && (frame >= logged_frame + 1800 || (frame == logged_frame && logged < 6))) {
+          if (frame != logged_frame) logged_frame = frame, logged = 0;
+          ++logged;
+          REXLOG_INFO("[native_x_renderer] planar: draw {} matrix at packed {} of {} ({}), {} vertices; A {:.4f} {:.4f} "
+                      "{:.4f} {:.4f} / {:.4f} {:.4f} {:.4f} {:.4f} / {:.4f} {:.4f} {:.4f} {:.4f} / {:.4f} {:.4f} {:.4f} "
+                      "{:.4f}; B row 1 {:.4f} {:.4f} {:.4f} {:.4f}",
+                      logged, matrix, draw.vs_size / 16, transposed ? "transposed" : "rows",
+                      draw.vertex_count, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11],
+                      a[12], a[13], a[14], a[15], b[4], b[5], b[6], b[7]);
+        }
+        float v[16];
+        for (int r = 0; r < 4; ++r)
+          for (int c = 0; c < 4; ++c) (transposed ? v[c * 4 + r] : v[r * 4 + c]) = float(b[r * 4 + c]);
+        std::memcpy(vs.data() + size_t(matrix) * 16, v, sizeof(v));
+      }
+      if (draw.vs_size && pipeline.float_constants[0]) {
+        MappedBuffer map(recorder, pipeline.float_constants[0]);
+        std::memcpy(map.data(), vs.data(), draw.vs_size);
+      }
+      data += draw.vs_size;
+      if (draw.ps_size && pipeline.float_constants[1]) {
+        MappedBuffer map(recorder, pipeline.float_constants[1]);
+        std::memcpy(map.data(), data, draw.ps_size);
+      }
+      data += draw.ps_size;
+      auto upload = [&](IBuffer* buffer, size_t size) {
+        MappedBuffer map(recorder, buffer);
+        std::memcpy(map.data(), data, size);
+        data += size;
+      };
+      upload(system_constants_buffer_, sizeof(system_constants_));
+      upload(bool_loop_constants_buffer_, kBoolLoopConstantsSize);
+      upload(fetch_constants_buffer_, kFetchConstantsSize);
+      planar_set_objects_.assign(planar_objects_.begin() + draw.objects,
+                                 planar_objects_.begin() + draw.objects + draw.object_count);
+      bool created = false;
+      BindingSet* set = pipelines_->FindSet(pipeline, planar_set_objects_, frame, &created);
+      if (!set) continue;
+      Viewport viewport = draw.viewport;
+      if (debug != 1) viewport.MinDepth = 0.0f, viewport.MaxDepth = 1.0f;
+      viewport.TopLeftX *= scale, viewport.TopLeftY *= scale, viewport.Width *= scale, viewport.Height *= scale;
+      Rect scissor = draw.scissor;
+      scissor.left = int32_t(std::floor(float(scissor.left) * scale));
+      scissor.top = int32_t(std::floor(float(scissor.top) * scale));
+      scissor.right = int32_t(std::ceil(float(scissor.right) * scale));
+      scissor.bottom = int32_t(std::ceil(float(scissor.bottom) * scale));
+      recorder.Do([pso = pipeline.pso.RawPtr(), srb = set->srb.RawPtr(), draw, viewport, scissor](IDeviceContext* context) {
+        context->SetPipelineState(pso);
+        context->CommitShaderResources(srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        context->SetViewports(1, &viewport, 0, 0);
+        context->SetScissorRects(1, &scissor, 0, 0);
+        context->SetBlendFactors(draw.blend);
+        if (draw.index_buffer) {
+          context->SetIndexBuffer(draw.index_buffer, draw.index_offset, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+          DrawIndexedAttribs attribs{draw.vertex_count, draw.index_type, DRAW_FLAG_NONE};
+          context->DrawIndexed(attribs);
+        } else {
+          DrawAttribs attribs{draw.vertex_count, DRAW_FLAG_NONE};
+          context->Draw(attribs);
+        }
+      });
+      ++drawn;
+    }
+    committed_ = nullptr;
+  }
+  static uint64_t said_at = 0;
+  if (device_->frames_presented() >= said_at + 1800) {
+    said_at = device_->frames_presented();
+    REXLOG_INFO("[native_x_renderer] planar reflection (D252): {} draws kept, {} drawn, {} with no projection to mirror "
+                "(the terrain's partitions {}), {} without a world-view-projection, {} pipelines not ready; the sea at "
+                "{:.1f}; since the last line: terrain patches left out under the water {}, small models out of the "
+                "mirror's sight {}",
+                kept, drawn, no_partition, terrain ? terrain->partition_count : 0, planar_no_matrix_,
+                planar_not_ready_, sea, planar_under_, planar_culled_);
+    planar_no_matrix_ = planar_not_ready_ = planar_under_ = planar_culled_ = 0;
+  }
+  planar_draws_.clear();
+  planar_data_.clear();
+  planar_objects_.clear();
+  return drawn;
+}
+
+// D252: whether this draw's terrain patch lies wholly under the water: its 16 x 16 grid (step c20.x metres) from its
+// corner, the heightmap's cells it covers (with a cell's margin), their highest points all a metre or more under the
+// sea. The cells are read from the heightmap in the game's memory (Xenos 2D tiled, 16-bit, the game's byte order) the
+// first time a heightmap is seen; false while the sea's height is not known or the heightmap cannot be read.
+bool DrawPath::PlanarPatchUnderWater() {
+  if (!std::isfinite(sea_level_)) return false;
+  const auto& f = terrain_patch_fetch_;
+  const uint32_t width = f.size_2d.width + 1, height = f.size_2d.height + 1;
+  const uint32_t address = uint32_t(f.base_address) << 12;
+  if (width < 256 || height < 256 || width % 16 || height % 16) return false;
+  if (address != planar_heights_address_ || planar_cell_top_.size() != size_t(width / 16) * (height / 16)) {
+    planar_heights_address_ = address;
+    planar_cell_top_.assign(size_t(width / 16) * (height / 16), std::numeric_limits<float>::infinity());
+    auto* kernel = rex::system::kernel_state();
+    const uint8_t* base = kernel && kernel->memory() ? kernel->memory()->TranslatePhysical<const uint8_t*>(address) : nullptr;
+    if (!base) return false;
+    const auto start = std::chrono::steady_clock::now();
+    const bool is_float = f.format == xenos::TextureFormat::k_16_FLOAT;
+    const uint32_t pitch = uint32_t(f.pitch) * 32;
+    const uint32_t cells_across = width / 16;
+    for (uint32_t y = 0; y < height; ++y) {
+      for (uint32_t x = 0; x < width; ++x) {
+        const size_t at = f.tiled ? size_t(rg::texture_util::GetTiledOffset2D(int32_t(x), int32_t(y), pitch, 1))
+                                  : (size_t(y) * pitch + x) * 2;
+        uint16_t raw;
+        std::memcpy(&raw, base + at, 2);
+        raw = xenos::GPUSwap(raw, xenos::Endian(f.endianness));
+        float v;
+        if (is_float) {
+          // (Half to float.)
+          const uint32_t sign = uint32_t(raw >> 15), e = (raw >> 10) & 0x1F, m = raw & 0x3FF;
+          v = e == 0 ? std::ldexp(float(m), -24) : std::ldexp(float(m | 0x400), int(e) - 25);
+          if (sign) v = -v;
+        } else {
+          v = float(raw) / 65535.0f;
+        }
+        const float h = v * terrain_patch_height_[0] + terrain_patch_height_[1];
+        float& top = planar_cell_top_[size_t(y / 16) * cells_across + x / 16];
+        top = std::isinf(top) ? h : std::max(top, h);
+      }
+    }
+    planar_heights_size_ = width;
+    REXLOG_INFO("[native_x_renderer] planar reflection (D252): the heightmap at {:08X} ({}x{}, {}) read in {:.1f} ms "
+                "for the underwater test",
+                address, width, height, f.tiled ? "tiled" : "linear",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+  }
+  // The patch's texels: its corner's (u, v times the size) across 16 grid steps (a texel a metre at step 1).
+  const float step = std::max(terrain_patch_at_[2], 1e-3f);
+  const float u0 = terrain_patch_at_[3] * float(width), v0 = terrain_patch_at_[4] * float(height), span = 16.0f * step;
+  const int cx0 = std::max(0, int(std::floor((u0 - 16.0f) / 16.0f)));
+  const int cy0 = std::max(0, int(std::floor((v0 - 16.0f) / 16.0f)));
+  const int cx1 = std::min(int(width / 16) - 1, int(std::floor((u0 + span + 16.0f) / 16.0f)));
+  const int cy1 = std::min(int(height / 16) - 1, int(std::floor((v0 + span + 16.0f) / 16.0f)));
+  if (cx0 > cx1 || cy0 > cy1) return false;
+  for (int cy = cy0; cy <= cy1; ++cy)
+    for (int cx = cx0; cx <= cx1; ++cx)
+      if (!(planar_cell_top_[size_t(cy) * (width / 16) + cx] < sea_level_ - 1.0f)) return false;
+  return true;
 }
 
 ITexture* DrawPath::sea_after() const {
@@ -3082,7 +3579,7 @@ void DrawPath::KeepMotionDraw(rg::SpirvShader& vertex_shader, uint64_t vertex_mo
     // Stored with the others (D137, before only in DiligentCore's pipeline cache): the motion state itself, marked by
     // its pixel shader hash.
     if (storage_) {
-      storage_->AddPipeline({vertex_shader.ucode_data_hash(), vertex_modification, PipelineStorage::kMotionPixelHash, 0,
+      storage_->AddPipeline({vertex_shader.GetUcodeDataHash(), vertex_modification, PipelineStorage::kMotionPixelHash, 0,
                              motion});
     }
     ++pipelines_unsaved_;
@@ -3234,7 +3731,7 @@ void DrawPath::KeepSkinDraw(rg::SpirvShader& vertex_shader, uint64_t vertex_modi
   if (!said) {
     said = true;
     REXLOG_INFO("[native_x_renderer] weapon skin: the gun's draws are drawn again with the storm's light (VS {:016X})",
-                vertex_shader.ucode_data_hash());
+                vertex_shader.GetUcodeDataHash());
   }
 }
 
@@ -3334,24 +3831,24 @@ void DrawPath::FillSystemConstants(const DrawContext& draw) {
   uint32_t flags = 0;
   if (primitives.index_buffer_type == PIBT::kHostBuiltinForDMA || primitives.index_buffer_type == PIBT::kGuestDMA ||
       primitives.index_buffer_type == PIBT::kHostConverted) {
-    flags |= Translator::kSysFlag_ComputeOrPrimitiveVertexIndexLoad;
+    flags |= Translator::kSysFlagComputeOrPrimitiveVertexIndexLoad;
     if (draw_initiator.index_size == xenos::IndexFormat::kInt32) {
-      flags |= Translator::kSysFlag_ComputeOrPrimitiveVertexIndexLoad32Bit;
+      flags |= Translator::kSysFlagComputeOrPrimitiveVertexIndexLoad32Bit;
     }
     if (primitives.host_primitive_reset_enabled &&
         primitives.host_vertex_shader_type != rg::Shader::HostVertexShaderType::kPointListAsTriangleStrip &&
         primitives.host_vertex_shader_type != rg::Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
-      flags |= Translator::kSysFlag_ComputeOrPrimitiveVertexIndexReset;
+      flags |= Translator::kSysFlagComputeOrPrimitiveVertexIndexReset;
     }
   }
-  if (vte_cntl.vtx_xy_fmt) flags |= Translator::kSysFlag_XYDividedByW;
-  if (vte_cntl.vtx_z_fmt) flags |= Translator::kSysFlag_ZDividedByW;
-  if (vte_cntl.vtx_w0_fmt) flags |= Translator::kSysFlag_WNotReciprocal;
-  if (draw.polygonal) flags |= Translator::kSysFlag_PrimitivePolygonal;
-  if (draw_util::IsPrimitiveLine(regs)) flags |= Translator::kSysFlag_PrimitiveLine;
-  flags |= uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples) << Translator::kSysFlag_MsaaSamples_Shift;
+  if (vte_cntl.vtx_xy_fmt) flags |= Translator::kSysFlagXYDividedByW;
+  if (vte_cntl.vtx_z_fmt) flags |= Translator::kSysFlagZDividedByW;
+  if (vte_cntl.vtx_w0_fmt) flags |= Translator::kSysFlagWNotReciprocal;
+  if (draw.polygonal) flags |= Translator::kSysFlagPrimitivePolygonal;
+  if (draw_util::IsPrimitiveLine(regs)) flags |= Translator::kSysFlagPrimitiveLine;
+  flags |= uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples) << Translator::kSysFlagMSAASamplesShift;
   if (regs.Get<reg::RB_DEPTH_INFO>().depth_format == xenos::DepthRenderTargetFormat::kD24FS8) {
-    flags |= Translator::kSysFlag_DepthFloat24;
+    flags |= Translator::kSysFlagDepthFloat24;
   }
   xenos::CompareFunction alpha_test =
       colorcontrol.alpha_test_enable ? colorcontrol.alpha_func : xenos::CompareFunction::kAlways;
@@ -3365,21 +3862,21 @@ void DrawPath::FillSystemConstants(const DrawContext& draw) {
       alpha_reference = std::max(alpha_reference, 0.5f);
     }
   }
-  flags |= uint32_t(alpha_test) << Translator::kSysFlag_AlphaPassIfLess_Shift;
+  flags |= uint32_t(alpha_test) << Translator::kSysFlagAlphaPassIfLessShift;
   // Gamma render targets are 8-bit here (targets.cpp): the shader writes gamma-encoded values.
   reg::RB_COLOR_INFO color_infos[4];
   for (uint32_t i = 0; i < 4; ++i) {
-    color_infos[i] = regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[i]);
+    color_infos[i] = regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::kRTRegisterIndices[i]);
     if (color_infos[i].color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
-      flags |= Translator::kSysFlag_ConvertColor0ToGamma << i;
+      flags |= Translator::kSysFlagConvertColor0ToGamma << i;
     }
   }
   c.flags = flags;
 
-  if (flags & Translator::kSysFlag_ComputeOrPrimitiveVertexIndexLoad) {
+  if (flags & Translator::kSysFlagComputeOrPrimitiveVertexIndexLoad) {
     c.vertex_index_load_address = primitives.guest_index_base;
   }
-  c.vertex_index_reset = (flags & Translator::kSysFlag_ComputeOrPrimitiveVertexIndexReset)
+  c.vertex_index_reset = (flags & Translator::kSysFlagComputeOrPrimitiveVertexIndexReset)
                              ? regs.Get<reg::VGT_MULTI_PRIM_IB_RESET_INDX>().reset_indx
                              : 0;
   c.compute_memexport_vertex_count = 0;
@@ -4852,6 +5349,10 @@ void DrawPath::EndFrame() {
   skin_data_.clear();
   glass_draws_.clear();  // D191: not drawn into a mask this frame
   glass_data_.clear();
+  planar_draws_.clear();  // D252
+  planar_data_.clear();
+  planar_objects_.clear();
+  sea_seen_ = false;
   sea_draws_.clear();
   sea_data_.clear();
   sea_after_due_ = false;
@@ -4972,7 +5473,7 @@ IDeviceObject* DrawPath::SeaSkyView(uint32_t stage, uint32_t fetch_constant, IDe
                                     const rg::SpirvShader& shader, bool cube) {
   // D240: with or without the renderer's own reflection, every cube map the sea's shaders take (the day sky's
   // outdoorLightReflectionEnvmap of all the maps' seas too) is this one, so the water takes the hour's sky.
-  if (stage != 1 || (fetch_constant != 6 && !cube) || !own_sea_sky_ || !view || !IsSeaShader(shader.ucode_data_hash()) ||
+  if (stage != 1 || (fetch_constant != 6 && !cube) || !own_sea_sky_ || !view || !IsSeaShader(shader.GetUcodeDataHash()) ||
       REXCVAR_GET(native_x_renderer_sea_game_light))  // D245: the game's own painted sky
     return view;
   constexpr uint32_t n = 4;
@@ -5046,14 +5547,14 @@ IDeviceObject* DrawPath::SkinView(uint32_t stage, uint32_t fetch_constant, IDevi
   }
   {  // each pixel shader of the weapon's draws once: its textures, and whether it was taken for the hands'
     static std::set<uint64_t> said;
-    if (said.size() < 24 && said.insert(shader.ucode_data_hash()).second) {
+    if (said.size() < 24 && said.insert(shader.GetUcodeDataHash()).second) {
       std::string list;
       for (const auto& b : shader.GetTextureBindingsAfterTranslation()) {
         const auto f = regs.GetTextureFetch(b.fetch_constant);
         list += fmt::format(" {}:{}x{}/{}", b.fetch_constant, f.size_2d.width + 1, f.size_2d.height + 1, int(f.format));
       }
       REXLOG_INFO("[native_x_renderer] weapon skin: a weapon draw's pixel shader {:016X} ({} vertex constants{}), textures{}",
-                  shader.ucode_data_hash(), weapon_constants_, hands || squares >= 3 ? ", the hands'" : "", list);
+                  shader.GetUcodeDataHash(), weapon_constants_, hands || squares >= 3 ? ", the hands'" : "", list);
     }
   }
   if (int(fetch_constant) != colour) return view;
@@ -5096,7 +5597,7 @@ IDeviceObject* DrawPath::WetView(uint32_t stage, uint32_t fetch_constant, IDevic
   }
   // The hands' draws, whose texture gets no drops: their material has a 512 x 256 texture among its others, the
   // weapons' have none (runs wet1 and wlog2). (Not by the shader: a hosted match draws them with others, run mrg3.)
-  const uint64_t pixel_shader = shader.ucode_data_hash();
+  const uint64_t pixel_shader = shader.GetUcodeDataHash();
   bool skin_shader = false;
   // (In a hosted match their material is another: there it has four 512 x 512 DXT1 textures, its colour among them,
   // where the weapon's has one: runs wlog3, slot1 to slot4 and bump2.)
@@ -5198,7 +5699,7 @@ uint64_t DrawPath::PixelShaderHash(const StateTracker::Program& program) {
   if (program.ucode.empty()) return 0;
   bool new_failure = false;
   rg::SpirvShader* shader = FindShader(xenos::ShaderType::kPixel, program, &new_failure);
-  return shader ? shader->ucode_data_hash() : 0;
+  return shader ? shader->GetUcodeDataHash() : 0;
 }
 
 bool DrawPath::TakeProjection(GtaoProjection& out, float& z_min, float& z_max) {
@@ -5243,6 +5744,33 @@ void DrawPath::CaptureTerrain(const rg::RegisterFile& regs, const rg::SpirvShade
   }
   TerrainFrame& t = *terrain_;
   ++t.draws;
+  {  // D252: this patch, for the planar reflection's underwater test.
+    const float* c = reinterpret_cast<const float*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+    terrain_patch_ = true;
+    terrain_patch_at_[0] = c[21 * 4], terrain_patch_at_[1] = c[21 * 4 + 2], terrain_patch_at_[2] = c[20 * 4];
+    terrain_patch_at_[3] = c[22 * 4 + 2], terrain_patch_at_[4] = c[22 * 4 + 3];
+    terrain_patch_height_[0] = c[20 * 4 + 1], terrain_patch_height_[1] = c[21 * 4 + 1];
+    terrain_patch_fetch_ = fetch;
+  }
+  {  // NXR_TERRAIN_PATCH_LOG=1 (a diagnosis aid, D252): one frame's terrain draws, 60 s in: c20 to c24 and the counts.
+    static const bool patch_log = std::getenv("NXR_TERRAIN_PATCH_LOG") != nullptr;
+    static const auto started = std::chrono::steady_clock::now();
+    static uint64_t frame = 0;
+    static int n = 0;
+    if (patch_log && n < 80 && std::chrono::steady_clock::now() - started > std::chrono::seconds(60)) {
+      const uint64_t now = device_->frames_presented();
+      if (!frame) frame = now;
+      if (now == frame) {
+        ++n;
+        const float* c = reinterpret_cast<const float*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X]);
+        std::string line;
+        for (uint32_t r = 16; r < 28; ++r)
+          line += fmt::format(" c{}=({:.3f} {:.3f} {:.3f} {:.3f})", r, c[r * 4], c[r * 4 + 1], c[r * 4 + 2], c[r * 4 + 3]);
+        REXLOG_INFO("[native_x_renderer] terrain patch {}: {} vertices{}", n,
+                    regs.values[rg::XE_GPU_REG_VGT_DRAW_INITIATOR] >> 16, line);
+      }
+    }
+  }
   const uint32_t* c = &regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X];
   auto get = [&](uint32_t reg, float* out) { std::memcpy(out, &c[reg * 4], 16); };
   // Its depth partition (by the viewport's depth range).
@@ -5281,7 +5809,7 @@ void DrawPath::CaptureTerrain(const rg::RegisterFile& regs, const rg::SpirvShade
   t.height = textures_->View(binding.fetch_constant, fetch, binding.dimension, binding.is_signed);
   t.height_size = fetch.size_2d.width + 1;
   t.height_unorm = fetch.format == xenos::TextureFormat::k_16;
-  t.vertex_shader = vertex_shader.ucode_data_hash();
+  t.vertex_shader = vertex_shader.GetUcodeDataHash();
   t.valid = t.height != nullptr;
   // Research for puddles in craters ("have it create puddles during rainfall where craters form on the map",
   // 14 Nov 2026): does the terrain's height texture change when a crater forms? Once a second its data in the game's

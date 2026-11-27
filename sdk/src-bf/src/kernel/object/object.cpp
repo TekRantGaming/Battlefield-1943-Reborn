@@ -1,0 +1,515 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ *
+ * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+ */
+
+#include <rex/kernel/object/object.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <type_traits>
+#include <variant>
+#include <vector>
+
+#include <rex/assert.h>
+#include <rex/chrono.h>
+#include <rex/kernel/title_runtime.h>
+#include <rex/kernel/object/object_block.h>
+#include <rex/kernel/object/kernel_object.h>
+#include <rex/kernel/object/object_pin.h>
+#include <rex/kernel/object/kernel_thread.h>
+#include <rex/kernel/types/io.h>
+#include <rex/kernel/thread_registry.h>
+#include <rex/kernel/guest_allocator.h>
+#include <rex/platform/sync.h>
+#include <rex/platform/thread.h>
+#include <rex/kernel/object/object_table.h>
+#include "kernel/categories.h"
+#include "kernel/settings_access.h"
+#include "kernel/kernel_pool.h"
+
+#include "kernel/thread_wait.h"
+
+namespace rex::kernel {
+
+namespace {
+
+struct WaitTarget {
+  ThreadPin thread;
+  rex::platform::WaitHandle* handle = nullptr;
+  MutantObject* mutant = nullptr;
+};
+
+rex::platform::WaitHandle* HandleOf(ObjectData& data) {
+  return std::visit(
+      [](auto& object) -> rex::platform::WaitHandle* {
+        using T = std::decay_t<decltype(object)>;
+        if constexpr (std::is_same_v<T, EventObject>) {
+          return object.event.get();
+        } else if constexpr (std::is_same_v<T, SemaphoreObject>) {
+          return object.semaphore.get();
+        } else if constexpr (std::is_same_v<T, MutantObject>) {
+          return object.mutant.get();
+        } else if constexpr (std::is_same_v<T, TimerObject>) {
+          return object.timer.get();
+        } else if constexpr (std::is_same_v<T, NotifyListenerObject>) {
+          return object.wait_handle.get();
+        } else if constexpr (std::is_same_v<T, FileObject>) {
+          return object.async_event.get();
+        } else {
+          return nullptr;
+        }
+      },
+      data);
+}
+
+WaitTarget TargetOf(TitleRuntime& runtime, const ObjectPin& object) {
+  REX_ASSERT(object);
+  WaitTarget target;
+  if (auto* ref = std::get_if<ThreadRef>(&object.GetData())) {
+    target.thread = runtime.GetThreadRegistry().Find(ref->thread_id);
+    target.handle = target.thread ? target.thread->GetThread() : nullptr;
+  } else {
+    target.handle = HandleOf(object.GetData());
+    target.mutant = std::get_if<MutantObject>(&object.GetData());
+  }
+  return target;
+}
+
+template <typename Wait, typename IsCallback>
+auto WaitGuest(u32 alertable, std::chrono::milliseconds timeout, Wait wait,
+               IsCallback is_callback) {
+  using Result = decltype(wait(timeout));
+  if (alertable && KernelThread::GetCallingThread()->HasPendingAPCs()) {
+    if constexpr (std::is_same_v<Result, rex::platform::WaitResult>) {
+      return rex::platform::WaitResult::kUserCallback;
+    } else {
+      return Result{rex::platform::WaitResult::kUserCallback, 0};
+    }
+  }
+  using clock = std::chrono::steady_clock;
+  const bool infinite = timeout == std::chrono::milliseconds::max();
+  const auto deadline = infinite ? clock::time_point::max() : clock::now() + timeout;
+  while (true) {
+    auto result = wait(timeout);
+    if (!is_callback(result)) {
+      return result;
+    }
+    KernelThread::CheckStop();
+    if (alertable) {
+      return result;
+    }
+    if (!infinite) {
+      timeout = std::max(std::chrono::ceil<std::chrono::milliseconds>(deadline - clock::now()),
+                         std::chrono::milliseconds(0));
+    }
+  }
+}
+
+bool IsCallback(rex::platform::WaitResult result) {
+  return result == rex::platform::WaitResult::kUserCallback;
+}
+
+// Battlefield 1943 Reborn patch (v0.10's job_wait_floor_ms, 14 Nov 2026): Frostbite's idle job threads (JobManager1
+// to 5) wait on their job semaphore with a 1 ms timeout and look again, about 800 times a second each, 14% of a core on
+// an idle Linux server, and the client's four about 15,000 times a second in a match. A job posted wakes them at once
+// whatever the timeout, so their short timeouts are lengthened to runtime.job_wait_floor_ms (0: as asked). Measured on
+// v0.10 (Windows, Wake Island's carrier, 90 FPS): about 1% less CPU on sixteen threads; held to two cores, 1% low 80
+// FPS against 67.
+std::chrono::milliseconds JobWaitFloor(std::chrono::milliseconds timeout) {
+  const u32 floor_ms = GetRuntimeSettings().job_wait_floor_ms.Get();
+  if (floor_ms == 0 || timeout.count() <= 0 || timeout == std::chrono::milliseconds::max() ||
+      timeout.count() >= static_cast<i64>(floor_ms)) {
+    return timeout;
+  }
+  // Known once the thread has its name (the title names it after it starts); looked at until then.
+  thread_local bool job_thread = false;
+  if (!job_thread) {
+    const KernelThread* thread = KernelThread::IsInThread() ? KernelThread::GetCallingThread() : nullptr;
+    job_thread = thread && thread->IsJobThread();
+    if (job_thread) {
+      REXKRNL_INFO("Job thread {:08X}'s waits at least {} ms (runtime.job_wait_floor_ms)", thread->GetHandle(),
+                   floor_ms);
+    }
+  }
+  return job_thread ? std::chrono::milliseconds(floor_ms) : timeout;
+}
+
+std::chrono::milliseconds TimeoutOf(u64* opt_timeout) {
+  return opt_timeout ? JobWaitFloor(std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(static_cast<u32>(
+                           TimeoutFromTicks(static_cast<i64>(*opt_timeout)).count()))))
+                     : std::chrono::milliseconds::max();
+}
+
+X_STATUS MapResult(rex::platform::WaitResult result) {
+  switch (result) {
+    case rex::platform::WaitResult::kSuccess:
+      return X_STATUS_SUCCESS;
+    case rex::platform::WaitResult::kUserCallback:
+      return X_STATUS_USER_APC;
+    case rex::platform::WaitResult::kTimeout:
+      rex::platform::MaybeYield();
+      return X_STATUS_TIMEOUT;
+    default:
+      return X_STATUS_ABANDONED_WAIT_0;
+  }
+}
+
+}  // namespace
+
+rex::platform::WaitResult WaitHostObject(rex::platform::WaitHandle* handle,
+                                         std::chrono::milliseconds timeout) {
+  return WaitGuest(
+      0, timeout, [handle](auto left) { return rex::platform::Wait(handle, true, left); },
+      IsCallback);
+}
+
+rex::platform::WaitResult WaitHostSockets(std::span<const rex::platform::SocketWait> sockets,
+                                          std::chrono::milliseconds timeout) {
+  return WaitGuest(
+      0, timeout, [sockets](auto left) { return rex::platform::WaitSockets(sockets, true, left); },
+      IsCallback);
+}
+
+namespace {
+
+constexpr u64 kTicksPerMs = 10000;
+constexpr u64 kLongestMs = 0xFFFFFFFE;
+
+u64 RemainingTicks(i64 timeout_ticks) {
+  if (timeout_ticks < 0) {
+    return 0 - static_cast<u64>(timeout_ticks);
+  }
+  if (timeout_ticks > 0) {
+    const u64 now = Clock::QueryGuestSystemTime();
+    const u64 deadline = static_cast<u64>(timeout_ticks);
+    return deadline > now ? deadline - now : 0;
+  }
+  return 0;
+}
+
+}  // namespace
+
+std::chrono::milliseconds TimeoutFromTicks(i64 timeout_ticks) {
+  const u64 ticks = RemainingTicks(timeout_ticks);
+  const u64 milliseconds = ticks / kTicksPerMs + (ticks % kTicksPerMs != 0 ? 1 : 0);
+  return std::chrono::milliseconds(std::min(milliseconds, kLongestMs));
+}
+
+std::chrono::microseconds DelayFromTicks(i64 delay_ticks) {
+  constexpr u64 kTicksPerMicrosecond = 10;
+  const u64 ticks = std::min<u64>(RemainingTicks(delay_ticks), std::numeric_limits<i64>::max());
+  const u64 scaled =
+      static_cast<u64>(0 - Clock::ScaleGuestDurationFileTime(-static_cast<i64>(ticks)));
+  const u64 microseconds =
+      scaled / kTicksPerMicrosecond + (scaled % kTicksPerMicrosecond != 0 ? 1 : 0);
+  return std::chrono::microseconds(std::min(microseconds, kLongestMs * 1000));
+}
+
+std::string NameFromAttributes(kernel::GuestAddressSpace* memory, u32 obj_attributes_ptr) {
+  if (!obj_attributes_ptr) {
+    return {};
+  }
+  auto name = kernel::TranslateAnsiStringAddress(
+      memory, *memory->TranslateVirtual<const be_u32*>(obj_attributes_ptr + 4));
+  return std::string(name);
+}
+
+ObjectBlock AllocObjectBlock(kernel::GuestAddressSpace* memory, u32 size, u32 type_address,
+                             WorkspaceHeap* workspace, const ObjectBlockOptions& options) {
+  // A named object takes the name after the 4 byte aligned body and 16 more header bytes, as the
+  // console does. The SDK layout keeps the body after the first header, and the rest is unused.
+  const u32 header_size = sizeof(X_OBJECT_HEADER);
+  const u32 total_size = options.name_length
+                             ? ((size + 3) & ~3u) + options.name_length + 2 * header_size
+                             : size + header_size;
+  const u32 thread_shift = options.thread ? 8 : 0;
+  u32 mem = 0;
+  if (workspace) {
+    mem = workspace->Allocate(total_size, false).value_or(0);
+  } else if (type_address != 0) {
+    const u32 pool_type = (options.attributes & 0x1000) ? 1 : (options.attributes & 0x2000) ? 2 : 0;
+    const u32 tag =
+        static_cast<u32>(memory->TranslateVirtual<const X_OBJECT_TYPE*>(type_address)->pool_tag);
+    mem = memory->GetPool().Allocate(total_size + thread_shift, tag, pool_type);
+    if (mem && thread_shift && (mem & 0xFFF) != 0) {
+      mem += thread_shift;
+    }
+  } else {
+    mem = memory->SystemHeapAlloc(total_size);
+  }
+  if (!mem) {
+    return {};
+  }
+  memory->Zero(mem, total_size);
+  auto* header = memory->TranslateVirtual<X_OBJECT_HEADER*>(mem);
+  header->object_type_ptr = type_address;
+  return ObjectBlock{mem + static_cast<u32>(sizeof(X_OBJECT_HEADER)), true, workspace};
+}
+
+void FreeObjectBlock(kernel::GuestAddressSpace* memory, u32 address, WorkspaceHeap* workspace) {
+  if (!address) {
+    return;
+  }
+  const u32 block = address - sizeof(X_OBJECT_HEADER);
+  if (workspace) {
+    workspace->Free(block);
+  } else if (!memory->GetPool().Free(block % 32 == 16 ? block - 8 : block)) {
+    memory->SystemHeapFree(block);
+  }
+}
+
+X_STATUS Wait(TitleRuntime& runtime, const ObjectPin& object, [[maybe_unused]] u32 wait_reason,
+              [[maybe_unused]] u32 processor_mode, u32 alertable, u64* opt_timeout) {
+  WaitTarget target = TargetOf(runtime, object);
+  if (!target.handle) {
+    return X_STATUS_SUCCESS;
+  }
+  const auto timeout = TimeoutOf(opt_timeout);
+  KernelThread::CheckStop();
+  KernelThread::WriteKernelTime();
+  auto result = WaitGuest(
+      alertable, timeout,
+      [&](std::chrono::milliseconds left) {
+        return rex::platform::Wait(target.handle, true, left);
+      },
+      IsCallback);
+  KernelThread::CheckStop();
+  const X_STATUS status = MapResult(result);
+  if ((status == X_STATUS_SUCCESS || status == X_STATUS_ABANDONED_WAIT_0) && target.mutant &&
+      target.mutant->OnAcquired(target.handle)) {
+    return X_STATUS_ABANDONED_WAIT_0;
+  }
+  return status;
+}
+
+X_STATUS SignalAndWait(TitleRuntime& runtime, const ObjectPin& signal_object,
+                       const ObjectPin& wait_object, [[maybe_unused]] u32 wait_reason,
+                       [[maybe_unused]] u32 processor_mode, u32 alertable, u64* opt_timeout) {
+  WaitTarget signal = TargetOf(runtime, signal_object);
+  WaitTarget wait = TargetOf(runtime, wait_object);
+  if (!wait.handle) {
+    return X_STATUS_SUCCESS;
+  }
+  KernelThread::CheckStop();
+  KernelThread::WriteKernelTime();
+  bool signaled = !signal.handle;
+  auto result = WaitGuest(
+      alertable, TimeoutOf(opt_timeout),
+      [&](std::chrono::milliseconds left) {
+        if (signaled) {
+          return rex::platform::Wait(wait.handle, true, left);
+        }
+        signaled = true;
+        return rex::platform::SignalAndWait(signal.handle, wait.handle, true, left);
+      },
+      IsCallback);
+  KernelThread::CheckStop();
+  const X_STATUS status = MapResult(result);
+  if ((status == X_STATUS_SUCCESS || status == X_STATUS_ABANDONED_WAIT_0) && wait.mutant &&
+      wait.mutant->OnAcquired(wait.handle)) {
+    return X_STATUS_ABANDONED_WAIT_0;
+  }
+  return status;
+}
+
+X_STATUS WaitMultiple(TitleRuntime& runtime, std::span<const ObjectPin> objects, u32 wait_type,
+                      [[maybe_unused]] u32 wait_reason, [[maybe_unused]] u32 processor_mode,
+                      u32 alertable, u64* opt_timeout) {
+  std::vector<WaitTarget> targets;
+  targets.reserve(objects.size());
+  std::vector<rex::platform::WaitHandle*> wait_handles;
+  wait_handles.reserve(objects.size());
+  size_t idle_index = objects.size();
+  for (const ObjectPin& object : objects) {
+    WaitTarget target = TargetOf(runtime, object);
+    if (!target.handle) {
+      idle_index = std::min(idle_index, targets.size());
+    } else if (wait_type ? idle_index == objects.size() : true) {
+      wait_handles.push_back(target.handle);
+    }
+    targets.push_back(std::move(target));
+  }
+  if (!wait_type && wait_handles.empty()) {
+    return X_STATUS_SUCCESS;
+  }
+  const auto timeout = TimeoutOf(opt_timeout);
+  KernelThread::CheckStop();
+  KernelThread::WriteKernelTime();
+  if (wait_type) {
+    std::pair<rex::platform::WaitResult, size_t> result{rex::platform::WaitResult::kSuccess,
+                                                        idle_index};
+    if (idle_index == objects.size()) {
+      result = WaitGuest(
+          alertable, timeout,
+          [&](std::chrono::milliseconds left) {
+            return rex::platform::WaitAny(wait_handles.data(), wait_handles.size(), true, left);
+          },
+          [](const auto& r) { return IsCallback(r.first); });
+    } else if (!wait_handles.empty()) {
+      const auto polled = rex::platform::WaitAny(wait_handles.data(), wait_handles.size(), true,
+                                                 std::chrono::milliseconds(0));
+      if (polled.first == rex::platform::WaitResult::kSuccess) {
+        result = polled;
+      }
+    }
+    KernelThread::CheckStop();
+    switch (result.first) {
+      case rex::platform::WaitResult::kSuccess:
+        if (targets[result.second].mutant &&
+            targets[result.second].mutant->OnAcquired(targets[result.second].handle)) {
+          return static_cast<X_STATUS>(X_STATUS_ABANDONED_WAIT_0 + result.second);
+        }
+        return static_cast<X_STATUS>(result.second);
+      case rex::platform::WaitResult::kUserCallback:
+        return X_STATUS_USER_APC;
+      case rex::platform::WaitResult::kTimeout:
+        rex::platform::MaybeYield();
+        return X_STATUS_TIMEOUT;
+      case rex::platform::WaitResult::kFailed:
+        return X_STATUS_UNSUCCESSFUL;
+      default:
+        if (targets[result.second].mutant) {
+          (void)targets[result.second].mutant->OnAcquired(targets[result.second].handle);
+        }
+        return static_cast<X_STATUS>(X_STATUS_ABANDONED_WAIT_0 + result.second);
+    }
+  }
+  auto result = WaitGuest(
+      alertable, timeout,
+      [&](std::chrono::milliseconds left) {
+        return rex::platform::WaitAll(wait_handles.data(), wait_handles.size(), true, left);
+      },
+      IsCallback);
+  KernelThread::CheckStop();
+  switch (result) {
+    case rex::platform::WaitResult::kSuccess: {
+      bool abandoned = false;
+      for (WaitTarget& target : targets) {
+        if (target.mutant && target.mutant->OnAcquired(target.handle)) {
+          abandoned = true;
+        }
+      }
+      return abandoned ? X_STATUS_ABANDONED_WAIT_0 : X_STATUS_SUCCESS;
+    }
+    case rex::platform::WaitResult::kUserCallback:
+      return X_STATUS_USER_APC;
+    case rex::platform::WaitResult::kTimeout:
+      rex::platform::MaybeYield();
+      return X_STATUS_TIMEOUT;
+    default:
+      for (WaitTarget& target : targets) {
+        if (target.mutant) {
+          (void)target.mutant->OnAcquired(target.handle);
+        }
+      }
+      return X_STATUS_ABANDONED_WAIT_0;
+  }
+}
+
+namespace {
+
+std::atomic<i64> g_spin_bound_ns{0};
+std::once_flag g_spin_bound_once;
+
+constexpr int kWarmupRoundTrips = 32;
+constexpr int kTimedRoundTrips = 200;
+
+/** Returns the lowest set bit of the mask, or 0 for an empty mask. */
+u64 LowestBitOf(u64 mask) {
+  return mask & (~mask + 1);
+}
+
+/**
+ * Returns half the median round trip of 2 host threads that pass control through 2 auto reset
+ * events, the cost of one block and one wake on another processor. Each thread is pinned to its
+ * own processor of the process affinity mask, and the measuring thread is unpinned before it ends.
+ * Returns 0 when the mask holds 1 processor.
+ */
+std::chrono::nanoseconds MeasureBlockAndWake() {
+  auto ping = rex::platform::Event::CreateAutoResetEvent(false);
+  auto pong = rex::platform::Event::CreateAutoResetEvent(false);
+  if (!ping || !pong) {
+    return {};
+  }
+  using clock = std::chrono::steady_clock;
+  clock::duration cost{};
+  auto measurer = rex::platform::Thread::Create({}, [&] {
+    rex::platform::Thread* self = rex::platform::Thread::GetCallingThread();
+    const u64 mask = self->GetAffinityMask();
+    const u64 first = LowestBitOf(mask);
+    const u64 second = LowestBitOf(mask & ~first);
+    if (second == 0) {
+      return;
+    }
+    self->SetAffinityMask(first);
+    constexpr int kRoundTrips = kWarmupRoundTrips + kTimedRoundTrips;
+    auto partner = rex::platform::Thread::Create({}, [&] {
+      rex::platform::Thread::GetCallingThread()->SetAffinityMask(second);
+      for (int n = 0; n < kRoundTrips; ++n) {
+        (void)rex::platform::Wait(ping.get(), false);
+        pong->Set();
+      }
+    });
+    if (partner) {
+      std::array<clock::duration, kTimedRoundTrips> trips{};
+      for (int n = 0; n < kRoundTrips; ++n) {
+        const auto start = clock::now();
+        ping->Set();
+        (void)rex::platform::Wait(pong.get(), false);
+        if (n >= kWarmupRoundTrips) {
+          trips[n - kWarmupRoundTrips] = clock::now() - start;
+        }
+      }
+      (void)rex::platform::Wait(partner.get(), false);
+      auto median = trips.begin() + kTimedRoundTrips / 2;
+      std::ranges::nth_element(trips, median);
+      cost = *median;
+    }
+    self->SetAffinityMask(mask);
+  });
+  if (measurer) {
+    (void)rex::platform::Wait(measurer.get(), false);
+  }
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(cost) / 2;
+}
+
+}  // namespace
+
+void MeasureWaitSpinBound() {
+  std::call_once(g_spin_bound_once, [] {
+    if (rex::platform::GetLogicalProcessorCount() < 2) {
+      REXKRNL_INFO("Contended critical sections do not spin on a host with 1 logical processor");
+      return;
+    }
+    const std::chrono::nanoseconds bound = MeasureBlockAndWake();
+    g_spin_bound_ns.store(bound.count(), std::memory_order_relaxed);
+    if (bound.count() == 0) {
+      REXKRNL_INFO("Contended critical sections do not spin, no 2 processors to measure across");
+      return;
+    }
+    REXKRNL_INFO(
+        "Contended critical sections spin for up to {} ns before they block, the measured host "
+        "block and wake cost across processors",
+        bound.count());
+  });
+}
+
+std::chrono::nanoseconds GetWaitSpinBound() {
+  return std::chrono::nanoseconds(g_spin_bound_ns.load(std::memory_order_relaxed));
+}
+
+void SetWaitSpinBoundForTest(std::chrono::nanoseconds bound) {
+  g_spin_bound_ns.store(bound.count(), std::memory_order_relaxed);
+}
+
+}  // namespace rex::kernel
