@@ -47,7 +47,7 @@ Reborn servers and community servers, and the options of a modern PC release.
 | 🖱️ **Keyboard and mouse** in every seat, planes flown with the mouse | 🎮 **Any controller**, with Xbox, PlayStation or Steam Deck prompts | 🎚️ **Graphics presets** from Potato to Ultra |
 | 🎙️ **Proximity voice chat** and text chat, with a profanity filter | 🔒 **Custom Match**: your own match, online or LAN, with a password | 🔎 **Server browser** with regions, tick rates and Direct connect |
 | 🗺️ **Lettered flags** and a map of the whole battle in the menu | 🔄 **Updates itself** at every start | 🚂 **Add to Steam** with the game's artwork |
-| 🏅 **Stats & Awards, Leaderboards** and **Achievements**, all 12 plus 3 of Reborn's own | 🏷️ **Clan tags** and **a name you can protect**, with no email or password | ⚖️ **Fairer teams**, with no points lost when you are moved |
+| 🏅 **Stats & Awards, Leaderboards** and **Achievements**, all 12 plus 8 of Reborn's own | 🏷️ **Clan tags** and **a name you can protect**, with no email or password | ⚖️ **Fairer teams**, with no points lost when you are moved |
 | 🐧 **Linux and Steam Deck** as one AppImage, Ubuntu 22.04 and newer | 🖧 **Host your own servers** from a page in your browser | 📰 **News** on the main menu and **your match on Discord** |
 | 🐞 **Report an issue** from the game, no GitHub account needed | 🔊 **The original menu sounds** in our menus | 💬 **[Join the Discord](https://discord.gg/8eakYSvBZS)** right from Home |
 
@@ -109,7 +109,7 @@ player logs in to and which lists every server.
 - **Stats & Awards**: your rank, kills, flags, headshots, repairs, your time in each kit and vehicle and your results
   on each map, counted by the Reborn servers, for all time, this month and this week
 - **Leaderboards**: Score, Kills, K/D, Flags and Time, with your own row pinned
-- **Achievements**: the game's 12 plus 3 of Reborn's own, with your progress on each, how many players have it, and a
+- **Achievements**: the game's 12 plus 8 of Reborn's own, with your progress on each, how many players have it, and a
   popup with a chime when you unlock one
 - **Clan tags**: 2 to 4 letters or digits before your name, as [TAG]YourName, on the menus, the scoreboard, the kill
   feed and in chat
