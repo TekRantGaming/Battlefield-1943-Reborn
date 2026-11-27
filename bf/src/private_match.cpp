@@ -9,6 +9,7 @@
 #include <random>
 
 #include "private_match.h"
+#include "player_limits.h"
 #include "world_sync.h"
 
 #include <algorithm>
@@ -60,6 +61,14 @@ struct State {
 std::atomic<uint64_t> g_self{0};  // ip << 16 | port, network order; 0: none
 
 fs::path MatchDir() { return g.user / "private_match"; }
+
+// One of the server sizes (player_limits.h), the nearest at or under the one asked for.
+int MatchSize(int size) {
+  int pick = kServerSizes[0];
+  for (const int s : kServerSizes)
+    if (s <= size) pick = s;
+  return pick;
+}
 
 const char* LevelOf(const std::string& key) {
   if (key == "guadalcanal") return "Levels/Guadal_Canal";
@@ -132,6 +141,7 @@ std::wstring ServerEnvironment() {
       // spawns are moved to the airfield's flag; BF_BOTS and BF_BOT_*: the bots' tests) goes to the server too.
       const bool for_server = _wcsnicmp(entry.c_str(), L"BF_DEV_MOVE_SPAWNS", 18) == 0 ||
                               _wcsnicmp(entry.c_str(), L"BF_BOTS=", 8) == 0 ||
+                              _wcsnicmp(entry.c_str(), L"BF_DEV_EVENT_RAMP=", 18) == 0 ||  // Night Ops' build, fast
                               _wcsnicmp(entry.c_str(), L"BF_BOT_", 7) == 0;
 #else
       const bool for_server = false;
@@ -287,7 +297,11 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
       {"--bf_round_end_delay", "45"},
       // At the rate this game runs at: its own game joins it without starting again.
       {"--bf_tick_rate", std::to_string(o.tick ? o.tick : TickRate())},
-      {"--bf_bots", std::to_string(std::clamp(o.bots, 0, 24))},
+      // Its size (24, 32 or 64): the players the backend sends it and the room its bots fill (bots.cpp), as a
+      // dedicated server's --bf_gm_max_players from the server manager.
+      {"--bf_gm_max_players", std::to_string(MatchSize(o.size))},
+      {"--bf_bots", std::to_string(std::clamp(o.bots, 0, MatchSize(o.size)))},
+      {"--bf_world_event", std::to_string(std::clamp(o.event, 0, 2))},
       {"--bf_gm_backend", registry},
       {"--bf_gm_listen", (LoopbackOnly() ? "127.0.0.1:" : "0.0.0.0:") + std::to_string(g.port)},
       {"--bf_gm_name", Clean(o.name.empty() ? std::string("Private match") : o.name), true},
@@ -317,8 +331,8 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
            {"--bf_world_cloud_height", number(o.cloud_height)},
            {"--bf_world_dynamic_storm", o.dynamic_storm ? "true" : "false"},
            {"--bf_world_storm_type", std::to_string(std::clamp(o.storm_type, 0, 1))},  // D224
-           // The page's "map's own" (0) is the level's own count, never scaled (-1; match_rules.cpp).
-           {"--bf_match_tickets", o.tickets > 0 ? std::to_string(std::min(o.tickets, 9999)) : std::string("-1")},
+           // As the server manager's: 0 automatic (the map's own scaled to the size), -1 the map's own (match_rules.cpp).
+           {"--bf_match_tickets", o.tickets > 0 ? std::to_string(std::min(o.tickets, 9999)) : o.tickets < 0 ? "-1" : "0"},
            {"--bf_match_time_limit", std::to_string(std::clamp(o.time_limit, 0, 600))},
            {"--bf_world_admin_key", admin_key},
            {"--bf_gm_status_file", (dir / "status.json").string(), true},
@@ -370,7 +384,9 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
   g.pid = pid;
   const uint32_t server_pid = uint32_t(pid);
 #endif
-  REXLOG_INFO("BF private match: our server started (PID {}, maps {}, UDP {}{})", server_pid, rotation, g.port,
+  REXLOG_INFO("BF private match: our server started (PID {}, maps {}, UDP {}, size {}, {} bots, {}{})", server_pid,
+              rotation, g.port, MatchSize(o.size), std::clamp(o.bots, 0, MatchSize(o.size)),
+              o.event == 1 ? "Night Ops" : o.event == 2 ? "Daybreak" : "Classic",
               o.lan ? ", a LAN match with its own backend" : o.upnp && !LoopbackOnly() ? ", router port asked" : "");
   return true;
 }
