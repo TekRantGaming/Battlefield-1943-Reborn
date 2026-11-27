@@ -36,7 +36,7 @@ run. It is **free, unofficial and open source**, and it ships **no game files**:
 <table>
 <tr>
 <td width="33%" valign="top"><img src="docs/images/readme/icons/map.png" width="40" alt=""><br><b>All four maps</b><br>Wake Island, Guadalcanal, Iwo Jima and Coral Sea, with the air raid, as in the original.</td>
-<td width="33%" valign="top"><img src="docs/images/readme/icons/people.png" width="40" alt=""><br><b>Online play is back</b><br>Project-Official Servers and anyone's own, at 60 Hz, twice the console's tick rate, for up to 64 players.</td>
+<td width="33%" valign="top"><img src="docs/images/readme/icons/people.png" width="40" alt=""><br><b>Online play is back</b><br>Reborn servers and anyone's own, at 60 Hz, twice the console's tick rate, for up to 64 players.</td>
 <td width="33%" valign="top"><img src="docs/images/readme/icons/moon.png" width="40" alt=""><br><b>Night Ops and Daybreak</b><br>Night battles under a building storm, and rounds that start at sunrise in the mist. New in 0.4.8.</td>
 </tr>
 <tr>
@@ -183,7 +183,7 @@ in: when a newer one is out, a pop-up says so, with **Update**.
 <img src="docs/images/readme/chapter-3.png" alt="Chapter 2: Playing online. No hosting needed: Quick Play gets you in." width="100%">
 
 EA's servers for the original game are gone. 1943 Reborn brings online play back with its own main backend, which every
-player logs in to and which lists every server. **You never need to host**: the Project-Official Servers and the
+player logs in to and which lists every server. **You never need to host**: the Reborn servers and the
 community's servers are online around the clock.
 
 <img src="docs/images/readme/board-launcher.jpg" alt="Our launcher: Home with Quick Play, the Server Browser, and the first start's name page with clan tag and name protection" width="100%">
@@ -203,7 +203,7 @@ community's servers are online around the clock.
 </td>
 <td width="50%" valign="top">
 
-### Project-Official Servers
+### Reborn servers
 Run by TekRantGaming at 60 Hz in Europe (EU Central), all with bots, on Wake Island, Guadalcanal and Iwo Jima:
 
 | Server | Players |
