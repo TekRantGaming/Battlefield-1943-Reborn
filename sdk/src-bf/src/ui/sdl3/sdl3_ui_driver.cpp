@@ -161,6 +161,35 @@ struct SDL3UIDriver::State {
     return density > 0.0f ? density : 1.0f;
   }
 
+  // Battlefield 1943 Reborn patch (27 Nov 2026, as v0.10's Window::SizeToPhysical): the window's sizes from the
+  // settings are logical (96 DPI); SDL takes them in physical pixels on Windows and X11, so they are scaled by the
+  // display's content scale (macOS: SDL works in points itself). v0.11 passed them unscaled, and at 250 % scaling a
+  // 1280x720 window came out a third of its size with its text drawn tiny (0.4.8: 3200x1800 there).
+  f32 LogicalScale(i32 monitor_index) const {
+#if REX_PLATFORM_MAC
+    (void)monitor_index;
+    return 1.0f;
+#else
+    f32 scale = 0.0f;
+    if (window) {
+      scale = SDL_GetWindowDisplayScale(window);
+    } else {
+      SDL_DisplayID display = SDL_GetPrimaryDisplay();
+      int display_count = 0;
+      if (SDL_DisplayID* displays = SDL_GetDisplays(&display_count)) {
+        if (monitor_index > 0 && monitor_index <= display_count) display = displays[monitor_index - 1];
+        SDL_free(displays);
+      }
+      scale = SDL_GetDisplayContentScale(display);
+    }
+    return scale > 0.0f ? scale : 1.0f;
+#endif
+  }
+  int ToPhysical(u32 size, i32 monitor_index) const {
+    // rounded up, as v0.10's ConvertSizeDpi: no zero sizes and no gaps at the edge
+    return static_cast<int>(std::ceil(static_cast<f64>(size) * LogicalScale(monitor_index) - 1e-6));
+  }
+
   void CenterOnMonitor() {
     if (!window || monitor <= 0) {
       return;
@@ -493,8 +522,8 @@ Result<void> SDL3UIDriver::OpenWindow(const WindowConfig& config) {
   const int width = static_cast<int>(config.width);
   const int height = static_cast<int>(config.height);
 #else
-  const int width = static_cast<int>(config.width);
-  const int height = static_cast<int>(config.height);
+  const int width = s.ToPhysical(config.width, config.monitor);
+  const int height = s.ToPhysical(config.height, config.monitor);
 #endif
   s.window = SDL_CreateWindow(config.title.c_str(), width, height, flags);
   if (!s.window) {
@@ -571,7 +600,7 @@ void SDL3UIDriver::SetSize(u32 width, u32 height) {
                     (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MINIMIZED))) {
     return;
   }
-  SDL_SetWindowSize(s.window, static_cast<int>(width), static_cast<int>(height));
+  SDL_SetWindowSize(s.window, s.ToPhysical(width, s.monitor), s.ToPhysical(height, s.monitor));
 }
 
 void SDL3UIDriver::SetLimits(u32 min_width, u32 min_height, AspectRatio ratio) {
@@ -579,7 +608,8 @@ void SDL3UIDriver::SetLimits(u32 min_width, u32 min_height, AspectRatio ratio) {
   if (!s.window) {
     return;
   }
-  SDL_SetWindowMinimumSize(s.window, static_cast<int>(min_width), static_cast<int>(min_height));
+  SDL_SetWindowMinimumSize(s.window, min_width ? s.ToPhysical(min_width, s.monitor) : 0,
+                           min_height ? s.ToPhysical(min_height, s.monitor) : 0);
   const f32 value = RatioOf(ratio);
   SDL_SetWindowAspectRatio(s.window, value, value);
 }
