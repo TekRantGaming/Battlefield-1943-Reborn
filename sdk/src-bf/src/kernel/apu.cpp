@@ -45,6 +45,9 @@ std::condition_variable g_mixer_tick_cv;
 // The audio log line, every 30 s while frames are rendered (the worker thread only): frames, waits for the title's
 // mixer, their time, and waits that ran out.
 u64 g_stat_frames = 0, g_stat_waits = 0, g_stat_waits_out = 0, g_stat_wait_us = 0;
+// The output's underruns (rex::apu AudioStats: a mix period with nothing queued, silence played) at the last line, so
+// each line says how many came in its 30 s: a player's log shows whether the sound broke up (issue 74, 0.4.8.1).
+u64 g_stat_underruns_said = 0;
 std::chrono::steady_clock::time_point g_stat_since{};
 
 // While the title's check says its mixer has no packet ready, wait for it, up to kRenderWait. After a wait that ran
@@ -174,8 +177,11 @@ void APU::WorkerMain() {
         if (const auto stat_now = std::chrono::steady_clock::now(); g_stat_since == std::chrono::steady_clock::time_point{}) {
           g_stat_since = stat_now;
         } else if (stat_now - g_stat_since >= std::chrono::seconds(30)) {
+          const u64 underruns = audio_ ? audio_->GetStats().underruns : 0;
           REXAPU_INFO("Audio: over 30 s, {} frames rendered; the game's mixer waited for {} times, {:.1f} ms in all, {} "
-                      "ran out", g_stat_frames, g_stat_waits, g_stat_wait_us / 1000.0, g_stat_waits_out);
+                      "ran out; {} underruns (silence played)", g_stat_frames, g_stat_waits, g_stat_wait_us / 1000.0,
+                      g_stat_waits_out, underruns - std::min(underruns, g_stat_underruns_said));
+          g_stat_underruns_said = underruns;
           g_stat_frames = g_stat_waits = g_stat_waits_out = g_stat_wait_us = 0;
           g_stat_since = stat_now;
         }
