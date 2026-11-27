@@ -112,6 +112,21 @@ REXCVAR_DEFINE_BOOL(bf_bots_dynamic_aggression, true, "BF1943/Server",
 REXCVAR_DEFINE_BOOL(bf_bots_squad_humans, false, "BF1943/Server",
                     "Bots: a human in no squad is put into a squad with bots (off: players choose their own; bots fill "
                     "theirs)");
+// The shared bot data (TekRantGaming, 26 Nov 2026: "we do this for the official servers only, and then we can, when we
+// do like hot fixes and releases, also include updated bot information for community servers"). The official servers
+// hand what their bots learn to the main backend (bots/outbox/, sent by server/gmhost.py), which merges it
+// (server/botdata.py) and sends the merged set back to them (bots/network/); every release carries the latest set
+// beside the program (data/bots/). The bots use the newer of the two over this server's own learning.
+REXCVAR_DEFINE_BOOL(bf_bots_shared_data, true, "BF1943/Server",
+                    "Bots: start from the shared bot data (the official servers' merged learning: the set shipped with "
+                    "the game, or on an official server the latest one); off: this server's own learning only");
+REXCVAR_DEFINE_BOOL(bf_bots_share, false, "BF1943/Server",
+                    "Bots (official servers; the server manager sets it): hand what is learned here to the shared set");
+REXCVAR_DEFINE_INT32(bf_bots_share_minutes, 15, "BF1943/Server",
+                     "Bots: minutes between two hand-offs of what was learned to the shared set");
+REXCVAR_DEFINE_INT32(bf_bots_share_min_players, 3, "BF1943/Server",
+                     "Bots: a hand-off to the shared set waits until this many different human players have played the "
+                     "map since the last one (never one player's routes alone)");
 
 namespace bf1943 {
 std::string CurrentMapTitle();  // server_rotation.cpp: the map now ("" without a rotation)
@@ -1098,102 +1113,332 @@ struct Learned {
   Clock::time_point saved_at{};
 } learn;
 
-std::filesystem::path LearnedFile() {
-  const std::filesystem::path root = REXCVAR_GET(user_data_root);
-  if (root.empty() || learn.map.empty()) return {};
+// The layers (the shared bot data, 26 Nov 2026). `own` is this server's own learning, its file bots/<map>.txt as
+// before. `learn`, what the bots use, is own + the shared set (the official servers' merged learning, SharedPick) -
+// `sent`, what of own an official server already handed to the shared set (bots/sent/<map>.txt: in the shared set
+// already, or soon), so nothing counts twice. Every new thing learned goes into both learn and own (Note).
+Learned own, sent;
+template <class F>
+void Note(F&& f) {
+  f(learn), f(own);
+  learn.dirty = true;
+}
+
+std::string MapFileName(const std::string& map) {
   std::string name;
-  for (char c : learn.map) name += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
-  return root / "bots" / (name + ".txt");
+  for (char c : map) name += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+  return name;
+}
+
+std::filesystem::path BotsDir() {
+  const std::filesystem::path root = REXCVAR_GET(user_data_root);
+  return root.empty() ? std::filesystem::path() : root / "bots";
+}
+
+std::filesystem::path LearnedFile() {
+  if (BotsDir().empty() || learn.map.empty()) return {};
+  return BotsDir() / (MapFileName(learn.map) + ".txt");
+}
+
+// The program's own folder (the shipped set is in its data/bots/, as the packages lay it out).
+std::filesystem::path ProgramDir() {
+#if defined(_WIN32)
+  wchar_t p[MAX_PATH * 2] = {};
+  const DWORD n = GetModuleFileNameW(nullptr, p, DWORD(std::size(p)));
+  return n ? std::filesystem::path(p).parent_path() : std::filesystem::path();
+#else
+  std::error_code ec;
+  const std::filesystem::path p = std::filesystem::read_symlink("/proc/self/exe", ec);
+  return ec ? std::filesystem::path() : p.parent_path();
+#endif
+}
+
+// A shared set's version: its version.txt's "version <n>" (server/botdata.py writes it last), 0 without one.
+int64_t SharedVersion(const std::filesystem::path& dir) {
+  std::ifstream f(dir / "version.txt");
+  std::string word;
+  long long v = 0;
+  if (!(f >> word >> v) || word != "version" || v < 0) return 0;
+  return v;
+}
+
+// The shared set the bots start from: the network's (bots/network/, an official server's host keeps it up to date)
+// or the one shipped with the program (data/bots/), the newer; none with bf_bots_shared_data off.
+struct SharedPick {
+  std::filesystem::path dir;
+  int64_t version = 0;
+  const char* from = "";
+} shared_pick;
+SharedPick PickShared() {
+  SharedPick best;
+  if (!REXCVAR_GET(bf_bots_shared_data)) return best;
+  const std::filesystem::path program = ProgramDir();
+  const std::pair<std::filesystem::path, const char*> places[] = {
+      {BotsDir().empty() ? std::filesystem::path() : BotsDir() / "network", "the official servers' latest"},
+      {program.empty() ? std::filesystem::path() : program / "data" / "bots", "shipped with the game"}};
+  for (const auto& [dir, from] : places) {
+    if (dir.empty()) continue;
+    const int64_t v = SharedVersion(dir);
+    if (v > best.version) best = SharedPick{dir, v, from};
+  }
+  return best;
 }
 
 int CellX(uint64_t key) { return int(uint32_t(key >> 32)); }
 int CellZ(uint64_t key) { return int(uint32_t(key)); }
 
-void SaveStyle();
-// The bots' files are written on a thread of their own (the optimization pass, 20 Nov 2026: a save on the server's
-// tick wrote hundreds of thousands of lines and stalled it), one at a time; the tick only takes a copy.
-std::mutex save_mutex;
-void SaveLearned() {
-  const std::filesystem::path file = LearnedFile();
-  if (file.empty()) return;
-  auto snap = std::make_shared<Learned>(learn);
-  learn.dirty = false, learn.saved_at = Clock::now();
-  SaveStyle();
-  std::thread([file, snap] {
-    std::lock_guard lock(save_mutex);
-    const Learned& learn = *snap;
-    std::error_code ec;
-    std::filesystem::create_directories(file.parent_path(), ec);
-    const std::filesystem::path tmp = file.string() + ".new";
-    {
-      std::ofstream f(tmp, std::ios::trunc);
-      if (!f) return;
-      f << "BF1943 Reborn bots, what they learned on " << learn.map << " (1)\n";
-      for (const auto& [k, y] : learn.walk_y) f << "c " << CellX(k) << ' ' << CellZ(k) << ' ' << y << '\n';
-      for (const auto& [k, w] : learn.step_use)
-        f << "s " << CellX(k >> 3) << ' ' << CellZ(k >> 3) << ' ' << (k & 7) << ' ' << w << '\n';
-      const char* kinds[3] = {"k", "d", "w"};
-      const std::unordered_map<uint64_t, float>* maps[3][2] = {
-          {&learn.kills[0], &learn.kills[1]}, {&learn.deaths[0], &learn.deaths[1]}, {&learn.waits[0], &learn.waits[1]}};
-      for (int kind = 0; kind < 3; ++kind)
-        for (int side = 0; side < 2; ++side)
-          for (const auto& [k, w] : *maps[kind][side])
-            f << kinds[kind] << ' ' << side + 1 << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << w << '\n';
-      for (const auto& [flag, steps] : learn.ways_in)
-        for (const auto& [k, w] : steps)
-          f << "a " << flag << ' ' << CellX(k >> 3) << ' ' << CellZ(k >> 3) << ' ' << (k & 7) << ' ' << w << '\n';
-      for (const auto& [key, v] : learn.vehicles) {
-        f << "vt " << key << ' ' << v.time << ' ' << v.kills << ' ' << v.kill_dist << '\n';
-        for (const auto& [k, c] : v.cells)
-          f << "vc " << key << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << c.first / c.second << ' ' << c.second << '\n';
-        for (const auto& [k, w] : v.kills_at) f << "vk " << key << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << w << '\n';
-      }
-    }
-    std::filesystem::rename(tmp, file, ec);
-  }).detach();
-}
-
 // Steps' keys hold the cell in their upper bits (the cell key shifted by 3, the direction in the low 3).
 uint64_t StepKey(int ix, int iz, int d) { return (CellKey(ix, iz) << 3) ^ uint64_t(d); }
 
-// What earlier matches learned on this map: into the store, and the walked ground into the grid.
-void LoadLearned(const std::string& map) {
-  learn = Learned{};
-  learn.map = map;
-  learn.saved_at = Clock::now();
-  const std::filesystem::path file = LearnedFile();
-  std::ifstream f(file);
-  if (!f) {
-    REXLOG_INFO("BF bots: nothing learned on {} yet ({})", map, file.string());
-    return;
+// One store in the files' text form (the header line, then a line per entry; read back by ReadLearned).
+void WriteLearned(std::ostream& f, const Learned& learn, const std::string& header) {
+  f << header << '\n';
+  for (const auto& [k, y] : learn.walk_y) f << "c " << CellX(k) << ' ' << CellZ(k) << ' ' << y << '\n';
+  for (const auto& [k, w] : learn.step_use)
+    f << "s " << CellX(k >> 3) << ' ' << CellZ(k >> 3) << ' ' << (k & 7) << ' ' << w << '\n';
+  const char* kinds[3] = {"k", "d", "w"};
+  const std::unordered_map<uint64_t, float>* maps[3][2] = {
+      {&learn.kills[0], &learn.kills[1]}, {&learn.deaths[0], &learn.deaths[1]}, {&learn.waits[0], &learn.waits[1]}};
+  for (int kind = 0; kind < 3; ++kind)
+    for (int side = 0; side < 2; ++side)
+      for (const auto& [k, w] : *maps[kind][side])
+        f << kinds[kind] << ' ' << side + 1 << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << w << '\n';
+  for (const auto& [flag, steps] : learn.ways_in)
+    for (const auto& [k, w] : steps)
+      f << "a " << flag << ' ' << CellX(k >> 3) << ' ' << CellZ(k >> 3) << ' ' << (k & 7) << ' ' << w << '\n';
+  for (const auto& [key, v] : learn.vehicles) {
+    f << "vt " << key << ' ' << v.time << ' ' << v.kills << ' ' << v.kill_dist << '\n';
+    for (const auto& [k, c] : v.cells)
+      if (c.second > 0)
+        f << "vc " << key << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << c.first / c.second << ' ' << c.second << '\n';
+    for (const auto& [k, w] : v.kills_at) f << "vk " << key << ' ' << CellX(k) << ' ' << CellZ(k) << ' ' << w << '\n';
   }
+}
+
+// One store from a file, every value checked (bots-learning.md, 26 Nov 2026: a weight of -1 or less, as a host's edit
+// could leave, made the route search's costs -inf or NaN): finite and not negative, cells within 2 million metres,
+// names short; anything else is left out. False when there is no such file.
+bool ReadLearned(const std::filesystem::path& file, Learned& out) {
+  if (file.empty()) return false;
+  std::ifstream f(file);
+  if (!f) return false;
+  const auto fine = [](double v) { return std::isfinite(v) && v >= 0 && v < 1e9; };
+  const auto cell_ok = [](int x, int z) { return std::abs(x) <= (1 << 20) && std::abs(z) <= (1 << 20); };
+  const auto name_ok = [](const std::string& s) { return !s.empty() && s.size() <= 64; };
+  // A step's x as WriteLearned writes it: CellX(key >> 3) keeps 29 bits, so a cell left of 0 comes out as x + 2^29
+  // (StepKey of either gives the same key). Back to its own value, for the checks.
+  const auto step_x = [](int x) {
+    x &= 0x1FFFFFFF;
+    return x >= (1 << 28) ? x - (1 << 29) : x;
+  };
   std::string line;
   std::getline(f, line);
-  while (std::getline(f, line)) {
+  size_t lines = 0;
+  while (std::getline(f, line) && ++lines <= 8000000) {
     std::istringstream in(line);
     std::string kind;
     in >> kind;
     int x = 0, z = 0, d = 0, side = 0;
     float v = 0;
     if (kind == "c" && (in >> x >> z >> v)) {
-      learn.walk_y[CellKey(x, z)] = v;
+      if (cell_ok(x, z) && std::isfinite(v) && std::fabs(v) < 1e5f) out.walk_y[CellKey(x, z)] = v;
     } else if (kind == "s" && (in >> x >> z >> d >> v) && d >= 0 && d < 8) {
-      learn.step_use[StepKey(x, z, d)] = v;
+      x = step_x(x);
+      if (cell_ok(x, z) && fine(v)) out.step_use[StepKey(x, z, d)] = v;
     } else if ((kind == "k" || kind == "d" || kind == "w") && (in >> side >> x >> z >> v) && (side == 1 || side == 2)) {
-      auto& m = kind == "k" ? learn.kills[side - 1] : kind == "d" ? learn.deaths[side - 1] : learn.waits[side - 1];
-      m[CellKey(x, z)] = v;
+      auto& m = kind == "k" ? out.kills[side - 1] : kind == "d" ? out.deaths[side - 1] : out.waits[side - 1];
+      if (cell_ok(x, z) && fine(v)) m[CellKey(x, z)] = v;
     } else if (kind == "a") {
       std::string flag;
-      if (in >> flag >> x >> z >> d >> v && d >= 0 && d < 8) learn.ways_in[flag][StepKey(x, z, d)] = v;
+      if (in >> flag >> x >> z >> d >> v && d >= 0 && d < 8 && name_ok(flag) && cell_ok(x = step_x(x), z) && fine(v))
+        out.ways_in[flag][StepKey(x, z, d)] = v;
     } else if (kind == "vt" || kind == "vc" || kind == "vk") {
       std::string key;
       double a = 0, b = 0, c = 0;
-      if (!(in >> key)) continue;
-      auto& vu = learn.vehicles[key];
-      if (kind == "vt" && (in >> a >> b >> c)) vu.time = a, vu.kills = b, vu.kill_dist = c;
-      if (kind == "vc" && (in >> x >> z >> a >> b)) vu.cells[CellKey(x, z)] = {float(a * b), float(b)};
-      if (kind == "vk" && (in >> x >> z >> a)) vu.kills_at[CellKey(x, z)] = float(a);
+      if (!(in >> key) || !name_ok(key)) continue;
+      if (kind == "vt" && (in >> a >> b >> c) && fine(a) && fine(b) && fine(c)) {
+        auto& vu = out.vehicles[key];
+        vu.time = a, vu.kills = b, vu.kill_dist = c;
+      }
+      if (kind == "vc" && (in >> x >> z >> a >> b) && cell_ok(x, z) && std::isfinite(a) && std::fabs(a) < 1e5 &&
+          fine(b) && b > 0)
+        out.vehicles[key].cells[CellKey(x, z)] = {float(a * b), float(b)};
+      if (kind == "vk" && (in >> x >> z >> a) && cell_ok(x, z) && fine(a))
+        out.vehicles[key].kills_at[CellKey(x, z)] = float(a);
     }
+  }
+  return true;
+}
+
+// dst += sign * src, entry by entry (the walked ground's heights are not counts: only added where dst has none).
+void AddInto(std::unordered_map<uint64_t, float>& dst, const std::unordered_map<uint64_t, float>& src, float sign) {
+  for (const auto& [k, w] : src) dst[k] += sign * w;
+}
+void Combine(Learned& dst, const Learned& src, float sign) {
+  if (sign > 0)
+    for (const auto& [k, y] : src.walk_y) dst.walk_y.emplace(k, y);
+  AddInto(dst.step_use, src.step_use, sign);
+  for (int s = 0; s < 2; ++s) {
+    AddInto(dst.kills[s], src.kills[s], sign);
+    AddInto(dst.deaths[s], src.deaths[s], sign);
+    AddInto(dst.waits[s], src.waits[s], sign);
+  }
+  for (const auto& [flag, steps] : src.ways_in) AddInto(dst.ways_in[flag], steps, sign);
+  for (const auto& [key, v] : src.vehicles) {
+    auto& d = dst.vehicles[key];
+    d.time += sign * v.time, d.kills += sign * v.kills, d.kill_dist += sign * v.kill_dist;
+    for (const auto& [k, c] : v.cells) {
+      auto& dc = d.cells[k];
+      dc.first += sign * c.first, dc.second += sign * c.second;
+    }
+    AddInto(d.kills_at, v.kills_at, sign);
+  }
+}
+
+// What is left after a subtraction: nothing below zero (float sums), no empty entries.
+void Tidy(Learned& l) {
+  const auto tidy = [](std::unordered_map<uint64_t, float>& m) {
+    for (auto it = m.begin(); it != m.end();) it = it->second > 1e-4f ? std::next(it) : m.erase(it);
+  };
+  tidy(l.step_use);
+  for (int s = 0; s < 2; ++s) tidy(l.kills[s]), tidy(l.deaths[s]), tidy(l.waits[s]);
+  for (auto it = l.ways_in.begin(); it != l.ways_in.end();) {
+    tidy(it->second);
+    it = it->second.empty() ? l.ways_in.erase(it) : std::next(it);
+  }
+  for (auto it = l.vehicles.begin(); it != l.vehicles.end();) {
+    auto& v = it->second;
+    v.time = std::max(0.0, v.time), v.kills = std::max(0.0, v.kills), v.kill_dist = std::max(0.0, v.kill_dist);
+    for (auto c = v.cells.begin(); c != v.cells.end();) c = c->second.second > 1e-4f ? std::next(c) : v.cells.erase(c);
+    tidy(v.kills_at);
+    it = v.time <= 1e-4 && v.cells.empty() && v.kills_at.empty() ? l.vehicles.erase(it) : std::next(it);
+  }
+}
+
+// What `now` holds beyond `before`: the counts' differences, the walked cells `before` has not.
+Learned Delta(const Learned& now, const Learned& before) {
+  Learned d = now;
+  d.walk_y.clear();
+  for (const auto& [k, y] : now.walk_y)
+    if (!before.walk_y.count(k)) d.walk_y.emplace(k, y);
+  Combine(d, before, -1.0f);
+  Tidy(d);
+  return d;
+}
+
+size_t Entries(const Learned& l) {
+  size_t n = l.walk_y.size() + l.step_use.size();
+  for (int s = 0; s < 2; ++s) n += l.kills[s].size() + l.deaths[s].size() + l.waits[s].size();
+  for (const auto& [f, steps] : l.ways_in) n += steps.size();
+  for (const auto& [k, v] : l.vehicles) n += 1 + v.cells.size() + v.kills_at.size();
+  return n;
+}
+
+void SaveStyle();
+// The bots' files are written on a thread of their own (the optimization pass, 20 Nov 2026: a save on the server's
+// tick wrote hundreds of thousands of lines and stalled it), one at a time; the tick only takes a copy (of own, this
+// server's own learning: the shared set is never written into it).
+std::mutex save_mutex;
+void SaveLearned() {
+  const std::filesystem::path file = LearnedFile();
+  if (file.empty()) return;
+  own.map = learn.map;
+  auto snap = std::make_shared<Learned>(own);
+  learn.dirty = false, learn.saved_at = Clock::now();
+  SaveStyle();
+  std::thread([file, snap] {
+    std::lock_guard lock(save_mutex);
+    std::error_code ec;
+    std::filesystem::create_directories(file.parent_path(), ec);
+    const std::filesystem::path tmp = file.string() + ".new";
+    {
+      std::ofstream f(tmp, std::ios::trunc);
+      if (!f) return;
+      WriteLearned(f, *snap, "BF1943 Reborn bots, what they learned on " + snap->map + " (1)");
+    }
+    std::filesystem::rename(tmp, file, ec);
+  }).detach();
+}
+
+// A file written whole (beside, then renamed over the old: a reader never sees half of it).
+void WriteWhole(const std::filesystem::path& file, const std::string& text) {
+  std::error_code ec;
+  std::filesystem::create_directories(file.parent_path(), ec);
+  const std::filesystem::path tmp = file.string() + ".new";
+  {
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    f << text;
+  }
+  std::filesystem::rename(tmp, file, ec);
+}
+
+// An official server's level grid for the shared set (a scan finished here, not yet handed): a copy into the outbox,
+// once per grid (bots/sent/<map>.grid.txt keeps the size handed).
+void ShareGrid(const std::string& map) {
+  if (!REXCVAR_GET(bf_bots_share) || BotsDir().empty() || map.empty()) return;
+  const std::string name = MapFileName(map);
+  const std::filesystem::path grid = BotsDir() / (name + ".grid"), marker = BotsDir() / "sent" / (name + ".grid.txt");
+  std::thread([grid, marker, name] {
+    std::lock_guard lock(save_mutex);
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(grid, ec);
+    if (ec || size < 16) return;
+    uint32_t head[2] = {};
+    {
+      std::ifstream g(grid, std::ios::binary);
+      if (!g.read(reinterpret_cast<char*>(head), 8) || head[0] != 0x42475231 || head[1] != 1) return;  // finished only
+    }
+    std::string handed;
+    {
+      std::ifstream m(marker);
+      std::getline(m, handed);
+    }
+    if (handed == std::to_string(size)) return;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+    const std::filesystem::path out = grid.parent_path() / "outbox" / (name + "." + std::to_string(ms) + ".grid");
+    std::filesystem::create_directories(out.parent_path(), ec);
+    std::filesystem::copy_file(grid, out.string() + ".new", std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) return;
+    std::filesystem::rename(out.string() + ".new", out, ec);
+    if (!ec) WriteWhole(marker, std::to_string(size) + "\n");
+  }).detach();
+}
+
+// What earlier matches learned on this map: this server's own, the shared set over it (less what of own is in it
+// already), into the store, and the walked ground into the grid.
+void LoadLearned(const std::string& map) {
+  learn = Learned{}, own = Learned{}, sent = Learned{};
+  learn.map = own.map = sent.map = map;
+  learn.saved_at = Clock::now();
+  const std::string name = MapFileName(map);
+  if (!ReadLearned(LearnedFile(), own))
+    REXLOG_INFO("BF bots: nothing learned on {} yet ({})", map, LearnedFile().string());
+  // What of own went to the shared set (official servers): never more than own holds (a file of own deleted).
+  if (!BotsDir().empty() && ReadLearned(BotsDir() / "sent" / (name + ".txt"), sent)) {
+    const Learned beyond = Delta(own, sent);
+    Learned capped = own;
+    Combine(capped, beyond, -1.0f);
+    for (const auto& [k, y] : beyond.walk_y) capped.walk_y.erase(k);
+    Tidy(capped);
+    capped.map = map;
+    sent = std::move(capped);
+  }
+  Learned shared;
+  shared_pick = PickShared();
+  const bool have_shared = !shared_pick.dir.empty() && ReadLearned(shared_pick.dir / (name + ".txt"), shared);
+  learn = own;
+  learn.map = map;
+  learn.saved_at = Clock::now();
+  if (have_shared) {
+    Combine(learn, shared, 1.0f);
+    Combine(learn, sent, -1.0f);
+    Tidy(learn);
+    REXLOG_INFO("BF bots: the shared bot data {} ({}) on {}: {} entries (this server's own: {}, of it handed already: {})",
+                shared_pick.version, shared_pick.from, map, Entries(shared), Entries(own), Entries(sent));
+  } else if (!shared_pick.dir.empty()) {
+    REXLOG_INFO("BF bots: the shared bot data {} ({}) has nothing on {}", shared_pick.version, shared_pick.from, map);
   }
   nav.cells.reserve(nav.cells.size() + learn.walk_y.size());
   for (const auto& [k, y] : learn.walk_y) {
@@ -1213,6 +1458,7 @@ void LoadLearned(const std::string& map) {
               "spots, ways into {} flags",
               map, learn.walk_y.size(), learn.step_use.size(), kills, deaths,
               learn.waits[0].size() + learn.waits[1].size(), learn.ways_in.size());
+  ShareGrid(map);
 }
 
 float Learnt(const std::unordered_map<uint64_t, float>& m, uint64_t key) {
@@ -1237,13 +1483,14 @@ void LearnWalk(const float a[3], const float b[3], float weight, std::deque<std:
     } else if (c.state != 1) {
       c.y = y, c.state = 1;
     }
-    if (!learn.walk_y.count(cell)) learn.walk_y[cell] = y, learn.dirty = true;
+    if (!own.walk_y.count(cell)) own.walk_y[cell] = y, learn.dirty = true;  // (own: this server's file, Note)
+    if (!learn.walk_y.count(cell)) learn.walk_y[cell] = y;
     if (cx == px && cz == pz) continue;
     for (int d = 0; d < 8; ++d) {
       if (kDx[d] != cx - px || kDz[d] != cz - pz) continue;
       const uint64_t there = StepKey(px, pz, d);
       SetStep(px, pz, d, true), SetStep(cx, cz, kBack[d], true);
-      learn.step_use[there] += weight, learn.dirty = true;
+      Note([&](Learned& l) { l.step_use[there] += weight; });
       if (trail) trail->push_back({now, there});
     }
     px = cx, pz = cz;
@@ -1331,11 +1578,17 @@ struct Style {
   double attack = 0, defend = 0;        // seconds near a flag the side does not hold / holds
   double kit[3] = {0, 0, 0};            // spawns with each kit (the level's order: Support, Assault, Specialist)
 } style_long, style_match;
+// The shared set's style (the official servers' players, merged: SharedPick's style.txt), over this server's own;
+// style_handed: what of this match's style an official server handed to the shared set already.
+Style style_net, style_handed;
+
+// A measure from all three: this server's long term, this match, the shared set.
+double StyleSum(double Style::*f) { return style_long.*f + style_match.*f + style_net.*f; }
 
 // A trait from the long term and this match together, with a prior (what a player does before anything is known)
 // worth `prior_weight` of the measure's own unit.
 double StyleRatio(double Style::*num, double Style::*den, double prior, double prior_weight) {
-  const double n = style_long.*num + style_match.*num, d = style_long.*den + style_match.*den;
+  const double n = StyleSum(num), d = StyleSum(den);
   return (n + prior * prior_weight) / (d + prior_weight);
 }
 double SprintShare() { return StyleRatio(&Style::sprint, &Style::time, 0.45, 120); }
@@ -1345,12 +1598,12 @@ double BurstLength() { return StyleRatio(&Style::burst_time, &Style::bursts, 0.4
 double KillDistance() { return StyleRatio(&Style::kill_dist, &Style::kills, 35.0, 3); }
 double FlankShare() { return StyleRatio(&Style::flank_kills, &Style::kills, 0.2, 5); }
 double AttackShare() {
-  const double a = style_long.attack + style_match.attack, d = style_long.defend + style_match.defend;
+  const double a = StyleSum(&Style::attack), d = StyleSum(&Style::defend);
   return (a + 0.65 * 120) / (a + d + 120);
 }
 int StyleKit() {
   double w[3], total = 0;
-  for (int k = 0; k < 3; ++k) total += w[k] = style_long.kit[k] + style_match.kit[k] + 1.0;  // never none
+  for (int k = 0; k < 3; ++k) total += w[k] = style_long.kit[k] + style_match.kit[k] + style_net.kit[k] + 1.0;  // never none
   double r = Rand01() * total;
   for (int k = 0; k < 3; ++k)
     if ((r -= w[k]) <= 0) return k;
@@ -1383,27 +1636,103 @@ void SaveStyle() {
   std::filesystem::rename(file.string() + ".new", file, ec);
 }
 
-void LoadStyle() {
-  style_long = Style{}, style_match = Style{};
-  std::ifstream f(StyleFile());
-  if (!f) return;
+// A style file's fields into s, each times `scale`; false without the file. Values checked: finite, not negative.
+bool ReadStyle(const std::filesystem::path& file, Style& s, double scale) {
+  if (file.empty()) return false;
+  std::ifstream f(file);
+  if (!f) return false;
   std::string line;
   std::getline(f, line);
   while (std::getline(f, line)) {
     std::istringstream in(line);
     std::string name;
     double v = 0;
-    if (!(in >> name >> v) || !std::isfinite(v)) continue;
-    v *= 0.7;  // an older match counts less
+    if (!(in >> name >> v) || !std::isfinite(v) || v < 0 || v > 1e12) continue;
+    v *= scale;
     for (const auto& [n, field] : kStyleFields)
-      if (name == n) style_long.*field = v;
+      if (name == n) s.*field = v;
     for (int k = 0; k < 3; ++k)
-      if (name == "kit" + std::to_string(k)) style_long.kit[k] = v;
+      if (name == "kit" + std::to_string(k)) s.kit[k] = v;
   }
+  return true;
+}
+
+void LoadStyle() {
+  style_long = Style{}, style_match = Style{}, style_net = Style{}, style_handed = Style{};
+  // The shared set's (SharedPick, chosen as the level's learning loaded): as merged, its own fading done there.
+  if (!shared_pick.dir.empty() && ReadStyle(shared_pick.dir / "style.txt", style_net, 1.0))
+    REXLOG_INFO("BF bots: the shared bot data's style: {:.0f} min of the official servers' players", style_net.time / 60);
+  const bool mine = ReadStyle(StyleFile(), style_long, 0.7);  // an older match counts less
+  if (!mine && style_net.time <= 0) return;
   REXLOG_INFO("BF bots: the players' style so far ({:.0f} min measured): sprint {:.0f}%, still {:.0f}%, sights {:.0f}% of "
               "fire, bursts {:.2f} s, kills at {:.0f} m, {:.0f}% from the side or back, attacking {:.0f}% of the time",
-              style_long.time / 60, SprintShare() * 100, StillShare() * 100, AdsShare() * 100, BurstLength(),
-              KillDistance(), FlankShare() * 100, AttackShare() * 100);
+              (style_long.time + style_net.time) / 60, SprintShare() * 100, StillShare() * 100, AdsShare() * 100,
+              BurstLength(), KillDistance(), FlankShare() * 100, AttackShare() * 100);
+}
+
+// The hand-off to the shared set (official servers, bf_bots_share; the server manager sets it). Every
+// bf_bots_share_minutes and at each level change: what this server learned on the map since the last hand-off
+// (own - sent) into bots/outbox/<map>.<ms>.txt, and this match's style since the last one into
+// bots/outbox/style.<ms>.txt; the host (server/gmhost.py) sends them to the main backend and deletes them. Only once
+// bf_bots_share_min_players different human players have played the map since the last hand-off: a hand-off is never
+// one player's routes (the privacy page). Their names are counted here in memory only (hashes), never written.
+Clock::time_point shared_at{};
+std::map<std::string, std::unordered_set<size_t>> share_players;  // map -> the humans who played it since a hand-off
+std::set<std::pair<std::string, uint32_t>> share_noted;           // (map, player) counted already (each looked up once)
+void NoteSharePlayer(const uint8_t* base, uint32_t player) {
+  if (!REXCVAR_GET(bf_bots_share) || learn.map.empty() || !share_noted.insert({learn.map, player}).second) return;
+  const std::string name = PlayerName(base, player);
+  if (!name.empty()) share_players[learn.map].insert(std::hash<std::string>{}(name));
+}
+
+void ShareLearned(const std::string& why) {
+  shared_at = Clock::now();
+  if (!REXCVAR_GET(bf_bots_share) || learn.map.empty() || BotsDir().empty()) return;
+  auto& players = share_players[learn.map];
+  const int need = std::max(0, REXCVAR_GET(bf_bots_share_min_players));
+  if (int(players.size()) < need) {
+    if (REXCVAR_GET(bf_bots_log_detail))
+      REXLOG_INFO("BF bots: nothing handed to the shared set yet ({}): {} of {} players on {}", why, players.size(), need,
+                  learn.map);
+    return;
+  }
+  own.map = learn.map;
+  auto delta = std::make_shared<Learned>(Delta(own, sent));
+  Style sd;
+  for (const auto& [n, field] : kStyleFields) sd.*field = std::max(0.0, style_match.*field - style_handed.*field);
+  for (int k = 0; k < 3; ++k) sd.kit[k] = std::max(0.0, style_match.kit[k] - style_handed.kit[k]);
+  const size_t entries = Entries(*delta);
+  if (entries == 0 && sd.time < 1) return;
+  players.clear();
+  share_noted.clear();
+  sent = own;
+  style_handed = style_match;
+  auto snap_sent = std::make_shared<Learned>(sent);
+  const std::string name = MapFileName(learn.map), map = learn.map;
+  const std::filesystem::path dir = BotsDir();
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::system_clock::now().time_since_epoch()).count();
+  std::thread([=] {
+    std::lock_guard lock(save_mutex);
+    if (Entries(*delta)) {
+      std::ostringstream text;
+      WriteLearned(text, *delta, "BF1943 Reborn bots, what they learned on " + map + " (1)");
+      WriteWhole(dir / "outbox" / (name + "." + std::to_string(ms) + ".txt"), text.str());
+    }
+    if (sd.time >= 1) {
+      std::ostringstream text;
+      text << "BF1943 Reborn bots, the human players' style (1)\n";
+      for (const auto& [n, field] : kStyleFields) text << n << ' ' << sd.*field << '\n';
+      for (int k = 0; k < 3; ++k) text << "kit" << k << ' ' << sd.kit[k] << '\n';
+      WriteWhole(dir / "outbox" / ("style." + std::to_string(ms) + ".txt"), text.str());
+    }
+    // What is handed now counts as sent: the next shared set holds it (bots/sent/, read at the next level load).
+    std::ostringstream text;
+    WriteLearned(text, *snap_sent, "BF1943 Reborn bots, handed to the shared set on " + map + " (1)");
+    WriteWhole(dir / "sent" / (name + ".txt"), text.str());
+  }).detach();
+  REXLOG_INFO("BF bots: handed to the shared set ({}): {} entries learned on {}, {:.0f} s of the players' style", why,
+              entries, map, sd.time);
 }
 
 // The match's own memory (on the fly): deaths and the enemy's firing spots of the last minutes, fading with a time of
@@ -1472,15 +1801,16 @@ void SaveGrid() {
   }).detach();
 }
 
-void LoadGrid() {
-  std::ifstream f(GridFile(), std::ios::binary);
-  if (!f) return;
+bool LoadGridFile(const std::filesystem::path& file, const char* what) {
+  if (file.empty()) return false;
+  std::ifstream f(file, std::ios::binary);
+  if (!f) return false;
   uint32_t magic = 0, done = 0;
   uint64_t count = 0;
   f.read(reinterpret_cast<char*>(&magic), 4);
   f.read(reinterpret_cast<char*>(&done), 4);
   f.read(reinterpret_cast<char*>(&count), 8);
-  if (!f || magic != 0x42475231 || count > 20000000) return;
+  if (!f || magic != 0x42475231 || count > 20000000) return false;
   nav.cells.reserve(nav.cells.size() + count);
   for (uint64_t i = 0; i < count && f; ++i) {
     int32_t x = 0, z = 0;
@@ -1499,8 +1829,18 @@ void LoadGrid() {
     have.open |= open;
     have.closed |= uint8_t(closed & ~have.open);
   }
-  nav.scan_done = done != 0;
-  REXLOG_INFO("BF bots: the level's grid loaded: {} cells{}", count, nav.scan_done ? " (the whole level)" : " (a scan in part)");
+  nav.scan_done = nav.scan_done || done != 0;
+  REXLOG_INFO("BF bots: the level's grid loaded ({}): {} cells{}", what, count,
+              done != 0 ? " (the whole level)" : " (a scan in part)");
+  return true;
+}
+
+// This server's own grid; when it has none, or only a scan in part, the shared set's finished one (the official
+// servers mapped the level already: no scan of its own needed here).
+void LoadGrid() {
+  LoadGridFile(GridFile(), "this server's own");
+  if (!nav.scan_done && !shared_pick.dir.empty() && !learn.map.empty())
+    LoadGridFile(shared_pick.dir / (MapFileName(learn.map) + ".grid"), shared_pick.from);
 }
 
 // Starts the scan from these places (each a cell and its ground's height).
@@ -3360,7 +3700,7 @@ void BotsNoteKill(PPCContext& ctx, uint8_t* base, uint32_t killer, uint32_t vict
   float vp[3] = {};
   const uint32_t vso = Load32(base, victim + 288);
   if (vso && Position(ctx, base, vso, vp) && (vside == 1 || vside == 2))
-    learn.deaths[vside - 1][CellKey(CellOf(vp[0]), CellOf(vp[2]))] += 1.0f, learn.dirty = true;
+    Note([&](Learned& l) { l.deaths[vside - 1][CellKey(CellOf(vp[0]), CellOf(vp[2]))] += 1.0f; });
   if (!killer || killer == victim || !Readable(killer, 0x140)) return;
   const int kside = int(Load32(base, killer + 48));
   float kp[3] = {};
@@ -3374,16 +3714,19 @@ void BotsNoteKill(PPCContext& ctx, uint8_t* base, uint32_t killer, uint32_t vict
     if (kveh && Position(ctx, base, kveh, at) && (kside == 1 || kside == 2) && kside != vside) {
       NoteRecent(recent_fire[kside - 1], CellKey(CellOf(at[0]), CellOf(at[2])), 1.0f);
       if (!IsBot(killer)) {
-        auto& vu = learn.vehicles[vkey];
-        vu.kills += 1, vu.kill_dist += std::min(Dist2D(at, vp), 1000.0f);
-        vu.kills_at[CellKey(CellOf(at[0]), CellOf(at[2]))] += 1.0f, learn.dirty = true;
+        Note([&](Learned& l) {
+          auto& vu = l.vehicles[vkey];
+          vu.kills += 1, vu.kill_dist += std::min(Dist2D(at, vp), 1000.0f);
+          vu.kills_at[CellKey(CellOf(at[0]), CellOf(at[2]))] += 1.0f;
+        });
         REXLOG_INFO("BF bots: a player's kill from {} at {:.0f} m", vkey, Dist2D(at, vp));
       }
     }
     return;
   }
   if (kso && kso != vso && Position(ctx, base, kso, kp) && (kside == 1 || kside == 2) && kside != vside) {
-    learn.kills[kside - 1][CellKey(CellOf(kp[0]), CellOf(kp[2]))] += IsBot(killer) ? 0.5f : 1.0f, learn.dirty = true;
+    const float kw = IsBot(killer) ? 0.5f : 1.0f;
+    Note([&](Learned& l) { l.kills[kside - 1][CellKey(CellOf(kp[0]), CellOf(kp[2]))] += kw; });
     NoteRecent(recent_fire[kside - 1], CellKey(CellOf(kp[0]), CellOf(kp[2])), 1.0f);
     if (!IsBot(killer)) {
       // A human's kill: its range, and whether it came from the victim's side or back (the victim's facing: a bot's
@@ -3413,6 +3756,7 @@ void BotsLevelChange() {
   pressure = Pressure{};
   if (learn.dirty) SaveLearned();
   if (!learn.map.empty() && !nav.cells.empty()) SaveGrid();
+  ShareLearned("level change");
   learn.map.clear();
   std::lock_guard lock(g.mutex);
   g.spawns.clear();
@@ -3612,6 +3956,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     if (map.empty() && !g.flags.empty()) map = g.flags.front().name;
     if (!map.empty() && map != learn.map) {
       if (learn.dirty) SaveLearned();
+      ShareLearned("level change");
       LoadLearned(map);
       LoadGrid();
       LoadStyle();
@@ -3799,6 +4144,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     }
     const float moved = Dist2D(it->second.data(), me.pos);
     if (me.human) {
+      NoteSharePlayer(base, p);  // (the hand-off's count of players: a hash, in memory only)
       // The style: its time on foot, sprinting, still, firing (and with the sights), its bursts, attacking or
       // defending (the nearest flag within 40 m its side holds or not), and its kit at each spawn.
       static std::map<uint32_t, double> firing;
@@ -3845,7 +4191,8 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
         bool enemy_near = false;
         for (const Seen& o : seen)
           if (o.side != me.side && (o.side == 1 || o.side == 2) && Dist2D(o.pos, me.pos) < 60.0f) enemy_near = true;
-        if (enemy_near) learn.waits[me.side - 1][CellKey(CellOf(me.pos[0]), CellOf(me.pos[2]))] += float(dt), learn.dirty = true;
+        if (enemy_near)
+          Note([&](Learned& l) { l.waits[me.side - 1][CellKey(CellOf(me.pos[0]), CellOf(me.pos[2]))] += float(dt); });
       }
     }
     if (moved < 0.3f) continue;  // standing: keep the last point
@@ -3861,14 +4208,15 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       uint32_t veh = 0;
       const std::string key = VehicleKey(base, p, &veh);
       if (key.empty()) continue;
-      auto& vu = learn.vehicles[key];
-      vu.time += dt, learn.dirty = true;
+      Note([&](Learned& l) { l.vehicles[key].time += dt; });
       if (now - sampled[p] < std::chrono::milliseconds(500)) continue;
       sampled[p] = now;
       float at[3];
       if (!Position(ctx, base, veh, at)) continue;
-      auto& c = vu.cells[CellKey(CellOf(at[0]), CellOf(at[2]))];
-      c.first += at[1], c.second += 1;
+      Note([&](Learned& l) {
+        auto& c = l.vehicles[key].cells[CellKey(CellOf(at[0]), CellOf(at[2]))];
+        c.first += at[1], c.second += 1;
+      });
       static std::set<std::string> told;
       if (told.insert(key).second) REXLOG_INFO("BF bots: a player in {} (learning its way)", key);
     }
@@ -3877,6 +4225,11 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
   if (learn.dirty && now - learn.saved_at > std::chrono::seconds(20)) {
     CostTimer t(&cost.save);
     SaveLearned();
+  }
+  if (REXCVAR_GET(bf_bots_share) &&
+      now - shared_at > std::chrono::minutes(std::max(1, REXCVAR_GET(bf_bots_share_minutes)))) {
+    CostTimer t(&cost.save);
+    ShareLearned("every " + std::to_string(std::max(1, REXCVAR_GET(bf_bots_share_minutes))) + " minutes");
   }
   // The level's scan: once the water's height is known (a bot's physics), from every spawn point and flag.
   {
@@ -4169,7 +4522,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       for (const auto& [p, i] : seen_of) {
         if (!seen[i].human || seen[i].side != h || Dist2D(seen[i].pos, f.pos) > 25.0f) continue;
         for (const auto& [t, step] : trails[p])
-          if (now - t < std::chrono::seconds(60)) learn.ways_in[f.name][step] += 1.0f, ++learned;
+          if (now - t < std::chrono::seconds(60)) Note([&](Learned& l) { l.ways_in[f.name][step] += 1.0f; }), ++learned;
       }
       if (learned) {
         learn.dirty = true;

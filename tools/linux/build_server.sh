@@ -33,11 +33,15 @@ stage() {
   # and no button pictures: a server draws nothing.
   cp -a "$S/bf1943" "$S"/*.so* "$T/bin/"
   if [ -d "$S/fonts" ]; then cp -a "$S/fonts" "$T/bin/"; fi
+  # The shared bot data (bf/data/bots, server/botdata.py install): what every server's bots start from.
+  if [ -f "$S/data/bots/version.txt" ]; then mkdir -p "$T/bin/data/bots" && cp -a "$S/data/bots/." "$T/bin/data/bots/"; rm -f "$T/bin/data/bots/README.md"
+  else echo "warning: no shared bot data in $S/data/bots: the package carries none"; fi
   if [ -d "$S/licences" ]; then cp -a "$S/licences" "$T/licences"; else echo "warning: no licences folder in $S"; fi
   # Every module plasma.py imports (16 Nov 2026: player_stats.py was missing, so the package's own backend, LAN only
   # mode and the manager's commands that load plasma.py, stopped at the start); as tools/make_packages.ps1 copies.
   cp "$WT/server/manager.py" "$WT/server/gmhost.py" "$WT/server/plasma.py" "$WT/server/ed25519.py" "$WT/server/stats.py" \
-    "$WT/server/player_stats.py" "$WT/server/text_filter.py" "$WT/server/bans.py" "$WT/server/dashboard.py" "$T/server/"
+    "$WT/server/player_stats.py" "$WT/server/text_filter.py" "$WT/server/bans.py" "$WT/server/dashboard.py" \
+    "$WT/server/botdata.py" "$T/server/"
   cp "$WT/server/manager_ui/index.html" "$WT/server/manager_ui/dash.js" "$WT/server/manager_ui/public.html" "$T/server/manager_ui/"
   cp "$WT/tools/linux/server/bf1943-server" "$T/bf1943-server"
   chmod +x "$T/bf1943-server" "$T/bin/bf1943"

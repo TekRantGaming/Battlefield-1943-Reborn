@@ -111,6 +111,18 @@ function New-Bin([string]$dest, [switch]$Shaders, [switch]$Flat) {
     foreach ($f in $binFiles) { Copy-Item (Join-Path $build $f) $bin }
     foreach ($f in $crtFiles) { Copy-Item (Join-Path $crtDir.FullName $f) $bin }
     Copy-Item (Join-Path $build "fonts") (Join-Path $bin "fonts") -Recurse  # our menus' font (Oswald, OFL)
+    # The shared bot data (bf\data\bots, filled by server\botdata.py install at each release): the official servers'
+    # merged learning, that every server's and every offline match's bots start from (bf\src\bots.cpp SharedPick).
+    # Both packages. No players in it: counts per 2 m cell of each map.
+    $botData = Join-Path $build "data\bots"
+    if (Test-Path (Join-Path $botData "version.txt")) {
+        $to = Join-Path $bin "data\bots"
+        New-Item -ItemType Directory -Force $to | Out-Null
+        Get-ChildItem $botData -File | Where-Object { $_.Extension -in ".txt", ".grid", ".json", ".sig" } |
+            Copy-Item -Destination $to
+    } else {
+        Write-Warning "no shared bot data in the build ($botData): the package carries none (server\botdata.py install)"
+    }
     # Our shader list (data\shaders: where each shader is in the player's game files, and the pipelines' render
     # state; no shader code), read at the first start (bf\src\shader_prep.cpp). Missing from every package up to
     # 0.1.5, so players' first sessions built all pipelines during play. Not for a server (it draws nothing).
@@ -207,7 +219,7 @@ function New-ServerPackage([string]$sname, [bool]$official) {
     Copy-Licences $s
     $sv = Join-Path $s "server"
     New-Item -ItemType Directory -Force (Join-Path $sv "manager_ui") | Out-Null
-    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\ed25519.py"), (Join-Path $root "server\stats.py"), (Join-Path $root "server\player_stats.py"), (Join-Path $root "server\text_filter.py"), (Join-Path $root "server\gmhost.py"), (Join-Path $root "server\manager.py"), (Join-Path $root "server\bans.py"), (Join-Path $root "server\dashboard.py") $sv
+    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\ed25519.py"), (Join-Path $root "server\stats.py"), (Join-Path $root "server\player_stats.py"), (Join-Path $root "server\text_filter.py"), (Join-Path $root "server\gmhost.py"), (Join-Path $root "server\manager.py"), (Join-Path $root "server\bans.py"), (Join-Path $root "server\dashboard.py"), (Join-Path $root "server\botdata.py") $sv
     Copy-Item (Join-Path $root "server\manager_ui\index.html"), (Join-Path $root "server\manager_ui\dash.js"), (Join-Path $root "server\manager_ui\public.html") (Join-Path $sv "manager_ui")
     Copy-Item (Join-Path $root "tools\server_package\open_firewall.ps1") $s
     # The package's own Python (tools\server_package\make_python_runtime.py): a host installs nothing. python.org's

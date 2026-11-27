@@ -681,6 +681,9 @@ def clean_config(raw):
     out['start_servers'] = raw.get('start_servers') is not False
     out['version_gate'] = raw.get('version_gate') is not False
     out['required_version'] = clean_text(raw.get('required_version'), 24)
+    # The shared bot data (bf/src/bots.cpp, server/botdata.py): bots start from the official servers' merged learning,
+    # shipped with each update. On unless the owner turns it off (their bots then learn only from their own servers).
+    out['shared_bot_data'] = raw.get('shared_bot_data') is not False
     # The public stats page (the dashboard's, docs/DASHBOARD.md): off unless turned on; player names on it or counts only.
     out['public_page'] = clean_public_page(raw.get('public_page'))
     return out
@@ -1057,7 +1060,9 @@ class Manager:
                          # Promoted community servers (manager.py promote): the Reborn tab, Trusted Community Servers.
                          '--promoted-file', PROMOTED_FILE,
                          # The Reborn network's ban list (the Moderation page's network list, manager.py ban --network)
-                         '--network-bans', NETWORK_BANS_FILE]
+                         '--network-bans', NETWORK_BANS_FILE,
+                         # The shared bot data (server/botdata.py): the official servers' hand-offs and the merged set.
+                         '--bot-data', os.path.join(DATA, 'botdata')]
             self.backend = spawn(args, output=os.path.join(LOGS, 'backend.out'))
             self.backend_mode = mode
             self.note('the %s started (PID %d)' % ('main backend' if mode == 'official' else 'LAN backend', self.backend.pid))
@@ -1080,6 +1085,12 @@ class Manager:
         # Its bots, when it has any (none: the flag left out, so BF_SERVER_GAME_ARGS below may still give some).
         if s['bots']:
             game.append('--bf_bots=%d' % s['bots'])
+        # The shared bot data: an official server hands what its bots learn to the shared set (its host sends it to
+        # the main backend, which sends the merged set back); any server may start from it or not (the owner's choice).
+        if self.flags['official']:
+            game.append('--bf_bots_share=true')
+        if not self.cfg.get('shared_bot_data', True):
+            game.append('--bf_bots_shared_data=false')
         # Team balance: the server's own switches, and the file its moves go to for the host to tell the players.
         game += ['--bf_team_balance=%s' % ('true' if s['team_balance'] else 'false'),
                  '--bf_balance_gap=%d' % s['balance_gap'], '--bf_balance_min_players=%d' % s['balance_min_players'],
@@ -2078,7 +2089,7 @@ class Manager:
             merged = dict(self.cfg)
             for key in ('servers', 'region', 'tick', 'lan_only', 'public_address', 'upnp', 'auto_update',
                         'update_warning_minutes', 'start_servers', 'version_gate', 'required_version', 'web_remote',
-                        'public_page'):
+                        'public_page', 'shared_bot_data'):
                 if key in new:
                     merged[key] = new[key]
             if isinstance(new.get('public_page'), dict) and 'logo' not in new['public_page']:
