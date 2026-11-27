@@ -84,10 +84,15 @@ endfunction ()
 # each one as an output section. Past 65,280 sections GNU ld cannot write the dynamic symbol table
 # of a binary that exports symbols, and lld can, so the binaries link with lld (see
 # rexglue_link_flags).
+# REXGLUE_SMALL_CODE_MODEL (Battlefield 1943 Reborn, 27 Nov 2026): the project's program is far under 2 GB and builds the
+# SDK inside its own build with ThinLTO; the large model's objects cannot be linked into the same LTO link as the
+# project's small-model code ("linking module flags 'Code Model': IDs have conflicting values"), so the whole build
+# takes the default (small) model, the faster one too (every call and global access was an absolute 64 bit load).
 function (rexglue_uses_large_code_model out_var)
   if (UNIX
       AND NOT APPLE
       AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64"
+      AND NOT REXGLUE_SMALL_CODE_MODEL
   )
     set(${out_var}
         ON

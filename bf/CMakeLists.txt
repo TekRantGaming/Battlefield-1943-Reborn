@@ -11,6 +11,11 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(REXSDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src-bf" CACHE PATH "Our ReXGlue SDK copy")
+# Linux x86_64: the SDK's targets in the default (small) code model too, as the game's own (rexglue_target.cmake,
+# REXGLUE_SMALL_CODE_MODEL): a ThinLTO link refuses to mix the large model's objects with the small ones.
+if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(REXGLUE_SMALL_CODE_MODEL ON CACHE BOOL "The SDK in the default code model (Linux x86_64)" FORCE)
+endif()
 add_subdirectory("${REXSDK_DIR}" rexglue-sdk)
 rexglue_project(bf1943 OUTPUT_DIR generated/default)
 
@@ -186,7 +191,7 @@ target_include_directories(bf1943 BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/sr
 # own code goes back to it (the flag given last wins). King Kong found this on the ROG Ally (its commit 39064772):
 # its recompiled movie decoder went from 13 to 30 FPS. (The renderer's targets: after their add_subdirectory below.)
 if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    foreach(_bf_target bf1943 bf1943_recomp)
+    foreach(_bf_target bf1943 bf1943_recomp bf1943_recompiled)
         if(TARGET ${_bf_target})
             target_compile_options(${_bf_target} PRIVATE -mcmodel=small)
         endif()
