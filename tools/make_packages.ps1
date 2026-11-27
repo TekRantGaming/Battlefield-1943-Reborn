@@ -192,6 +192,11 @@ function New-Bin([string]$dest, [switch]$Shaders, [switch]$Flat) {
         if (-not (Get-ChildItem $ach -Filter *.png -ErrorAction SilentlyContinue)) { throw "no achievement pictures in the build: $ach" }
         New-Item -ItemType Directory -Force (Join-Path $bin "data\achievements") | Out-Null
         Get-ChildItem $ach -Filter *.png | Copy-Item -Destination (Join-Path $bin "data\achievements")
+        # The server type page's four cards (bf\src\game_menu_modes.inc): stills from the 0.4.8 trailer's own footage.
+        $modes = Join-Path $build "data\modes"
+        if (-not (Get-ChildItem $modes -Filter *.jpg -ErrorAction SilentlyContinue)) { throw "no server type pictures in the build: $modes" }
+        New-Item -ItemType Directory -Force (Join-Path $bin "data\modes") | Out-Null
+        Get-ChildItem $modes -Filter *.jpg | Copy-Item -Destination (Join-Path $bin "data\modes")
     }
     # The main backend players and servers use (bf_online_host): the official one, or this PC for tests.
     Set-Content (Join-Path $bin "bf1943.toml") -Encoding ascii -Value @"
