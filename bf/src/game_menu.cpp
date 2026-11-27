@@ -199,6 +199,8 @@ const std::vector<GraphicsPreset>& GraphicsPresets() {
   // PresetValueMatches, ApplyGraphicsPreset, NoteNisSupport), Ultra too; Soft shadows and SSR reflections on High and
   // Ultra only. Transparent edges, Animation smoothing, HUD scale and Storm shake are the same on every preset, so
   // they are defaults instead (NewInstallDefaults, install_defaults 7) and a preset leaves the player's choice alone.
+  // Transparent edges is Original on every preset and for everyone since 27 Nov 2026 (install_defaults 8: Smooth left
+  // the palms' fronds out up close).
   static const std::vector<GraphicsPreset> kPresets = {
       {"Potato",
        {{"bf_post_aa", "off"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
@@ -6595,7 +6597,7 @@ std::string StartupGpuPlugin(const fs::path&) {
 // High and Ultra presets have them (`high`) or the others. The settings file's keys.
 std::vector<std::pair<std::string, std::string>> GraphicsDefaults048(bool high) {
   return {{"cvar.bf_upscaler_mode", "quality"},
-          {"cvar.native_x_renderer_alpha_to_coverage", "blend"},  // Transparent edges: Smooth
+          {"cvar.native_x_renderer_alpha_to_coverage", "auto"},   // Transparent edges: Original (install_defaults 8)
           {"cvar.bf_smooth_bones", "true"},                        // Animation smoothing: on
           {"cvar.bf_hud_scale", "high"},                           // HUD scale: High-Res
           {"cvar.native_x_renderer_storm_sway", "false"},          // Storm shake: off
@@ -6686,9 +6688,21 @@ void NewInstallDefaults(Settings& settings) {
     settings.values["upscaler_auto"] = "1";
     settings.values["install_defaults"] = "7";
     settings.Save();
-    REXLOG_INFO("BF settings: v0.4.8's graphics defaults: the spatial upscaler at Quality, Transparent edges Smooth, "
+    REXLOG_INFO("BF settings: v0.4.8's graphics defaults: the spatial upscaler at Quality, Transparent edges Original, "
                 "Animation smoothing on, HUD scale High-Res, Storm shake off, Soft shadows and SSR {} (preset {})",
                 high ? "on" : "off", preset.empty() ? "none chosen" : preset);
+  }
+  // Transparent edges back to Original for everyone (TekRantGaming, 27 Nov 2026: "the leves of the pam trees dont show
+  // up unless i break the tree or get far away" ... "it was transparent edges turn this off by default on all presets
+  // and by default for everyone"). Smooth (NativeXRenderer D69's blend) left the palms' fronds out up close; 0.4.8's
+  // defaults (install_defaults 7) had set it for every player. Once, for every settings file, it is Original (auto)
+  // again; the player can still choose Smooth in Settings, Graphics, and that choice then stays.
+  if (settings.Get("install_defaults", "") == "7") {
+    const std::string was = settings.Get("cvar.native_x_renderer_alpha_to_coverage", "auto");
+    settings.values["cvar.native_x_renderer_alpha_to_coverage"] = "auto";
+    settings.values["install_defaults"] = "8";
+    settings.Save();
+    REXLOG_INFO("BF settings: Transparent edges Original for everyone (it was {})", was == "blend" ? "Smooth" : "Original");
   }
   if (REXCVAR_GET(server) || !settings.Get("launcher_setup", "").empty() || !settings.Get("install_defaults", "").empty())
     return;
@@ -6720,7 +6734,7 @@ void NewInstallDefaults(Settings& settings) {
   for (const auto& [key, value] : GraphicsDefaults048(true)) settings.values[key] = value;
   settings.values["fullscreen_mode"] = "desktop";  // Borderless (a test window stays a window)
   if (!test_window) settings.values["fullscreen"] = "on";
-  settings.values["install_defaults"] = "7";  // 0.4.8's: nothing to move (above)
+  settings.values["install_defaults"] = "8";  // 0.4.8's: nothing to move (above)
   settings.values["upscaler_auto"] = "1";     // NVIDIA NIS on a GPU that runs it (NoteNisSupport)
   settings.values["gi_full_capped"] = "1";    // a new install never had the menus' Full (above)
   std::error_code ec;

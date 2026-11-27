@@ -6,7 +6,8 @@
 - **The spatial upscaler is on in every preset,** Ultra included, at Quality: NVIDIA NIS on an NVIDIA card that runs
   it, AMD FSR 1 on any other card. Players who had NVIDIA NIS keep it.
 - **Soft shadows and SSR reflections are on in the High and Ultra presets,** and off in Potato, Low and Medium.
-- **Transparent edges Smooth, Animation smoothing on and HUD scale High-Res** for everyone, whatever the preset.
+- **Animation smoothing on and HUD scale High-Res** for everyone, whatever the preset.
+- **Transparent edges is Original** for everyone, whatever the preset (Smooth left palm leaves out up close). You can still choose Smooth in Settings, Graphics.
 - **Storm shake is off** until you turn it on in Settings, Graphics.
 - When you update, your settings move to these once: from then on your own changes stay.
 
