@@ -15,6 +15,21 @@ WT="${BF_LINUX_SOURCE:-$MAIN}"  # the main tree (from v0.2.0 the Linux work is m
 BASE="${BF_LINUX_ROOT:-$HOME/bf-linux}"
 JOBS="${BF_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
 T0=$(date +%s)
+# BF_LINUX_MARCH (optional, 27 Nov 2026 server optimisation tests): the CPU level, e.g. x86-64-v3 (AVX2, FMA, BMI2,
+# MOVBE). Unset: the presets' x86-64-v2, what the release ships. SDK v0.11 is built inside the game's build, so it
+# applies to both. Use a build root of its own (BF_LINUX_ROOT): the flags live in the build folder's cache.
+# BF_LINUX_GAME_FLAGS (optional, tests): more compile and link flags, e.g. clang's profile-guided optimisation:
+# -fprofile-generate=<dir> for an instrumented build, -fprofile-use=<file> for the optimised one (the profile needs
+# real players before a release: one made with bots alone treats the players' code as rarely used).
+GAME_FLAGS=()
+if [ -n "${BF_LINUX_MARCH:-}${BF_LINUX_GAME_FLAGS:-}" ]; then
+  G="-march=${BF_LINUX_MARCH:-x86-64-v2} -fno-semantic-interposition -fno-plt ${BF_LINUX_GAME_FLAGS:-}"
+  GAME_FLAGS=("-DCMAKE_C_FLAGS=$G" "-DCMAKE_CXX_FLAGS=$G")
+  if [ -n "${BF_LINUX_GAME_FLAGS:-}" ]; then
+    L="-fuse-ld=lld -Wl,-O2 -Wl,--icf=safe $BF_LINUX_GAME_FLAGS"
+    GAME_FLAGS+=("-DCMAKE_EXE_LINKER_FLAGS=$L" "-DCMAKE_SHARED_LINKER_FLAGS=$L")
+  fi
+fi
 step() { echo "== [$(( $(date +%s) - T0 )) s] $*"; }
 mkdir -p "$BASE/src/bf" "$BASE/src/sdk"
 
@@ -82,7 +97,7 @@ build_game() {
   if [ ! -f "$B/CMakeCache.txt" ]; then
     # SDK v0.11: the SDK from $BASE/src/sdk/src-bf (REXSDK_DIR's default, ../sdk/src-bf), built in the game's build.
     (cd "$BASE/src/bf" && cmake --preset "$P" -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
-       -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF -DBF_DEV_TOOLS="${BF_DEV_TOOLS:-OFF}") > "$BASE/game-configure.log" 2>&1 ||
+       -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF -DBF_DEV_TOOLS="${BF_DEV_TOOLS:-OFF}" "${GAME_FLAGS[@]}") > "$BASE/game-configure.log" 2>&1 ||
       { tail -40 "$BASE/game-configure.log"; exit 1; }
   fi
   # The release's version (BfVersion(): the pipeline sharing, the updater's comparison), as the Windows package's.
