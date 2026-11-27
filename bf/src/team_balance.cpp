@@ -47,6 +47,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
+#include "guest_readable.h"
 #include "player_limits.h"
 
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
@@ -98,17 +99,7 @@ bool Readable(uint32_t address, uint32_t size) {
   if (!memory) return false;
   // Committed pages only: a reserved page answers QueryProtect with its protection too, and a read of it crashed the
   // second run (tb_dump2: guest 01000000).
-  for (uint32_t page = address & ~0xFFFu; page < address + size;) {
-    rex::memory::BaseHeap* heap = memory->LookupHeap(page);
-    rex::memory::HeapAllocationInfo info{};
-    if (!heap || !heap->QueryRegionInfo(page, &info)) return false;
-    if (!(info.state & rex::memory::kMemoryAllocationCommit) || !(info.protect & rex::memory::kMemoryProtectRead))
-      return false;
-    const uint32_t next = info.base_address + info.region_size;
-    if (next <= page) return false;
-    page = next;
-  }
-  return true;
+  return bf1943::GuestCommittedReadable(memory, address, size);  // guest_readable.h (was a QueryRegionInfo walk)
 }
 
 // What we keep of a player, by its object's address (a new player in a reused object: told apart by its arrival).

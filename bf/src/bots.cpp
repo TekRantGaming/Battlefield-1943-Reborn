@@ -77,6 +77,7 @@
 #include <rex/system/xmemory.h>
 
 #include "dev_guest_memory.h"
+#include "guest_readable.h"
 #include "player_limits.h"
 
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
@@ -208,17 +209,7 @@ bool Readable(uint32_t address, uint32_t size) {
   auto* state = rex::system::kernel_state();
   rex::memory::Memory* memory = state ? state->memory() : nullptr;
   if (!memory) return false;
-  for (uint32_t page = address & ~0xFFFu; page < address + size;) {
-    rex::memory::BaseHeap* heap = memory->LookupHeap(page);
-    rex::memory::HeapAllocationInfo info{};
-    if (!heap || !heap->QueryRegionInfo(page, &info)) return false;
-    if (!(info.state & rex::memory::kMemoryAllocationCommit) || !(info.protect & rex::memory::kMemoryProtectRead))
-      return false;
-    const uint32_t next = info.base_address + info.region_size;
-    if (next <= page) return false;
-    page = next;
-  }
-  return true;
+  return bf1943::GuestCommittedReadable(memory, address, size);  // guest_readable.h (was a QueryRegionInfo walk)
 }
 
 #if !defined(_WIN32)
