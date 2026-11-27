@@ -152,6 +152,10 @@ struct SDL3UIDriver::State {
   std::array<SDL_Cursor*, 9> cursors{};
   std::thread::id main_thread;
   IUIEventListener* listener = nullptr;
+  // Battlefield 1943 Reborn patch (27 Nov 2026): the window's pixel size as its last SDL size event gave it (0: none
+  // yet). See HandleWindowEvent.
+  i32 event_pixel_width = 0;
+  i32 event_pixel_height = 0;
 #if REX_PLATFORM_MAC
   void* metal_view = nullptr;
 #endif
@@ -261,6 +265,16 @@ struct SDL3UIDriver::State {
   void HandleWindowEvent(const SDL_Event& event) {
     switch (event.type) {
       case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: {
+        // Battlefield 1943 Reborn patch (27 Nov 2026, as v0.10's Window::OnActualSizeUpdate): the size is the one the
+        // event carries, not SDL's at the time it is handled. Under XWayland on a scaled desktop (the ROG Ally at
+        // 185 %) SDL can keep a stale size (the desktop's maximised 1038x506) for a window that is fullscreen at
+        // 1920x1080; NativeXRenderer then posts an event of its own with its X11 surface's real size (D159). v0.11
+        // asked SDL again and got the stale size back, so the launcher and menus stayed laid out for 1038x506 (a
+        // fresh first start, 1 to 2 starts of 3 on the Ally; 0.4.8 never).
+        if (event.window.data1 > 0 && event.window.data2 > 0) {
+          event_pixel_width = event.window.data1;
+          event_pixel_height = event.window.data2;
+        }
         UISetupEvent e(UIEvent::Type::kResize);
         Deliver(e);
         break;
@@ -582,6 +596,7 @@ void SDL3UIDriver::CloseUIWindow() {
     s.window = nullptr;
     s.window_id = 0;
     s.has_focus = false;
+    s.event_pixel_width = s.event_pixel_height = 0;
   }
   s.relative = false;
   s.pointer_mode = PointerMode::kFree;
@@ -716,7 +731,13 @@ WindowSize SDL3UIDriver::GetWindowSize() const {
   }
   int width = 0;
   int height = 0;
-  SDL_GetWindowSizeInPixels(s.window, &width, &height);
+  if (s.event_pixel_width > 0 && s.event_pixel_height > 0) {
+    // The last size event's (HandleWindowEvent): SDL's own can be stale under XWayland.
+    width = s.event_pixel_width;
+    height = s.event_pixel_height;
+  } else {
+    SDL_GetWindowSizeInPixels(s.window, &width, &height);
+  }
   return {static_cast<u32>(std::max(width, 0)), static_cast<u32>(std::max(height, 0))};
 }
 
