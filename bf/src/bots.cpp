@@ -242,10 +242,11 @@ std::vector<std::pair<uint64_t, uint64_t>> GuestHostRanges(const uint8_t* base) 
 // Guest memory committed in the host's view (the level's data, outside the heaps Readable knows).
 bool Mapped(const uint8_t* base, uint32_t address, uint32_t size) {
 #if defined(_WIN32)
-  MEMORY_BASIC_INFORMATION mbi{};
-  if (address < 0x10000 || !VirtualQuery(base + address, &mbi, sizeof(mbi))) return false;
-  return mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
-         uint64_t(static_cast<const uint8_t*>(mbi.BaseAddress) - base) + mbi.RegionSize >= uint64_t(address) + size;
+  // One byte of each page copied through the kernel (dev_guest_memory.h: ReadProcessMemory, about 0.35 us), as
+  // squad_colors.cpp since 20 Nov 2026: VirtualQuery measures the whole region the address lies in, up to 100 us in the
+  // game's large committed regions, and the bots' name reads run every tick (27 Nov 2026, from the Linux server
+  // optimisation's twin finding on Linux).
+  return address >= 0x10000 && bf1943::dev::GuestReadable(base, address, size);
 #else
   // One byte of each page read through the kernel (dev_guest_memory.h: process_vm_readv fails on memory that is not
   // mapped or not readable), about a microsecond. Until 27 Nov 2026 every call read and parsed the whole of
