@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <thread>
@@ -340,6 +341,20 @@ int CopyGame(const fs::path& from, const fs::path& out, Line line) {
   return 0;
 }
 }  // namespace
+
+// Hotfix 0.4.8.1: the install's process ends here, its output flushed, without the runtime's own shutdown. On SDK v0.11
+// an ordinary exit from the app's start (std::exit, std::_Exit: both reach ExitProcess) never finished: Windows unloads
+// the DLLs, and the graphics module's static teardown (rexgpu, through rexui) waits on the UI thread, which the exit has
+// already ended. One thread stayed stuck in the loader, the process never ended, and the server manager's "install the
+// game" waited forever (0.4.8.11-test9; the stack of a stuck process, 27 Nov 2026). 0.4.8 (SDK v0.10) ended at once.
+// The game's own quit and the dedicated server already end hard (gm_host.cpp).
+[[noreturn]] void EndInstallProcess(int code) {
+  std::fflush(nullptr);
+#if defined(_WIN32)
+  TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
+#endif
+  std::_Exit(code);
+}
 
 int InstallFromCommandLine(const std::filesystem::path& game_dir) {
   const bool lines = REXCVAR_GET(install_progress);

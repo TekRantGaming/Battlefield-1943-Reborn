@@ -178,8 +178,13 @@ rex::Result<void> Bf1943App::OnInit() {
   bf1943::RaiseTimerResolution();           // 1 ms sleeps for the game's waits and our frame limit (frame_rate.cpp)
   // --install_game (the server package's setup) or --install_progress (RecompLauncher's, which leaves the package out
   // once the game is installed; pull request 70): the game unpacked into its folder, then the process ends.
-  if (!REXCVAR_GET(install_game).empty() || REXCVAR_GET(install_progress))
-    std::exit(bf1943::install::InstallFromCommandLine(GameDir()));
+  // Hotfix 0.4.8.1: the process ends hard after the install (EndInstallProcess: on SDK v0.11 an ordinary exit from
+  // here never finished, and the server manager's "install the game" waited forever). Every file it wrote is closed.
+  if (!REXCVAR_GET(install_game).empty() || REXCVAR_GET(install_progress)) {
+    const int code = bf1943::install::InstallFromCommandLine(GameDir());
+    REXLOG_INFO("BF install: finished, exit code {}", code);
+    bf1943::install::EndInstallProcess(code);
+  }
   rex::ui::IUISystem& ui = GetUI();
   rex::ui::compat::Attach(ui);
   rex::ui::Window* window = rex::ui::compat::GetWindow();
