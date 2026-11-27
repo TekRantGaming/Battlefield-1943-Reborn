@@ -1454,7 +1454,11 @@ class ServerCheck:
                     with open(os.path.join(self.folder, n), encoding='utf-8') as f:
                         m = json.load(f)
                     files = {str(k): str(v) for k, v in m['files'].items()}
-                    official[(str(m['version']), str(m['platform']))] = gmhost.build_digest(files)
+                    # Hotfix 0.4.8.2: every manifest of a version and platform counts (a set, no longer the last one
+                    # read): the Linux archive and the Linux server AppImage are both 'linux' (before, the AppImage's
+                    # was overwritten and its servers hidden), and a package updated by an older manager keeps the old
+                    # SDK's files (its own manifest, tools/build_manifest.py --leftovers).
+                    official.setdefault((str(m['version']), str(m['platform'])), set()).add(gmhost.build_digest(files))
                 except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
                     self.note('server check: manifest %s not read (%s)' % (n, e))
             self.seen, self.official = stamps, official
@@ -1509,7 +1513,7 @@ class ServerCheck:
         want = self.official.get((version, platform))
         if want is None:
             return 'version %s (%s) is not an official server package' % (version, platform), key
-        if digest != want:
+        if digest not in want:
             return 'its files are not those of the official %s package' % version, key
         if not key:
             return 'no valid host key', key
