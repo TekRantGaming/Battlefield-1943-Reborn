@@ -1443,8 +1443,28 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   bf1943::DevTeamScan(base, seated || bf1943::LocalOnFoot());  // BF_DEV_TEAMSCAN (dev_team_scan.cpp)
   bf1943::DevPlayerScan(base, seated || bf1943::LocalOnFoot());  // BF_DEV_PLAYERSCAN (dev_player_scan.cpp)
 #endif
+#if defined(BF_DEV_TOOLS)
+  // BF_DEV_PAD_TRACE=1 (developer builds; issue 90): each change of the left stick and the triggers as the game's read
+  // gave them and as our controller settings left them, beside what the keyboard says its keys gave.
+  static const bool pad_trace = std::getenv("BF_DEV_PAD_TRACE") != nullptr;
+  const int16_t trace_lx_in = int16_t(p[8] << 8 | p[9]), trace_ly_in = int16_t(p[10] << 8 | p[11]);
+#endif
   if (!input_off)  // Settings > Controls
     bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, seated);
+#if defined(BF_DEV_TOOLS)
+  if (pad_trace) {
+    static std::string last;
+    const std::string now = fmt::format("{} {} | lx {} -> {}, ly {} -> {}, lt {}, keys lx {} ly {} buttons {:04X}",
+                                        connected ? "read" : "NOT READ", seated ? "seated" : "on foot", trace_lx_in,
+                                        int16_t(p[8] << 8 | p[9]), trace_ly_in, int16_t(p[10] << 8 | p[11]), p[6],
+                                        rex::input::mnk::LastKeyLeftStick(false), rex::input::mnk::LastKeyLeftStick(true),
+                                        rex::input::mnk::LastKeyButtons());
+    if (now != last) {
+      last = now;
+      REXLOG_INFO("BF pad trace: {}", now);
+    }
+  }
+#endif
   bf1943::HudGlyphsTick(seated);  // hud_glyphs.cpp: the keyboard prompts follow the seat's keys
   bf1943::SharpTextTick();        // sharp_text.cpp: the HUD's sharper copies drawn or not
   bf1943::SquadColorsTick(base);  // squad_colors.cpp: the squad's icons a brighter green

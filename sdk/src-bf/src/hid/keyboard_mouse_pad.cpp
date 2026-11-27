@@ -322,6 +322,7 @@ Result<rex::hid::PadState> KeyboardMousePad::GetDeviceState(rex::hid::PadDeviceI
   pointer_lock_.store(settings_.mnk_mouse.Get() && focused && look, std::memory_order_relaxed);
   const bool tests = g_test_keys_held.load(std::memory_order_relaxed) > 0;
   if (!focused && !tests) {
+    ClearLastKeys();  // (Battlefield 1943 Reborn patch: nothing of the keys' in this read, so none reported either)
     return rex::hid::PadState{};
   }
 
@@ -586,6 +587,25 @@ int16_t LastKeyLeftStick(bool y) {
 int16_t LastKeyRightStick(bool y) {
   return int16_t(uint16_t(detail::g_last_key_right_stick.load(std::memory_order_relaxed) >> (y ? 16 : 0)));
 }
+}  // namespace rex::hid::bf
+
+namespace rex::hid::detail {
+// Battlefield 1943 Reborn patch: a test holds keys (SetTestKey), which count without the window's focus.
+bool TestKeysHeld() { return g_test_keys_held.load(std::memory_order_relaxed) > 0; }
+// Battlefield 1943 Reborn patch: what the keys gave (bf::LastKey*) set to nothing, for a read whose keyboard state the
+// title does not get (no focus, or InputSystem's ReadRawLocked leaving it out). The title takes the keys' part back out
+// of the pad it got (its vehicle keys, its stick remapping): a stale value took it from a pad that never had it, and a
+// held key turned a vehicle's stick full the other way (0.4.8.2).
+void ClearLastKeys() {
+  g_last_key_buttons.store(0, std::memory_order_relaxed);
+  g_last_key_axes.store(false, std::memory_order_relaxed);
+  g_last_key_triggers.store(0, std::memory_order_relaxed);
+  g_last_key_left_stick.store(0, std::memory_order_relaxed);
+  g_last_key_right_stick.store(0, std::memory_order_relaxed);
+}
+}  // namespace rex::hid::detail
+
+namespace rex::hid::bf {
 void SetTestKey(uint16_t virtual_key, bool down) {
   if (virtual_key >= 256) {
     return;

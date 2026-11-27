@@ -87,6 +87,12 @@ std::optional<std::string> Get(std::string_view old_name) {
   const std::string_view name = NewName(old_name);
   if (name.empty()) return std::nullopt;
   auto found = REX_SETTINGS().Find(name);
+  // The keyboard's bindings (keybind_a ... keybind_guide) are hid.keybind_a ... in v0.11. Its old names
+  // (src/base/settings/aliases.cpp) are followed by SetText, not by Find, so every read of them gave nothing: the
+  // vehicles' key sets were seeded empty at the first start (issue 90: in a vehicle the keyboard did nothing), and the
+  // bindings' infantry rows and the HUD's key prompts read no keys (0.4.8.2).
+  if ((!found.has_value() || !*found) && name.starts_with("keybind_"))
+    found = REX_SETTINGS().Find("hid." + std::string(name));
   if (!found.has_value() || !*found) return std::nullopt;
   return (*found)->GetText();
 }
