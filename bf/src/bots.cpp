@@ -76,6 +76,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
+#include "dev_guest_memory.h"
 #include "player_limits.h"
 
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
@@ -249,10 +250,14 @@ bool Mapped(const uint8_t* base, uint32_t address, uint32_t size) {
   return mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
          uint64_t(static_cast<const uint8_t*>(mbi.BaseAddress) - base) + mbi.RegionSize >= uint64_t(address) + size;
 #else
+  // One byte of each page read through the kernel (dev_guest_memory.h: process_vm_readv fails on memory that is not
+  // mapped or not readable), about a microsecond. Until 27 Nov 2026 every call read and parsed the whole of
+  // /proc/self/maps (GuestHostRanges, 250+ lines): the player and flag names of each tick made it 3 to 5 ms of the
+  // server's tick with the bots waiting and the most of its main thread with them playing (US Central, perf: 81% of
+  // the thread in GuestHostRanges). Windows had the same fix for its VirtualQuery on 20 Nov (squad_colors.cpp).
+  // (From the Linux server optimisation, branch linux-server-optim b30ae988.)
   if (address < 0x10000) return false;
-  for (const auto& [start, end] : GuestHostRanges(base))
-    if (start <= address && uint64_t(address) + size <= end) return true;
-  return false;
+  return bf1943::dev::GuestReadable(base, address, size);
 #endif
 }
 
