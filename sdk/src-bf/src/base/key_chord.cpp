@@ -53,7 +53,10 @@ bool IsModifierKey(VirtualKey key) {
     return Err<KeyChord>(ErrorCategory::kConfig,
                          std::format("no key named '{}' in '{}'", rest, text));
   }
-  if (IsModifierKey(chord.key)) {
+  // Battlefield 1943 Reborn patch (27 Nov 2026, as v0.10's mnk binds): a bare modifier name ("Shift", "Control",
+  // "Alt") is a key of its own. The game's defaults are Shift for sprint and C,Control for crouch; v0.11 refused them,
+  // and keyboard players had no sprint and no Control crouch. A modifier after prefixes ("Ctrl+Shift") stays refused.
+  if (IsModifierKey(chord.key) && chord.modifiers != KeyModifiers::kNone) {
     return Err<KeyChord>(ErrorCategory::kConfig,
                          std::format("'{}' is only a modifier and needs a key", text));
   }

@@ -63,11 +63,33 @@ KeyModifiers HeldModifiers(const bool (&key_down)[256]) {
   return mods;
 }
 
+// Battlefield 1943 Reborn patch (27 Nov 2026, v0.10's mnk rules again): a bind with no modifier fires whatever
+// modifiers are held (Shift is sprint and Control crouch, and W has to keep walking and Space jumping while they are
+// held); one that names modifiers ("Shift+Up") needs exactly those, leaving out the bound key's own (a bind to
+// "Shift" holds Shift while pressed). v0.11 asked every bind for exactly the held modifiers, so holding Shift stopped
+// all the plain keys.
+u8 ModifierOf(VirtualKey key) {
+  switch (key) {
+    case VirtualKey::kShift:
+      return std::to_underlying(KeyModifiers::kShift);
+    case VirtualKey::kControl:
+      return std::to_underlying(KeyModifiers::kCtrl);
+    case VirtualKey::kMenu:
+      return std::to_underlying(KeyModifiers::kAlt);
+    default:
+      return 0;
+  }
+}
+
 bool IsBindPressed(const bool (&key_down)[256], const std::vector<KeyChord>& chords) {
-  const KeyModifiers live = HeldModifiers(key_down);
+  const u8 live = std::to_underlying(HeldModifiers(key_down));
   return std::ranges::any_of(chords, [&](const KeyChord& chord) {
     const u16 index = static_cast<u16>(chord.key);
-    return chord.modifiers == live && index < 256 && key_down[index];
+    const u8 want = std::to_underlying(chord.modifiers);
+    if (want != 0 && want != (live & static_cast<u8>(~ModifierOf(chord.key)))) {
+      return false;
+    }
+    return index < 256 && key_down[index];
   });
 }
 
