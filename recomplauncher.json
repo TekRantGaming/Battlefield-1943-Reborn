@@ -52,7 +52,9 @@
         "{install}/user/bf1943-settings.txt",
         "{install}/user/achievements",
         "{data}/bf1943-settings.txt",
-        "{data}/achievements"
+        "{data}/achievements",
+        "{install}/usr/bin/user/bf1943-settings.txt",
+        "{install}/usr/bin/user/achievements"
     ],
     "system": {
         "windows": {
