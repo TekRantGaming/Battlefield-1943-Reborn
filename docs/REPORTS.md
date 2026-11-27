@@ -33,12 +33,13 @@ REPORT AN ISSUE on Home (and on the main menu once the game runs) opens three st
 
 | Part | What | Ticked by default |
 |---|---|---|
-| Game | version, release or dev build, OS family, the game's tick rate | always |
+| Game | version, release or dev build, OS family, the game's tick rate, which Diagnostics logging was on | always |
 | PC | Windows version and build, CPU name, cores and threads, RAM, GPU name and driver version | always |
 | Display and graphics | resolution, window mode, refresh, renderer, the graphics settings (a fixed list of keys) | always |
 | Last match | server name, official or community, map, players, when (never its address) | if one was played this run or the last |
 | Crash report | the newest crash-*.txt or hang-*.txt from the last 7 days (text only; the minidump stays on the PC) | Crash type |
 | Log | the last 400 lines (up to 40 KB) of bf1943.log, or of bf1943.previous.log when the last run crashed | not for Suggestion |
+| Whole log | the same log whole (with this run's rotated parts), gzip, at most 1.4 MB compressed (else its start and newest part); kept 30 days by the relay and linked from the issue | not for Suggestion |
 | Screenshot | the newest picture the game saved with F12 (user\screenshots), downscaled to 1280 wide JPEG | when there is one from the last day |
 | Contact | the soldier name or a name the player types, if they want a reply | off (anonymous) |
 
@@ -57,6 +58,126 @@ Each one is replaced by a word in brackets, `[user]`, `[name]`, `[ip]`, `[recove
 - The install id (install-id.txt), any 32+ character hex or base64 run (keys, tokens), Authorization and token=
   values, e-mail addresses.
 - What the player types is scrubbed the same way (a pasted path or address).
+
+### The log itself is anonymized as it is written (Settings > Diagnostics, 26 Nov 2026; bf/src/diagnostics.h)
+
+A player's bf1943.log goes through the same rules on its way to the disk (the SDK's SetLogFileFilter, on a thread of
+its own: the game's threads never wait for the disk or the rules), with more: the soldier name becomes `[you]`, other
+players' names `[player N]` (from the host's player list and chat lines), addresses `[ip N]` (numbered per run, so
+lines about one server still match up), and chat text is left out of the log. A report scrubs it again before
+sending. A dedicated server's log is left as it is.
+
+Settings > Diagnostics (all on by default, each can be turned off; at the next start):
+
+| Area | What the log gets |
+|---|---|
+| Audio | every 5 s when sound went wrong: output underruns, XMA voices starved of input or unreadable, the game's mixer late; an all-clear line every minute; the device and its buffer at the start |
+| Rendering | frame statistics every 5 s, the renderer's frames over 50 ms with what they waited for, the game's own frames over 100 ms, the graphics settings not at their defaults |
+| Network | in a match, every 10 s: packets and bytes from each server, the longest gap, gaps over 150 ms, the ping; each gap over 400 ms |
+| Input | the controls' settings and bindings not at their defaults (controllers' connections are always logged) |
+| System | the system at the start (OS, CPU, RAM, GPU and driver, Wine/Proton); every minute the process's memory and peak, the PC's free memory, the game's own physical and virtual memory, the CPU, the game's file reads (count, MB, the slowest, over 100 ms), power and the CPU's clock; as they happen: a change to battery, the CPU held under 60% of its top clock while playing, memory over 95%, the window's focus and minimising |
+
+Every area's lines carry the scene (starting, menus, loading, deploy screen, playing, paused, end of round, tutorial),
+and each scene's end is logged with what happened in it: how long, frames over 50 ms and the longest, audio underruns,
+network gaps. Network logging also times every online request (the backend's and HTTP): failed or slower than 2 s
+each, and a count a minute. Voice chat logs its relay going silent (12 s; it sends every 5 s) and coming back.
+
+Added 27 Nov 2026 (later; the engine designer's wish list):
+
+- **Black box** (any area on; bf/src/diagnostics_blackbox.cpp): the last 30 s of every game frame (its time, the main
+  thread's waits, file reads, packets in and out and the longest gap, audio underruns, sounds EA's mixer stopped) and
+  every renderer frame (time between presents, GPU wait, the renderer's own work, pipelines made, draws skipped while
+  compiling, texture loads with their size and time and the largest, HD copies) kept in memory, written to the log only
+  on a trigger: a game frame over 100 ms while playing (at most one dump every 2 minutes, 10 a run), the player's mark
+  key, the hang watchdog, a crash. A dump is a line a second, the worst 40 slow frames one by one, and the last 5 s of
+  frame times (about 80 lines).
+- **Mark key**: `keybind_mark_problem`, F10 by default (Settings > Controls > Bindings, "Mark a problem for the log"):
+  "BF mark: the player marked a problem", a black box dump, a notice on screen for 3 s; at most one in 3 s and 30 a
+  run. A report's table gets a Marks row (how many, the last one's time).
+- **Scenes**: each scene's line also has the 1% and 0.1% lows, how many frames were unevenly paced, pipelines made (ready
+  at once, compiled, failed), shader failures, texture loads, HD copies made and remade, swap chain resizes and
+  rebuilds, how often EA's mixer looked overloaded; a long scene gets a "still" line every 10 minutes, and the last scene
+  its line when the window closes.
+- **System**: the minute line also has the video memory against the driver's budget (VK_EXT_memory_budget), the PC's
+  CPUs (the game's cores and other programs'), page faults, the game's memory peak; a second line has the busiest
+  threads by CPU, how long the game's threads waited for a CPU (Linux), and the main thread's longest waits by guest
+  caller. As they happen: slow frames while other programs kept many cores busy, video memory near its budget.
+- **Network**: our own sends to each server (their rate and gaps; "we sent nothing to ... for N ms"), and the ping
+  sampled every second (its average, range and how much it moved).
+- **Rendering** (the renderer's native_x_renderer_diagnostics): each pipeline that was ready over 50 ms after it was
+  asked for, with its shaders (30 a minute); one line each time the game's pictures change and its patched textures
+  are made again (why, how many, how long); swap chain resizes.
+- **Memory**: each failed guest allocation with its size and how much of the heap was free (the first 20, then at each
+  power of two).
+- **Crashes on Linux**: crashes/crash-<time>.txt (the signal, the address, the thread, the host stack as module +
+  offset) and hang-<time>.txt (every thread's stack), as Windows has its .txt and .dmp; both platforms write the black
+  box into the log first.
+
+Added 27 Nov 2026 (the second round, after the first match with the black box; bf/src/diagnostics_extra.cpp):
+
+- **Build line** first in the log: the version servers are told, the commit and whether it had local changes (as of
+  the build's CMake configure), dev or release, the ReXGlue SDK's version.
+- **Run summary** when the window closes ("BF summary:"): the time in each kind of scene, the black box's triggers by
+  cause and the worst five, joins and the deploy screen to alive, the totals below, warnings by kind.
+- **Black box**: each slow frame says what it most likely was (HD copies, texture loads, pipelines, new shaders, the
+  GPU and its busiest passes, the main thread waiting, the game waiting for the renderer, a slow file read, or the
+  game's own work); the renderer's passes are timed on the GPU (native_x_renderer_gpu_sections, on with Rendering).
+- **Ghosts** (the game's network objects): an object id the server named that this game does not have, or has without
+  its object, with the id and the guest caller (30 a minute); the most objects known against the game's 8192. The dev
+  build's "an object id not in the table" line is gone (it mixed these with "no object" references).
+- **Rubber banding**: the view jumping over 2 m (and 8 times the usual move) in one frame on foot.
+- **Input**: a press to the game's next input read and to the next frame (median, 95%, longest), presses too short
+  for the game to see; controllers connected or disconnected in a match.
+- **Display**: the refresh, the cap, V-Sync, the video driver and desktop; presents over 1.5 frames late. Variable
+  refresh is not reported to the game.
+- **Renderer queue**: the game's waits for room in the renderer's queue, the frames the renderer is behind.
+- **Network**: each server's packet spacing (median, 95%) and the largest packet, packets over 1400 bytes. Packet loss
+  and order are not knowable without the game's protocol.
+- **Audio**: output devices added and removed; reads of the sound and music files over 50 ms; EA's "overloaded" checks
+  that fell within 0.2 s of a slow frame.
+- **Memory**: the largest free block of the game's memory (each minute), the memory at each round's end against the
+  first round's.
+- **Threads**: a warning when the game's threads wait over 15% of the time for a CPU while the PC is over 85% busy.
+- **Renderer totals**: HD copies made again with the same picture as before (what a cache would save), the pipeline
+  storage's additions this run and a failed write.
+- **Warnings and errors** counted by kind per scene and for the run (our fix-ups firing show here).
+- **Settings** changed while the game runs.
+- tools/bf_log_summary.py: a log in one screen (the build, the summary, the scenes, marks and dumps with their causes,
+  warnings by kind).
+
+Added 27 Nov 2026 (the third round: "name everything directly", "make the verbosity modular"):
+
+- **Levels**: each area's row (and a new Black box row) is Off or On, and **Logging verbosity** sets how much the
+  areas that are on write: Normal (the default and the lowest a player can choose), Detailed or Verbose (settings file
+  diag_verbosity = normal / detailed / verbose). Every Diagnostics row but the log's size applies at once, in the game (diagnostics.h
+  ApplyNow: the levels read again, the renderer's switches set, the parts an area turns on started). Quiet remains for dev builds and settings files (an area's own value
+  "quiet", "detailed" or "verbose" overrides the verbosity; diagnostics.h Level). Features ask for the level they need
+  (Want) and scale their per-minute line limits with it (Scaled: none at Quiet, 4x Detailed, 20x Verbose). Quiet keeps
+  the summaries (scene lines, the minute's health, the run's summary, the black box's worst 10 frames with their
+  causes); Detailed adds every slow frame's whole time account; Verbose the 2 s around a trigger frame by frame. The
+  renderer's lines follow the Rendering level (native_x_renderer_diagnostics_level; its slow frames from 100, 50, 33
+  or 20 ms). BF_DEV_DIAG_LEVEL=<level> sets every area in dev builds.
+- **Every millisecond named**: the renderer's thread is timed by command kind at its one dispatch (draws, clears,
+  resolves, presents, frame end and the rest; native_x_renderer.h FrameSlice) and the frame end by step; the rest of
+  its time is waiting for the game's commands. The game's frame thread is timed by our own hooks (OursTimer: our frame
+  limit's wait, the SDK's VdSwap, look, tick blend, the pad hook, ...) and its kernel waits; the rest is the game's own
+  code. A slow frame's cause is its largest named part, and Detailed prints the whole account.
+
+Added 27 Nov 2026 (the gaps closed):
+
+- **Audio threads**: EA's control step, the game's render callback (the SDK's audio worker) and the XMA decoder's work
+  timed (rex/audio/diagnostics.h Timed): per black box frame, per second (the longest), per scene.
+- **Every thread**: the process's threads sampled 4 times a second off the game's threads (CPU and waiting for a CPU),
+  30 s kept: a dump names the busiest threads around its trigger.
+- **The game's code by function** (Black box at Detailed and up): the game frame thread sampled about 1000 times a
+  second (Linux: a real-time signal; Windows: a brief suspend), each sample named exactly from the binary's own symbol
+  table (Linux dev builds; else the game's function table, "nearest"), a sample outside the game's code by its module
+  and the game's function that called it ("libc.so.6 __sched_yield from the game's sub_821659B0"). The network's
+  handling on that thread shows here as the game's functions.
+- **GPU**: the game's own 3D view and the whole frame timed on the GPU beside the renderer's passes.
+
+Log file size: Automatic (25 MB while any area is on, else 5 MB), Small (5 MB) or Large (200 MB); one older part
+kept beside it (bf1943.1.log) when it is larger than 5 MB.
 
 ## How it reaches GitHub
 
@@ -167,8 +288,15 @@ What he does, with his own logins (nothing of it goes through a chat or a file):
   server/report_relay/README.md. POST /v1/bf/reports with the checks (shape, sizes, links, @ mentions, HTML, rate
   limits per install and per salted address hash, the same report in a day, a known open crash commented instead of
   filed again), then the GitHub API call; GET /v1/bf/reports/shot/<id>.jpg serves a report's screenshot.
+- 26 Nov 2026 (TekRantGaming's OK for larger reports): `log_gz`, the whole log (gzip, at most 1.4 MB), kept in
+  bf_report_logs for 30 days and linked where the game marked the issue (`<!-- full log -->`); a duplicate crash's
+  comment links it too. GET /v1/bf/reports/log/<id>.txt serves it as text (Content-Encoding gzip). The request may now
+  be 700 KB + the log's base64. Until the route is deployed again, the live relay answers 413 to a report with its
+  whole log and the game sends it again without (report.cpp PostOnce); the usage.js line for the log route is in
+  server/report_relay/README.md.
 - D1 tables made by the module: bf_report_sent (install, salted address hash, content hash, time: pruned after 2
-  days), bf_report_signatures (crash signature to issue, 90 days), bf_report_shots (the JPEG, 90 days).
+  days), bf_report_signatures (crash signature to issue, 90 days), bf_report_shots (the JPEG, 90 days),
+  bf_report_logs (the whole log, 30 days).
 - Tested: 9 tests with a fake GitHub (`npm test` in server/report_relay), and the dev game against the real code run
   locally (local_relay.mjs): filed as #3001 at the fake GitHub, its screenshot link served. No real issue made.
 - First live check after the deploy: one report filed, looked at, then closed and deleted (his OK for that one issue).

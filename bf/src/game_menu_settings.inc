@@ -11,7 +11,8 @@
                                                       "VOLUME, VOICE CHAT", "KEYBOARD AND MOUSE, OR CONTROLLER",  // by device since 16 Nov
                                                       "NAME, CAMERA, HUD",
                                                       // the sniper scope only in a build with it (scope_pip.h)
-                                                      "FOV, LIGHTING, HUD SCALE"};
+                                                      "FOV, LIGHTING, HUD SCALE",
+                                                      "LOGS FOR REPORTS"};
 
   // Back where the settings were opened from: the pause (a match running), else the menu (Home before the game runs).
   void BackFromSettings() {
@@ -500,7 +501,7 @@
       RestartForSettings("Settings");
       return;
     }
-    // ---- the rail: the five categories, the PC's card under them
+    // ---- the rail: the categories, the PC's card under them
     const ImVec2 ra = st.P(48, 167), rb = st.P(267, 640);
     d->AddRectFilled(ra, rb, IM_COL32(13, 15, 11, 204));
     d->AddRect(ra, rb, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
@@ -525,7 +526,8 @@
             caption_lines(t == kTabControls && device_page >= 0
                               ? (device_page == 0 ? "CONTROLS \xC2\xB7 KEYBOARD AND MOUSE" : "CONTROLS \xC2\xB7 CONTROLLER")
                               : kTabSubs[t]);
-        const float h = st(53) + st(10) * float(lines.size() - 1);
+        // A little shorter with seven (Diagnostics, 26 Nov 2026): the PC's card still fits under them.
+        const float h = st(kTabCount > 6 ? 47 : 53) + st(10) * float(lines.size() - 1);
         const ImVec2 a(ra.x, y), b(rb.x, y + h);
         const bool sel = t == tab_;
         const bool over = !sel && ImGui::IsMouseHoveringRect(a, b);

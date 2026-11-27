@@ -2,8 +2,9 @@
 // section 4), kept small: <user>\crashes\crash-<time>.dmp and .txt for a crash, hang-<time>.dmp and .txt when no
 // game frame came for 20 s. The text has the exception, the faulting module and offset, up to 16 callers as module +
 // offset (decoded with the build's bf1943.map), then the stack's third party modules and the overlays hooked into the
-// game (overlay_hooks.inc; also logged at the start). Module paths and user names are never written. Windows only;
-// on Linux only the null page guard (at the end).
+// game (overlay_hooks.inc; also logged at the start). Module paths and user names are never written. On Linux (27 Nov
+// 2026) a text report of a crash (the signal, the host stack) or a hang (every thread's stack), and the null page guard
+// (at the end). Both write the diagnostics' black box (diagnostics.h) into the log.
 
 #if defined(_WIN32)
 
@@ -36,6 +37,8 @@
 #include <rex/ppc/func.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/xmemory.h>
+
+#include "diagnostics.h"
 
 REXCVAR_DEFINE_BOOL(bf_null_page_guard, true, "BF1943",
                     "Reads of the game's null page give zeros (each logged) instead of a crash (Windows)");
@@ -261,6 +264,11 @@ void WriteReport(const char* kind, EXCEPTION_POINTERS* ep, const std::string& re
     if (end > at) REXLOG_ERROR("BF {} report: {}", kind, text.substr(at, end - at));
     at = end + 1;
   }
+  // The black box's last 30 s (diagnostics.h), then the log file (written on a thread of its own) drained: what was
+  // logged up to the crash, in the file.
+  diagnostics::BlackBoxDump(std::string(kind) == "hang" ? diagnostics::Trigger::kHang : diagnostics::Trigger::kCrash,
+                            reason, true);
+  rex::DrainLogFile(std::chrono::seconds(2));
   HANDLE file = CreateFileW(dmp.wstring().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
                             nullptr);
   if (file != INVALID_HANDLE_VALUE) {
@@ -526,13 +534,29 @@ void NoteGuestFrame() {
 
 #else
 
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <signal.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
+#include <fstream>
+#include <string>
+#include <thread>
+
+#include <fmt/format.h>
+#include <rex/platform/seh.h>
+
+#include "diagnostics.h"
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -546,8 +570,192 @@ REXCVAR_DEFINE_BOOL(bf_null_page_guard, true, "BF1943",
                     "Reads of the game's null page give zeros instead of a crash (on Windows each one is logged)");
 
 namespace bf1943 {
-void InstallCrashReports(const std::filesystem::path&) {}
-void NoteGuestFrame() {}
+namespace {
+
+// Linux crash and hang reports (27 Nov 2026; before, a crash on Linux left only the log): <user>/crashes/crash-<time>.txt
+// and hang-<time>.txt with the signal, the faulting address, the host stack as module + offset (decoded with the
+// build's map), the scene; for a hang every thread's stack. The black box's last 30 s go into the log.
+std::filesystem::path g_dir;
+std::atomic<int64_t> g_last_frame_ms{0};
+std::atomic<bool> g_writing{false};
+constexpr int64_t kHangMs = 20000;
+
+int64_t NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+std::string Stamp() {
+  const std::time_t t = std::time(nullptr);
+  char b[32] = {};
+  if (const std::tm* tm = std::localtime(&t)) std::strftime(b, sizeof(b), "%Y%m%d-%H%M%S", tm);
+  return b;
+}
+
+// A host address as its module's file name and the offset in it (no folders: they carry the user's name).
+std::string Where(void* address) {
+  Dl_info info{};
+  if (dladdr(address, &info) && info.dli_fname) {
+    const char* name = std::strrchr(info.dli_fname, '/');
+    return fmt::format("{}+{:X}", name ? name + 1 : info.dli_fname,
+                       reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(info.dli_fbase));
+  }
+  return fmt::format("{:X}", reinterpret_cast<uintptr_t>(address));
+}
+
+std::string Stack(void* const* frames, int n, int skip) {
+  std::string out;
+  for (int i = skip; i < n; ++i) out += " " + Where(frames[i]);
+  return out;
+}
+
+std::string ThreadName(pid_t tid) {
+  std::ifstream f("/proc/self/task/" + std::to_string(tid) + "/comm");
+  std::string name;
+  std::getline(f, name);
+  return name.empty() ? "?" : name;
+}
+
+void WriteText(const char* kind, const std::string& text) {
+  std::error_code ec;
+  std::filesystem::create_directories(g_dir, ec);
+  const std::filesystem::path txt = g_dir / (std::string(kind) + "-" + Stamp() + ".txt");
+  if (FILE* f = std::fopen(txt.c_str(), "w")) {
+    std::fputs(text.c_str(), f);
+    std::fclose(f);
+  }
+  for (size_t at = 0; at < text.size();) {
+    const size_t end = std::min(text.find('\n', at), text.size());
+    if (end > at) REXLOG_ERROR("BF {} report: {}", kind, text.substr(at, end - at));
+    at = end + 1;
+  }
+}
+
+const char* SignalName(int sig) {
+  switch (sig) {
+    case SIGSEGV: return "SIGSEGV (access violation)";
+    case SIGBUS: return "SIGBUS (bus error)";
+    case SIGILL: return "SIGILL (illegal instruction)";
+    case SIGFPE: return "SIGFPE (arithmetic)";
+    case SIGABRT: return "SIGABRT (abort)";
+  }
+  return "a signal";
+}
+
+// The crash (the SDK's fatal signal hook, rex/platform/seh.h, and our SIGABRT handler). In the signal handler: it
+// formats and writes files, which is not safe there in general; the process is ending either way, and a report that
+// is sometimes cut short beats none (the Windows report is written in its handler too).
+void OnFatal(int sig, void* info_ptr, void*) {
+  if (g_dir.empty() || g_writing.exchange(true)) return;
+  const auto* info = static_cast<const siginfo_t*>(info_ptr);
+  void* frames[48];
+  const int n = backtrace(frames, 48);
+  std::string text = fmt::format("Battlefield 1943 Reborn crash report (Linux)\nSignal: {}{}\nThread: {} ({})\nScene: {}\n",
+                                 SignalName(sig),
+                                 info && (sig == SIGSEGV || sig == SIGBUS)
+                                     ? fmt::format(" at address {:X}", reinterpret_cast<uintptr_t>(info->si_addr))
+                                     : std::string(),
+                                 ThreadName(pid_t(syscall(SYS_gettid))), pid_t(syscall(SYS_gettid)),
+                                 *diagnostics::SceneName() ? diagnostics::SceneName() : "not known yet");
+  text += "Host stack (module + offset):" + Stack(frames, n, 1) + "\n";
+  WriteText("crash", text);
+  diagnostics::BlackBoxDump(diagnostics::Trigger::kCrash, SignalName(sig), true);
+  rex::DrainLogFile(std::chrono::seconds(2));
+  g_writing = false;
+}
+
+void OnAbort(int sig, siginfo_t* info, void* uc) {
+  OnFatal(sig, info, uc);
+  signal(SIGABRT, SIG_DFL);
+  raise(SIGABRT);
+}
+
+// A hang: every thread's stack. Each thread is sent kStackSignal; its handler puts its own stack in a slot.
+const int kStackSignal = SIGRTMAX - 1;  // the SDK's threads use SIGRTMIN and up
+struct StackSlot {
+  std::atomic<pid_t> tid{0};
+  void* frames[32];
+  std::atomic<int> n{-1};
+};
+StackSlot g_slots[256];
+std::atomic<int> g_slot_next{0};
+
+void OnStackSignal(int, siginfo_t*, void*) {
+  const int i = g_slot_next.fetch_add(1);
+  if (i < 0 || i >= int(std::size(g_slots))) return;
+  StackSlot& s = g_slots[i];
+  s.tid = pid_t(syscall(SYS_gettid));
+  s.n.store(backtrace(s.frames, 32), std::memory_order_release);
+}
+
+std::string AllStacks() {
+  for (StackSlot& s : g_slots) s.tid = 0, s.n = -1;
+  g_slot_next = 0;
+  int sent = 0;
+  std::error_code ec;
+  const pid_t self = pid_t(syscall(SYS_gettid));
+  for (const auto& e : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+    const pid_t tid = pid_t(std::atoi(e.path().filename().c_str()));
+    if (tid <= 0 || tid == self) continue;
+    if (syscall(SYS_tgkill, getpid(), tid, kStackSignal) == 0) ++sent;
+  }
+  // The answers: a thread stuck in the kernel answers when it returns; a moment is enough for the rest.
+  for (int i = 0; i < 100 && g_slot_next.load() < sent; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  std::string out = fmt::format("Threads: {} asked for their stacks, {} answered\n", sent, std::min(g_slot_next.load(), sent));
+  const int answered = std::min(g_slot_next.load(), int(std::size(g_slots)));
+  for (int i = 0; i < answered; ++i) {
+    const int n = g_slots[i].n.load(std::memory_order_acquire);
+    if (n <= 0) continue;
+    const pid_t tid = g_slots[i].tid.load();
+    out += fmt::format("Thread {} ({}):{}\n", tid, ThreadName(tid), Stack(g_slots[i].frames, n, 2));
+  }
+  return out;
+}
+
+}  // namespace
+
+void InstallCrashReports(const std::filesystem::path& user_root) {
+  g_dir = user_root / "crashes";
+  {
+    void* warm[4];
+    backtrace(warm, 4);  // loads the unwinder now, not in a signal handler
+  }
+  rex::platform::set_fatal_signal_hook(OnFatal);
+  struct sigaction sa{};
+  sa.sa_sigaction = OnAbort;
+  sa.sa_flags = SA_SIGINFO;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGABRT, &sa, nullptr);
+  struct sigaction st{};
+  st.sa_sigaction = OnStackSignal;
+  st.sa_flags = SA_SIGINFO | SA_RESTART;
+  sigemptyset(&st.sa_mask);
+  sigaction(kStackSignal, &st, nullptr);
+  std::thread([] {
+    bool written = false;
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      const int64_t last = g_last_frame_ms.load();
+      if (!last) continue;
+      const int64_t stalled = NowMs() - last;
+      if (stalled > kHangMs && !written) {
+        written = true;
+        REXLOG_ERROR("BF hang: no game frame for {} s, writing a hang report", stalled / 1000);
+        std::string text = fmt::format("Battlefield 1943 Reborn hang report (Linux)\nNo game frame for {} s\nScene: {}\n",
+                                       stalled / 1000, *diagnostics::SceneName() ? diagnostics::SceneName() : "?");
+        text += AllStacks();
+        WriteText("hang", text);
+        diagnostics::BlackBoxDump(diagnostics::Trigger::kHang, fmt::format("no game frame for {} s", stalled / 1000), true);
+        rex::DrainLogFile(std::chrono::seconds(2));
+      } else if (stalled < kHangMs) {
+        written = false;
+      }
+    }
+  }).detach();
+  REXLOG_INFO("BF crash reports: on (crashes folder in the user data; Linux: a text report of the crash or hang)");
+}
+
+void NoteGuestFrame() { g_last_frame_ms = NowMs(); }
 // Linux: reserved guest memory already reads as zeros, so the Windows stray read guard gives no pages here.
 bool StrayReadPage(uint32_t) { return false; }
 

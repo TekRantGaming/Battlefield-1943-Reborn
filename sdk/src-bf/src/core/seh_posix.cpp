@@ -12,11 +12,18 @@
 static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
 
 #include <signal.h>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>  // std::abort()
+
+#include <rex/logging.h>
 
 #include <rex/platform/exceptions.h>
 
 namespace rex::platform {
+
+static std::atomic<FatalSignalHook> g_fatal_hook{nullptr};
+void set_fatal_signal_hook(FatalSignalHook hook) { g_fatal_hook.store(hook); }
 
 static thread_local SehThreadState tls_seh_state;
 static thread_local bool tls_seh_active = false;
@@ -31,9 +38,10 @@ int seh_filter(uint32_t /*code*/, void* /*ep*/) {
 }
 
 /// Signal handler for SIGSEGV/SIGBUS/SIGFPE/SIGILL
-static void signal_handler(int sig, siginfo_t* info, void* /*ucontext*/) {
+static void signal_handler(int sig, siginfo_t* info, void* ucontext) {
   // Only handle if we're in SEH-protected code
   if (!tls_seh_active) {
+    if (FatalSignalHook hook = g_fatal_hook.load()) hook(sig, info, ucontext);  // the game's crash report
     // Not in SEH region - restore default handler and re-raise
     signal(sig, SIG_DFL);
     raise(sig);
@@ -94,6 +102,9 @@ static void signal_handler(int sig, siginfo_t* info, void* /*ucontext*/) {
     default:
       abort();
   }
+  if (FatalSignalHook hook = g_fatal_hook.load()) hook(sig, nullptr, nullptr);  // the game's crash report
+  // What was logged before the crash, into the log file (written on a thread of its own: SetLogFileFilter).
+  rex::DrainLogFile(std::chrono::milliseconds(500));
   // Restore default handler and re-raise
   signal(sig, SIG_DFL);
   raise(sig);

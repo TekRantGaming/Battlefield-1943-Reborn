@@ -133,9 +133,11 @@ void CommandQueue::WaitConsumed(uint64_t target, std::atomic<uint64_t>& waits, s
       consumed_cv_.wait_for(lock, kWaitSlice);
     }
   }
+  const uint64_t ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
   waits.fetch_add(1, std::memory_order_relaxed);
-  wait_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count()),
-                    std::memory_order_relaxed);
+  wait_ns.fetch_add(ns, std::memory_order_relaxed);
+  // The diagnostics' running totals (never taken: the per-frame record reads their difference).
+  (&wait_ns == &producer_wait_ns_ ? producer_total_ns_ : gate_total_ns_).fetch_add(ns, std::memory_order_relaxed);
 }
 
 CommandQueue::Waits CommandQueue::Take(std::atomic<uint64_t>& waits, std::atomic<uint64_t>& wait_ns) {

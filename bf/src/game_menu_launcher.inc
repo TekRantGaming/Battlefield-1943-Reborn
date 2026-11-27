@@ -4429,13 +4429,21 @@
     }
     // The tabs: a strip each, the current one green; a click switches.
     float x = st.P(330, 0).x;
+    // Smaller type when the strips would run past the page's right edge (seven since Diagnostics, 26 Nov 2026).
+    float strip_size = st(17);
+    {
+      float total = 0;
+      for (int t = 0; t < kTabCount; ++t) total += kit::SpacedWidth(f.ui, strip_size, kTabNames[t], st(1));
+      const float room = st.P(1240, 0).x - x - float(kTabCount) * st(36);
+      if (room > 0 && total > room) strip_size *= room / total;
+    }
     for (int t = 0; t < kTabCount; ++t) {
       const std::string name = kTabNames[t];
-      const float tw = kit::SpacedWidth(f.ui, st(17), name, st(1));
+      const float tw = kit::SpacedWidth(f.ui, strip_size, name, st(1));
       const ImVec2 a(x, st.P(0, 92).y), b(x + tw + st(28), st.P(0, 126).y);
       const bool cur = t == tab_ && sub_ == kSubNone;
       d->AddRectFilled(a, b, cur ? kit::kGreen : kit::kStrip);
-      kit::Spaced(d, f.ui, st(17), ImVec2(a.x + st(14), a.y + st(4)), kit::kStripText, name, st(1));
+      kit::Spaced(d, f.ui, strip_size, ImVec2(a.x + st(14), a.y + st(4)), kit::kStripText, name, st(1));
       if (ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         tab_ = t, row_ = 0, scroll_ = 0, sub_ = kSubNone;
       x = b.x + st(8);

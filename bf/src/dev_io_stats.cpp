@@ -1,8 +1,9 @@
 // Developer aid (BF_DEV_TOOLS builds): BF_DEV_IOSTATS=1 logs, every 2 s, the game's file reads (calls, bytes, time in
 // the call), its waits (time in each kind, and the callers that waited longest) and its sleeps: where a load that
 // keeps no thread busy spends its time (runs bootprof1 and loadprof1: the boot and a level load were both idle).
-
-#if defined(BF_DEV_TOOLS)
+//
+// In every build (27 Nov 2026): each NtReadFile also goes to Settings > Diagnostics > System logging's counts (the
+// game's file reads a minute, the slowest: diagnostics_health.cpp).
 
 #include <algorithm>
 #include <chrono>
@@ -18,7 +19,10 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
+#include "diagnostics.h"  // NoteFileRead
+#if defined(BF_DEV_TOOLS)
 #include "dev_guest_memory.h"  // SafeLoad32
+#endif
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -40,7 +44,10 @@ PPCFunc* RuntimeExport(const char* name) {
   return reinterpret_cast<PPCFunc*>(dlsym(RTLD_NEXT, name));
 #endif
 }
+}  // namespace
 
+#if defined(BF_DEV_TOOLS)
+namespace {
 bool On() {
   static const bool on = [] {
     const char* v = std::getenv("BF_DEV_IOSTATS");
@@ -155,14 +162,40 @@ void DevNoteOpenedHandle(const uint8_t* base, uint32_t handle_out, uint32_t attr
 }
 }  // namespace bf1943
 
-extern "C" REX_FUNC(__imp__NtReadFile) {
-  static PPCFunc* original = RuntimeExport("__imp__NtReadFile");
-  Timed(On() ? ReadKind(ctx.r3.u32) : "read", ctx, base, original, ctx.r9.u32, 0);
-}
-BF_TIMED_IMPORT(KeWaitForSingleObject, "wait1", 0)
-BF_TIMED_IMPORT(NtWaitForSingleObjectEx, "ntwait1", 0)
-BF_TIMED_IMPORT(NtWaitForMultipleObjectsEx, "ntwaitN", 0)
-BF_TIMED_IMPORT(KeWaitForMultipleObjects, "waitN", 0)
 BF_TIMED_IMPORT(KeDelayExecutionThread, "sleep", 0)
 
 #endif  // BF_DEV_TOOLS
+
+// Every build (27 Nov 2026): the guest's waits, timed for Settings > Diagnostics (diagnostics.h NoteWait: the game
+// thread's waits in the black box's frames and the minute's top waits by caller); dev builds' stats too.
+#if defined(BF_DEV_TOOLS)
+#define BF_WAIT_CALL(kind) Timed(kind, ctx, base, original, 0, 0)
+#else
+#define BF_WAIT_CALL(kind) original(ctx, base)
+#endif
+#define BF_WAIT_IMPORT(name, kind)                                                                           \
+  extern "C" REX_FUNC(__imp__##name) {                                                                       \
+    static PPCFunc* original = RuntimeExport("__imp__" #name);                                               \
+    const uint32_t lr = uint32_t(ctx.lr);                                                                    \
+    const auto t0 = Clock::now();                                                                            \
+    BF_WAIT_CALL(kind);                                                                                      \
+    bf1943::diagnostics::NoteWait(lr, std::chrono::duration<double, std::milli>(Clock::now() - t0).count()); \
+  }
+BF_WAIT_IMPORT(KeWaitForSingleObject, "wait1")
+BF_WAIT_IMPORT(NtWaitForSingleObjectEx, "ntwait1")
+BF_WAIT_IMPORT(NtWaitForMultipleObjectsEx, "ntwaitN")
+BF_WAIT_IMPORT(KeWaitForMultipleObjects, "waitN")
+
+// Every build: the read's time and length (r9, the length asked for) to the diagnostics' counts; dev builds' stats too.
+extern "C" REX_FUNC(__imp__NtReadFile) {
+  static PPCFunc* original = RuntimeExport("__imp__NtReadFile");
+  const uint64_t bytes = ctx.r9.u32;
+  const uint32_t handle = ctx.r3.u32;
+  const auto t0 = Clock::now();
+#if defined(BF_DEV_TOOLS)
+  Timed(On() ? ReadKind(ctx.r3.u32) : "read", ctx, base, original, bytes, 0);
+#else
+  original(ctx, base);
+#endif
+  bf1943::diagnostics::NoteFileRead(bytes, std::chrono::duration<double, std::milli>(Clock::now() - t0).count(), handle);
+}

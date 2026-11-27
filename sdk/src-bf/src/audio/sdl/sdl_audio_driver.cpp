@@ -17,6 +17,7 @@
 
 #include <rex/assert.h>
 #include <rex/audio/conversion.h>
+#include <rex/audio/diagnostics.h>
 #include <rex/audio/downmix.h>
 #include <rex/audio/flags.h>
 #include <rex/audio/sdl/sdl_audio_driver.h>
@@ -147,6 +148,12 @@ bool SDLAudioDriver::MoveTo(SDL_AudioDeviceID target, const char* why) {
               target == SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK ? " (system default)" : "", why,
               obtained_spec.channels, obtained_spec.freq,
               static_cast<uint32_t>(obtained_spec.format), static_cast<int>(sdl_device_channels_));
+  if (diag::On()) {
+    int buffer_frames = 0;
+    SDL_AudioSpec spec{};
+    SDL_GetAudioDeviceFormat(device, &spec, &buffer_frames);
+    diag::NoteDevice(device_name, obtained_spec.channels, obtained_spec.freq, buffer_frames, uint32_t{channel_samples_});
+  }
 
   if (!SDL_ResumeAudioDevice(device)) {
     REXAPU_ERROR("SDL_ResumeAudioDevice() failed: {}", SDL_GetError());
@@ -217,11 +224,14 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
     sdl_submit_count++;
   }
 
+  size_t queued = 0;
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);
     frames_queued_.push(output_frame);
-    PROFILE_BUFFER_QUEUE_DEPTH(static_cast<int64_t>(frames_queued_.size()));
+    queued = frames_queued_.size();
+    PROFILE_BUFFER_QUEUE_DEPTH(static_cast<int64_t>(queued));
   }
+  diag::NoteFrameIn(queued);  // outside the lock: it may write the summary line
 }
 
 void SDLAudioDriver::Shutdown() {
@@ -284,6 +294,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
         REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
         sdl_callback_count++;
       }
+      diag::NoteSilentChunk();
       std::memset(data, 0, len);
       if (!SDL_PutAudioStreamData(stream, data, len)) {
         REXAPU_ERROR("SDL_PutAudioStreamData() failed while filling silence: {}", SDL_GetError());
@@ -293,6 +304,8 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
     } else {
       auto buffer = driver->frames_queued_.front();
       driver->frames_queued_.pop();
+      diag::NoteFrameOut(driver->frames_queued_.size(),
+                         int64_t{channel_samples_} * 1000000 / int64_t{frame_frequency_});
       if (REXCVAR_GET(audio_mute)) {
         std::memset(data, 0, len);
       } else {

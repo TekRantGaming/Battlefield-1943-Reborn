@@ -2,6 +2,10 @@
 
 #include "http.h"
 
+#include <chrono>
+
+#include "diagnostics.h"  // NoteRequest
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -35,8 +39,8 @@ namespace bf1943 {
 const char* BfVersion();  // pipeline_upload.cpp
 
 #if defined(_WIN32)
-bool HttpGet(const std::string& url, std::vector<uint8_t>& out, std::atomic<uint64_t>* bytes,
-             std::atomic<uint64_t>* total, int timeout_ms) {
+static bool HttpGetDirect(const std::string& url, std::vector<uint8_t>& out, std::atomic<uint64_t>* bytes,
+                          std::atomic<uint64_t>* total, int timeout_ms) {
   URL_COMPONENTSW parts{};
   parts.dwStructSize = sizeof(parts);
   wchar_t host[256], path[2048];
@@ -134,8 +138,8 @@ int RunCapture(const std::vector<std::string>& argv, std::vector<uint8_t>& out, 
   return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-bool HttpGet(const std::string& url, std::vector<uint8_t>& out, std::atomic<uint64_t>* bytes,
-             std::atomic<uint64_t>* total, int timeout_ms) {
+static bool HttpGetDirect(const std::string& url, std::vector<uint8_t>& out, std::atomic<uint64_t>* bytes,
+                          std::atomic<uint64_t>* total, int timeout_ms) {
   (void)total;  // the caller knows the size from the release (curl gives no size before the end)
   const std::string agent = std::string("BF1943Reborn/") + BfVersion();
   std::vector<std::string> argv = {"curl", "-sSfL", "--connect-timeout", "15", "-A", agent, "-H",
@@ -153,8 +157,8 @@ bool HttpGet(const std::string& url, std::vector<uint8_t>& out, std::atomic<uint
   return code == 0;
 }
 
-int HttpPost(const std::string& url, const std::vector<std::pair<std::string, std::string>>& headers,
-             const std::vector<uint8_t>& body, std::string& reply, int timeout_ms) {
+static int HttpPostDirect(const std::string& url, const std::vector<std::pair<std::string, std::string>>& headers,
+                          const std::vector<uint8_t>& body, std::string& reply, int timeout_ms) {
   // curl reads the body from a file (it may be binary) and prints the reply, then the status on a line of its own.
   std::error_code ec;
   const std::filesystem::path scratch =
@@ -183,6 +187,34 @@ int HttpPost(const std::string& url, const std::vector<std::pair<std::string, st
   if (nl == std::string::npos) return 0;
   reply = text.substr(0, std::min<size_t>(nl, 65536));
   return std::atoi(text.c_str() + nl + 1);
+}
+#endif
+
+// Each request's time and answer for Settings > Diagnostics > Network logging (diagnostics.h NoteRequest): the address
+// without its query (no keys in the log).
+namespace {
+std::string WithoutQuery(const std::string& url) { return url.substr(0, url.find_first_of("?#")); }
+double MsSince(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+}  // namespace
+
+bool HttpGet(const std::string& url, std::vector<uint8_t>& out, std::atomic<uint64_t>* bytes,
+             std::atomic<uint64_t>* total, int timeout_ms) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool ok = HttpGetDirect(url, out, bytes, total, timeout_ms);
+  diagnostics::NoteRequest("GET", WithoutQuery(url), ok, MsSince(t0));
+  return ok;
+}
+
+#if !defined(_WIN32)
+int HttpPost(const std::string& url, const std::vector<std::pair<std::string, std::string>>& headers,
+             const std::vector<uint8_t>& body, std::string& reply, int timeout_ms) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const int status = HttpPostDirect(url, headers, body, reply, timeout_ms);
+  const std::string why = status == 0 ? "no answer" : "status " + std::to_string(status);
+  diagnostics::NoteRequest("POST", WithoutQuery(url), status >= 200 && status < 300, MsSince(t0), why.c_str());
+  return status;
 }
 #endif
 

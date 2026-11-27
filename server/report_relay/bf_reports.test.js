@@ -2,7 +2,8 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { report, screenshot, prune, forgetBfReportTables, neutralise, allowedHtml, PER_HOUR } from './bf_reports.js';
+import { gzipSync } from 'node:zlib';
+import { report, screenshot, wholeLog, prune, forgetBfReportTables, neutralise, allowedHtml, PER_HOUR, MAX_LOG } from './bf_reports.js';
 
 // The Worker tests' D1 stand in (server-api test/bf_pipelines.test.js), schema made by the module itself.
 function d1() {
@@ -31,6 +32,7 @@ function json(value, status = 200, headers = {}) {
 const INSTALL = '0f8e2a11-4b2c-4d3e-8f00-123456789abc', OTHER = '1a2b3c4d-1111-4222-8333-444455556666';
 const NOW = Date.UTC(2026, 10, 16, 6, 0, 0);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4, 0xff, 0xd9]);
+const LOG = gzipSync(Buffer.from('[2026-11-26 10:00:00.000] [info] [core] [t1] BF diagnostics: on: audio\n'));
 let env, calls, ghState, ghFail, realFetch;
 
 beforeEach(() => {
@@ -87,6 +89,9 @@ test('missing headers or a bad report: refused before GitHub', async () => {
   const links = Array.from({ length: 6 }, (_, i) => `https://example.com/${i}`).join(' ');
   assert.equal((await post(crash({ body: `### What happened\n\n${links}\n\n### System\n` }))).status, 422);
   assert.equal((await post(crash({ screenshot_jpeg: Buffer.from('not a jpeg').toString('base64') }))).status, 413);
+  assert.equal((await post(crash({ log_gz: Buffer.from('not gzip').toString('base64') }))).status, 413);
+  const big = Buffer.alloc(MAX_LOG + 1); big[0] = 0x1f, big[1] = 0x8b;
+  assert.equal((await post(crash({ log_gz: big.toString('base64') }))).status, 413);
   assert.equal(calls.length, 0);
 });
 
@@ -109,6 +114,35 @@ test('a report: filed once with the bot token, mentions and HTML made harmless, 
   assert.equal(shot.headers.get('Content-Type'), 'image/jpeg');
   assert.deepEqual(Buffer.from(await shot.arrayBuffer()), JPEG);
   assert.equal((await screenshot(new Request('https://relay.test/v1/bf/reports/shot/' + 'a'.repeat(32) + '.jpg'), env, json)).status, 404);
+});
+
+test('the whole log: stored, linked where the game marked it, served as gzip text', async () => {
+  const body = crash().body.replace('<!-- screenshot -->', '<!-- full log -->\n\n<!-- screenshot -->');
+  const r = await post(crash({ body, log_gz: LOG.toString('base64') }));
+  assert.equal(r.status, 201);
+  const issue = calls[0].body.body;
+  assert.ok(!issue.includes('<!-- full log -->'), 'the mark replaced');
+  const link = /\[The whole log\]\((https:\/\/relay\.test\/v1\/bf\/reports\/log\/([0-9a-f]{32})\.txt)\) \(anonymized, kept 30 days\)/.exec(issue);
+  assert.ok(link, 'the log linked');
+  const got = await wholeLog(new Request(link[1]), env, json);
+  assert.equal(got.status, 200);
+  assert.equal(got.headers.get('Content-Encoding'), 'gzip');
+  assert.match(got.headers.get('Content-Type'), /^text\/plain/);
+  assert.equal((await wholeLog(new Request('https://relay.test/v1/bf/reports/log/' + 'b'.repeat(32) + '.txt'), env, json)).status, 404);
+  // A report without the mark (an older game) gets no link; a log without the mark is linked at the end.
+  const plain = await post(crash({ signature: '', title: '[Bug] No log with this one' }), { install: OTHER, ip: '198.51.100.9' });
+  assert.equal(plain.status, 201);
+  assert.ok(!calls[1].body.body.includes('The whole log'));
+});
+
+test('a known crash with a whole log: the comment links it', async () => {
+  assert.equal((await post(crash())).status, 201);
+  const body = crash().body.replace('<!-- screenshot -->', '<!-- full log -->\n\n<!-- screenshot -->');
+  const again = await post(crash({ body, title: '[Crash] Same crash, its log', log_gz: LOG.toString('base64') }),
+                           { install: OTHER, ip: '198.51.100.9' });
+  assert.equal(again.status, 200);
+  assert.match(calls[2].body.body, /\[The whole log\]\(https:\/\/relay\.test\/v1\/bf\/reports\/log\/[0-9a-f]{32}\.txt\)/);
+  assert.ok(!calls[2].body.body.includes('<!-- full log -->'));
 });
 
 test('the same report again the same day: 409, GitHub not asked', async () => {
@@ -150,11 +184,15 @@ test('GitHub fails: 502 (the game keeps the report) and nothing is counted', asy
   assert.equal((await post(crash())).status, 201, 'the retry is not taken for a repeat');
 });
 
-test('prune: limits after 2 days, screenshots after 90', async () => {
-  assert.equal((await post(crash({ screenshot_jpeg: JPEG.toString('base64') }))).status, 201);
+test('prune: limits after 2 days, logs after 30, screenshots after 90', async () => {
+  assert.equal((await post(crash({ screenshot_jpeg: JPEG.toString('base64'), log_gz: LOG.toString('base64') }))).status, 201);
   const count = table => env.DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
   await prune(env.DB, NOW + 3 * 24 * 3600 * 1000);
   assert.equal(count('bf_report_sent'), 0);
+  assert.equal(count('bf_report_shots'), 1);
+  assert.equal(count('bf_report_logs'), 1);
+  await prune(env.DB, NOW + 31 * 24 * 3600 * 1000);
+  assert.equal(count('bf_report_logs'), 0);
   assert.equal(count('bf_report_shots'), 1);
   await prune(env.DB, NOW + 91 * 24 * 3600 * 1000);
   assert.equal(count('bf_report_shots'), 0);
@@ -164,4 +202,5 @@ test('prune: limits after 2 days, screenshots after 90', async () => {
 test('helpers', () => {
   assert.equal(neutralise('hi @TekRantGaming and a@b'), 'hi @​TekRantGaming and a@​b');
   assert.equal(allowedHtml('<script>x</script> ```<i>y</i>``` <details>'), '&lt;script&gt;x&lt;/script&gt; ```<i>y</i>``` <details>');
+  assert.equal(allowedHtml('<!-- full log --> <!-- other -->'), '<!-- full log --> &lt;!-- other --&gt;');
 });

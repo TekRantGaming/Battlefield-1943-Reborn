@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
 #include <algorithm>
 #include <cstring>
 #include <utility>
@@ -1118,6 +1119,23 @@ uint32_t BaseHeap::GetTotalPageCount() {
   return uint32_t(page_table_.size());
 }
 
+// The longest run of unreserved pages (diagnostics: a heap with room overall can still fail a large allocation).
+uint32_t BaseHeap::GetLargestUnreservedRun() {
+  std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  uint32_t best = 0, run = 0;
+  const uint32_t size = uint32_t(page_table_.size());
+  for (uint32_t i = 0; i < size; ++i) {
+    auto& page = page_table_[i];
+    if (!page.state) {
+      best = std::max(best, ++run);
+      continue;
+    }
+    run = 0;
+    i += page.region_page_count ? page.region_page_count - 1 : 0;
+  }
+  return best;
+}
+
 uint32_t BaseHeap::GetUnreservedPageCount() {
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
   uint32_t count = 0;
@@ -1274,8 +1292,22 @@ bool BaseHeap::Alloc(uint32_t size, uint32_t alignment, uint32_t allocation_type
 
   uint32_t low_address = heap_base_;
   uint32_t high_address = heap_base_ + (heap_size_ - 1) - heap_virtual_guest_offset;
-  return AllocRange(low_address, high_address, size, alignment, allocation_type, protect, top_down,
-                    out_address);
+  const bool ok = AllocRange(low_address, high_address, size, alignment, allocation_type, protect, top_down,
+                             out_address);
+  if (!ok) NoteAllocFailure(size);
+  return ok;
+}
+
+// An allocation that failed (players' logs: the game's memory running out shows as these, before the game's own
+// failure). The first 20, then at each power of two; with how much of the heap was free.
+void BaseHeap::NoteAllocFailure(uint32_t size) {
+  static std::atomic<uint64_t> failures{0};
+  const uint64_t n = ++failures;
+  if (n > 20 && (n & (n - 1))) return;
+  REXLOG_WARN("guest memory: an allocation of {} KB failed in the heap at {:08X} ({} KB pages; {} of {} MB unreserved); "
+              "{} failure(s) so far",
+              size >> 10, heap_base_, page_size_ >> 10, (uint64_t(GetUnreservedPageCount()) * page_size_) >> 20,
+              (uint64_t(GetTotalPageCount()) * page_size_) >> 20, n);
 }
 
 bool BaseHeap::AllocSystemHeap(uint32_t size, uint32_t alignment, uint32_t allocation_type,
@@ -1922,6 +1954,7 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment, uint32_t allocation_
   if (!parent_heap_->AllocRange(parent_heap_start, parent_heap_end, size, alignment,
                                 allocation_type, protect, top_down, &parent_address)) {
     REXSYS_ERROR("PhysicalHeap::Alloc unable to alloc physical memory in parent heap");
+    NoteAllocFailure(size);  // with the size and how much was free
     return false;
   }
 
@@ -1955,6 +1988,7 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t ali
   uint32_t parent_base_address = GetPhysicalAddress(base_address);
   if (!parent_heap_->AllocFixed(parent_base_address, size, alignment, allocation_type, protect)) {
     REXSYS_ERROR("PhysicalHeap::Alloc unable to alloc physical memory in parent heap");
+    NoteAllocFailure(size);  // with the size and how much was free
     return false;
   }
 
@@ -1993,6 +2027,7 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint3
   if (!parent_heap_->AllocRange(parent_low_address, parent_high_address, size, alignment,
                                 allocation_type, protect, top_down, &parent_address)) {
     REXSYS_ERROR("PhysicalHeap::Alloc unable to alloc physical memory in parent heap");
+    NoteAllocFailure(size);  // with the size and how much was free
     return false;
   }
 

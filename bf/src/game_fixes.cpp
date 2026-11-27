@@ -909,23 +909,6 @@ void RunGameFixTest(PPCContext& ctx, uint8_t* base) {
 
 }  // namespace bf1943
 
-#if defined(BF_DEV_TOOLS)
 // Server sizes study (docs/SERVER-SIZES.md, 20 Nov 2026): a client joining a 63 player match died on a network object
-// id its ghost table did not hold (sub_8275D230: an id read with the bit count at +576, looked up in the table at
-// +460 by sub_8275D0D8, the entry's +8 read from 0). A failed lookup logs the id, the bit count and the table's words.
-REX_EXTERN(__imp__sub_8275D230);
-REX_HOOK_RAW(sub_8275D230) {
-  const uint32_t self = ctx.r3.u32;
-  __imp__sub_8275D230(ctx, base);
-  static std::atomic<int> told{0};
-  if (ctx.r3.u32 == 0 && told.load() < 20) {
-    ++told;
-    auto word = [&](uint32_t a) {
-      return uint32_t(base[a]) << 24 | uint32_t(base[a + 1]) << 16 | uint32_t(base[a + 2]) << 8 | base[a + 3];
-    };
-    REXLOG_WARN("BF ghosts: an object id not in the table (object {:08X}, id bits {}, table words {:08X} {:08X} {:08X} "
-                "{:08X} {:08X})", self, word(self + 576), word(self + 460), word(self + 464), word(self + 468),
-                word(self + 472), word(self + 476));
-  }
-}
-#endif
+// id its ghost table did not hold (sub_8275D230). Its line is now Settings > Diagnostics' (diagnostics_extra.cpp, every
+// build), with the id, the caller and which kind of miss.

@@ -2,6 +2,7 @@
 
 #include "guest_textures.h"
 
+#include "diag.h"
 #include "guest_memory.h"
 #include "spirv_patch.h"
 #include "targets.h"
@@ -461,10 +462,20 @@ void GuestTextures::RequestTextures(uint32_t used_texture_mask) {
   // again (LoadTextureDataFromResidentMemoryImpl).
   if (const uint32_t repatch = g_repatch_count.load(std::memory_order_acquire); repatch != repatched_) {
     repatched_ = repatch;
+    const auto start = std::chrono::steady_clock::now();
     const std::vector<HostTexture*> textures(patched_.begin(), patched_.end());
+    size_t now = 0, later = 0;
     for (HostTexture* texture : textures) {
-      if (texture->outdated_mask() & Texture::kOutdatedBitBase) texture->repatch = true;
-      else Patch(*texture, true);
+      if (texture->outdated_mask() & Texture::kOutdatedBitBase) texture->repatch = true, ++later;
+      else Patch(*texture, true), ++now;
+    }
+    // One line for the lot (the per texture "(again)" lines say which; 120 of them made the deploy screen stutter in a
+    // play test of 27 Nov 2026), with what asked for it.
+    if (diag::LinesOn() && !textures.empty()) {
+      const char* why = diag::RepatchReason();
+      REXLOG_INFO("[native_x_renderer] diagnostics: the game's pictures changed ({}): {} patched textures made again "
+                  "in {:.1f} ms on the renderer's thread, {} more at their next load",
+                  why ? why : "no reason given", now, diag::MsSince(start), later);
     }
   }
   // Marking all 32 written computed every used binding again in every draw (BindingInfoFromFetchConstant, the
@@ -530,6 +541,7 @@ ITextureView* GuestTextures::GetView(uint32_t fetch_constant, xenos::FetchOpDime
 // 13 Nov 2026 (Battlefield 1943's menu and HUD pictures): 8_8_8_8 textures too (the pack's block format 0: RGBA8, not
 // compressed), and first levels from 4 KB up; the key is then of the whole first level (of its first 64 KB above).
 ITextureView* GuestTextures::HdView(HostTexture& host_texture) {
+  const auto made_start = std::chrono::steady_clock::now();
   host_texture.hd_own = false;
   if (TextureUpscaleFn upscale = g_texture_upscaler.load(std::memory_order_acquire)) {
     if (ITextureView* view = Upscaled(host_texture, upscale)) {
@@ -609,6 +621,7 @@ ITextureView* GuestTextures::HdView(HostTexture& host_texture) {
         TextureData init{levels.data(), e->mips};
         device_->CreateTexture(desc, &init, &texture);
         if (texture) {
+          diag::NoteHdMade(diag::MsSince(made_start), false);
           ++stats_.hd_textures;
           stats_.hd_bytes += data.size();
           if (stats_.hd_textures <= 5 || stats_.hd_textures % 25 == 0 || log_misses)
@@ -636,6 +649,7 @@ ITextureView* GuestTextures::Upscaled(HostTexture& host_texture, TextureUpscaleF
                            (uint64_t(h) << 16) ^ 0x5348415250ull;  // "SHARP": apart from the pack's keys
   auto it = hd_textures_.find(content);
   if (it == hd_textures_.end()) {
+    const auto made_start = std::chrono::steady_clock::now();
     RefCntAutoPtr<ITexture> texture;
     std::vector<uint8_t> out;
     uint32_t scale = 0;
@@ -656,6 +670,7 @@ ITextureView* GuestTextures::Upscaled(HostTexture& host_texture, TextureUpscaleF
       level.Stride = uint64_t(w) * scale;
       TextureData init{&level, 1};
       device_->CreateTexture(desc, &init, &texture);
+      if (texture) diag::NoteHdMade(diag::MsSince(made_start), false);
       if (texture)
         REXLOG_INFO("[native_x_renderer] upscaled texture {:016X}: {}x{} for the game's {}x{} (D200)", content, w * scale,
                     h * scale, w, h);
@@ -680,6 +695,7 @@ ITextureView* GuestTextures::UpscaledImage(HostTexture& host_texture, TextureUps
                            (uint64_t(h) << 16) ^ 0x5348415250494dull;  // "SHARPIM"
   auto it = hd_textures_.find(content);
   if (it == hd_textures_.end()) {
+    const auto made_start = std::chrono::steady_clock::now();
     RefCntAutoPtr<ITexture> texture;
     std::vector<uint8_t> rgba;
     uint32_t scale = 0;
@@ -704,6 +720,7 @@ ITextureView* GuestTextures::UpscaledImage(HostTexture& host_texture, TextureUps
       level.Stride = uint64_t(w) * scale * 4;
       TextureData init{&level, 1};
       device_->CreateTexture(desc, &init, &texture);
+      if (texture) diag::NoteHdMade(diag::MsSince(made_start), false);
       if (texture)
         REXLOG_INFO("[native_x_renderer] upscaled picture {:016X}: {}x{} for the game's {}x{} (format {}, D200)",
                     content, w * scale, h * scale, w, h, format);
@@ -877,6 +894,7 @@ bool GuestTextures::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool
 // shader reads the guest memory mirror and writes the host layout into a scratch buffer, which is then
 // copied into the texture level by level.
 bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bool load_mips) {
+  const auto load_start = std::chrono::steady_clock::now();
   TextureKey key = host_texture.key();
   const HostFormat& host_format = GetHostFormat(key);
   LoadShaderIndex load_shader = host_format.load_shader;
@@ -1082,6 +1100,8 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
   ++stats_.loads;
   stats_.loaded_bytes += host_buffer_size;
   if (load_base) Patch(host_texture, false);
+  // The load's time on this thread, with the patcher's and HD copies' (diag.h: the black box, the scenes).
+  diag::NoteTextureLoad(host_buffer_size, diag::MsSince(load_start), key.GetWidth(), key.GetHeight());
   return true;
 }
 
@@ -1141,6 +1161,7 @@ void GuestTextures::Patch(HostTexture& host_texture, bool again) {
 // and no flag letters). The texture's own HD texture, made again at each patch; its smaller levels are made here
 // (colour weighted by alpha, so a transparent surround does not darken an edge).
 void GuestTextures::PatchHd(HostTexture& host_texture, bool again) {
+  const auto made_start = std::chrono::steady_clock::now();
   auto none = [&] {
     if (!host_texture.hd_patched) return;
     host_texture.hd_patched.Release();
@@ -1213,6 +1234,10 @@ void GuestTextures::PatchHd(HostTexture& host_texture, bool again) {
   if (!texture) return none();
   host_texture.hd_patched = texture;
   host_texture.hd_view = texture->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+  diag::NoteHdMade(diag::MsSince(made_start), again);
+  // A picture made again that is the same as one made before (the prompts switching back and forth: 27 Nov 2026's
+  // match had 182 remakes): counted, so the log says what a cache would save.
+  if (again) diag::NoteHdAgainPicture(XXH3_64bits(chain[0].data(), chain[0].size()) ^ content, diag::MsSince(made_start));
   host_texture.hd_own = !e;  // the upscaler's: drawn while SetUpscaledTextures is on; a pack's while the pack is
   REXLOG_INFO("[native_x_renderer] HD texture {:016X}: {}x{} with the game's pictures for its {}x{} texture at {:08X}{}{}",
               content, hw, hh, w, h, uint32_t(key.base_page) << 12, again ? " (again)" : "",

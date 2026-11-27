@@ -2,6 +2,7 @@
 
 #include "pipelines.h"
 
+#include "diag.h"
 #include "targets.h"
 
 #include <rex/cvar.h>
@@ -179,9 +180,23 @@ Pipeline* PipelineCache::Get(const PipelineState& s, const rg::SpirvShader& vert
   }
   pipeline->motion = motion;
   pipeline->binding_sets_on = binding_sets;
+  pipeline->created_at = std::chrono::steady_clock::now();
+  pending_.push_back(pipeline.get());
   slot = std::move(pipeline);
   if (created) *created = true;
   return slot.get();
+}
+
+void PipelineCache::PollPending() {
+  // A pipeline's status is DiligentCore's atomic: a few loads a frame for the ones compiling.
+  std::erase_if(pending_, [](Pipeline* p) {
+    const PIPELINE_STATE_STATUS status = p->pso->GetStatus();
+    if (status == PIPELINE_STATE_STATUS_COMPILING) return false;
+    diag::NotePipelineReady(diag::MsSince(p->created_at), status != PIPELINE_STATE_STATUS_READY,
+                            p->shaders[0] ? p->shaders[0]->ucode_data_hash() : 0,
+                            p->shaders[1] ? p->shaders[1]->ucode_data_hash() : 0);
+    return true;
+  });
 }
 
 bool PipelineCache::Ready(Pipeline& p) {

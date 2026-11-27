@@ -16,12 +16,15 @@
 // itself takes about 4 % of one core on a PC, so there is no load worth stopping sounds for.
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
+
+#include "diagnostics.h"
 
 REXCVAR_DEFINE_BOOL(bf_ea_cpu_cull, false, "BF1943/Audio",
                     "Let EA's mixer stop sounds when its thread looks overloaded (the console's behaviour). Off: "
@@ -33,6 +36,13 @@ REX_HOOK_RAW(sub_82183680) {
   static std::atomic<uint64_t> times{0};
   const uint64_t n = ++times;
   const bool cull = REXCVAR_GET(bf_ea_cpu_cull);
+  bf1943::diagnostics::NoteVoiceCulled();  // the black box's frames, the scenes' audio part
+  {
+    const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch()).count();
+    const int64_t slow = bf1943::diagnostics::LastSlowFrameUs();
+    if (slow && now_us - slow < 200000) bf1943::diagnostics::NoteCulledNearSlow();
+  }
   if (n <= 20 || (n & (n - 1)) == 0)
     REXLOG_INFO("BF audio: EA's mixer looked overloaded ({} times so far){}", n,
                 cull ? "; stopping its lowest-priority sounds" : "; no sound stopped");

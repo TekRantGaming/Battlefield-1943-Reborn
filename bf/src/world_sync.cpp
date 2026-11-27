@@ -76,6 +76,7 @@
 #include <rex/ui/imgui_dialog.h>
 
 #include "comms.h"
+#include "diagnostics.h"
 #include "free_cam.h"
 #include "launcher_kit.h"
 
@@ -329,6 +330,7 @@ void Run() {
           const std::string name(reinterpret_cast<const char*>(buf + at), size_t(len));
           at += len;
           if (!name.empty()) board.emplace_back(BoardKey(name), ms == 0xFFFF ? -1 : ms);
+          if (!name.empty()) diagnostics::NotePlayerName(name);  // [player N] in a player's log
         }
         static bool said_board = false;
         if (!said_board) {

@@ -317,6 +317,9 @@ class XmaContext {
 
   // Decode stopped at a frame that needs the next input buffer (not valid yet): Work waits for the next kick.
   bool input_stalled_ = false;
+
+  // audio_diagnostics: since when (steady clock, ms) the output has wanted data with no input buffer valid; 0: not.
+  int64_t starved_since_ms_ = 0;
 };
 
 }  // namespace rex::audio

@@ -7,10 +7,12 @@ GitHub, needs no token and sends nothing anywhere: every "issue" is written to t
 
 This is also the reference for the real relay (a route on the Cloudflare Worker, on TekRantGaming's word).
 
-    python -I tools/fake_report_relay.py --out runs/report_relay [--port 18490] [--fail] [--slow 5]
+    python -I tools/fake_report_relay.py --out runs/report_relay [--port 18490] [--fail] [--slow 5] [--no-log]
     game: BF_REPORT_ENDPOINT=http://127.0.0.1:18490
 
 --fail answers 503 to everything (the game keeps the report and says so); --slow waits that many seconds first.
+--no-log takes requests only as large as the relay before the whole log (26 Nov 2026): a report with its whole log
+gets 413, and the game sends it again without (report.cpp PostOnce).
 """
 import argparse
 import base64
@@ -28,6 +30,7 @@ TYPES = {"crash", "bug", "performance", "server", "suggestion"}
 MAX_BODY = 60 * 1024          # GitHub's issue body limit is 65,536 characters
 MAX_TITLE, MIN_TITLE = 120, 8
 MAX_SHOT = 400 * 1024         # the JPEG, before base64
+MAX_LOG = 1400 * 1024         # the whole log's gzip, before base64
 MAX_LINKS = 5                 # in what the player typed (above "### System")
 PER_HOUR, PER_DAY = 3, 10     # per install
 PER_IP_DAY = 20
@@ -56,18 +59,19 @@ def allowed_html(body):
     # are left as they are: GitHub shows them as text anyway.
     def fix(m):
         tag = m.group(0)
-        if re.fullmatch(r"</?(details|summary)>", tag) or tag == "<!-- screenshot -->":
+        if re.fullmatch(r"</?(details|summary)>", tag) or tag in ("<!-- screenshot -->", "<!-- full log -->"):
             return tag
         return tag.replace("<", "&lt;").replace(">", "&gt;")
     parts = body.split("```")
     for i in range(0, len(parts), 2):  # outside the fences
-        parts[i] = re.sub(r"<!-- screenshot -->|<[^>\n]{1,200}>", fix, parts[i])
+        parts[i] = re.sub(r"<!-- screenshot -->|<!-- full log -->|<[^>\n]{1,200}>", fix, parts[i])
     return "```".join(parts)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     state = None
     fail = False
+    no_log = False
     slow = 0.0
 
     def log_message(self, fmt, *args):
@@ -91,7 +95,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.fail:
             return self.answer(503, {"error": "The report service is down (--fail)."})
         length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0 or length > MAX_BODY + MAX_SHOT * 4 // 3 + 16 * 1024:
+        if length <= 0 or length > MAX_BODY + MAX_SHOT * 4 // 3 + (0 if self.no_log else MAX_LOG * 4 // 3) + 16 * 1024 or (
+                self.no_log and length > 700 * 1024):
             return self.answer(413, {"error": "The report is too large."})
         install = self.headers.get("X-BF-Install", "")
         version = self.headers.get("X-BF-Version", "")
@@ -119,6 +124,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.answer(400, {"error": "The screenshot is not readable."})
             if len(shot) > MAX_SHOT or not shot.startswith(b"\xff\xd8\xff"):
                 return self.answer(413, {"error": "The screenshot is too large or not a JPEG."})
+        log = None
+        if req.get("log_gz"):
+            if self.no_log:
+                return self.answer(413, {"error": "The report is too large."})
+            try:
+                log = base64.b64decode(req["log_gz"], validate=True)
+            except ValueError:
+                return self.answer(400, {"error": "The log is not readable."})
+            if len(log) > MAX_LOG or not log.startswith(b"\x1f\x8b"):
+                return self.answer(413, {"error": "The log is too large or not gzip."})
 
         st = self.state
         now = time.time()
@@ -147,6 +162,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 st.signatures[sig] = [number, 0]
 
         body = allowed_html(neutralise(body))
+        log_link = ""
+        if log:
+            name = f"issue-{number}-log.txt.gz"
+            with open(os.path.join(st.out, name), "wb") as f:
+                f.write(log)
+            log_link = f"[The whole log](https://reports.example/logs/{name}) (anonymized, kept 30 days)"
+        body = body.replace("<!-- full log -->", log_link)
         if shot:
             name = f"issue-{number}-screenshot.jpg"
             with open(os.path.join(st.out, name), "wb") as f:
@@ -173,11 +195,12 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--port", type=int, default=18490)
     ap.add_argument("--fail", action="store_true")
+    ap.add_argument("--no-log", action="store_true")
     ap.add_argument("--slow", type=float, default=0)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     Handler.state = State(a.out)
-    Handler.fail, Handler.slow = a.fail, a.slow
+    Handler.fail, Handler.slow, Handler.no_log = a.fail, a.slow, a.no_log
     server = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
     print(f"relay: fake report relay on http://127.0.0.1:{a.port} (nothing goes to GitHub), writing to {a.out}", flush=True)
     server.serve_forever()
