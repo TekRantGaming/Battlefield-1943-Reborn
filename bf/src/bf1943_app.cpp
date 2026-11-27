@@ -284,6 +284,9 @@ rex::Result<void> Bf1943App::OnTitleLaunch(rex::kernel::TitleRuntime& title) {
   // the guest's memory and hooks (rex/system/interfaces/graphics.h). Here, before Launch, there is no processor yet
   // (the port's first smoke run, 25 Nov 2026: nothing drew). A dedicated server draws nothing at all.
   if (!REXCVAR_GET(server)) {
+    // The game's text sharper (sharp_text.cpp: HUD scale High-Res), as in 0.4.8: here, not in OnInit, because the game
+    // folder is known only after the first start's setup (BeginPreGame); before the renderer starts, as before.
+    bf1943::InstallSharpText(game_dir_);
     title_attached_ = title.OnTitleAttached([this] {
       native_x_renderer::StopPreGamePresenter();  // its device off the window first
       native_x_renderer::Initialize(bf1943::NativeXRendererProfile(), rex::system::bfnative_graphics(),
