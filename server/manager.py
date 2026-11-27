@@ -499,7 +499,13 @@ def package_flags():
     # "main_backend": false (TekRantGaming, 14 Nov 2026: official servers on a second machine, a VPS in the US): the
     # servers are official (the key's code at registering) but the package runs no backend of its own; they register
     # with the main one (server.json "backend", MAIN_BACKEND by default).
-    return {'official': bool(flags.get('official')), 'night_ops': bool(flags.get('night_ops')),
+    # Night Ops and Daybreak: every package from 0.4.8 on has them (its game is built with BF_NIGHT_OPS ON, the
+    # packagers refuse one without), so its version says so too. Until 0.4.8.1 only package.json did, and the Linux
+    # server package had none, and an update keeps the old package.json (install_package): Linux community servers and
+    # Windows ones updated from 0.4.7 ran with Night Ops and Daybreak off (TekRantGaming, 27 Nov 2026, from community
+    # server owners: "missing their JSON files ... preventing NightOps and Daybreak from loading correctly").
+    night_ops = bool(flags.get('night_ops')) or version_key(package_version())[0] >= (0, 4, 8, 0)
+    return {'official': bool(flags.get('official')), 'night_ops': night_ops,
             'main_backend': bool(flags.get('official')) and flags.get('main_backend', True) is not False}
 
 
@@ -2231,6 +2237,25 @@ class Manager:
         return cleaned
 
 
+def merge_package_flags(new_path, old_path):
+    """The new package's package.json game flags (night_ops) into the host's own (which keeps official and
+    main_backend); written only when something changes."""
+    try:
+        new = json.loads(read_text(new_path, '{}') or '{}')
+    except ValueError:
+        return
+    try:
+        old = json.loads(read_text(old_path, '{}') or '{}') if os.path.exists(old_path) else {}
+    except ValueError:
+        old = {}
+    merged = dict(old)
+    if new.get('night_ops'):
+        merged['night_ops'] = True
+    if merged != old:
+        with open(old_path, 'w', encoding='ascii', newline='') as f:
+            f.write(json.dumps(merged, separators=(',', ':')))
+
+
 def install_package(archive, target):
     """A release's server package (a zip, or a tar.gz) over the program in `target`. The host's own things are never
     touched: server.json, official.key, the game, the logs, the updates. A file in use on Windows (the running
@@ -2271,6 +2296,11 @@ def install_package(archive, target):
                 continue
             os.makedirs(os.path.join(target, *parts), exist_ok=True)
             for name in files:
+                if not parts and name == 'package.json':
+                    # The owner's package.json is kept (official, main_backend), but what the new package's game has
+                    # (night_ops) comes with it.
+                    merge_package_flags(os.path.join(folder, name), os.path.join(target, name))
+                    continue
                 if not parts and name in keep_names:
                     continue
                 source, destination = os.path.join(folder, name), os.path.join(target, *parts, name)
