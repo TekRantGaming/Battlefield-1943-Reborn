@@ -51,8 +51,8 @@
     "saves": [
         "{install}/user/bf1943-settings.txt",
         "{install}/user/achievements",
-        "{install}/usr/bin/user/bf1943-settings.txt",
-        "{install}/usr/bin/user/achievements"
+        "{data}/bf1943-settings.txt",
+        "{data}/achievements"
     ],
     "system": {
         "windows": {
@@ -70,6 +70,10 @@
         ],
         "logs": [
             {
+                "path": "{data}",
+                "if": "{data}/bf1943.log"
+            },
+            {
                 "path": "{install}/usr/bin/user",
                 "if": "{install}/usr/bin/bf1943"
             },
@@ -78,6 +82,10 @@
             }
         ],
         "crashes": [
+            {
+                "path": "{data}/crashes",
+                "if": "{data}/bf1943.log"
+            },
             {
                 "path": "{install}/usr/bin/user/crashes",
                 "if": "{install}/usr/bin/bf1943"
