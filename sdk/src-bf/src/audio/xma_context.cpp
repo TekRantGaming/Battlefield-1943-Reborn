@@ -10,10 +10,12 @@
 */
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <vector>
 
+#include <rex/audio/diagnostics.h>
 #include <rex/audio/xma/context.h>
 #include <rex/audio/xma/decoder.h>
 #include <rex/audio/xma/helpers.h>
@@ -98,6 +100,14 @@ bool XmaContext::Work() {
   if (!is_allocated() || !is_enabled()) {
     return false;
   }
+  // The decoder's time for the diagnostics (rex/audio/diagnostics.h Timed::kXmaWork).
+  struct WorkTimer {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    ~WorkTimer() {
+      diag::NoteTime(diag::Timed::kXmaWork,
+                     std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+    }
+  } work_timer;
 
   std::lock_guard<std::mutex> lock(lock_);
   set_is_enabled(false);
@@ -108,6 +118,20 @@ bool XmaContext::Work() {
 
   if (!data.output_buffer_valid) {
     return true;
+  }
+
+  if (diag::On() && !data.IsConsumeOnlyContext()) {
+    // Starved: the output wants data and no input buffer is there. Counted when input comes back (the voice goes on
+    // after a gap); a voice that ended is released or reset instead (ResetDecoderState), and never counted.
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+    if (!data.IsAnyInputBufferValid()) {
+      if (!starved_since_ms_) starved_since_ms_ = now_ms;
+    } else if (starved_since_ms_) {
+      if (now_ms - starved_since_ms_ >= 50) diag::NoteXmaStarved(now_ms - starved_since_ms_);
+      starved_since_ms_ = 0;
+    }
   }
 
   memory::RingBuffer output_rb = PrepareOutputRingBuffer(&data);
@@ -221,6 +245,7 @@ void XmaContext::ResetDecoderState() {
   loop_frame_output_limit_ = 0;
   loop_start_skip_pending_ = false;
   silence_pad_blocks_ = 0;
+  starved_since_ms_ = 0;
 }
 
 void XmaContext::Disable() {
@@ -768,6 +793,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
     uint64_t frame_size = combined.Peek(kBitsPerFrameHeader);
     if (frame_size == xma::kMaxFrameLength) {
       data->error_status = 4;
+      diag::NoteXmaBadFrame();
       return;
     }
     packet_info.current_frame_size_ = static_cast<uint32_t>(frame_size);
@@ -781,6 +807,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
 
   if (bits_to_copy == 0) {
     REXAPU_ERROR("XmaContext {}: There are no bits to copy!", id());
+    diag::NoteXmaNoBits();
     SwapInputBuffer(data);
     return;
   }
@@ -795,6 +822,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
         // decoded one frame only, and EA's XMA decoder in BF1943 (821B0F08) gives a voice up when its first read
         // after a mid-sound start needs more than that (up to 767 samples): about one sound a minute was cut short.
         input_stalled_ = true;
+        diag::NoteXmaInputWait();
         return;
       }
       std::memcpy(input_buffer_.data() + kBytesPerPacketData, next_packet + kBytesPerPacketHeader,

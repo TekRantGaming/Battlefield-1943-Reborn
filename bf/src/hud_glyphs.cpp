@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -431,6 +432,7 @@ void HudGlyphsTick(bool seated) {
   static Clock::time_point checked{};
   static std::string shown;
   const auto now = Clock::now();
+
   if (seated == was_seated && checked.time_since_epoch().count() && now - checked < std::chrono::milliseconds(500))
     return;
   was_seated = seated, checked = now;
@@ -444,7 +446,7 @@ void HudGlyphsTick(bool seated) {
   shown = std::move(next);
   REXLOG_INFO("BF prompts: the game's atlases drawn again in the {} style{}", StyleSet().empty() ? "xbox360" : StyleSet(),
               seated ? ", seated" : "");
-  native_x_renderer::RepatchTextures();
+  native_x_renderer::RepatchTextures(seated ? "the button prompts, seated in a vehicle" : "the button prompts");
 }
 
 }  // namespace bf1943

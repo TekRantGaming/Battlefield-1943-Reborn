@@ -22,6 +22,7 @@
 #include "game_install.h"
 #include "private_match.h"
 #include "report.h"
+#include "diagnostics.h"
 #include "achievement_toast.h"
 
 #include <chrono>
@@ -197,9 +198,16 @@ class Bf1943App : public rex::ReXApp {
   void OnPreLaunchModule() override { bf1943::FinishNameCheck(); }
 
   // The frame limit while minimised (frame_rate.cpp; Windows reads the window's own state instead).
-  void OnWindowMinimized() override { bf1943::NoteWindowMinimized(true); }
-  void OnWindowRestored() override { bf1943::NoteWindowMinimized(false); }
+  void OnWindowMinimized() override {
+    bf1943::NoteWindowMinimized(true);
+    bf1943::diagnostics::NoteWindow("minimised");
+  }
+  void OnWindowRestored() override {
+    bf1943::NoteWindowMinimized(false);
+    bf1943::diagnostics::NoteWindow("restored");
+  }
   void OnWindowFocusChanged(bool focused) override {
+    bf1943::diagnostics::NoteFocus(focused);
     if (focused) bf1943::NoteWindowMinimized(false);
     rex::ReXApp::OnWindowFocusChanged(focused);
   }
@@ -208,12 +216,16 @@ class Bf1943App : public rex::ReXApp {
   void OnPostLaunchModule(rex::system::XThread* thread) override {
     (void)thread;
     launched_at_ = std::chrono::steady_clock::now();
+    bf1943::diagnostics::AtGameStart();  // the settings not at their defaults, with the player's saved ones applied
   }
 
   // The app is quitting by itself (the SDK copy's ReXApp::OnDestroy; a window close never comes here). When that is
   // because the game could not start, the player is told, with where the log is (start_failure.cpp; TekRantGaming,
   // 13 Nov 2026: a player's game closed 2 s after its launcher came up and said nothing). A dedicated server has
   // nobody to tell.
+  // The window is closing (a quit or the close button): the diagnostics' last scene and the run's summary.
+  void OnClosingWindow() override { bf1943::diagnostics::AtExit(); }
+
   void OnShutdown() override {
     if (REXCVAR_GET(server)) return;
     const double since_launch =
@@ -245,6 +257,9 @@ class Bf1943App : public rex::ReXApp {
         rex::cvar::SetFlagByName("native_x_renderer_hitch_ms", "100");
     }
 #endif
+    // Settings > Diagnostics (diagnostics.h): what a player's log holds, its size, and its anonymizer, before it opens.
+    // A dedicated server's log is left as it is (its admins moderate from it).
+    if (!REXCVAR_GET(server)) bf1943::diagnostics::ApplyAtStart(paths.user_data_root);
     // The last run's log kept as bf1943.previous.log before this one opens over it: a crash's report sends the log of
     // the run that crashed (report.cpp, Report an issue).
     if (!REXCVAR_GET(server)) {
@@ -258,6 +273,7 @@ class Bf1943App : public rex::ReXApp {
   // --install_game (the server package's setup) or --install_progress (RecompLauncher's, which leaves the package out
   // once the game is installed): the game unpacked into its folder, then the process ends.
   void OnPostInitLogging() override {
+    bf1943::diagnostics::AfterLogOpened();  // the log's header: what is on, its size
     if (!REXCVAR_GET(install_game).empty() || REXCVAR_GET(install_progress))
       std::exit(bf1943::install::InstallFromCommandLine(GameDir(paths_)));
   }
@@ -400,6 +416,16 @@ class Bf1943App : public rex::ReXApp {
     if (!keep_sdk_binds)
       for (const char* bind : {"bind_debug_overlay", "bind_settings", "bind_console"}) rex::ui::UnregisterBind(bind);
 #if defined(BF_DEV_TOOLS)
+    // BF_DEV_CLOSE_AT=<s> (tests): the window closed that long after start, as its close button does.
+    if (const char* v = std::getenv("BF_DEV_CLOSE_AT"); v && *v) {
+      const double after = std::atof(v);
+      std::thread([this, after] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(int64_t(after * 1000)));
+        app_context().CallInUIThreadDeferred([this] {
+          if (window()) window()->RequestClose();
+        });
+      }).detach();
+    }
     // BF_DEV_KEY_PROBE=<s> (tests): that long after start, F3, F4 and the backtick go to the binds as a key press in the
     // window does (ReXApp::OnKeyDown), then F2 (ours, the check); whether a bind took each is logged.
     if (const char* v = std::getenv("BF_DEV_KEY_PROBE"); v && *v) {

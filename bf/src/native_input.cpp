@@ -35,6 +35,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
+#include "diagnostics.h"
 #include "seat_info.h"
 
 REXCVAR_DEFINE_BOOL(bf_native_input, true, "BF1943/Controls",
@@ -289,6 +290,7 @@ REX_HOOK_RAW(sub_822BDB90) {
   const uint32_t player = ctx.r31.u32, ctrl = ctx.r29.u32, input_type = ctx.r23.u32, flip_y = ctx.r27.u32;
   __imp__sub_822BDB90(ctx, base);
   if (lr != kMapCaller || !Guest(state)) return;
+  bf1943::diagnostics::NoteInputRead();  // Settings > Diagnostics: presses timed to the game's read
   static bool checked = false;
   if (!checked) {
     checked = true;

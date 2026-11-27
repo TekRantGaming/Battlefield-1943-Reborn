@@ -89,7 +89,8 @@
       {"keybind_push_to_talk", "Push to talk (voice chat)"},
       {"keybind_chat_all", "Chat to everyone"},
       {"keybind_chat_team", "Chat to your team"},
-      {"keybind_chat_squad", "Chat to your squad"}};
+      {"keybind_chat_squad", "Chat to your squad"},
+      {"keybind_mark_problem", "Mark a problem for the log"}};
   // The controller's button behind each button action (the bf_remap_* settings say what each button presses).
   static constexpr std::pair<const char*, const char*> kPadOfBind[] = {
       {"keybind_a", "a"}, {"keybind_b", "b"}, {"keybind_x", "x"}, {"keybind_y", "y"},

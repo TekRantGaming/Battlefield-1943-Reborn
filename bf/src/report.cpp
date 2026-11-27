@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <ctime>
 #include <fstream>
 #include <map>
@@ -37,7 +38,9 @@
 #include <rex/logging.h>
 
 #include "account_key.h"
+#include "diagnostics.h"
 #include "http.h"
+#include "../third_party/miniz/miniz.h"
 
 #define STB_IMAGE_WRITE_STATIC
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -70,6 +73,11 @@ constexpr const char* kTypeFiles[] = {"crash.yml", "bug.yml", "performance.yml",
 constexpr int kLogLines = 400;
 constexpr size_t kLogBytes = 40 * 1024;
 constexpr size_t kCrashBytes = 8 * 1024;
+// The whole log (sent beside the issue, stored by the relay: server/report_relay MAX_LOG): at most this compressed; of a
+// larger log its start (the system and the settings) and its newest part.
+constexpr size_t kWholeLogGzMax = 1400 * 1024;
+constexpr size_t kWholeLogRawMax = size_t(48) << 20;
+constexpr size_t kWholeLogHead = size_t(256) << 10;
 constexpr int kMaxTries = 5;
 
 std::string Stamp() {
@@ -450,6 +458,38 @@ double AgeHours(fs::file_time_type t) {
   return std::chrono::duration<double>(fs::file_time_type::clock::now() - t).count() / 3600.0;
 }
 
+// When this run started (the log's rotated parts written since are this run's).
+const fs::file_time_type g_run_started = fs::file_time_type::clock::now();
+
+// The whole log's files, oldest first: the run's rotated parts (bf1943.2.log, bf1943.1.log, written since this run
+// started: the SDK's log_max_files), then the file itself. The run that crashed (bf1943.previous.log) is the file alone.
+std::vector<fs::path> WholeLogFiles(const fs::path& log, bool this_run) {
+  std::vector<fs::path> files;
+  std::error_code ec;
+  if (this_run)
+    for (int n = 9; n >= 1; --n) {
+      const fs::path part = log.parent_path() / (log.stem().string() + "." + std::to_string(n) + log.extension().string());
+      if (fs::exists(part, ec) && fs::last_write_time(part, ec) >= g_run_started && !ec) files.push_back(part);
+    }
+  if (fs::exists(log, ec)) files.push_back(log);
+  return files;
+}
+
+// A gzip member of the text (miniz's raw deflate in the gzip wrapper, as pipeline_upload.cpp sends pipelines).
+std::string GzipText(const std::string& d) {
+  std::string out("\x1f\x8b\x08\0\0\0\0\0\0\xff", 10);
+  size_t deflated_size = 0;
+  void* deflated = tdefl_compress_mem_to_heap(d.data(), d.size(), &deflated_size, TDEFL_DEFAULT_MAX_PROBES);
+  if (!deflated) return {};
+  out.append(static_cast<const char*>(deflated), deflated_size);
+  mz_free(deflated);
+  const uint32_t crc = uint32_t(mz_crc32(MZ_CRC32_INIT, reinterpret_cast<const unsigned char*>(d.data()), d.size()));
+  const uint32_t size = uint32_t(d.size());
+  for (int i = 0; i < 4; ++i) out.push_back(char(crc >> (8 * i)));
+  for (int i = 0; i < 4; ++i) out.push_back(char(size >> (8 * i)));
+  return out;
+}
+
 fs::path Newest(const fs::path& dir, const std::vector<std::string>& prefixes, const std::string& ext) {
   fs::path best;
   fs::file_time_type best_t{};
@@ -574,37 +614,123 @@ const Rules& FixedRules() {
   static const Rules r;
   return r;
 }
-// This scrubber's own rules: its names, the recovery code in any spacing, the install id.
+std::string Lower(std::string s) {
+  for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return s;
+}
+// This scrubber's own rules: its names, the recovery code in any spacing, the install id. Each with the text (lower
+// case) a line must hold for the rule to be tried; `spaced`: looked for with the line's spaces and dashes left out.
+struct OwnRule {
+  std::regex re;
+  std::string with, guard;
+  bool spaced = false;
+};
 struct OwnRules {
-  std::vector<std::pair<std::regex, std::string>> list;
+  std::vector<OwnRule> list;
 };
 OwnRules MakeOwnRules(const Scrubber& s) {
   OwnRules o;
   for (size_t i = 0; i < s.names.size(); ++i)
     // As a word (not inside a longer one), any case.
     o.list.push_back({std::regex("(^|[^A-Za-z0-9])" + RegexEscape(s.names[i]) + "(?=$|[^A-Za-z0-9])", std::regex::icase),
-                      i == 0 ? "$1[user]" : "$1[name]"});
+                      i == 0 ? "$1[user]" : "$1[name]", Lower(s.names[i])});
   if (s.code.size() == 20) {
     std::string pat;
     for (size_t i = 0; i < s.code.size(); ++i) pat += (i ? "[\\s-]?" : "") + RegexEscape(std::string(1, s.code[i]));
-    o.list.push_back({std::regex(pat, std::regex::icase), "[recovery code]"});
+    o.list.push_back({std::regex(pat, std::regex::icase), "[recovery code]", Lower(s.code), true});
   }
-  if (!s.install.empty()) o.list.push_back({std::regex(RegexEscape(s.install), std::regex::icase), "[install]"});
+  if (!s.install.empty())
+    o.list.push_back({std::regex(RegexEscape(s.install), std::regex::icase), "[install]", Lower(s.install)});
   return o;
 }
 
-std::string ScrubLine(const std::string& line, const Rules& r, const OwnRules& own) {
+// An address's replacement: "[ip]", or the log's numbered label (LogScrubLine).
+using IpLabel = std::function<std::string(const std::string&)>;
+
+// A long run that is a name, not a key (26 Nov 2026: the whole log's Vulkan feature names and folders became [key]):
+// a path (two or more '/', no part of 32 or more), or letters and digits changing places at most 3 times
+// (shaderDenormFlushToZeroFloat32, VK_KHR_get_physical_device_properties2, linux-amd64-release-dev); a key's
+// letters and digits change about every 4 characters.
+bool NotAKey(const std::string& m) {
+  if (std::count(m.begin(), m.end(), '/') >= 2) {
+    size_t longest = 0, part = 0;
+    for (char c : m) part = c == '/' ? 0 : part + 1, longest = std::max(longest, part);
+    if (longest < 32) return true;
+  }
+  int changes = 0;
+  for (size_t i = 1; i < m.size(); ++i) {
+    const unsigned char a = static_cast<unsigned char>(m[i - 1]), b = static_cast<unsigned char>(m[i]);
+    if ((std::isdigit(a) && std::isalpha(b)) || (std::isalpha(a) && std::isdigit(b))) ++changes;
+  }
+  return changes <= 3;
+}
+// A value that is an address or a range of them (code=82000000-82DB0000), not a secret: hex groups of up to 16.
+bool AddressValue(const std::string& v) {
+  std::string s = v.rfind("0x", 0) == 0 || v.rfind("0X", 0) == 0 ? v.substr(2) : v;
+  size_t group = 0;
+  for (char c : s) {
+    if (c == '-') {
+      if (!group) return false;
+      group = 0;
+    } else if (std::isxdigit(static_cast<unsigned char>(c))) {
+      if (++group > 16) return false;
+    } else {
+      return false;
+    }
+  }
+  return group > 0;
+}
+
+// A run of 32 or more of base64's letters (the longrun rule's least).
+bool HasLongRun(const std::string& t) {
+  size_t run = 0;
+  for (char c : t) {
+    run = std::isalnum(static_cast<unsigned char>(c)) || std::strchr("+/_=-", c) ? run + 1 : 0;
+    if (run >= 32) return true;
+  }
+  return false;
+}
+
+// Each rule is tried only where the text it needs is in the line (the log file passes every line through these as it
+// is written, and most lines need none): the checks only skip what could not match.
+std::string ScrubLine(const std::string& line, const Rules& r, const OwnRules& own, const IpLabel* ip_label = nullptr) {
   std::string t = line;
+  const std::string low = Lower(line);
+  auto has = [&](const char* what) { return low.find(what) != std::string::npos; };
+  const auto dashes = std::count(line.begin(), line.end(), '-'), dots = std::count(line.begin(), line.end(), '.'),
+             colons = std::count(line.begin(), line.end(), ':');
   // Other users' and the home folders' names first (this user's own paths are caught by the names too).
-  t = std::regex_replace(t, r.users, "$1[user]");
-  t = std::regex_replace(t, r.home, "$1[user]");
-  for (const auto& [re, with] : own.list) t = std::regex_replace(t, re, with);
+  if (has(":\\") || has(":/")) t = std::regex_replace(t, r.users, "$1[user]");
+  if (has("/home/") || has("/users/")) t = std::regex_replace(t, r.home, "$1[user]");
+  std::string spaced_low;
+  for (const OwnRule& o : own.list) {
+    if (o.spaced) {
+      if (spaced_low.empty())
+        for (char c : low)
+          if (c != ' ' && c != '\t' && c != '-') spaced_low += c;
+      if (spaced_low.find(o.guard) == std::string::npos) continue;
+    } else if (low.find(o.guard) == std::string::npos) {
+      continue;
+    }
+    t = std::regex_replace(t, o.re, o.with);
+  }
   // Keys and tokens.
-  t = std::regex_replace(t, r.auth, "$1[key]");
-  t = std::regex_replace(t, r.assign, "$1[key]");
-  t = std::regex_replace(t, r.github, "[key]");
-  t = std::regex_replace(t, r.uuid, "[id]");
+  if (has("authorization")) t = std::regex_replace(t, r.auth, "$1[key]");
+  if (has("token") || has("key") || has("secret") || has("passw") || has("pwd") || has("code"))
   {
+    std::string out;
+    size_t last = 0;
+    for (auto it = std::sregex_iterator(t.begin(), t.end(), r.assign); it != std::sregex_iterator(); ++it) {
+      const auto& m = *it;
+      if (AddressValue(m.str().substr(size_t(m[1].length())))) continue;
+      out += t.substr(last, size_t(m.position()) - last) + m[1].str() + "[key]";
+      last = size_t(m.position()) + size_t(m.length());
+    }
+    t = out + t.substr(last);
+  }
+  if (has("_")) t = std::regex_replace(t, r.github, "[key]");
+  if (dashes >= 4) t = std::regex_replace(t, r.uuid, "[id]");
+  if (HasLongRun(t)) {
     // Long runs that look like keys: 32 or more of base64's letters with both letters and digits.
     std::string out;
     size_t last = 0;
@@ -612,14 +738,14 @@ std::string ScrubLine(const std::string& line, const Rules& r, const OwnRules& o
       const std::string m = it->str();
       const bool letters = std::any_of(m.begin(), m.end(), [](char c) { return std::isalpha(static_cast<unsigned char>(c)); });
       const bool digits = std::any_of(m.begin(), m.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
-      if (!letters || !digits || m.find('/') == 0) continue;
+      if (!letters || !digits || m.find('/') == 0 || NotAKey(m)) continue;
       out += t.substr(last, size_t(it->position()) - last) + "[key]";
       last = size_t(it->position()) + m.size();
     }
     t = out + t.substr(last);
   }
-  t = std::regex_replace(t, r.email, "[email]");
-  {
+  if (has("@")) t = std::regex_replace(t, r.email, "[email]");
+  if (dots >= 3) {
     // IPv4 (loopback and versions kept), with a port if it has one.
     std::string out;
     size_t last = 0;
@@ -634,12 +760,12 @@ std::string ScrubLine(const std::string& line, const Rules& r, const OwnRules& o
       if ((m.position() > 0 && t[size_t(m.position()) - 1] == '.') ||
           (end < t.size() && t[end] == '.' && end + 1 < t.size() && std::isdigit(static_cast<unsigned char>(t[end + 1]))))
         continue;
-      out += t.substr(last, size_t(m.position()) - last) + "[ip]";
+      out += t.substr(last, size_t(m.position()) - last) + (ip_label ? (*ip_label)(addr) : "[ip]");
       last = end;
     }
     t = out + t.substr(last);
   }
-  {
+  if (colons >= 4 || has("::")) {
     // IPv6: hex groups with :: or with four colons or more (never a time of day, which has two).
     std::string out;
     size_t last = 0;
@@ -649,7 +775,7 @@ std::string ScrubLine(const std::string& line, const Rules& r, const OwnRules& o
       // Inside a word (C++'s rex::cvar) or the loopback ::1: kept.
       if (m == "::1" || (pos > 0 && std::isalnum(static_cast<unsigned char>(t[pos - 1])))) continue;
       if (std::count(m.begin(), m.end(), ':') < 2) continue;
-      out += t.substr(last, pos - last) + "[ip]";
+      out += t.substr(last, pos - last) + (ip_label ? (*ip_label)(m) : "[ip]");
       last = pos + m.size();
     }
     t = out + t.substr(last);
@@ -685,6 +811,22 @@ std::string Scrub(const std::string& text, const Scrubber& s) {
   return out;
 }
 
+struct LogScrubRules {
+  OwnRules own;
+};
+
+std::shared_ptr<const LogScrubRules> MakeLogScrub(const Scrubber& s) {
+  FixedRules();  // compiled now: a rule that cannot be built throws here, not at a line
+  auto r = std::make_shared<LogScrubRules>();
+  r->own = MakeOwnRules(s);
+  return r;
+}
+
+std::string ScrubLogLine(const std::string& line, const LogScrubRules& rules,
+                         const std::function<std::string(const std::string&)>& ip_label) {
+  return ScrubLine(line, FixedRules(), rules.own, ip_label ? &ip_label : nullptr);
+}
+
 bool ScrubSelfTest(std::string& failures) {
   Scrubber s;
   s.names = {"PlayerOne", "DESKTOP-K9X2"};
@@ -711,6 +853,21 @@ bool ScrubSelfTest(std::string& failures) {
       {"mail me at someone@example.com", "mail me at [email]"},
       {"VS 1B4EBA8B2370E9A7 draws", "VS 1B4EBA8B2370E9A7 draws"},
       {"seed aGVsbG8gd29ybGQgdGhpcyBpcyBhIGtleQ1234567", "seed [key]"},
+      // The rules' cheap checks (26 Nov 2026) never skip a match: other spellings of the same things.
+      {"C:/Users/PlayerOne/Saved Games", "C:/Users/[user]/Saved Games"},
+      {"/Users/macuser/Library/Logs", "/Users/[user]/Library/Logs"},
+      {"user PLAYERONE here", "user [user] here"},
+      {"addr 2001:0db8:0000:0000:0000:ff00:0042:8329 ok", "addr [ip] ok"},
+      {"Authorization: token abcdef123456", "Authorization: token [key]"},
+      {"PASSWORD = hunter2hunter2", "PASSWORD = [key]"},
+      {"at 10:41:07 the round ended", "at 10:41:07 the round ended"},
+      // Names and folders are no keys (the whole log, 26 Nov 2026); a key among them still is.
+      {"* VK_KHR_get_physical_device_properties2", "* VK_KHR_get_physical_device_properties2"},
+      {"* shaderDenormFlushToZeroFloat32: 0", "* shaderDenormFlushToZeroFloat32: 0"},
+      {"fonts from /mnt/ms1/Games/BF1943/out/build/linux-amd64-release-dev/fonts", "fonts from /mnt/ms1/Games/BF1943/out/build/linux-amd64-release-dev/fonts"},
+      {"module: code=82000000-82DB0000, image=82000000", "module: code=82000000-82DB0000, image=82000000"},
+      {"api code=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "api code=[key]"},
+      {"blob 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 end", "blob [key] end"},
   };
   failures.clear();
   for (const auto& [in, want] : cases) {
@@ -721,6 +878,17 @@ bool ScrubSelfTest(std::string& failures) {
 }
 
 // ---- gathering
+
+std::string SystemLine(const fs::path& user_dir) {
+  const System& sys = GetSystem(user_dir);
+  char ram[32];
+  std::snprintf(ram, sizeof(ram), "%.0f GB RAM", sys.ram_gb);
+  return (sys.os.empty() ? std::string("unknown OS") : sys.os) + " \xC2\xB7 " +
+         (sys.cpu.empty() ? std::string("unknown CPU") : sys.cpu) + ", " + std::to_string(sys.cores) + " cores, " +
+         std::to_string(sys.threads) + " threads \xC2\xB7 " + ram + " \xC2\xB7 " +
+         (sys.gpu.empty() ? std::string("unknown GPU") : sys.gpu) + (sys.driver.empty() ? "" : ", driver " + sys.driver) +
+         (sys.api.empty() ? "" : " (" + sys.api + ")") + " \xC2\xB7 game " + BfVersion();
+}
 
 std::vector<Part> Gather(const Context& c, int type) {
   const Scrubber sc = MakeScrubber(c);
@@ -744,6 +912,16 @@ std::vector<Part> Gather(const Context& c, int type) {
                 (c.tick_rate > 0 ? " \xC2\xB7 " + std::to_string(c.tick_rate) + " Hz game" : "");
     p.text = "| Version | " + std::string(BfVersion()) + " (" + platform + ", " + build + ")" +
              (c.tick_rate > 0 ? ", " + std::to_string(c.tick_rate) + " Hz" : "") + " |\n";
+    // Settings > Diagnostics (diagnostics.h): what this run's log holds.
+    if (diagnostics::Anonymized()) p.text += "| Logging | " + diagnostics::Summary() + " (anonymized log) |\n";
+    // The player's marks this run (the mark key: each one's line and black box are in the whole log).
+    if (const int marks = diagnostics::Marks(); marks > 0) {
+      const std::time_t last = std::time_t(diagnostics::LastMarkTime());
+      char when[32] = {};
+      if (const std::tm* tm = std::localtime(&last)) std::strftime(when, sizeof(when), "%H:%M:%S", tm);
+      p.text += "| Marks | " + std::to_string(marks) + " this run (the last at " + when +
+                "; \"BF mark\" and \"BF black box\" in the whole log) |\n";
+    }
     parts.push_back(p);
   }
   {
@@ -819,12 +997,12 @@ std::vector<Part> Gather(const Context& c, int type) {
     }
     parts.push_back(p);
   }
+  const fs::path cur = LogPath(c.user_dir), prev = cur.parent_path() / "bf1943.previous.log";
+  fs::path use = cur;
   {
     Part p{"log", "Log"};
     // The run that crashed: its log was kept as bf1943.previous.log at this start (KeepPreviousLog); a crash report
     // from before this run started points there.
-    const fs::path cur = LogPath(c.user_dir), prev = cur.parent_path() / "bf1943.previous.log";
-    fs::path use = cur;
     std::error_code ec;
     if (!crash_file.empty() && fs::exists(prev, ec)) {
       const auto crash_t = fs::last_write_time(crash_file, ec);
@@ -837,6 +1015,49 @@ std::vector<Part> Gather(const Context& c, int type) {
     p.summary = "The last " + std::to_string(lines) + " lines of " + use.filename().string() +
                 (use == prev ? " (the run that crashed)" : " (this run)");
     p.text = Details("Log: the last " + std::to_string(lines) + " lines of " + use.filename().string(), text);
+    p.on = p.available && type != kSuggestion;
+    parts.push_back(p);
+  }
+  {
+    // The whole log, compressed (TekRantGaming, 26 Nov 2026: logs for reports, Settings > Diagnostics): too large for
+    // the issue (GitHub's 65,536 characters), so the relay keeps it and links it from the issue. Scrubbed again here,
+    // though the log was anonymized as it was written: nothing is sent unchecked.
+    Part p{"fulllog", "Whole log"};
+    const std::vector<fs::path> files = WholeLogFiles(use, use == cur);
+    std::string all;
+    size_t raw = 0;
+    std::error_code ec;
+    for (const fs::path& f : files) raw += size_t(fs::file_size(f, ec));
+    for (const fs::path& f : files) {
+      if (files.size() > 1) all += "----- " + f.filename().string() + " -----\n";
+      all += ReadFile(f, kWholeLogRawMax);
+    }
+    // Its start (the system, the settings) and its newest part, as large as fits once compressed.
+    all = Scrub(all, sc);
+    size_t keep = std::min(all.size(), kWholeLogRawMax);
+    for (int tries = 0; tries < 6 && !all.empty(); ++tries) {
+      std::string text = all;
+      if (keep < all.size()) {
+        const size_t head = std::min(kWholeLogHead, keep / 4);
+        text = all.substr(0, head) + "\n[... " + std::to_string((all.size() - keep) >> 10) +
+               " KB of the log left out here: the whole log is too large to send ...]\n" +
+               all.substr(all.size() - (keep - head));
+      }
+      p.data = GzipText(text);
+      if (p.data.size() <= kWholeLogGzMax) break;
+      p.data.clear();
+      keep /= 2;
+    }
+    p.file = use;
+    p.available = !p.data.empty();
+    if (p.available) {
+      char sizes[96];
+      std::snprintf(sizes, sizeof(sizes), "%.1f MB, %.0f KB compressed", raw / 1048576.0, p.data.size() / 1024.0);
+      p.summary = use.filename().string() + (files.size() > 1 ? " with its " + std::to_string(files.size() - 1) + " older part(s)" : "") +
+                  " \xC2\xB7 " + sizes + " \xC2\xB7 anonymized \xC2\xB7 kept 30 days by the report service, linked from the issue";
+    } else {
+      p.summary = all.empty() ? "No log" : "Too large to send";
+    }
     p.on = p.available && type != kSuggestion;
     parts.push_back(p);
   }
@@ -904,6 +1125,7 @@ std::string Body(const Draft& d, const std::vector<Part>& parts) {
   b += "### System\n\n" + SystemText(parts, true) + "\n";
   if (const Part* p = FindPart(parts, "crash")) b += p->text + "\n\n";
   if (const Part* p = FindPart(parts, "log")) b += p->text + "\n\n";
+  if (FindPart(parts, "fulllog")) b += "<!-- full log -->\n\n";  // the relay's link to the whole log
   if (FindPart(parts, "screenshot")) b += "<!-- screenshot -->\n\n";
   const std::string sig = Signature(parts);
   b += "---\n_Filed from the game's Report an issue page" + (sig.empty() ? std::string() : " \xC2\xB7 crash signature `" + sig + "`") +
@@ -963,8 +1185,8 @@ std::string BrowserUrl(const Draft& d, const std::vector<Part>& parts, std::stri
 
 std::string CopyText(const Draft& d, const std::vector<Part>& parts) {
   std::string b = Body(d, parts);
-  const std::string mark = "<!-- screenshot -->\n\n";
-  if (const size_t at = b.find(mark); at != std::string::npos) b.erase(at, mark.size());
+  for (const std::string mark : {"<!-- screenshot -->\n\n", "<!-- full log -->\n\n"})
+    if (const size_t at = b.find(mark); at != std::string::npos) b.erase(at, mark.size());
   return "**" + Title(d) + "**\n\n" + b;
 }
 
@@ -973,6 +1195,7 @@ std::string RequestJson(const Draft& d, const std::vector<Part>& parts) {
                   ", \"labels\": [" + Json(TypeLabel(d.type)) + ", \"from-game\", \"needs-triage\"]" +
                   ", \"signature\": " + Json(Signature(parts)) + ", \"version\": " + Json(BfVersion());
   if (const Part* p = FindPart(parts, "screenshot")) j += ", \"screenshot_jpeg\": " + Json(Base64(ReadFile(p->file, 1 << 20)));
+  if (const Part* p = FindPart(parts, "fulllog")) j += ", \"log_gz\": " + Json(Base64(p->data));
   return j + "}";
 }
 
@@ -1056,11 +1279,27 @@ std::vector<std::pair<std::string, std::string>> Headers(const fs::path& user_di
 
 // One POST of a request; fills the job from the answer. True when it is done with (sent, a duplicate, or refused for
 // good); false when it should be kept and tried later.
+// The request without its whole log (log_gz) and the issue's mark for its link.
+std::string WithoutWholeLog(std::string json) {
+  const std::string key = ", \"log_gz\": \"";
+  if (const size_t at = json.find(key); at != std::string::npos)
+    if (const size_t end = json.find('"', at + key.size()); end != std::string::npos) json.erase(at, end + 1 - at);
+  const std::string mark = "<!-- full log -->\\n\\n";
+  if (const size_t at = json.find(mark); at != std::string::npos) json.erase(at, mark.size());
+  return json;
+}
+
 bool PostOnce(const fs::path& user_dir, const std::string& json, Send* job) {
   std::string reply;
   const int status = Post(Endpoint() + "/v1/bf/reports", Headers(user_dir), json, reply);
   const auto kv = ParseFlat(reply);
   REXLOG_INFO("BF report: the relay answered {} ({} bytes)", status, reply.size());
+  // Too large with the whole log (a relay from before it, 26 Nov 2026, takes 700 KB): the report again without it.
+  if (status == 413)
+    if (const std::string without = WithoutWholeLog(json); without.size() < json.size()) {
+      REXLOG_INFO("BF report: sent again without the whole log ({} bytes less)", json.size() - without.size());
+      return PostOnce(user_dir, without, job);
+    }
   if (job) {
     std::lock_guard lock(job->mutex);
     job->status = status;

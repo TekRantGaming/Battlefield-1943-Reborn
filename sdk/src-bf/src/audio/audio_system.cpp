@@ -15,6 +15,7 @@
 #include <rex/assert.h>
 #include <rex/audio/audio_driver.h>
 #include <rex/audio/audio_system.h>
+#include <rex/audio/diagnostics.h>
 #include <rex/audio/flags.h>
 #include <rex/audio/xma/decoder.h>
 #include <rex/dbg.h>
@@ -167,8 +168,12 @@ void AudioSystem::WorkerThreadMain() {
         SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
         uint64_t args[] = {client_callback_arg};
         WaitForGameMixer();
+        const auto callback_start = std::chrono::steady_clock::now();
         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
                                       rex::countof(args));
+        diag::NoteTime(diag::Timed::kRenderCallback,
+                       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - callback_start)
+                           .count());
         if (diag_pump_count < 10) {
           REXAPU_DEBUG("AudioWorker: callback returned for client {}", index);
         }
@@ -217,6 +222,8 @@ void AudioSystem::WaitForGameMixer() {
     rex::thread::Sleep(std::chrono::microseconds(100));
     ok = ready();
   }
+  diag::NoteMixerWait(ok, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start)
+                              .count());
   if (!ok) {
     wait_armed_ = false;
     REXAPU_DEBUG("AudioWorker: the game's mixer was not ready after {} ms; rendering anyway", wait_ms);

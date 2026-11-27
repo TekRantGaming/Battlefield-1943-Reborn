@@ -3,6 +3,7 @@
 #include "device.h"
 #include "xess.h"
 
+#include "diag.h"
 #include "queries.h"
 
 #include <rex/cvar.h>
@@ -407,6 +408,7 @@ bool Device::CreateSwapChain() {
 bool Device::RebuildSwapChain(const char* where, const char* what) {
   if (what && std::strstr(what, "DEVICE_LOST")) ReportFault();
   ++rebuilds_;
+  diag::NoteSwapChainRebuild();
   g_swap_chain_failed.store(false);
   if (!vsync_fallback_ || rebuilds_ <= 5) {
     REXLOG_ERROR("[native_x_renderer] the swap chain failed while {} ({}): made again from nothing, with V-Sync from "
@@ -1621,6 +1623,7 @@ bool Device::UpdateSize() {
     return true;
   }
   const auto& now = swap_chain_->GetDesc();
+  diag::NoteSwapChainResize(now.Width, now.Height);
   if (now.Width != width || now.Height != height) {
     refused_width_ = width, refused_height_ = height;
     if (real_size_notes_ < 5) {
@@ -1636,9 +1639,40 @@ bool Device::UpdateSize() {
   }
 #else
   swap_chain_->Resize(width, height);
+  diag::NoteSwapChainResize(width, height);
   if (g_swap_chain_failed.load()) RebuildSwapChain("resizing", "see DiligentCore's line above");
 #endif
   return true;
+}
+
+// The video memory (native_x_renderer.h QueryVideoMemory). VK_EXT_memory_budget's numbers are physical device level:
+// a GPU that has the extension reports them without the device enabling it (Vulkan 1.1).
+bool Device::QueryVideoMemory(VideoMemory* out) {
+  RefCntAutoPtr<IRenderDeviceVk> device_vk(device_, IID_RenderDeviceVk);
+  if (!device_vk || !vkGetPhysicalDeviceMemoryProperties2) return false;
+  const VkPhysicalDevice physical = device_vk->GetVkPhysicalDevice();
+  static const bool budget_ext = [physical] {
+    uint32_t count = 0;
+    if (!vkEnumerateDeviceExtensionProperties || vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, nullptr) != VK_SUCCESS)
+      return false;
+    std::vector<VkExtensionProperties> exts(count);
+    if (vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, exts.data()) != VK_SUCCESS) return false;
+    for (const auto& e : exts)
+      if (!std::strcmp(e.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) return true;
+    return false;
+  }();
+  VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+  VkPhysicalDeviceMemoryProperties2 props{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+  if (budget_ext) props.pNext = &budget;
+  vkGetPhysicalDeviceMemoryProperties2(physical, &props);
+  *out = {};
+  const auto& m = props.memoryProperties;
+  for (uint32_t i = 0; i < m.memoryHeapCount; ++i) {
+    if (!(m.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) continue;
+    out->heap_size += m.memoryHeaps[i].size;
+    if (budget_ext) out->used += budget.heapUsage[i], out->budget += budget.heapBudget[i];
+  }
+  return out->heap_size > 0;
 }
 
 Device::FenceState Device::GetFenceState() {

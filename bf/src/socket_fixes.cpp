@@ -30,6 +30,7 @@
 #include <rex/system/xthread.h>
 
 #include "dev_guest_memory.h"
+#include "diagnostics.h"
 #include "private_match.h"
 
 REXCVAR_DEFINE_BOOL(bf_net_only_from_server, true, "BF1943",
@@ -308,6 +309,12 @@ extern "C" REX_FUNC(__imp__NetDll_WSASendTo) {
     bf1943::NoteSent(ip, host_port);  // it may answer (SenderAllowed)
   }
   const uint32_t handle = ctx.r4.u32;
+  // The bytes: the WSABUF array (r5, r6 of them: big endian length, buffer).
+  uint64_t bytes = 0;
+  for (uint32_t i = 0, buffers = ctx.r5.u32, count = std::min<uint32_t>(ctx.r6.u32, 8); buffers && i < count; ++i) {
+    const uint8_t* b = base + buffers + i * 8;
+    bytes += uint32_t(b[0]) << 24 | uint32_t(b[1]) << 16 | uint32_t(b[2]) << 8 | b[3];
+  }
   original(ctx, base);
   if (TraceOn() && to) {  // where each send went (the first 200)
     static std::atomic<int> traced{0};
@@ -321,6 +328,8 @@ extern "C" REX_FUNC(__imp__NetDll_WSASendTo) {
 #if defined(BF_DEV_TOOLS)
   if (int32_t(ctx.r3.u32) >= 0) DevCountSend(base, to);
 #endif
+  // Settings > Diagnostics > Network: our sends (their gaps), the black box's packets out.
+  if (to && int32_t(ctx.r3.u32) >= 0) bf1943::diagnostics::NoteSend(guest_ip, port, int(bytes));
 }
 
 extern "C" REX_FUNC(__imp__NetDll_sendto) {
@@ -353,6 +362,12 @@ extern "C" REX_FUNC(__imp__NetDll_sendto) {
 #if defined(BF_DEV_TOOLS)
   if (result >= 0) DevCountSend(base, to);
 #endif
+  if (to && result >= 0) {
+    uint32_t guest_ip = 0;
+    uint16_t guest_port = 0;
+    std::memcpy(&guest_ip, base + to + 4, 4), std::memcpy(&guest_port, base + to + 2, 2);
+    bf1943::diagnostics::NoteSend(guest_ip, guest_port, result);
+  }
   std::string extra;
   if (TraceOn()) {
     extra = (to ? " to " + FormatAddress(base + to) : std::string()) +

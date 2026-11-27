@@ -34,6 +34,7 @@
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
 
+#include "diagnostics.h"  // the log's scene: the end of round screen
 #include "capture_points.h"
 #include "clan_tags.h"
 #include "voice_mute.h"
@@ -811,14 +812,16 @@ REX_HOOK_RAW(sub_8243BB70) {
     if (name == "settingsLoaded") bf1943::g.seen_settings = true;
     if (name == "presenceConnected") bf1943::g.seen_presence = true;
     if (name == "queryBegin") bf1943::g.seen_query = true;
-    if (name == "onStartLoading") bf1943::g.seen_loading = true;
+    if (name == "onStartLoading") bf1943::g.seen_loading = true, bf1943::diagnostics::NoteRoundOver(false);
     // Between two rounds (weather_audio.cpp): the round's end (the game's WinningTeamIsSet, the end of round screen's
     // winner) and, in a match, the next level's load (playerRoleReady, as on a join's load: runs endnames10, sb_round3,
     // m0472b, the last a change of map with no round's end).
     if (bf1943::g.stage == bf1943::Stage::kInGame && bf1943::g.seen_ready) {
-      if (name == "WinningTeamIsSet") bf1943::WeatherRoundOver(), bf1943::SkinMatchRoundOver(), bf1943::SpawnMouseRoundOver();
+      if (name == "WinningTeamIsSet")
+        bf1943::WeatherRoundOver(), bf1943::SkinMatchRoundOver(), bf1943::SpawnMouseRoundOver(),
+            bf1943::diagnostics::NoteRoundOver(true);
       if (name == "playerRoleReady" && std::chrono::steady_clock::now() - bf1943::g.ready_at > std::chrono::seconds(10))
-        bf1943::WeatherLevelLoading(), bf1943::SkinMatchNewLevel();
+        bf1943::WeatherLevelLoading(), bf1943::SkinMatchNewLevel(), bf1943::diagnostics::NoteRoundOver(false);
     }
     if (name == "gameIsReady" && bf1943::g.seen_loading) {
       const auto now = std::chrono::steady_clock::now();
@@ -1428,6 +1431,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     const char* v = std::getenv("BF_AB_OFF");
     return v && std::string(v).find("input") != std::string::npos;
   }();
+  bf1943::diagnostics::OursTimer ours_timer(bf1943::diagnostics::Ours::kPadHook);  // the black box's account
   const bool seated = bf1943::LocalSeated(base);
   native_x_renderer::NightVehicleSeated(seated);  // D178: a vehicle's lamps are on while someone is in it
   native_x_renderer::SetEyeOnFoot(!seated && bf1943::LocalOnFoot());  // D193: the storm shakes the view only on foot

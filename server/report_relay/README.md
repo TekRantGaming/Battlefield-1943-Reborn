@@ -7,7 +7,8 @@ King Kong coordinator session after TekRantGaming's OK in that session's own cha
 ## Files
 
 - `bf_reports.js`: the route. Copy to server-api/src/bf_reports.js. Its tables are made by the module itself
-  (bf_report_sent, bf_report_signatures, bf_report_shots), as bf_pipelines.js does; schema.sql needs nothing.
+  (bf_report_sent, bf_report_signatures, bf_report_shots, bf_report_logs), as bf_pipelines.js does; schema.sql needs
+  nothing.
 - `bf_reports.test.js`: its tests (node --test, the Worker tests' in-memory D1, a fake GitHub). Copy to
   server-api/test/ with the import changed to `../src/bf_reports.js`.
 - `local_relay.mjs`: the route on this PC with a fake GitHub, for testing the game against the real code
@@ -22,6 +23,8 @@ if (pathname === '/v1/bf/reports')
   return request.method === 'POST' ? await bfReports.report(request, env, now, json) : json({ error: 'Method not allowed' }, 405);
 if (pathname.startsWith('/v1/bf/reports/shot/'))
   return request.method === 'GET' ? await bfReports.screenshot(request, env, json) : json({ error: 'Method not allowed' }, 405);
+if (pathname.startsWith('/v1/bf/reports/log/'))
+  return request.method === 'GET' ? await bfReports.wholeLog(request, env, json) : json({ error: 'Method not allowed' }, 405);
 // in scheduled, after bfPipelines.prune, on its own:
 try { await bfReports.prune(env.DB, Date.now()); } catch (error) { console.error(error); }
 ```

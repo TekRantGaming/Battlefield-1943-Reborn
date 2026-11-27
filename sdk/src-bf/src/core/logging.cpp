@@ -10,13 +10,19 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <charconv>
+#include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <mutex>
+#include <thread>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
+#include <spdlog/pattern_formatter.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
@@ -56,9 +62,142 @@ REXCVAR_DEFINE_INT32(log_max_files, 20, "Log", "Max number of rotated log files 
     .range(1, 100)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_BOOL(log_file_writer_thread, false, "Log",
+                    "Write the log file on a thread of its own: a line logged is handed over, never waits for the disk "
+                    "(always on with a file filter, SetLogFileFilter)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 namespace rex {
 
 namespace {
+
+// The log file written on a thread of its own (log_file_writer_thread, or a file filter set): a line is formatted
+// where it is logged and queued; the writer passes it through the file filter (the game's anonymizer, which runs
+// regular expressions: never on the thread that logged) and into the rotating file. flush() never waits, as
+// flush_on(info) calls it for every line; DrainLogFile waits for what was queued. A queue that fills (the writer
+// far behind) drops lines and says how many, instead of holding the game's threads.
+class QueuedFileSink final : public spdlog::sinks::sink {
+ public:
+  static constexpr size_t kMaxQueued = 100000;
+
+  QueuedFileSink(spdlog::sink_ptr file, LogFileFilter filter) : file_(std::move(file)), filter_(std::move(filter)) {
+    file_->set_pattern("%v");
+    formatter_ = std::make_unique<spdlog::pattern_formatter>();
+    writer_ = std::thread([this] { Run(); });
+  }
+  ~QueuedFileSink() override {
+    {
+      std::lock_guard lock(mutex_);
+      stop_ = true;
+    }
+    wake_.notify_all();
+    if (writer_.joinable())
+      writer_.join();
+  }
+
+  void log(const spdlog::details::log_msg& msg) override {
+    if (!should_log(msg.level))
+      return;
+    spdlog::memory_buf_t buf;
+    {
+      std::lock_guard lock(format_mutex_);
+      formatter_->format(msg, buf);
+    }
+    std::string line(buf.data(), buf.size());
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+      line.pop_back();
+    {
+      std::lock_guard lock(mutex_);
+      if (queue_.size() >= kMaxQueued) {
+        ++dropped_;
+        return;
+      }
+      queue_.push_back(std::move(line));
+      ++queued_;
+    }
+    wake_.notify_one();
+  }
+  void flush() override { wake_.notify_one(); }
+  void set_pattern(const std::string& pattern) override {
+    std::lock_guard lock(format_mutex_);
+    formatter_ = std::make_unique<spdlog::pattern_formatter>(pattern);
+  }
+  void set_formatter(std::unique_ptr<spdlog::formatter> formatter) override {
+    std::lock_guard lock(format_mutex_);
+    formatter_ = std::move(formatter);
+  }
+
+  // Waits until every line queued before the call is in the file and flushed. False on the timeout.
+  bool Drain(std::chrono::milliseconds timeout) {
+    std::unique_lock lock(mutex_);
+    const uint64_t want = queued_;
+    wake_.notify_one();
+    return written_cv_.wait_for(lock, timeout, [&] { return written_ >= want || stop_; });
+  }
+
+ private:
+  void Write(const std::string& line) {
+    std::string out;
+    if (filter_) {
+      try {
+        out = filter_(line);
+      } catch (...) {
+        out = "[a log line left out: the privacy filter could not read it]";
+      }
+    } else {
+      out = line;
+    }
+    const spdlog::details::log_msg m(spdlog::string_view_t{}, spdlog::level::info, out);
+    file_->log(m);
+  }
+
+  void Run() {
+    std::deque<std::string> batch;
+    for (;;) {
+      uint64_t dropped = 0;
+      bool stopping = false;
+      {
+        std::unique_lock lock(mutex_);
+        wake_.wait(lock, [&] { return stop_ || !queue_.empty(); });
+        batch.swap(queue_);
+        dropped = std::exchange(dropped_, 0);
+        stopping = stop_;
+      }
+      for (const std::string& line : batch)
+        Write(line);
+      if (dropped)
+        Write(fmt::format("[log writer] {} lines left out: the log was written faster than the disk took it",
+                          dropped));
+      file_->flush();
+      {
+        std::lock_guard lock(mutex_);
+        written_ += batch.size();
+      }
+      batch.clear();
+      written_cv_.notify_all();
+      if (stopping) {
+        std::lock_guard lock(mutex_);
+        if (queue_.empty())
+          return;
+      }
+    }
+  }
+
+  spdlog::sink_ptr file_;
+  LogFileFilter filter_;
+  std::mutex format_mutex_;
+  std::unique_ptr<spdlog::formatter> formatter_;
+  std::mutex mutex_;
+  std::condition_variable wake_, written_cv_;
+  std::deque<std::string> queue_;
+  uint64_t queued_ = 0, written_ = 0, dropped_ = 0;
+  bool stop_ = false;
+  std::thread writer_;
+};
+
+LogFileFilter g_file_filter;
+std::shared_ptr<QueuedFileSink> g_queued_file_sink;
+std::atomic<QueuedFileSink*> g_queued_file_raw{nullptr};  // DrainLogFile's, without g_mutex
 
 std::vector<LogCategoryEntry> g_registry;
 spdlog::sink_ptr g_console_sink;
@@ -230,8 +369,16 @@ void InitLogging(const LogConfig& config) {
         resolved_path, static_cast<size_t>(REXCVAR_GET(log_max_file_size_mb)) * 1024 * 1024,
         static_cast<size_t>(REXCVAR_GET(log_max_files)), false);
     sink->set_level(spdlog::level::trace);
-    sink->set_pattern(config.file_pattern);
-    g_file_sink = sink;
+    if (g_file_filter || REXCVAR_GET(log_file_writer_thread)) {
+      g_queued_file_sink = std::make_shared<QueuedFileSink>(sink, g_file_filter);
+      g_queued_file_sink->set_level(spdlog::level::trace);
+      g_queued_file_sink->set_pattern(config.file_pattern);
+      g_file_sink = g_queued_file_sink;
+      g_queued_file_raw = g_queued_file_sink.get();
+    } else {
+      sink->set_pattern(config.file_pattern);
+      g_file_sink = sink;
+    }
   }
 
   g_extra_sinks = config.extra_sinks;
@@ -277,11 +424,15 @@ void ShutdownLogging() {
   for (auto& entry : g_registry)
     if (entry.logger)
       entry.logger->flush();
+  if (g_queued_file_sink)
+    g_queued_file_sink->Drain(std::chrono::seconds(2));
+  g_queued_file_raw = nullptr;
 
   spdlog::shutdown();
   g_registry.clear();
   g_console_sink.reset();
   g_file_sink.reset();
+  g_queued_file_sink.reset();
   g_early_sink.reset();
   g_extra_sinks.clear();
   g_initialized = false;
@@ -289,10 +440,27 @@ void ShutdownLogging() {
 }
 
 void FlushLogging() {
+  std::shared_ptr<QueuedFileSink> queued;
+  {
+    std::lock_guard lock(g_mutex);
+    for (auto& entry : g_registry)
+      if (entry.logger)
+        entry.logger->flush();
+    queued = g_queued_file_sink;
+  }
+  if (queued)
+    queued->Drain(std::chrono::seconds(2));
+}
+
+void SetLogFileFilter(LogFileFilter filter) {
   std::lock_guard lock(g_mutex);
-  for (auto& entry : g_registry)
-    if (entry.logger)
-      entry.logger->flush();
+  g_file_filter = std::move(filter);
+}
+
+bool DrainLogFile(std::chrono::milliseconds timeout) {
+  // No g_mutex: a crash report calls this, and the thread that crashed may hold it.
+  QueuedFileSink* queued = g_queued_file_raw.load();
+  return !queued || queued->Drain(timeout);
 }
 
 LogCategoryId RegisterLogCategory(const char* name) {

@@ -15,6 +15,7 @@
 
 #include "comms.h"
 #include "audio_devices.h"
+#include "diagnostics.h"
 #include "text_filter.h"
 
 #if defined(_WIN32)
@@ -543,6 +544,10 @@ class Engine {
   std::set<std::string> muted_from_;
   std::map<std::string, int> mixed_from_;  // frames each player's voice was placed in the mix (the same line)
   double stats_at_ = 0;
+  // The relay's last packet (it sends the roster every 5 s, gmhost.py): silent for 12 s, the voice and chat are off
+  // (logged once, and when it is back).
+  double relay_heard_at_ = 0;
+  bool relay_silent_ = false;
 #if defined(BF_DEV_TOOLS)
   std::vector<int16_t> dev_mic_;
   size_t dev_mic_at_ = 0;
@@ -604,6 +609,12 @@ class Engine {
     }
 #endif
     Receive(now);
+    if (welcomed_ && !relay_silent_ && relay_heard_at_ > 0 && now - relay_heard_at_ > 12.0) {
+      relay_silent_ = true;
+      REXLOG_WARN("BF comms: the server's relay has sent nothing for {:.0f} s (it sends every 5 s): voice and chat "
+                  "are cut until it answers",
+                  now - relay_heard_at_);
+    }
     Outbox(now);
     Audio(now);
   }
@@ -617,6 +628,7 @@ class Engine {
     REXLOG_INFO("BF comms: off {} ({})", udp_.target, why);
     udp_.Close();
     welcomed_ = false, g_connected = false, g_transmitting = false;
+    relay_heard_at_ = 0, relay_silent_ = false;
     talkers_.clear(), roster_.clear();
     NoteTeam(0, 0);  // read again in the next match (ReadTeam)
     {
@@ -632,6 +644,9 @@ class Engine {
       const int n = udp_.Recv(buf, sizeof(buf));
       if (n < 0) break;
       if (n < 9 || std::memcmp(buf, kMagic, 8) != 0) continue;
+      if (relay_silent_)
+        REXLOG_INFO("BF comms: the server's relay answers again after {:.0f} s", now - relay_heard_at_);
+      relay_heard_at_ = now, relay_silent_ = false;
       Reader r{buf + 9, size_t(n - 9)};
       switch (buf[8]) {
         case kWelcome: {
@@ -703,8 +718,14 @@ class Engine {
           // send one) all stars. The host's log keeps the text as sent (moderation).
           const std::string shown_name = ShownName(name), shown = text_filter::Censor(text);
           AddLine({now, Channel(channel), shown_name, shown, from == my_id_, false});
-          REXLOG_INFO("BF comms: chat {} {}: {}", channel == kAll ? "all" : channel == kTeam ? "team" : "squad",
-                      shown_name, shown);
+          // A player's log is anonymized (diagnostics.h): the sender's name as [player N], the text left out.
+          diagnostics::NotePlayerName(name);
+          if (diagnostics::Anonymized())
+            REXLOG_INFO("BF comms: chat {} {}: ({} characters)", channel == kAll ? "all" : channel == kTeam ? "team" : "squad",
+                        shown_name, shown.size());
+          else
+            REXLOG_INFO("BF comms: chat {} {}: {}", channel == kAll ? "all" : channel == kTeam ? "team" : "squad",
+                        shown_name, shown);
           break;
         }
         case kBroadcast: {

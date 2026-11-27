@@ -35,6 +35,7 @@
 #include <rex/system/xsocket.h>
 #include <rex/system/xthread.h>
 
+#include "diagnostics.h"    // Settings > Diagnostics > Network: packets and gaps per sender
 #include "private_match.h"  // a match this PC hosts, reached through 127.0.0.1
 
 namespace bf1943 {
@@ -128,6 +129,7 @@ int ReceiveNow(Receive& r, uint8_t* base, uint32_t* error) {
     // From an address this game never sent to: dropped before the game sees it, the next packet read
     // (socket_fixes.cpp SenderAllowed; a non-blocking socket ends in WSAEWOULDBLOCK).
     if (!bf1943::SenderAllowed(host.sin_addr.s_addr, host.sin_port)) continue;
+    bf1943::diagnostics::NoteReceive(host.sin_addr.s_addr, host.sin_port, n);
     size_t at = 0;
     for (auto& b : r.buffers) {
       const size_t part = std::min<size_t>(b.second, static_cast<size_t>(n) - at);

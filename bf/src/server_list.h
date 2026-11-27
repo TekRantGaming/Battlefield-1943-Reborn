@@ -18,6 +18,7 @@
 #pragma once
 
 #include "night_ops.h"
+#include "diagnostics.h"  // RegistryRequest: each backend request timed
 
 #include <atomic>
 #include <chrono>
@@ -252,7 +253,7 @@ inline std::string JsonField(const std::string& obj, const char* key) {
 
 // One request to the registry at `target` (host:port); the reply's first line. The game's own registry when `target`
 // is empty (bf_backend_registry, else bf_online_host's port 18250).
-inline bool RegistryRequest(const std::string& request, std::string& reply, std::string target = {}) {
+inline bool RegistryRequestDirect(const std::string& request, std::string& reply, std::string target, const char** failure) {
   if (target.empty()) target = REXCVAR_GET(bf_backend_registry);
   if (target.empty()) target = REXCVAR_GET(bf_online_host) + ":18250";
   const size_t colon = target.rfind(':');
@@ -260,8 +261,11 @@ inline bool RegistryRequest(const std::string& request, std::string& reply, std:
   addrinfo hints{}, *found = nullptr;
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
-  if (getaddrinfo(target.substr(0, colon).c_str(), target.substr(colon + 1).c_str(), &hints, &found) || !found)
+  if (getaddrinfo(target.substr(0, colon).c_str(), target.substr(colon + 1).c_str(), &hints, &found) || !found) {
+    *failure = "the name did not resolve";
     return false;
+  }
+  *failure = "no connection";
   auto s = socket(found->ai_family, found->ai_socktype, found->ai_protocol);
   bool ok = false;
 #if defined(_WIN32)
@@ -282,6 +286,7 @@ inline bool RegistryRequest(const std::string& request, std::string& reply, std:
         bind(s, reinterpret_cast<const sockaddr*>(&local), sizeof(local));
     }
     if (connect(s, found->ai_addr, static_cast<int>(found->ai_addrlen)) == 0) {
+      *failure = "no answer";
       const std::string line = request + "\n";
       send(s, line.data(), static_cast<int>(line.size()), 0);
       char buffer[4096];
@@ -301,6 +306,18 @@ inline bool RegistryRequest(const std::string& request, std::string& reply, std:
 #endif
   }
   freeaddrinfo(found);
+  return ok;
+}
+// Each request timed for Settings > Diagnostics > Network logging (diagnostics.h): its op ("list", "reserve"), how
+// long, and why it failed.
+inline bool RegistryRequest(const std::string& request, std::string& reply, std::string target = {}) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const char* failure = "";
+  const bool ok = RegistryRequestDirect(request, reply, std::move(target), &failure);
+  std::string op = JsonField(request, "op");
+  diagnostics::NoteRequest("backend", op.empty() ? std::string("request") : op, ok,
+                           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                           ok ? nullptr : failure);
   return ok;
 }
 

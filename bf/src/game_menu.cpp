@@ -78,6 +78,8 @@
 #include "news_video.h"
 #include "picture_decode.h"
 #include "paste_keys.h"  // Ctrl+V and Shift+Insert, the clipboard (the name page, Direct connect)
+#include "diagnostics.h"  // Settings > Diagnostics (DiagnosticsRows); the log's scene (NotePresence)
+#include "seat_info.h"    // the log's scene: in a vehicle or not
 #include "report.h"  // Report an issue (game_menu_report.inc)
 #include "update.h"
 
@@ -495,6 +497,7 @@ bool SmgSightTakeSave(std::string& name, std::string& value);  // fov.cpp: a tun
 void GameCommand(const std::string& name, const std::string& args);  // auto_join.cpp: a command as the game's menu sends it
 std::map<std::string, std::pair<int, double>> TakeScoreEvents();  // auto_join.cpp: the HUD's score events
 bool LevelLoaded();
+bool LocalOnFoot();  // look.cpp: the soldier's on foot camera ran in the last frames
 bool LoadingScreenShown();  // auto_join.cpp: the level's loading screen is up after a join's load began
 
 void NameChosen(const std::string& name);  // below: the name the player chose on the first start, in use at once
@@ -1590,6 +1593,33 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       p.where = open_ && page_ == Page::kServers ? W::kBrowser : W::kMenu;
     }
     discord::Note(p);
+    // The log's scene (diagnostics.h): the same answer, with the match split into its screens. The deploy screen as
+    // the deploy pointer has it (auto_join.cpp): a level in, the soldier in no seat and not on foot.
+    using S = diagnostics::Scene;
+    S scene = S::kMenus;
+    switch (p.where) {
+      case W::kNone:
+      case W::kStarting: scene = S::kStarting; break;
+      case W::kJoining: scene = S::kLoading; break;
+      case W::kTutorial: scene = S::kTutorial; break;
+      case W::kMatch: {
+        SeatInfo seat;
+        // Any of our pages open in a match (the pause, Settings from it, the scoreboard) is the pause: open_ alone
+        // (27 Nov 2026: Settings from the pause read as playing; and page_ stays kPause after the pause closes, which
+        // held the log at "paused" for the 11 minutes of play after it).
+        scene = open_ ? S::kPaused
+                : diagnostics::RoundOver() ? S::kRoundEnd
+                : !LocalOnFoot() && !(LocalSeat(seat) && seat.vehicle) ? S::kDeploy
+                                                                      : S::kPlaying;
+        break;
+      }
+      default: scene = S::kMenus; break;
+    }
+    // While loading, the map is the server list's entry, which can be out of date (27 Nov 2026: Iwo Jima listed,
+    // Wake Island loaded): said as the list's.
+    std::string map = scene == S::kMenus || scene == S::kStarting ? std::string() : p.map;
+    if (scene == S::kLoading && !map.empty()) map = "the server list said " + map;
+    diagnostics::NoteScene(scene, map);
   }
   void Background(ImDrawList* d, ImGuiIO& io, float left, float right) {
     if (InMatch()) Shade(d, io, left, right);
@@ -3494,6 +3524,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (vsync && hz > 0 && (rate <= 0 || rate > hz)) rate = hz;
     SetFrameRate(rate);
     applied_hz_ = hz;
+    diagnostics::NoteDisplay(hz, rate, vsync);  // the frame time aimed at, for the late presents
     const std::string applied = rate > 0 ? fmt::format("{:.2f}", rate) : "unlimited";
     if (applied != applied_rate_) {
       REXLOG_INFO("BF frame rate: {} (chosen {}; screen {:.2f} Hz{})", applied,
@@ -3506,9 +3537,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // Gameplay, in King Kong's order, rows and wording. Every value is saved in bf1943-settings.txt: our own keys,
   // and runtime settings as "cvar.<name>" (set again at every start, ApplyStartupDisplaySettings). Rows that need
   // more of the game found first are shown, greyed, with a note.
-  enum Tab { kTabDisplay, kTabGraphics, kTabAudio, kTabControls, kTabGameplay, kTabEnhancements, kTabCount };
+  // Diagnostics last (TekRantGaming, 26 Nov 2026: options for better logs for issue reports; diagnostics.h).
+  enum Tab { kTabDisplay, kTabGraphics, kTabAudio, kTabControls, kTabGameplay, kTabEnhancements, kTabDiagnostics, kTabCount };
   static constexpr const char* kTabNames[kTabCount] = {"DISPLAY", "GRAPHICS", "AUDIO", "CONTROLS", "GAMEPLAY",
-                                                       "ENHANCEMENTS"};
+                                                       "ENHANCEMENTS", "DIAGNOSTICS"};
   static constexpr const char* kNotYet = "Coming in a later version: this needs more of the game's own code found first.";
 
   struct SettingRow {
@@ -3551,14 +3583,25 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                                                 "native_x_renderer_shadow_scale", "native_x_renderer_sharpness",
                                                 "native_x_renderer_scaling", "bf_upscaler_mode", "user_language",
                                                 "native_x_renderer_fill_screen", "bf_render_scale"};
-  static constexpr const char* kStartKeys[] = {"monitor", "window_width", "window_height"};
+  // 27 Nov 2026: the Black box row and Logging verbosity too (without them a change there said nothing and the game ran
+  // on at the old verbosity: a Verbose match logged at Normal).
+  // The Diagnostics rows apply in the game (diagnostics::ApplyNow, 27 Nov 2026); only the log's size waits for a start.
+  static constexpr const char* kStartKeys[] = {"monitor", "window_width", "window_height", "diag_log_size"};
   std::map<std::string, std::string> started_with_;
+  // A start key's value as it takes effect: Diagnostics' keys are on (and Automatic) when missing (diagnostics.h).
+  std::string StartKeyValue(const std::string& key) {
+    const std::string def = key == diagnostics::kLogSizeKey     ? "auto"
+                            : key == diagnostics::kVerbosityKey ? "normal"
+                            : key.rfind("diag_", 0) == 0        ? "1"
+                                                                : "";
+    return settings_.Get(key, def);
+  }
   std::string StartValue(const std::string& key) {
-    return key.rfind("cvar.", 0) == 0 ? Cvar(key.substr(5)) : settings_.Get(key, "");
+    return key.rfind("cvar.", 0) == 0 ? Cvar(key.substr(5)) : StartKeyValue(key);
   }
   void NoteStartValues() {
     for (const char* c : kStartCvars) started_with_[std::string("cvar.") + c] = Cvar(c);
-    for (const char* k : kStartKeys) started_with_[k] = settings_.Get(k, "");
+    for (const char* k : kStartKeys) started_with_[k] = StartKeyValue(k);
   }
   bool StartChanged(const std::string& key) {
     // Before the game runs the renderer's settings are not taken yet: they apply at Play.
@@ -3643,6 +3686,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     settings_.values["cvar." + name] = value;
     settings_.Save();
     rex::cvar::SetFlagByName(name, value);
+    diagnostics::NoteSettingChanged(name, value);
     // The Upscaler's rows and the Sharpness it stands in for: the renderer's settings follow before the game runs (Play
     // takes them; once it runs, they wait for the next start, as the rows say).
     if (name == "native_x_renderer_sharpness") g_plain_sharpness = value;
@@ -3906,6 +3950,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
           return DeviceControlsRows(ctl_device_);
         return sub_ == kSubRemap ? RemapRows() : sub_ == kSubKeys ? KeyRows() : ControlsRows();
       case kTabEnhancements: return EnhancementsRows();
+      case kTabDiagnostics: return DiagnosticsRows();
       default: return GameplayRows();
     }
   }
@@ -5010,6 +5055,109 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     return rows;
   }
 
+  // Settings > Diagnostics (diagnostics.h): what the log holds for issue reports. Each area is on by default and
+  // applies at the next start (the log's anonymizer and size are set before it opens).
+  std::vector<SettingRow> DiagnosticsRows() {
+    std::vector<SettingRow> rows;
+    auto key_choice = [this](const std::string& section, const std::string& name, const std::string& help,
+                             const std::string& key, const std::string& def,
+                             const std::vector<std::pair<std::string, std::string>>& options) {
+      SettingRow r{section, name, help};
+      const std::string cur = settings_.Get(key, def);
+      std::vector<std::string> values;
+      for (size_t i = 0; i < options.size(); ++i) {
+        r.options.push_back(options[i].first);
+        values.push_back(options[i].second);
+        if (options[i].second == cur) r.index = int(i);
+      }
+      const bool live = key != diagnostics::kLogSizeKey;
+      r.choose = [this, key, values, live](int i) {
+        settings_.values[key] = values[size_t(i)];
+        settings_.Save();
+        if (live) diagnostics::ApplyNow();  // at once, no restart
+      };
+      if (!live) r.start_key = key;
+      return r;
+    };
+    using diagnostics::Area;
+    static const std::string kCost =
+        " Makes the log larger and costs a little speed; off for the best frame rate. Applies at once.";
+    // Each area on or off; how much the ones on say: Logging verbosity below (27 Nov 2026: "a setting that lets users
+    // select their logging verbosity, make normal the lowest option").
+    const std::vector<std::pair<std::string, std::string>> on_off = {{"Off", "0"}, {"On", "1"}};
+    rows.push_back(key_choice("Logs for reports", "Audio logging",
+                              "Sound problems in the log: the output running dry (crackles, gaps), voices cut short "
+                              "or starved of data, the game's mixer late. A line every 5 seconds when one happened, "
+                              "and one a minute either way." + kCost,
+                              diagnostics::Key(Area::kAudio), "1", on_off));
+    rows.push_back(key_choice("Logs for reports", "Rendering logging",
+                              "Frame rate and stutter in the log: frame times every 5 seconds, each frame over 50 ms "
+                              "and what it waited for, and your graphics settings at the start." + kCost,
+                              diagnostics::Key(Area::kRender), "1", on_off));
+    rows.push_back(key_choice("Logs for reports", "Network logging",
+                              "Connection problems in the log: in a match, the packets from the server every 10 "
+                              "seconds, the gaps between them (lag, rubber banding) and your ping; online requests "
+                              "that fail or are slow (the server list, joining, updates)." + kCost,
+                              diagnostics::Key(Area::kNetwork), "1", on_off));
+    rows.push_back(key_choice("Logs for reports", "Input logging",
+                              "Your controls' settings and bindings in the log at the start, beside the controllers "
+                              "connected and removed." + kCost,
+                              diagnostics::Key(Area::kInput), "1", on_off));
+    rows.push_back(key_choice("Logs for reports", "System logging",
+                              "Your PC and the game's health in the log: the system at the start; every minute the "
+                              "memory in use (the game's and the PC's), the CPU, the game's file reads, power and the "
+                              "CPU's clock; as they happen, a change to battery, the CPU slowed by heat or power "
+                              "saving, memory running out, the window losing focus." + kCost,
+                              diagnostics::Key(Area::kSystem), "1", on_off));
+    rows.push_back(key_choice("Logs for reports", "Black box",
+                              "The last 30 seconds of every frame kept in memory and written to the log when something "
+                              "goes wrong: a frame over 100 ms while playing, a hang, a crash, or your mark key (F10). "
+                              "Applies at once.",
+                              diagnostics::Key(Area::kBlackBox), "1", on_off));
+    rows.push_back(key_choice("Logs for reports", "Logging verbosity",
+                              "How much the logging that is on writes. Normal: each problem as it happens, summaries "
+                              "of every scene and minute, the black box's slow frames and their causes. Detailed: more "
+                              "of each kind of line, and every part of a slow frame's time (the renderer's work by "
+                              "kind, our own work, the game's code by function, the audio threads). Verbose: "
+                              "everything, the 2 seconds around a black box trigger frame by frame (a much larger "
+                              "log, and a little more speed). Applies at once.",
+                              diagnostics::kVerbosityKey, "normal",
+                              {{"Normal", "normal"}, {"Detailed", "detailed"}, {"Verbose", "verbose"}}));
+    rows.push_back(key_choice("Log file", "Log file size",
+                              "How large bf1943.log may grow before an older part is set aside. Automatic: 25 MB "
+                              "while any logging above is on, else 5 MB. Applies at the next start.",
+                              diagnostics::kLogSizeKey, "auto",
+                              {{"Automatic", "auto"}, {"Small (5 MB)", "small"}, {"Large (200 MB)", "large"}}));
+    SettingRow privacy{"Log file", "Privacy",
+                       "Your log is anonymized as it is written: your soldier name, other players' names, your PC "
+                       "and user names, addresses, keys and codes are replaced, and chat text is left out. Report an "
+                       "issue sends it only when you choose to."};
+    privacy.value = diagnostics::Anonymized() ? "Anonymized" : "Not anonymized (BF_DEV_LOG_RAW, a dev build)";
+    rows.push_back(privacy);
+    SettingRow folder{"Log file", "Open the log folder", "Shows bf1943.log in its folder, to attach it to a report yourself."};
+    folder.activate = [this] {
+      std::filesystem::path log = rex::cvar::GetFlagByName("log_file");
+      if (log.empty()) log = settings_.path.parent_path() / "bf1943.log";
+      REXLOG_INFO("BF settings: the log's folder opened");
+      if (const char* v = std::getenv("BF_DEV_NO_OPEN"); v && *v == '1') return;  // tests: logged only
+#if defined(_WIN32)
+      ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + log.wstring() + L"\"").c_str(), nullptr,
+                    SW_SHOWNORMAL);
+#else
+      OpenUrl(log.parent_path().string());
+#endif
+    };
+    rows.push_back(folder);
+    SettingRow reset{"Reset", "Reset page", "Every logging area back on, the log's size Automatic."};
+    reset.activate = [this] {
+      for (int a = 0; a < int(Area::kCount); ++a) settings_.values[diagnostics::Key(Area(a))] = "1";
+      settings_.values[diagnostics::kLogSizeKey] = "auto";
+      settings_.Save();
+    };
+    rows.push_back(reset);
+    return rows;
+  }
+
   std::vector<SettingRow> GameplayRows() {
     std::vector<SettingRow> rows;
     SettingRow name{"Player", "Name", name_saved_.empty() ? "The name other players see in the game."
@@ -5347,9 +5495,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (in.prev_tab) tab_ = (tab_ + kTabCount - 1) % kTabCount, row_ = 0, scroll_ = 0;
       if (in.next_tab) tab_ = (tab_ + 1) % kTabCount, row_ = 0, scroll_ = 0;
       // The tabs, spread over the bar; a click switches.
-      const float tab_size = std::min(28 * s, (b.x - a.x) / 26.0f);
+      float tab_size = std::min(28 * s, (b.x - a.x) / 26.0f);
       float total = 0;
       for (int t = 0; t < kTabCount; ++t) total += Width(g_fonts.bf, tab_size, kTabNames[t]);
+      // Smaller type when the tabs would not fit with their least gap (seven since Diagnostics, 26 Nov 2026).
+      const float room = (b.x - a.x) - 40 * s - 18 * s * float(kTabCount);
+      if (room > 0 && total > room) tab_size *= room / total, total = room;
       const float gap = std::max(18 * s, ((b.x - a.x) - 40 * s - total) / float(kTabCount));
       float tx = a.x + 20 * s + gap * 0.5f;
       for (int t = 0; t < kTabCount; ++t) {

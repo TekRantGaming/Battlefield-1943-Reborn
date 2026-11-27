@@ -2,6 +2,7 @@
 
 #include "shaders.h"
 
+#include "diag.h"
 #include "spirv_patch.h"
 #include "storage.h"
 
@@ -110,6 +111,7 @@ rg::SpirvShader* ShaderCache::Get(rg::xenos::ShaderType type, const uint32_t* uc
   if (!error.empty()) {
     REXLOG_ERROR("[native_x_renderer] {} shader {:016X} ({} dwords): analysis failed: {}",
                  type == rg::xenos::ShaderType::kVertex ? "vertex" : "pixel", hash, dwords, error);
+    diag::NoteShaderFailure();
     disassembly_buffer_.Reset();
     shader.reset();
     if (new_failure) *new_failure = true;
@@ -211,6 +213,7 @@ void ShaderCache::Translate(rg::SpirvShaderTranslator& translator, const Job& jo
   if (!translated) {
     REXLOG_ERROR("[native_x_renderer] {} shader {:016X} (modification {:016X}): translation failed",
                  vertex ? "vertex" : "pixel", shader.ucode_data_hash(), modification);
+    diag::NoteShaderFailure();
     return finish(kFailed);
   }
   if (!translation->is_valid()) return finish(kFailed);

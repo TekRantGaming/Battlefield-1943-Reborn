@@ -124,6 +124,9 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
 
   /// Called before cleanup begins. Release custom resources here.
   virtual void OnShutdown() {}
+  /// The window is closing (the close button, or a quit that closes it): the process ends right after (OnClosing
+  /// hard-exits). Last words for the log; the log is flushed after.
+  virtual void OnClosingWindow() {}
 
   /// Called after path defaults are computed, before Runtime is constructed.
   /// Override to adjust game/user/update data paths programmatically.

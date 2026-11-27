@@ -164,6 +164,8 @@ class BaseHeap {
 
   uint32_t GetTotalPageCount();
   uint32_t GetUnreservedPageCount();
+  // The longest run of unreserved pages (pages, not bytes).
+  uint32_t GetLargestUnreservedRun();
 
   uint32_t total_page_count() const { return uint32_t(page_table_.size()); }
   uint32_t unreserved_page_count() const { return unreserved_page_count_; }
@@ -226,6 +228,9 @@ class BaseHeap {
   bool Restore(stream::ByteStream* stream);
 
   void Reset();
+
+  // A failed allocation, for the log (rate limited).
+  void NoteAllocFailure(uint32_t size);
 
  protected:
   BaseHeap();
