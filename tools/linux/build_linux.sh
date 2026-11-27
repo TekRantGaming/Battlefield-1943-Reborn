@@ -14,6 +14,14 @@ MAIN="${BF_LINUX_MAIN:-/mnt/f/BF-1942-MP-Decomp}"  # the Windows checkout, seen 
 WT="${BF_LINUX_SOURCE:-$MAIN}"  # the main tree (from v0.2.0 the Linux work is merged)
 BASE="${BF_LINUX_ROOT:-$HOME/bf-linux}"
 JOBS="${BF_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
+# BF_LINUX_MARCH (optional, 27 Nov 2026 server optimisation tests): the CPU level for the SDK and the game, e.g.
+# x86-64-v3 (AVX2, FMA, BMI2, MOVBE). Unset: the presets' x86-64-v2, what the release ships. Use a build root of its own
+# (BF_LINUX_ROOT): the flags live in each build folder's cache.
+MARCH_FLAGS=()
+if [ -n "${BF_LINUX_MARCH:-}" ]; then
+  F="-march=$BF_LINUX_MARCH -fno-semantic-interposition -fno-plt"
+  MARCH_FLAGS=("-DCMAKE_C_FLAGS=$F" "-DCMAKE_CXX_FLAGS=$F")
+fi
 T0=$(date +%s)
 step() { echo "== [$(( $(date +%s) - T0 )) s] $*"; }
 mkdir -p "$BASE/src/bf" "$BASE/src/sdk"
@@ -59,7 +67,7 @@ build_sdk() {
   if [ ! -f "$S/out/build/linux-amd64/CMakeCache.txt" ]; then
     (cd "$S" && cmake --preset linux-amd64 -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
        -DCMAKE_INSTALL_PREFIX="$BASE/sdk" -DREXGLUE_USE_VULKAN=ON -DREXGLUE_BUILD_TESTS=OFF \
-       -DBF_NATIVE_RENDERER_DIR="$BASE/src/bf/native-renderer") > "$BASE/sdk-configure.log" 2>&1 ||
+       -DBF_NATIVE_RENDERER_DIR="$BASE/src/bf/native-renderer" "${MARCH_FLAGS[@]}") > "$BASE/sdk-configure.log" 2>&1 ||
       { tail -30 "$BASE/sdk-configure.log"; exit 1; }
   fi
   step "SDK build ($JOBS jobs)"
@@ -78,7 +86,7 @@ build_game() {
   if [ ! -f "$B/CMakeCache.txt" ]; then
     (cd "$BASE/src/bf" && cmake --preset "$P" -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF \
        -DCMAKE_PREFIX_PATH="$BASE/sdk" -Drexglue_DIR="$BASE/sdk/lib/cmake/rexglue" \
-       -DBF_DEV_TOOLS="${BF_DEV_TOOLS:-OFF}") > "$BASE/game-configure.log" 2>&1 ||
+       -DBF_DEV_TOOLS="${BF_DEV_TOOLS:-OFF}" "${MARCH_FLAGS[@]}") > "$BASE/game-configure.log" 2>&1 ||
       { tail -40 "$BASE/game-configure.log"; exit 1; }
   fi
   # The release's version (BfVersion(): the pipeline sharing, the updater's comparison), as the Windows package's.
