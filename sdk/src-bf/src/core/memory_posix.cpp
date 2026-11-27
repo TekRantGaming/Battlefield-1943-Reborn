@@ -582,6 +582,31 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
       assert_always();
       return kFileMappingHandleInvalid;
   }
+#if REX_PLATFORM_LINUX
+  // Linux (27 Nov 2026, the server optimisation): the guest's memory in an anonymous memfd, not a file in /dev/shm.
+  // /dev/shm is a tmpfs of half the RAM by default; the 4.5 GB mapping is sparse, but every page the game touches takes
+  // room there, and once the mount is full the next touched page is a SIGBUS (a 1 GB VPS crashed about 10 s after its
+  // bots spawned: the mount was ~475 MB). A memfd is bounded by memory and swap only, has no name to leave behind, and
+  // its huge pages follow /sys/kernel/mm/transparent_hugepage/shmem_enabled (MapFileView asks for them).
+  // BF_GUEST_MEMORY_SHM=1: /dev/shm as before.
+  if (oflag == O_RDWR) {
+    static const bool use_shm = [] {
+      const char* v = std::getenv("BF_GUEST_MEMORY_SHM");
+      return v && *v == '1';
+    }();
+    if (!use_shm) {
+      const int fd = memfd_create(MakeShmName(path).c_str() + 1, MFD_CLOEXEC);
+      if (fd >= 0) {
+        if (rex_ftruncate64(fd, static_cast<off_t>(length)) == 0) {
+          return static_cast<FileMappingHandle>(fd);
+        }
+        close(fd);
+        return kFileMappingHandleInvalid;
+      }
+      // No memfd (a kernel before 3.17 or a sandbox that blocks it): /dev/shm below.
+    }
+  }
+#endif
   oflag |= O_CREAT;
   auto full_path = MakeShmName(path);
   int ret = shm_open(full_path.c_str(), oflag, 0777);
@@ -639,6 +664,25 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
     munmap(result, length);
     return nullptr;
   }
+
+#if REX_PLATFORM_LINUX
+  // The guest's memory (27 Nov 2026, the server optimisation):
+  //  - huge pages where the system allows them for shared memory (shmem_enabled "advise", the server package's tuned
+  //    profile; nothing changes at the kernel's default "never"): the game's random walks over its 4 GB miss the TLB
+  //    far less, and in a VM each miss is a two level page walk;
+  //  - left out of core dumps: a crash's core is the program's own memory and stacks (a few hundred MB) instead of the
+  //    whole guest (GBs; Ubuntu's apport filled hosts' disks). BF_FULL_CORE=1 keeps it in, to read the game's state.
+  static const bool full_core = [] {
+    const char* v = std::getenv("BF_FULL_CORE");
+    return v && *v == '1';
+  }();
+#if defined(MADV_HUGEPAGE)
+  (void)madvise(result, length, MADV_HUGEPAGE);
+#endif
+#if defined(MADV_DONTDUMP)
+  if (!full_core) (void)madvise(result, length, MADV_DONTDUMP);
+#endif
+#endif
 
   return result;
 }
