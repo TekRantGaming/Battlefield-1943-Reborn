@@ -156,8 +156,17 @@ offline or LAN play and for real servers.
 ### Vehicles
 
 - **Riding along:** a bot within 6 m of a vehicle of its own side that a human drives (a swimmer next to a passing
-  boat too) takes the first free seat other than the driver's, through the server's own seating. It stays in it, with
-  no input of its own, until it dies. Checked twice a second.
+  boat too) takes the first free seat other than the driver's, through the server's own seating. Checked twice a
+  second.
+- **Getting off** (27 Nov 2026): a passenger gets off when the vehicle has come 25 m or more and stopped (stood 2
+  seconds, or moved under 4 m in 10 seconds: a boat grinding in the surf), when the driver's seat has been empty a
+  second, or when the vehicle has not moved for 20 seconds, whoever drives. A bot boat driver gets off on the beach
+  the same way.
+- **A landing craft's places 3 to 5** keep the soldier as what its player controls (its own weapon in hand), and no
+  button gets a soldier out of them. Bots now board boats only into seats 0 to 2 (the driver's and the two guns').
+  A bot that is in such a place anyway is found by the boat's seats, stands still, and on the beach is moved by the
+  server's seating to a gun seat the others have left, from which it gets off. Before this, a bot in such a place was
+  taken for one on foot, rode to the beach and then walked against the boat for the rest of the match.
 - **Tanks (new, commit b28008c6):** a bot within 20 m of a free Sherman or Japanese tank may take its driver's seat,
   two bots a side at most. It drives to the nearest flag its side does not hold and stops about 18 m short, follows
   the ground human players drove that tank over where that is shorter, steers round what is in front of it, and fires
