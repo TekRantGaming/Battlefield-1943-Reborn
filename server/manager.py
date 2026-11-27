@@ -1278,6 +1278,10 @@ class Manager:
         if not WINDOWS:  # no display on a server: SDL's offscreen video driver; the program's own libraries first
             env.setdefault('SDL_VIDEO_DRIVER', 'offscreen')
             env.setdefault('SDL_VIDEODRIVER', 'offscreen')
+            # No sound card either (27 Nov 2026, SDK v0.11 on US Central): SDL 3's audio needs libasound.so.2, which a
+            # server has no reason to have, and v0.11 stops the game when no audio driver starts ("module 'rexapu'
+            # failed to init, no audio driver is available"): SDL's dummy driver, which plays nothing.
+            env.setdefault('SDL_AUDIO_DRIVER', 'dummy')
             env['LD_LIBRARY_PATH'] = os.pathsep.join(x for x in (os.path.dirname(game_exe()), env.get('LD_LIBRARY_PATH')) if x)
         return game, host, env, directory
 
@@ -1676,6 +1680,7 @@ class Manager:
             if not WINDOWS:
                 env.setdefault('SDL_VIDEO_DRIVER', 'offscreen')
                 env.setdefault('SDL_VIDEODRIVER', 'offscreen')
+                env.setdefault('SDL_AUDIO_DRIVER', 'dummy')  # as the servers' (commands): no sound card on a server
             proc = spawn([game_exe(), '--install_game=' + source, '--game_data_root=' + game,
                           '--user_data_root=' + os.path.join(LOGS, 'install'), '--server'], env=env,
                          cwd=os.path.dirname(game_exe()), output=out)
