@@ -55,11 +55,11 @@
 REXCVAR_DEFINE_INT32(native_x_renderer_draw_log, 0, "NativeXRenderer",
                      "Bring-up: log the first N draws NativeXRenderer processes (primitive, indices, shaders)");
 REXCVAR_DECLARE(int32_t, anisotropic_override);  // the SDK's: forced anisotropic filtering (textures.cpp)
-REXCVAR_DEFINE_STRING(native_x_renderer_alpha_to_coverage, "auto", "NativeXRenderer",
+REXCVAR_DEFINE_STRING(native_x_renderer_alpha_to_coverage, "blend", "NativeXRenderer",
                       "Alpha to coverage on targets without MSAA (D69, D114): auto (blend on surfaces the game draws "
                       "with MSAA, dither on those it draws at 1x), blend (the color blended by its alpha, depth written "
                       "where the alpha is at least 0.5: close to the game's MSAA) or dither (the shader's 2x2 pattern, "
-                      "as on the console without MSAA)");
+                      "as on the console without MSAA). Default blend since hotfix 0.4.8.1 (Transparent edges: Smooth)");
 
 REXCVAR_DEFINE_BOOL(native_x_renderer_keep_pipeline_cache, false, "NativeXRenderer",
                     "Keep DiligentCore's pipeline cache for the whole run (D173). Off: it is let go once the stored "
