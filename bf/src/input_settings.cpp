@@ -402,6 +402,13 @@ PPCFunc* RuntimeExportForRumble() { return RuntimeExport("__imp__XamInputSetStat
 // took what it needed. `menu_open`: our menu has the pad (the game got an empty one); the aim toggle lowers.
 // `seated`: the player sits in a vehicle (the keyboard's vehicle keys; no aim toggle, whose trigger is the throttle
 // there).
+// Hotfix 0.4.8.2: the player's keyboard and mouse settings in the log at the start (0.4.8.1 turned them off for every
+// player who never set them: SDK v0.11's defaults were off, v0.10's on).
+void LogInputSettings() {
+  REXLOG_INFO("BF input: Keyboard & mouse {}, the mouse turns the camera {} (mnk_mode, mnk_mouse)",
+              REXCVAR_GET(mnk_mode) ? "on" : "off", REXCVAR_GET(mnk_mouse) ? "on" : "off");
+}
+
 void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated) {
   if (menu_open) {
     g_aim_raised = g_aim_was_down = false;

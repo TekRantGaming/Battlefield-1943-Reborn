@@ -45,6 +45,7 @@
 
 namespace bf1943 {
 void InstallFpeGuard();  // fpe_guard.cpp
+void LogInputSettings();  // input_settings.cpp: Keyboard & mouse on or off, in the log
 #if defined(BF_DEV_TOOLS)
 bool DevPadOn();                 // dev_pad.cpp: BF_DEV_PAD is set
 rex::IModule* DevPadModule();    // dev_pad.cpp: its input driver's module (null without BF_DEV_PAD)

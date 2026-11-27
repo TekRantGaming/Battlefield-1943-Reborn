@@ -15,12 +15,12 @@ std::string Text(const char* name) { return rex::cvar::bridge::Get(name).value_o
 
 bool& FLAGS_mnk_mode_storage_() {
   thread_local bool v;
-  v = rex::string::from_string<bool>(Text("mnk_mode"), false);
+  v = rex::string::from_string<bool>(Text("mnk_mode"), true);  // on by default, as in SDK v0.10 (hotfix 0.4.8.2)
   return v;
 }
 bool& FLAGS_mnk_mouse_storage_() {
   thread_local bool v;
-  v = rex::string::from_string<bool>(Text("mnk_mouse"), false);
+  v = rex::string::from_string<bool>(Text("mnk_mouse"), true);  // on by default, as in SDK v0.10 (hotfix 0.4.8.2)
   return v;
 }
 // Read by NativeXRenderer for every sampler of every draw (textures.cpp): each read through the bridge took the

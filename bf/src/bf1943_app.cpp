@@ -212,6 +212,7 @@ rex::Result<void> Bf1943App::OnInit() {
       // Quit as the window's close button does.
       [] { rex::app::RequestShutdown(0); }, [] { return rex::ui::compat::GetWindow(); },
       [this] { return game_dir_; });
+  if (!server) bf1943::LogInputSettings();  // input_settings.cpp: Keyboard & mouse on or off, in the player's log
   // A graphics driver reset (gpu_lost.cpp): the player told, and the game closed, instead of a frozen picture.
   if (!server)
     bf1943::WatchGpuDeviceLoss([this](std::function<void()> job) { GetUI().PostTask(std::move(job)); },
