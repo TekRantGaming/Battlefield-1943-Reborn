@@ -445,9 +445,13 @@
     kit::PaperArt(d, ta, tb);
     // (The region with its flag and the tick rate: TekRantGaming, 13 Nov 2026.)
     // (TICK at 686 since the bots' bracket before the players, 21 Nov 2026: "(24) 64 / 64" fits the PLAYERS column.)
-    const float colx[6] = {st(14), st(296), st(432), st(566), st(686), st(736)};
-    static const char* kHeads[6] = {"SERVER", "MAP", "REGION", "PLAYERS", "TICK", "PING"};
-    for (int c = 0; c < 6; ++c)
+    // (BOTS, Yes or No, before TICK: TekRantGaming, 27 Nov 2026, hotfix 0.4.8.1. The server column gave up 46 for it;
+    // a name too long for it scrolls while its row is hovered or chosen, below.)
+    // (TYPE, an icon for Classic, Night Ops or Daybreak: TekRantGaming, 27 Nov 2026, hotfix 0.4.8.1; the NIGHT and
+    // DAYBREAK chips that followed the name moved into it, and stay on the chosen server's card.)
+    const float colx[8] = {st(14), st(236), st(280), st(410), st(536), st(650), st(698), st(746)};
+    static const char* kHeads[8] = {"SERVER", "TYPE", "MAP", "REGION", "PLAYERS", "BOTS", "TICK", "PING"};
+    for (int c = 0; c < 8; ++c)
       kit::GameText(d, kit::GameFont::kListHeader, st(10), ImVec2(ta.x + colx[c], ta.y + (head - st(10)) * 0.5f), kit::kInkFaint,
                     kHeads[c], st(0.6f));
     d->AddRectFilled(ImVec2(ta.x, ta.y + head - st(2)), ImVec2(tb.x, ta.y + head), kit::kInk);
@@ -486,7 +490,7 @@
       const ImU32 ink = sel ? kit::kCream : full ? kit::kInkSection : kit::kInk;
       {  // the name, and NIGHT
         const float cap = st(12);
-        d->PushClipRect(ImVec2(ta.x, top), ImVec2(ta.x + colx[1] - st(10), tb.y), true);
+        d->PushClipRect(ImVec2(ta.x, top), ImVec2(ta.x + colx[1] - st(6), tb.y), true);
         float iw = HostIcon(d, st, ImVec2(ta.x + colx[0], y), rh, sv.player_hosted, ink);
         if (sv.locked) {  // a padlock: the match has a password, asked for on joining
           const float lx = ta.x + colx[0] + iw, cy = y + rh * 0.5f, w = st(9);
@@ -507,26 +511,76 @@
         }
         // A Reborn tab server (ours, or a promoted community one: plasma.py Promoted) has its band under the name.
         const float name_y = sv.official ? y + st(6.5f) : y + (rh - cap) * 0.5f;
-        float nw = iw + kit::GameText(d, kit::GameFont::kText, cap, ImVec2(ta.x + colx[0] + iw, name_y), ink, sv.name);
+        // A name longer than its column (TekRantGaming, 27 Nov 2026, hotfix 0.4.8.1: "if the server name is longer than
+        // the character limit, it should scroll so you can see the full name when it's been hovered over"): while its
+        // row is hovered or chosen it scrolls to its end and back, resting a second at each end, from its start each
+        // time the row is first hovered or chosen.
+        float shift = 0;
+        {
+          const float tw = kit::GameTextWidth(kit::GameFont::kText, cap, sv.name);
+          const float room = colx[1] - st(6) - colx[0] - iw - st(4);
+          static int marquee_row = -1;
+          static double marquee_at = 0;
+          // the hovered row, or the chosen one while the mouse is off the list (one name scrolls at a time)
+          const bool mouse_in = ImGui::IsMouseHoveringRect(ImVec2(ta.x, top), tb);
+          if ((hover || (sel && !mouse_in)) && tw > room) {
+            const int key = int(std::hash<std::string>{}(sv.name) & 0x7FFFFFFF);
+            if (marquee_row != key) marquee_row = key, marquee_at = ImGui::GetTime();
+            const double over = double(tw - room), speed = double(st(40)), rest = 1.0, run = over / speed;
+            const double t = std::fmod(ImGui::GetTime() - marquee_at, 2 * (rest + run));
+            const double s = t < rest ? 0.0 : t < rest + run ? (t - rest) / run : t < 2 * rest + run ? 1.0 : 1.0 - (t - 2 * rest - run) / run;
+            shift = float(s * over);
+          }
+        }
+        if (shift > 0) d->PushClipRect(ImVec2(ta.x + colx[0] + iw, std::max(y, top)), ImVec2(ta.x + colx[1] - st(6), std::min(y + rh, tb.y)), true);
+        float nw = iw - shift + kit::GameText(d, kit::GameFont::kText, cap, ImVec2(ta.x + colx[0] + iw - shift, name_y), ink, sv.name);
+        if (shift > 0) d->PopClipRect();
         RowBanner(d, st, ImVec2(ta.x + colx[0] + iw, y + st(23)), sv, st(15));
-        if (sv.night && kNightOps)
-          Chip(d, st, ImVec2(ta.x + colx[0] + nw + st(12), y + (rh - st(16)) * 0.5f), st(16), "NIGHT", IM_COL32(40, 46, 88, 255),
-               kit::kStripText, false);
-        else if (sv.daybreak && kNightOps)  // a dawn's amber beside Night Ops' navy
-          Chip(d, st, ImVec2(ta.x + colx[0] + nw + st(12), y + (rh - st(16)) * 0.5f), st(16), "DAYBREAK", IM_COL32(150, 84, 36, 255),
-               kit::kStripText, false);
+        (void)nw;
         d->PopClipRect();
       }
+      {  // the type: Classic (the 1943 logo's star), Night Ops (a crescent moon and a star) or Daybreak (the sun on the horizon)
+        const ImVec2 c(ta.x + colx[1] + st(10), y + rh * 0.5f);
+        const float r = st(7.5f);
+        if (sv.night && kNightOps) {
+          const ImU32 navy = sel ? kit::kCream : IM_COL32(40, 46, 88, 255);
+          d->AddCircleFilled(c, r, navy, 24);
+          d->AddCircleFilled(ImVec2(c.x + r * 0.45f, c.y - r * 0.3f), r * 0.8f, sel ? kit::kGreen : (hover ? IM_COL32(226, 220, 198, 255) : kit::kPaper), 24);
+          d->AddCircleFilled(ImVec2(c.x + r * 0.75f, c.y + r * 0.55f), st(1.3f), navy, 8);
+        } else if (sv.daybreak && kNightOps) {
+          const ImU32 amber = sel ? kit::kCream : IM_COL32(150, 84, 36, 255);
+          const float hy = c.y + r * 0.45f;  // the horizon
+          d->PathArcTo(ImVec2(c.x, hy), r * 0.62f, 3.14159265f, 6.2831853f, 16);
+          d->PathFillConvex(amber);
+          for (int k = 0; k < 5; ++k) {  // rays
+            const float a = 3.14159265f + 3.14159265f * (0.1f + 0.2f * float(k));
+            d->AddLine(ImVec2(c.x + std::cos(a) * r * 0.85f, hy + std::sin(a) * r * 0.85f),
+                       ImVec2(c.x + std::cos(a) * r * 1.25f, hy + std::sin(a) * r * 1.25f), amber, st(1.4f));
+          }
+          d->AddLine(ImVec2(c.x - r * 1.3f, hy), ImVec2(c.x + r * 1.3f, hy), amber, st(1.4f));
+        } else {
+          const ImU32 olive = sel ? kit::kCream : IM_COL32(74, 112, 58, 255);
+          ImVec2 pts[10];
+          for (int k = 0; k < 10; ++k) {
+            const float a = -1.5707963f + 3.14159265f * 0.2f * float(k), rr = (k & 1) ? r * 0.42f : r;
+            pts[k] = ImVec2(c.x + std::cos(a) * rr, c.y + std::sin(a) * rr);
+          }
+          for (int k = 0; k < 10; k += 2)  // the star as five triangles round its middle (a concave shape)
+            d->AddTriangleFilled(c, pts[k], pts[(k + 9) % 10], olive), d->AddTriangleFilled(c, pts[k], pts[(k + 1) % 10], olive);
+        }
+        if (hover && ImGui::IsMouseHoveringRect(ImVec2(c.x - r * 1.4f, y), ImVec2(c.x + r * 1.4f, y + rh)))
+          ImGui::SetTooltip("%s", sv.night && kNightOps ? "Night Ops" : sv.daybreak && kNightOps ? "Daybreak" : "Classic");
+      }
       {  // the map: its picture and its name
-        const float x = ta.x + colx[1];
+        const float x = ta.x + colx[2];
         MapPicture(d, st.u * 0.5f, ImVec2(x, y + st(8)), ImVec2(x + st(34), y + rh - st(8)), sv.map);
         kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(x + st(44), y + (rh - st(11)) * 0.5f), ink,
                       sv.map.empty() ? "Wake Island" : sv.map);
       }
       {  // the region: its country's flag and its name (an older server says none)
-        const float x = ta.x + colx[2];
+        const float x = ta.x + colx[3];
         const Region* r = FindRegion(sv.region);
-        d->PushClipRect(ImVec2(x, std::max(y, top)), ImVec2(ta.x + colx[3] - st(8), std::min(y + rh, tb.y)), true);
+        d->PushClipRect(ImVec2(x, std::max(y, top)), ImVec2(ta.x + colx[4] - st(8), std::min(y + rh, tb.y)), true);  // (PLAYERS)
         if (r) {
           DrawFlag(d, r->country, ImVec2(x, y + rh * 0.5f - st(7)), ImVec2(x + st(21), y + rh * 0.5f + st(7)));
           kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(x + st(28), y + (rh - st(11)) * 0.5f), ink, r->name);
@@ -538,7 +592,7 @@
       }
       {  // the players: a bar and the count, the bots in brackets before it in a fainter ink, "(4) 0 / 24"
         // (TekRantGaming, 21 Nov 2026). The bar is the people only: bots give their slots up to joining players.
-        const float x = ta.x + colx[3], bw = st(36);
+        const float x = ta.x + colx[4], bw = st(36);
         const ImVec2 b0(x, y + rh * 0.5f - st(2)), b1(x + bw, y + rh * 0.5f + st(2));
         d->AddRectFilled(b0, b1, sel ? IM_COL32(255, 255, 255, 70) : IM_COL32(34, 36, 27, 30));
         const float fill = sv.max_players > 0 ? std::clamp(float(sv.players) / float(sv.max_players), 0.0f, 1.0f) : 0.0f;
@@ -554,17 +608,20 @@
         kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(cx, y + (rh - st(11)) * 0.5f), ink, count);
         if (sv.queue > 0) {  // the players waiting in its queue (the join queue, 0.4.7.4): "+3", in the stamp's red
           const float qx = cx + kit::GameTextWidth(kit::GameFont::kText, st(11), count) + st(5);
-          d->PushClipRect(ImVec2(qx, std::max(y, top)), ImVec2(ta.x + colx[4] - st(4), std::min(y + rh, tb.y)), true);
+          d->PushClipRect(ImVec2(qx, std::max(y, top)), ImVec2(ta.x + colx[5] - st(4), std::min(y + rh, tb.y)), true);  // (BOTS)
           kit::GameText(d, kit::GameFont::kText, st(10), ImVec2(qx, y + (rh - st(10)) * 0.5f), sel ? kit::kCream : kit::kStamp,
                         fmt::format("+{}", sv.queue));
           d->PopClipRect();
         }
       }
+      // bots: Yes when the server has bots in it now (its own count, the bracket in PLAYERS), else No
+      kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(ta.x + colx[5], y + (rh - st(11)) * 0.5f),
+                    sv.bots > 0 ? ink : (sel ? IM_COL32(241, 234, 211, 150) : IM_COL32(90, 84, 64, 170)), sv.bots > 0 ? "Yes" : "No");
       // the tick rate (an older server says none)
-      kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(ta.x + colx[4], y + (rh - st(11)) * 0.5f), ink,
+      kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(ta.x + colx[6], y + (rh - st(11)) * 0.5f), ink,
                     sv.tick_hz > 0 ? fmt::format("{} Hz", sv.tick_hz) : std::string("?"));
       {  // the ping
-        const float x = ta.x + colx[5];
+        const float x = ta.x + colx[7];
         const float pw = PingBars(d, st, ImVec2(x, y + rh * 0.5f), sv.ping_ms, sel);
         kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(x + pw + st(6), y + (rh - st(11)) * 0.5f), ink,
                       sv.ping_ms < 0 ? "?" : fmt::format("{} ms", sv.ping_ms));
