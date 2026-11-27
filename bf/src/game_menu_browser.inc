@@ -109,9 +109,22 @@
     return w + st(7);
   }
   bool browser_has_players_ = false, browser_not_full_ = false;  // the filter chips
-  // The events chip (26 Nov 2026, Daybreak beside Night Ops): 0 every server, 1 Night Ops only, 2 Daybreak only; a
-  // click goes on to the next (it was the NIGHT OPS chip, on or off).
-  int browser_event_ = 0;
+  // The type chip (26 Nov 2026, Daybreak beside Night Ops; Classic since the server type page, 27 Nov 2026,
+  // game_menu_modes.inc): every server, Classic only (neither Night Ops nor Daybreak), Night Ops only, Daybreak only;
+  // a click goes on to the next (it was the NIGHT OPS chip, on or off). The server type page sets it.
+  static constexpr int kEventAll = 0, kEventNight = 1, kEventDaybreak = 2, kEventClassic = 3;
+  int browser_event_ = kEventAll;
+  static bool EventPasses(int event, const ServerInfo& sv) {
+    switch (event) {
+      case kEventNight: return sv.night;
+      case kEventDaybreak: return sv.daybreak;
+      case kEventClassic: return !sv.night && !sv.daybreak;
+      default: return true;
+    }
+  }
+  static const char* EventName(int event) {
+    return event == kEventNight ? "NIGHT OPS" : event == kEventDaybreak ? "DAYBREAK" : event == kEventClassic ? "CLASSIC" : "ALL";
+  }
   std::string browser_region_;       // the region chip: only this region's servers (a code of regions.h); empty: all
   // The size chip (server sizes, docs/SERVER-SIZES.md; TekRantGaming, 20 Nov 2026: the size shown, no pop-up): only
   // servers of this size (24: the game's own and smaller, 32, 64); 0: all.
@@ -163,20 +176,20 @@
   }
 
   // The tab's servers, through the search and the chips, the busiest first (or the nearest); counts[]: the Official,
-  // Community and Favourites totals before the search and the chips.
+  // Community and Favourites totals of the type chosen (the server type page, the type chip), before the search and
+  // the other chips.
   std::vector<ServerInfo> BrowserServers(const std::vector<ServerInfo>& all, int counts[3]) {
     const std::vector<std::string> favs = Favourites();
     const std::string search = Lower(browser_search_);
     std::vector<ServerInfo> out;
     for (const ServerInfo& sv : all) {
       const bool fav = std::find(favs.begin(), favs.end(), ServerKey(sv)) != favs.end();
+      if (!EventPasses(browser_event_, sv)) continue;
       ++counts[sv.official ? 0 : 1];
       if (fav) ++counts[2];
       if (browser_tab_ == kTabFavourites ? !fav : sv.official != (browser_tab_ == kTabOfficial)) continue;
       if (browser_has_players_ && sv.players <= 0) continue;
       if (browser_not_full_ && sv.max_players > 0 && sv.players >= sv.max_players) continue;
-      if (browser_event_ == 1 && !sv.night) continue;
-      if (browser_event_ == 2 && !sv.daybreak) continue;
       if (!browser_region_.empty() && sv.region != browser_region_) continue;
       if (browser_size_ && SizeOf(sv) != browser_size_) continue;
       if (!search.empty() && Lower(sv.name + " " + sv.map).find(search) == std::string::npos) continue;
@@ -240,10 +253,15 @@
     return st(20);
   }
 
-  // Back where the browser was opened from: the pause (a match running), else the menu (Home before the game runs).
+  // Back where the browser was opened from: the pause (a match running), the server type page (game_menu_modes.inc),
+  // else the menu (Home before the game runs).
   void BackFromBrowser() {
     browser_typing_ = false, direct_keys_ = false;
     if (servers_from_pause_) servers_from_pause_ = false, page_ = Page::kPause;
+    else if (browser_from_modes_) {
+      browser_from_modes_ = false, servers_from_home_ = false, page_ = Page::kModes;
+      return;
+    }
     else page_ = pre_game_ ? Page::kHome : Page::kMain;
     servers_from_home_ = false;
     home_row_ = kRowBrowser;
@@ -291,13 +309,20 @@
     const std::vector<ServerInfo>& servers = lan ? lan_found : listed;
     // ---- the title block
     {
-      const int players = list_.players_online();
+      int players = list_.players_online();
+      size_t listed_n = all.size();
+      if (browser_event_ != kEventAll) {  // one kind (the server type page, the type chip): that kind's own totals
+        players = 0, listed_n = 0;
+        for (const ServerInfo& sv : all)
+          if (EventPasses(browser_event_, sv)) players += std::max(0, sv.players), ++listed_n;
+      }
       const ServerNotice notice = list_.notice();
       const std::string eyebrow =
           notice.active() && !lan ? "PACIFIC THEATRE \xC2\xB7 SERVERS CLOSED \xC2\xB7 " + Upper(notice.title)
           : !online_ok ? "PACIFIC THEATRE \xC2\xB7 THE SERVER LIST IS NOT REACHABLE RIGHT NOW"
-                     : fmt::format("PACIFIC THEATRE \xC2\xB7 {} {} \xC2\xB7 {} {} ONLINE", all.size(),
-                                   all.size() == 1 ? "SERVER" : "SERVERS", players, players == 1 ? "PLAYER" : "PLAYERS");
+                     : fmt::format("PACIFIC THEATRE \xC2\xB7 {}{} {} \xC2\xB7 {} {} ONLINE",
+                                   browser_event_ == kEventAll ? std::string() : std::string(EventName(browser_event_)) + " \xC2\xB7 ",
+                                   listed_n, listed_n == 1 ? "SERVER" : "SERVERS", players, players == 1 ? "PLAYER" : "PLAYERS");
       kit::Spaced(d, f.typed, st(10.5f), st.P(48, 91), kit::kKhakiDim, eyebrow, st(2));
       kit::GameText(d, kit::GameFont::kHeadline, st(40), st.P(48, 105), kit::kCream, "SERVER BROWSER");
     }
@@ -374,7 +399,7 @@
       bool c_sort = false, c_night = false, c_full = false, c_players = false, c_region = false, c_size = false;
       chip_right(sort_by_ping_ ? "SORT: PING" : "SORT: PLAYERS", false, &c_sort);
       if (kNightOps)  // night_ops.h: not in every build
-        chip_right(browser_event_ == 1 ? "NIGHT OPS" : browser_event_ == 2 ? "DAYBREAK" : "EVENTS", browser_event_ != 0, &c_night);
+        chip_right(std::string("TYPE: ") + EventName(browser_event_), browser_event_ != kEventAll, &c_night);
       chip_right("NOT FULL", browser_not_full_, &c_full);
       chip_right("HAS PLAYERS", browser_has_players_, &c_players);
       // The region chip (TekRantGaming, 13 Nov 2026: servers say their region): a click goes through the regions
@@ -408,7 +433,9 @@
         browser_region_ = browser_region_.empty() ? regions.front() : at + 1 == regions.end() ? std::string() : *(at + 1);
       }
       if (c_sort) sort_by_ping_ = !sort_by_ping_;
-      if (c_night) browser_event_ = (browser_event_ + 1) % 3;
+      if (c_night)  // all, Classic, Night Ops, Daybreak, all (the server type page's order)
+        browser_event_ = browser_event_ == kEventAll ? kEventClassic : browser_event_ == kEventClassic ? kEventNight
+                         : browser_event_ == kEventNight ? kEventDaybreak : kEventAll;
       if (c_full) browser_not_full_ = !browser_not_full_;
       if (c_players) browser_has_players_ = !browser_has_players_;
       if (c_sort || c_night || c_full || c_players || c_region || c_size) row_ = 0, scroll_ = 0;
