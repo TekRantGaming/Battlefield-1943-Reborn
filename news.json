@@ -1,18 +1,29 @@
 {
-  "edition": "0.4.8 launch edition",
+  "edition": "0.4.8 release edition",
   "status": "",
   "items": [
     {
-      "id": "trailer-048",
+      "id": "release-048",
       "kind": "video",
-      "kicker": "Trailer · Update 0.4.8",
-      "title": "Update 0.4.8 arrives 27 November",
-      "text": "Night Ops and Daybreak, a full day and night cycle, dynamic weather, bots and servers for up to 64 players. Watch the trailer, then read everything that is new.",
-      "date": "2026-11-26",
+      "kicker": "Out now · Update 0.4.8",
+      "title": "Update 0.4.8 is out",
+      "text": "Night Ops and Daybreak, a full day and night cycle, dynamic weather, bots and servers for up to 64 players. You are already on it. Watch the trailer, then read everything that is new.",
+      "date": "2026-11-27",
       "youtube": "DF_Ls8N3miM",
       "link": "https://bf1943.tekrantgaming.com/updates/0-4-8",
       "button": "Read everything new",
       "lead": true
+    },
+    {
+      "id": "048-reborn-servers",
+      "kind": "news",
+      "kicker": "0.4.8 · Reborn servers",
+      "title": "Three new Reborn servers",
+      "text": "All Conquest Maps in three flavours, all with bots: Classic (24 players, the original look), Night Ops (32) and Daybreak (32).",
+      "date": "2026-11-27",
+      "link": "https://bf1943.tekrantgaming.com/servers",
+      "button": "See the servers",
+      "priority": 51
     },
     {
       "id": "048-night-ops",
@@ -85,7 +96,7 @@
       "kind": "update",
       "kicker": "0.4.8 · Unlockables",
       "title": "The electric skin",
-      "text": "A new skin for the Thompson and the Type 100: dark metal, gold wood, smoke and lightning, and a charge that runs over the gun on a reload.",
+      "text": "A new skin for the Thompson and the Type 100: dark metal, gold wood, smoke and lightning. Unlock it by playing one full Night Ops match, then equip it from Unlockables.",
       "date": "2026-11-26",
       "link": "https://bf1943.tekrantgaming.com/updates/0-4-8",
       "button": "Read more",
@@ -158,17 +169,6 @@
       "priority": 38
     },
     {
-      "id": "website-2026",
-      "kind": "news",
-      "kicker": "News · Website",
-      "title": "Our new website is live",
-      "text": "Guides for setting up, playing online and hosting, the live server list and every change in 0.4.8, all in one place.",
-      "date": "2026-11-26",
-      "link": "https://bf1943.tekrantgaming.com",
-      "button": "Open the website",
-      "priority": 37
-    },
-    {
       "id": "discord-community",
       "kind": "news",
       "kicker": "Community",
@@ -181,8 +181,17 @@
     }
   ],
   "upcoming": [
-    { "date": "2026-11-27", "text": "Update 0.4.8 out for everyone" },
-    { "label": "Now", "text": "The 0.4.8 trailer is on YouTube" },
-    { "label": "Now", "text": "Our new website is live" }
+    {
+      "label": "Now",
+      "text": "Update 0.4.8 out for everyone"
+    },
+    {
+      "label": "Now",
+      "text": "The 0.4.8 trailer is on YouTube"
+    },
+    {
+      "label": "Now",
+      "text": "Our new website is live"
+    }
   ]
 }
