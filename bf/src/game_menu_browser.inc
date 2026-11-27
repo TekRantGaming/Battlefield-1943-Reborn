@@ -548,9 +548,12 @@
           const float room = colx[1] - st(6) - colx[0] - iw - st(4);
           static int marquee_row = -1;
           static double marquee_at = 0;
-          // the hovered row, or the chosen one while the mouse is off the list (one name scrolls at a time)
-          const bool mouse_in = ImGui::IsMouseHoveringRect(ImVec2(ta.x, top), tb);
-          if ((hover || (sel && !mouse_in)) && tw > room) {
+          // the hovered row, or the chosen one while the mouse is off the list (one name scrolls at a time). A pointer
+          // resting over the list counts only when the mouse was used after the last key or controller press: on the
+          // ROG Ally it sits mid-screen over the list from the start, and the chosen name never scrolled for a
+          // controller player (27 Nov 2026).
+          const bool mouse_in = mouse_last_ && ImGui::IsMouseHoveringRect(ImVec2(ta.x, top), tb);
+          if (((hover && mouse_last_) || (sel && !mouse_in)) && tw > room) {
             const int key = int(std::hash<std::string>{}(sv.name) & 0x7FFFFFFF);
             if (marquee_row != key) marquee_row = key, marquee_at = ImGui::GetTime();
             const double over = double(tw - room), speed = double(st(40)), rest = 1.0, run = over / speed;
