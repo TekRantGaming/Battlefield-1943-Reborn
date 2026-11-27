@@ -70,7 +70,7 @@ shot)
 clean)
   # KDE keeps the path as given (/home/...) in recent files and the real one (/var/home/... on Bazzite) in the history.
   ENVS=$(desktop_env | sed 's/^/export /'); eval "$ENVS"
-  R=$(realpath "$T"); Q=$(command -v qdbus6 || command -v qdbus)
+  R=$(realpath "$T"); Q=$(command -v qdbus6 || command -v qdbus-qt6 || command -v qdbus)
   for d in "$T" "$R"; do
     "$Q" org.kde.ActivityManager /ActivityManager/Resources/Scoring \
       org.kde.ActivityManager.ResourcesScoring.DeleteStatsForResource ":any" "$(command -v spectacle)" "$d/*" >/dev/null
