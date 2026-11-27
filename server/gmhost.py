@@ -149,7 +149,10 @@ def official_code(key, name, stamp=None, nonce=None):
 
 BUILD_FOLDERS = ('bin', 'server', 'python')
 # Files an older official package had and a later one dropped: an update in place leaves them, so they are not counted.
-RETIRED_FILES = ('bin/amd_fidelityfx_vk.dll',)
+# Hotfix 0.4.8.3: also SDK v0.10's runtime, which an older manager's update leaves beside SDK v0.11's (manager.py
+# RETIRED_PROGRAM_FILES removes them; the main backend hid every community server updated from 0.4.8 to 0.4.8.2).
+RETIRED_FILES = ('bin/amd_fidelityfx_vk.dll', 'bin/rexruntime.dll', 'bin/rexgpu-bfnative.dll', 'bin/librexruntime.so',
+                 'bin/librexgpu-bfnative.so')
 # Crash dumps a Linux kernel wrote as plain files into the server's working folder (bin/) when its core_pattern is a
 # file name ("core", "core.%p"; Debian's default): never package files, so never counted (27 Nov 2026, a community
 # host: a 7.2 GB bin/core made every start hash it for 30 s and then fail the official check). Found ones are listed.
