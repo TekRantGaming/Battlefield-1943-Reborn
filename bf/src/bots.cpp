@@ -1047,6 +1047,15 @@ void NoteWater(const uint8_t* base, uint32_t phys) {
 // on Wake 1,310 such cells 1.3 m under the surface drew lines of "land" across the lagoon and out from the carriers,
 // routes the bots took into the water (TekRantGaming, 26 Nov 2026: "a pool of bots in the middle of the map in the
 // water"). Read when used, so it holds whenever the water's height becomes known.
+// Each level's water height, as players' games read it from the level's water mesh (shader_prep.cpp), by the map's file
+// name (MapFileName); -1e9 for one not known (found when a bot is first near the water, NoteWater).
+float KnownWater(const std::string& map) {
+  if (map == "Wake_Island") return 215.0f;
+  if (map == "Guadalcanal") return 173.0f;
+  if (map == "Iwo_Jima") return 5.3f;
+  if (map == "Coral_Sea") return 61.5f;
+  return -1e9f;
+}
 bool SwimCell(const NavCell& c) { return c.state == 3 || (c.state == 1 && c.y < nav.water - 0.9f); }
 // How much more a swum step costs than a walked one: swimming is slow, and a swimmer cannot shoot (TekRantGaming,
 // 26 Nov 2026: bots "try to swim over to the other side of the island instead of correctly traveling the island or
@@ -1386,6 +1395,11 @@ void WriteWhole(const std::filesystem::path& file, const std::string& text) {
   std::filesystem::rename(tmp, file, ec);
 }
 
+// "BGR2" from 0.4.8.1. "BGR1" (0.4.8): its servers kept the last level's water height over a level change, so only
+// Wake Island's (the first level of every set, its water found on it) are good; the others are left out and the level
+// is mapped again.
+constexpr uint32_t kGridMagic = 0x42475232, kGridMagicOld = 0x42475231;
+
 // An official server's level grid for the shared set (a scan finished here, not yet handed): a copy into the outbox,
 // once per grid (bots/sent/<map>.grid.txt keeps the size handed).
 void ShareGrid(const std::string& map) {
@@ -1400,7 +1414,7 @@ void ShareGrid(const std::string& map) {
     uint32_t head[2] = {};
     {
       std::ifstream g(grid, std::ios::binary);
-      if (!g.read(reinterpret_cast<char*>(head), 8) || head[0] != 0x42475231 || head[1] != 1) return;  // finished only
+      if (!g.read(reinterpret_cast<char*>(head), 8) || head[0] != kGridMagic || head[1] != 1) return;  // finished, 0.4.8.1's only
     }
     std::string handed;
     {
@@ -1799,7 +1813,7 @@ void SaveGrid() {
     {
       std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
       if (!f) return;
-      const uint32_t magic = 0x42475231;  // "BGR1"
+      const uint32_t magic = kGridMagic;
       const uint64_t count = rows->size();
       f.write(reinterpret_cast<const char*>(&magic), 4);
       f.write(reinterpret_cast<const char*>(&done), 4);
@@ -1823,7 +1837,11 @@ bool LoadGridFile(const std::filesystem::path& file, const char* what) {
   f.read(reinterpret_cast<char*>(&magic), 4);
   f.read(reinterpret_cast<char*>(&done), 4);
   f.read(reinterpret_cast<char*>(&count), 8);
-  if (!f || magic != 0x42475231 || count > 20000000) return false;
+  if (!f || (magic != kGridMagic && magic != kGridMagicOld) || count > 20000000) return false;
+  if (magic == kGridMagicOld && MapFileName(learn.map) != "Wake_Island") {
+    REXLOG_INFO("BF bots: the level's grid ({}) left out: a 0.4.8 one, made with the last level's water height", what);
+    return false;
+  }
   nav.cells.reserve(nav.cells.size() + count);
   for (uint64_t i = 0; i < count && f; ++i) {
     int32_t x = 0, z = 0;
@@ -3989,6 +4007,9 @@ void BotsLevelChange() {
   g.level_seen = false;
   nav.cells.clear();
   nav.scan.clear(), nav.scanned.clear(), nav.scan_started = nav.scan_done = false;
+  // The new level's water found on it (0.4.8 kept the last level's: Wake's sea, 215 m, on Guadalcanal, whose sea is at
+  // 173, and on Iwo Jima: their land "under water", mapped as sea in no time (139 cells in 0 s), and the bots swam it).
+  nav.water = -1e9f;
   field::Reset();
   nav.scan_min[0] = nav.scan_min[1] = 1e9f, nav.scan_max[0] = nav.scan_max[1] = -1e9f;
 }
@@ -4159,6 +4180,10 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     if (!map.empty() && map != learn.map) {
       if (learn.dirty) SaveLearned();
       ShareLearned("level change");
+      // The level's water height known from the start: the server has no water mesh (a player's game logs it, "BF
+      // level <name>: its water at ..."), and until a bot stood near the water the mapping took the seabed within a
+      // step's reach for ground (run botrot2: Guadalcanal's scan box all ground, its sea included).
+      if (const float known = KnownWater(MapFileName(map)); known > nav.water) nav.water = known;
       LoadLearned(map);
       LoadGrid();
       LoadStyle();
@@ -4772,9 +4797,27 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     told_pause = pause;
     REXLOG_INFO("BF bots: {}", pause ? "no players on the server: the bots wait" : "a player is on the server: the bots play");
   }
+  // The mapping's ray tests go through a soldier, so on an empty server at a level not mapped yet (a fresh server, or
+  // the next level after the last player left) none could run and the level stayed unmapped until players came, who
+  // then met bots routed over a part of it (hotfix 0.4.8.1). One bot spawns for it (and stands, paused like the rest).
+  const Bot* mapper = nullptr;
+  if (pause && !nav.scan_done && !learn.map.empty()) {
+    bool any = false;
+    for (const Bot& b : g.bots) any = any || Load32(base, b.player + 288) != 0;
+    for (const Bot& b : g.bots)
+      if (!any && !b.leaving) {
+        mapper = &b;
+        break;
+      }
+    static bool told_mapper = false;
+    if (mapper && !told_mapper) {
+      told_mapper = true;
+      REXLOG_INFO("BF bots: no players and the level not mapped: {} spawns for the mapping", mapper->name);
+    }
+  }
   for (Bot& bot : g.bots) {
     const uint32_t soldier = Load32(base, bot.player + 288);
-    if (pause) {
+    if (pause && &bot != mapper) {
       // Its last orders let go once (no walking, firing or sprinting left held), then nothing until a player joins.
       if (!bot.paused && soldier && soldier == bot.last_soldier && Load32(base, bot.player + 312) == soldier) {
         bot.forward = bot.strafe = 0.0f;
