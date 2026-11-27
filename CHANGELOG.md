@@ -24,6 +24,8 @@
 - **Bots use their kit:** the anti tank weapon and the rifle grenade against tanks, and grenades. A bot with nothing
   that can hurt a tank leaves it alone and goes on to its flag instead of shooting at it.
 - **Bot tank drivers back off when they get stuck** and steer round what is in front of them.
+- **Every bot gets off a landing craft on the beach,** drivers and gunners too, instead of sitting in it for the
+  rest of the match.
 - **Bots learn together on the official servers.** What the bots learn from players on every official server is
   merged into one set and shared between them as they play, with no restart. Every update brings the latest set to
   community servers and Custom Match too, so bots know each map from their first match. It holds no names or
