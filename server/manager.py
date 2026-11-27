@@ -2887,7 +2887,32 @@ def newer_program():
     return other if version_key(theirs) > version_key(package_version()) else None
 
 
+def plain_core_files_off():
+    """Linux: no core files written as plain files into the servers' working folder (the package's bin/).
+
+    27 Nov 2026, community hosts: with a core_pattern that is a file name (Debian's default "core"), a crash of a server
+    left a 7.2 GB bin/core: every later start hashed it for 30 s, and the build check failed ("its files are not those of
+    the official package") until it was deleted. When the kernel hands cores to a collector instead (core_pattern starting
+    with "|": systemd-coredump, which caps its own storage), they stay on. The limit is the manager's own, so the
+    servers it starts inherit it. BF_FULL_CORE=1 leaves cores on whatever the pattern."""
+    if WINDOWS or os.environ.get('BF_FULL_CORE') == '1':
+        return
+    try:
+        import resource
+        with open('/proc/sys/kernel/core_pattern', encoding='utf-8') as f:
+            pattern = f.read().strip()
+        if pattern.startswith('|'):
+            return
+        _, hard = resource.getrlimit(resource.RLIMIT_CORE)
+        resource.setrlimit(resource.RLIMIT_CORE, (0, hard))
+        print('Crash dumps off for the servers: this system writes them as plain files (core_pattern %r) into the '
+              'package folder. BF_FULL_CORE=1 keeps them.' % pattern, flush=True)
+    except (OSError, ValueError, ImportError):
+        pass
+
+
 def run(args):
+    plain_core_files_off()
     other = newer_program()
     if other and not os.environ.get('BF_SERVER_NO_HANDOVER'):
         env = dict(os.environ, BF_SERVER_ROOT=os.path.join(DATA, 'program'), BF_SERVER_DATA=DATA)
