@@ -130,7 +130,8 @@ if (Test-Path $sums) {
 # 3. required
 foreach ($r in 'bf1943.exe', 'bf1943.toml', 'data/shaders/bf1943-shaders.list',
                'data/startup/trg_studios.png', 'data/achievements/101.png', 'data/achievements/102.png',
-               'data/achievements/103.png', 'bf-retired.txt', 'README.txt', 'WebView2Loader.dll',
+               'data/achievements/103.png', 'data/modes/all.jpg', 'data/modes/classic.jpg', 'data/modes/night_ops.jpg',
+               'data/modes/daybreak.jpg', 'bf-retired.txt', 'README.txt', 'WebView2Loader.dll',
                'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'recomplauncher.json') {
     if (!$tree.Contains($r)) { Bad "required file missing: $r" }
 }

@@ -170,13 +170,21 @@
     }
     if (const ServerNotice n = list_.notice(); n.active() && own_backend_.empty()) return ShowNotice(n, "Quick Play");
     if (QuickJoin()) return;
-    menu_error_ = "No server has room right now. Try again in a moment, or open the server browser.";
+    menu_error_ = QuickNoRoom();
     menu_error_at_ = ImGui::GetTime();
+  }
+  // Quick Play's word when no server of the kind chosen (quick_event_, the server type page) has room.
+  std::string QuickNoRoom() const {
+    return quick_event_ == kEventAll
+               ? std::string("No server has room right now. Try again in a moment, or open the server browser.")
+               : fmt::format("No {} server has room right now. Try again in a moment, or choose another kind.",
+                             quick_event_ == kEventNight ? "Night Ops" : quick_event_ == kEventDaybreak ? "Daybreak" : "Classic");
   }
   // The server browser, at once (until v0.4.0 a playstyle question came first: Modern is gone, TekRantGaming, 13 Nov
   // 2026).
   void OpenBrowser() {
     page_ = Page::kServers, row_ = 0, scroll_ = 0, servers_from_home_ = pre_game_;
+    browser_from_modes_ = false;  // (the server type page sets it after: ChooseMode)
     list_.RefreshNow();
     REXLOG_INFO("BF menu: server browser");
   }
@@ -400,8 +408,9 @@
     home_row_ = clicked;
     REXLOG_INFO("BF menu: {}", kMenuRows[clicked].name);
     switch (clicked) {
-      case kRowQuick: return QuickPlay();
-      case kRowBrowser: return OpenBrowser();
+      // Both through the server type page first (TekRantGaming, 27 Nov 2026: game_menu_modes.inc).
+      case kRowQuick: return OpenModes(true);
+      case kRowBrowser: return OpenModes(false);
       case kRowPrivateMatch:
         page_ = Page::kPrivateMatch, pm_row_ = 0, pm_error_.clear();
         LoadPrivateMatchChoices();

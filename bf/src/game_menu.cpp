@@ -632,7 +632,8 @@ enum class Page {
   kControls,      // the game's controller layouts (ControlsPage), from Help and the pause
   kCredits,       // the credits (CreditsPage), from Help
   kSetup, kName, kShaders, kMain, kServers, kSettings, kJoining, kPause, kLeaving,
-  kSetupSettings, kPrompts, kVoice, kAllSet, kHome, kProjects, kReport, kStarting, kUpdate
+  kSetupSettings, kPrompts, kVoice, kAllSet, kHome, kProjects, kReport, kStarting, kUpdate,
+  kModes  // the server type page before the server browser and Quick Play (ModesPage, game_menu_modes.inc)
 };
 
 #if defined(_WIN32)
@@ -1122,7 +1123,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (InMatch() && page_ != Page::kLeaving) open_ = true, Leave();
     }
     if (removed_pending_ && open_ && !InMatch() && !notice_popup_ &&
-        (page_ == Page::kMain || page_ == Page::kHome || page_ == Page::kServers)) {
+        (page_ == Page::kMain || page_ == Page::kHome || page_ == Page::kServers || page_ == Page::kModes)) {
       removed_pending_ = false;
       ShowNotice(removed_notice_, "the match");
     }
@@ -1165,8 +1166,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
           menu_error_.clear();
           ShowNotice(n, "Quick Play");
         } else if (!QuickJoin()) {
-          menu_error_ = list_.reachable() ? "No server has room right now. Try again in a moment, or open the server browser."
-                                         : "The servers do not answer. Check your internet connection.";
+          menu_error_ = list_.reachable() ? QuickNoRoom() : "The servers do not answer. Check your internet connection.";
           menu_error_at_ = MenuTime();
         }
       } else if (MenuTime() > quick_waiting_) {
@@ -1331,6 +1331,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         case Page::kUpdate: UpdatePage(d, io, in); break;
         case Page::kMain: MenuPage(d, io, in); break;
         case Page::kServers: BrowserPage(d, io, in); break;
+        case Page::kModes: ModesPage(d, io, in); break;
         case Page::kSettings: SettingsA1Page(d, io, in); break;
         case Page::kJoining: JoiningPage(d, s, io, in); break;
         case Page::kPause: PauseA1Page(d, io, in); break;
@@ -1408,7 +1409,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     for (int v : {row_, tab_, pm_row_, pm_map_, direct_key_, popup_row_, pause_row_, home_row_, news_focus_,
                   news_first_card_, setup_tab_, prompts_row_, help_row_, ctl_tab_, browse_row_, browser_tab_,
                   preset_cursor_, voice_choice_, fr_row_, slot_cursor_, files_card_, allset_row_, name_key_,
-                  pm_edit_key_, project_, capture_slot_, ctl_device_, pause_page_})  // ctl_device_: Settings > Controls' card
+                  pm_edit_key_, project_, capture_slot_, ctl_device_, pause_page_, modes_row_})  // ctl_device_: Settings > Controls' card
       HashIn(h, uint64_t(int64_t(v)));
     HashIn(h, pause_focus_panel_);
     l.selection = h;
@@ -1594,7 +1595,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const int stage = MenuDriverStage();
     const bool loading = page_ == Page::kJoining || (stage == 5 && !LevelLoaded());
     if (pre_game_ && page_ != Page::kJoining) {
-      p.where = page_ == Page::kServers ? W::kBrowser : W::kLauncher;
+      p.where = page_ == Page::kServers || page_ == Page::kModes ? W::kBrowser : W::kLauncher;
     } else if (stage == 5 || page_ == Page::kJoining) {
       p.where = tutorial_ ? W::kTutorial : loading ? W::kJoining : W::kMatch;
       if (!tutorial_) {
@@ -1606,7 +1607,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     } else if (page_ == Page::kIntro || stage < 2) {
       p.where = W::kStarting;
     } else {
-      p.where = open_ && page_ == Page::kServers ? W::kBrowser : W::kMenu;
+      p.where = open_ && (page_ == Page::kServers || page_ == Page::kModes) ? W::kBrowser : W::kMenu;
     }
     discord::Note(p);
   }
@@ -2345,8 +2346,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const ListItem& it = kMainItems[clicked];
     const std::string name = it.name;
     REXLOG_INFO("BF main menu: {}", name);
-    if (name == "QUICK MATCH") return QuickPlay();
-    if (name == "SERVER BROWSER") return OpenBrowser();
+    if (name == "QUICK MATCH") return OpenModes(true);  // the server type page first (game_menu_modes.inc)
+    if (name == "SERVER BROWSER") return OpenModes(false);
     if (name == "PC SETTINGS") {
       page_ = Page::kSettings, row_ = 0, from_pause_ = false, from_home_ = false;
       return;
@@ -2454,11 +2455,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // default": every server plays the game's own movement and aiming now, and there is nothing to choose.)
   double quick_waiting_ = 0;      // Quick Play waits for the list's first answer until this time (ImGui's)
   uint64_t quick_asked_at_ = 0;   // the list's answers when it began to wait
+  int quick_event_ = 0;           // the kind of server Quick Play joins (the server type page: kEventAll, kEventNight...)
   bool QuickJoin() {
     const auto servers = list_.servers();
     const ServerInfo* best = nullptr;
     for (const auto& sv : servers)
-      if (QuickBetter(sv, best)) best = &sv;
+      if (EventPasses(quick_event_, sv) && QuickBetter(sv, best)) best = &sv;
     if (!best) return false;
     ServerInfo sv = *best;
     // Its ping, when the list has none (the browser pings only while it is open): the far server warning needs it.
@@ -6225,6 +6227,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 #include "game_menu_tutorial.inc"  // the first start's video tutorial (the news' video player)
 #include "game_menu_report.inc"  // Report an issue, the form that files on GitHub
 #include "game_menu_browser.inc"
+#include "game_menu_modes.inc"  // the server type page (All, Classic, Night Ops, Daybreak) before the browser and Quick Play
 #include "game_menu_progress.inc"  // Stats & Rewards, Leaderboards, Achievements
 #include "game_menu_controls.inc"  // Settings > Controls by device: the choice, each device's rows and drawings
 #include "game_menu_settings.inc"
