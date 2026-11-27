@@ -24,6 +24,35 @@ double SecondsSince(std::chrono::steady_clock::time_point t) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
 }
 
+#if !defined(BF_DEV_TOOLS)
+// The player's folder: "user" beside the exe, or on Linux RecompLauncher's data folder when it starts the game
+// (RECOMPLAUNCHER_DATA, <install>/recompdata). The launcher runs the unpacked AppImage, so beside the exe is
+// <install>/usr/bin, which every update replaces. The first start there copies what an earlier one kept in
+// usr/bin/user (not its cache); the old files stay.
+std::filesystem::path PlayerUserDir() {
+  const std::filesystem::path beside = bf1943::PlayerRoot() / "user";
+#if defined(__linux__)
+  if (const char* data = std::getenv("RECOMPLAUNCHER_DATA"); data && *data) {
+    const std::filesystem::path dir = data;
+    std::error_code ec;
+    if (!std::filesystem::exists(dir / "bf1943-settings.txt", ec) && std::filesystem::is_directory(beside, ec)) {
+      std::filesystem::create_directories(dir, ec);
+      for (const auto& e : std::filesystem::directory_iterator(beside, ec)) {
+        if (e.path().filename() == "cache") continue;
+        std::error_code c;
+        std::filesystem::copy(e.path(), dir / e.path().filename(),
+                              std::filesystem::copy_options::recursive | std::filesystem::copy_options::skip_existing, c);
+        if (c) REXLOG_WARN("BF setup: {} not copied to {}: {}", e.path().string(), dir.string(), c.message());
+      }
+      REXLOG_INFO("BF setup: the player's folder {} copied to RecompLauncher's {}", beside.string(), dir.string());
+    }
+    return dir;
+  }
+#endif
+  return beside;
+}
+#endif
+
 }  // namespace
 
 Bf1943App::Bf1943App() : TitleApp("bf1943", kPPCImageConfig) {}
@@ -63,9 +92,10 @@ rex::Result<void> Bf1943App::OnConfigure(rex::SettingsRegistry& settings) {
   SetSdk(settings, "ui.title", "Battlefield 1943 Reborn");  // the game's name, not the SDK's "bf1943"
 #if !defined(BF_DEV_TOOLS)
   // The player's data beside the exe in "user" (cache and log there too): the player's download starts bf1943.exe
-  // with no options (TekRantGaming, 7 Nov 2026). The server package passes its own.
+  // with no options (TekRantGaming, 7 Nov 2026). The server package passes its own. Under RecompLauncher on Linux:
+  // its data folder (PlayerUserDir).
   if (!server) {
-    const std::filesystem::path user = bf1943::PlayerRoot() / "user";
+    const std::filesystem::path user = PlayerUserDir();
     std::error_code ec;
     std::filesystem::create_directories(user, ec);
     SetSdk(settings, "app.user_root", user.string());
