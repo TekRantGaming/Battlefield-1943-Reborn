@@ -57,10 +57,10 @@ LONG CALLBACK BreakpointHandler(EXCEPTION_POINTERS* ep) {
   std::fprintf(f, "breakpoint at host rip=%p thread=%lu\n", reinterpret_cast<void*>(ep->ContextRecord->Rip),
                GetCurrentThreadId());
   auto* ts = rex::runtime::ThreadState::Get();
-  PPCContext* ctx = ts ? ts->GetContext() : nullptr;
-  const uint8_t* membase = (ts && ts->GetAddressSpace()) ? ts->GetAddressSpace()->GetVirtualMembase() : nullptr;
+  PPCContext* ctx = ts ? ts->context() : nullptr;
+  const uint8_t* membase = (ts && ts->memory()) ? ts->memory()->virtual_membase() : nullptr;
   if (ctx) {
-    std::fprintf(f, "guest thread %u lr=%08llX ctr=%08llX r1=%08X\n", ts->GetThreadID(),
+    std::fprintf(f, "guest thread %u lr=%08llX ctr=%08llX r1=%08X\n", ts->thread_id(),
                  static_cast<unsigned long long>(ctx->lr), static_cast<unsigned long long>(ctx->ctr.u64), ctx->r1.u32);
     std::fprintf(f, "r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X r8=%08X r30=%08X r31=%08X\n", ctx->r3.u32, ctx->r4.u32,
                  ctx->r5.u32, ctx->r6.u32, ctx->r7.u32, ctx->r8.u32, ctx->r30.u32, ctx->r31.u32);

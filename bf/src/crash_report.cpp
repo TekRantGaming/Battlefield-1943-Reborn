@@ -137,13 +137,13 @@ uint32_t GuestFunctionOf(uint64_t host, bool* approximate) {
   if (PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(host, &image, nullptr)) begin = image + fn->BeginAddress;
   uint64_t best = 0;
   uint32_t guest = 0;
-  for (const PPCFuncMapping* m = kPPCFuncMappings; m->host; ++m) {
+  for (const PPCFuncMapping* m = PPCFuncMappings; m->host; ++m) {
     const uint64_t h = reinterpret_cast<uint64_t>(m->host);
     if (begin && h == begin) {
       *approximate = false;
-      return uint32_t(m->address);
+      return uint32_t(m->guest);
     }
-    if (!begin && h <= host && h > best) best = h, guest = uint32_t(m->address);
+    if (!begin && h <= host && h > best) best = h, guest = uint32_t(m->guest);
   }
   *approximate = true;
   return begin ? 0 : guest;
@@ -219,9 +219,9 @@ std::string ReportText(const char* kind, EXCEPTION_POINTERS* ep, const std::stri
   const std::string hooked = OverlaysText(HookedOverlays());
   out += "Overlays hooked in: " + (hooked.empty() ? std::string("none") : hooked) + "\n";
   auto* ts = rex::runtime::ThreadState::Get();
-  PPCContext* ctx = ts ? ts->GetContext() : nullptr;
+  PPCContext* ctx = ts ? ts->context() : nullptr;
   if (!ctx) return out + "No game thread\n";
-  std::snprintf(b, sizeof(b), "Game thread %u: lr %08llX ctr %08llX r1 %08X\n", ts->GetThreadID(),
+  std::snprintf(b, sizeof(b), "Game thread %u: lr %08llX ctr %08llX r1 %08X\n", ts->thread_id(),
                 static_cast<unsigned long long>(ctx->lr), static_cast<unsigned long long>(ctx->ctr.u64), ctx->r1.u32);
   out += b;
   std::snprintf(b, sizeof(b), "  r3 %08X r4 %08X r5 %08X r6 %08X r7 %08X r8 %08X r9 %08X r10 %08X r11 %08X\n",
@@ -231,7 +231,7 @@ std::string ReportText(const char* kind, EXCEPTION_POINTERS* ep, const std::stri
   std::snprintf(b, sizeof(b), "  r26 %08X r27 %08X r28 %08X r29 %08X r30 %08X r31 %08X\n", ctx->r26.u32, ctx->r27.u32,
                 ctx->r28.u32, ctx->r29.u32, ctx->r30.u32, ctx->r31.u32);
   out += b;
-  const uint8_t* membase = ts->GetAddressSpace() ? ts->GetAddressSpace()->GetVirtualMembase() : nullptr;
+  const uint8_t* membase = ts->memory() ? ts->memory()->virtual_membase() : nullptr;
   if (!membase) return out;
   std::string calls = "  Game call stack (return addresses):";
   uint32_t sp = ctx->r1.u32;
@@ -359,12 +359,12 @@ LONG CALLBACK NullPageGuard(EXCEPTION_POINTERS* ep) {
     bool approximate = false;
     const uint32_t guest = GuestFunctionOf(ep->ContextRecord->Rip, &approximate);
     auto* ts = rex::runtime::ThreadState::Get();
-    PPCContext* ctx = ts ? ts->GetContext() : nullptr;
+    PPCContext* ctx = ts ? ts->context() : nullptr;
     const std::string where = guest ? std::string(approximate ? "near sub_" : "in sub_") + Hex(guest)
                                     : std::string("outside the game's code: ") + Where(ep->ContextRecord->Rip);
     REXLOG_WARN("BF null page: the game read guest 0x{:08X} (null), read {} times so far; zeros given, play goes on "
                 "({}, game thread {}, lr {:08X})",
-                uint32_t(at - page), n, where, ts ? ts->GetThreadID() : 0, ctx ? uint32_t(ctx->lr) : 0);
+                uint32_t(at - page), n, where, ts ? ts->thread_id() : 0, ctx ? uint32_t(ctx->lr) : 0);
   }
   std::lock_guard<std::mutex> lock(g_null_mutex);
   DWORD old = 0;
@@ -381,8 +381,8 @@ LONG CALLBACK NullPageGuard(EXCEPTION_POINTERS* ep) {
 void InstallNullPageGuard() {
   if (!REXCVAR_GET(bf_null_page_guard) || REXCVAR_GET(protect_zero) == false) return;
   auto* ts = rex::runtime::ThreadState::Get();
-  if (!ts || !ts->GetAddressSpace()) return;
-  g_null_page = ts->GetAddressSpace()->GetVirtualMembase();
+  if (!ts || !ts->memory()) return;
+  g_null_page = ts->memory()->virtual_membase();
   // First in the chain, ahead of the runtime's own handler (installed with the guest memory, before the first frame),
   // which would log the read as unhandled and pass it on to the crash.
   AddVectoredExceptionHandler(1, NullPageGuard);
@@ -437,12 +437,12 @@ LONG CALLBACK StrayReadGuard(EXCEPTION_POINTERS* ep) {
     bool approximate = false;
     const uint32_t guest = GuestFunctionOf(ep->ContextRecord->Rip, &approximate);
     auto* ts = rex::runtime::ThreadState::Get();
-    PPCContext* ctx = ts ? ts->GetContext() : nullptr;
+    PPCContext* ctx = ts ? ts->context() : nullptr;
     const std::string where = guest ? std::string(approximate ? "near sub_" : "in sub_") + Hex(guest)
                                      : std::string("outside the game's code: ") + Where(ep->ContextRecord->Rip);
     REXLOG_WARN("BF stray read: the game read guest {:08X}, memory never committed; that page now reads as zeros "
                 "(page {} so far), play goes on ({}, game thread {}, lr {:08X})",
-                uint32_t(at - base), n, where, ts ? ts->GetThreadID() : 0, ctx ? uint32_t(ctx->lr) : 0);
+                uint32_t(at - base), n, where, ts ? ts->thread_id() : 0, ctx ? uint32_t(ctx->lr) : 0);
   }
   return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -450,8 +450,8 @@ LONG CALLBACK StrayReadGuard(EXCEPTION_POINTERS* ep) {
 void InstallStrayReadGuard() {
   if (!REXCVAR_GET(bf_stray_read_guard)) return;
   auto* ts = rex::runtime::ThreadState::Get();
-  if (!ts || !ts->GetAddressSpace()) return;
-  g_guest_base = ts->GetAddressSpace()->GetVirtualMembase();
+  if (!ts || !ts->memory()) return;
+  g_guest_base = ts->memory()->virtual_membase();
   AddVectoredExceptionHandler(0, StrayReadGuard);
   REXLOG_INFO("BF stray read: reads of guest memory never committed give zeros (logged) instead of a crash");
 }
@@ -562,8 +562,8 @@ void InstallNullPageGuardOnce() {
   static const bool guard = [] {
     if (!REXCVAR_GET(bf_null_page_guard) || !REXCVAR_GET(protect_zero)) return true;
     auto* ts = rex::runtime::ThreadState::Get();
-    if (!ts || !ts->GetAddressSpace()) return true;
-    if (mprotect(ts->GetAddressSpace()->GetVirtualMembase(), 0x10000, PROT_READ) != 0) {
+    if (!ts || !ts->memory()) return true;
+    if (mprotect(ts->memory()->virtual_membase(), 0x10000, PROT_READ) != 0) {
       REXLOG_WARN("BF null page: could not make it readable ({})", std::strerror(errno));
     } else {
       REXLOG_INFO("BF null page: reads of the game's null page give zeros instead of a crash; writes still crash");
@@ -585,9 +585,9 @@ void InstallNullPageGuardOnce() {
       std::chrono::duration<double>(std::chrono::steady_clock::now() - first).count() > dead_at) {
     dead_done = true;
     auto* ts = rex::runtime::ThreadState::Get();
-    if (ts && ts->GetAddressSpace()) {
-      PPCContext& ctx = *ts->GetContext();
-      uint8_t* base = ts->GetAddressSpace()->GetVirtualMembase();
+    if (ts && ts->memory()) {
+      PPCContext& ctx = *ts->context();
+      uint8_t* base = ts->memory()->virtual_membase();
       const PPCContext saved = ctx;
       ctx.lr = 0x822A8FA8;  // the walk's return address after its call
       ctx.last_indirect_target = 0x1F680744;

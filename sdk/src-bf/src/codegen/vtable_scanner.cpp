@@ -1,40 +1,54 @@
-#include "vtable_scanner.h"
-#include <rex/logging/log_category.h>
-#include "codegen_categories.h"
+/**
+ * @file        rexcodegen/vtable_scanner.cpp
+ *
+ * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
+ *              All rights reserved.
+ *
+ * @license     BSD 3-Clause License
+ *              See LICENSE file in the project root for full license text.
+ */
 
-#include <rex/memory/endian.h>
+#include <rex/codegen/vtable_scanner.h>
+#include <rex/logging.h>
+
+#include "codegen_logging.h"
+#include <rex/memory/utils.h>
 #include <rex/types.h>
+
+using rex::memory::load_and_swap;
 
 namespace rex::codegen {
 
 VTableScanner::VTableScanner(const BinaryView& binary) : binary_(binary) {}
 
-std::vector<VTable> VTableScanner::Scan() {
-  std::vector<VTable> vtables;
+std::vector<VTableInfo> VTableScanner::scan() {
+  std::vector<VTableInfo> vtables;
 
-  auto cols = FindCompleteObjectLocators();
-  REXCG_DEBUG("VTableScanner: found {} Complete Object Locators", cols.size());
+  // Step 1: Find all Complete Object Locators
+  auto cols = findCompleteObjectLocators();
+  REXCODEGEN_DEBUG("VTableScanner: found {} Complete Object Locators", cols.size());
 
-  for (u32 col_addr : cols) {
-    auto vtable_addr = FindVTableForCOL(col_addr);
-    if (!vtable_addr) {
-      REXCG_TRACE("VTableScanner: COL at 0x{:08X} has no referencing vtable", col_addr);
+  // Step 2: For each COL, find its vtable and read slots
+  for (uint32_t colAddr : cols) {
+    auto vtableAddr = findVTableForCOL(colAddr);
+    if (!vtableAddr) {
+      REXCODEGEN_TRACE("VTableScanner: COL at 0x{:08X} has no referencing vtable", colAddr);
       continue;
     }
 
-    VTable info;
-    info.vtable_address = *vtable_addr;
-    info.col_address = col_addr;
-    info.class_name = ExtractClassName(col_addr);
-    info.slots = ReadVTableSlots(*vtable_addr);
+    VTableInfo info;
+    info.vtableAddress = *vtableAddr;
+    info.colAddress = colAddr;
+    info.className = extractClassName(colAddr);
+    info.slots = readVTableSlots(*vtableAddr);
 
     if (info.slots.empty()) {
-      REXCG_TRACE("VTableScanner: vtable at 0x{:08X} has no valid slots", *vtable_addr);
+      REXCODEGEN_TRACE("VTableScanner: vtable at 0x{:08X} has no valid slots", *vtableAddr);
       continue;
     }
 
-    REXCG_DEBUG("VTableScanner: vtable at 0x{:08X} ({}) has {} slots", info.vtable_address,
-                info.class_name, info.slots.size());
+    REXCODEGEN_DEBUG("VTableScanner: vtable at 0x{:08X} ({}) has {} slots", info.vtableAddress,
+                     info.className, info.slots.size());
 
     vtables.push_back(std::move(info));
   }
@@ -42,133 +56,130 @@ std::vector<VTable> VTableScanner::Scan() {
   return vtables;
 }
 
-/** Finds the Complete Object Locators in .rdata. */
-std::vector<u32> VTableScanner::FindCompleteObjectLocators() {
-  std::vector<u32> cols;
+std::vector<uint32_t> VTableScanner::findCompleteObjectLocators() {
+  std::vector<uint32_t> cols;
 
-  const auto* rdata = binary_.FindSectionByName(".rdata");
+  // Scan .rdata section for COL patterns
+  const auto* rdata = binary_.findSectionByName(".rdata");
   if (!rdata || !rdata->data) {
-    REXCG_WARN("VTableScanner: .rdata section not found");
+    REXCODEGEN_WARN("VTableScanner: .rdata section not found");
     return cols;
   }
 
-  const u8* data = rdata->data;
-  u32 base = rdata->base_address;
+  const uint8_t* data = rdata->data;
+  uint32_t base = rdata->baseAddress;
   size_t size = rdata->size;
 
+  // COL is 20 bytes, need room for it
   if (size < sizeof(RTTICompleteObjectLocator)) {
     return cols;
   }
 
+  // Scan for COL pattern: signature=0, valid type descriptor pointer
   for (size_t offset = 0; offset + sizeof(RTTICompleteObjectLocator) <= size; offset += 4) {
     auto* col = reinterpret_cast<const RTTICompleteObjectLocator*>(data + offset);
 
-    u32 signature = col->signature;
-    u32 type_desc_ptr = col->pTypeDescriptor;
+    uint32_t signature = load_and_swap<uint32_t>(&col->signature);
+    uint32_t typeDescPtr = load_and_swap<uint32_t>(&col->pTypeDescriptor);
 
+    // COL signature must be 0 for 32-bit MSVC RTTI
     if (signature != 0) {
       continue;
     }
 
-    const auto* type_desc_section = binary_.FindSection(type_desc_ptr);
-    if (!type_desc_section || !type_desc_section->data) {
+    // Type descriptor must point to valid memory
+    const auto* typeDescSection = binary_.findSection(typeDescPtr);
+    if (!typeDescSection || !typeDescSection->data) {
       continue;
     }
 
-    std::string type_name = ReadString(type_desc_ptr + 8, 64);
-    if (type_name.find(".?AV") != 0 && type_name.find(".?AU") != 0) {
+    // Check if type descriptor has ".?AV" mangling prefix
+    std::string typeName = readString(typeDescPtr + 8, 64);
+    if (typeName.find(".?AV") != 0 && typeName.find(".?AU") != 0) {
       continue;
     }
 
-    u32 col_addr = base + static_cast<u32>(offset);
-    cols.push_back(col_addr);
+    uint32_t colAddr = base + static_cast<uint32_t>(offset);
+    cols.push_back(colAddr);
 
-    REXCG_TRACE("VTableScanner: found COL at 0x{:08X} -> {}", col_addr, type_name);
+    REXCODEGEN_TRACE("VTableScanner: found COL at 0x{:08X} -> {}", colAddr, typeName);
   }
 
   return cols;
 }
 
-/**
- * Finds the vtable of a locator. The locator pointer sits at vtable[-1], so the vtable starts 1
- * dword after the .rdata word that holds the locator address.
- *
- * @return The vtable address, or nullopt when nothing references the locator.
- */
-std::optional<u32> VTableScanner::FindVTableForCOL(u32 col_addr) {
-  const auto* rdata = binary_.FindSectionByName(".rdata");
+std::optional<uint32_t> VTableScanner::findVTableForCOL(uint32_t colAddr) {
+  // The vtable pointer to COL is stored at vtable[-1]
+  // So we need to find a dword in .rdata that contains colAddr,
+  // and the vtable starts at that address + 4
+
+  const auto* rdata = binary_.findSectionByName(".rdata");
   if (!rdata || !rdata->data) {
     return std::nullopt;
   }
 
-  const u8* data = rdata->data;
-  u32 base = rdata->base_address;
+  const uint8_t* data = rdata->data;
+  uint32_t base = rdata->baseAddress;
   size_t size = rdata->size;
 
   for (size_t offset = 0; offset + 4 <= size; offset += 4) {
-    u32 value = memory::load<be_u32>(data + offset);
+    uint32_t value = load_and_swap<uint32_t>(data + offset);
 
-    if (value == col_addr) {
-      u32 vtable_addr = base + static_cast<u32>(offset) + 4;
-      return vtable_addr;
+    if (value == colAddr) {
+      // Found reference to COL - vtable starts at next dword
+      uint32_t vtableAddr = base + static_cast<uint32_t>(offset) + 4;
+      return vtableAddr;
     }
   }
 
   return std::nullopt;
 }
 
-/**
- * Reads vtable slots until a null, non executable or non 4 byte aligned pointer.
- *
- * @param vtable_start Address of slot 0.
- * @return The slot function addresses.
- */
-std::vector<u32> VTableScanner::ReadVTableSlots(u32 vtable_start) {
-  std::vector<u32> slots;
+std::vector<uint32_t> VTableScanner::readVTableSlots(uint32_t vtableStart) {
+  std::vector<uint32_t> slots;
 
-  u32 slot_addr = vtable_start;
+  uint32_t slotAddr = vtableStart;
 
   while (true) {
-    auto func_addr = ReadWord(slot_addr);
-    if (!func_addr) {
-      break;
+    auto funcAddr = readDword(slotAddr);
+    if (!funcAddr) {
+      break;  // Can't read memory
     }
 
-    u32 addr = *func_addr;
+    uint32_t addr = *funcAddr;
 
+    // Termination: null pointer
     if (addr == 0) {
       break;
     }
 
-    if (!IsExecutableAddress(addr)) {
+    // Termination: not executable address
+    if (!isExecutableAddress(addr)) {
       break;
     }
 
+    // Termination: not 4-byte aligned (PPC requirement)
     if (addr & 0x3) {
       break;
     }
 
     slots.push_back(addr);
-    slot_addr += 4;
+    slotAddr += 4;
   }
 
   return slots;
 }
 
-/**
- * Reads the class name from the type descriptor at locator offset 12, name at +8, and strips the
- * ".?AV" or ".?AU" prefix and the "@@" suffix.
- *
- * @return The class name, or the mangled text when it has no known prefix.
- */
-std::string VTableScanner::ExtractClassName(u32 col_addr) {
-  auto type_desc_ptr = ReadWord(col_addr + 12);
-  if (!type_desc_ptr) {
+std::string VTableScanner::extractClassName(uint32_t colAddr) {
+  auto typeDescPtr = readDword(colAddr + 12);  // pTypeDescriptor offset
+  if (!typeDescPtr) {
     return "";
   }
 
-  std::string mangled = ReadString(*type_desc_ptr + 8, 256);
+  // Class name is at typeDescriptor + 8
+  std::string mangled = readString(*typeDescPtr + 8, 256);
 
+  // Simple demangling: ".?AVClassName@@" -> "ClassName"
   if (mangled.size() > 4 && (mangled.substr(0, 4) == ".?AV" || mangled.substr(0, 4) == ".?AU")) {
     size_t end = mangled.find("@@");
     if (end != std::string::npos) {
@@ -179,38 +190,38 @@ std::string VTableScanner::ExtractClassName(u32 col_addr) {
   return mangled;
 }
 
-bool VTableScanner::IsExecutableAddress(u32 addr) const {
-  return binary_.IsExecutable(addr);
+bool VTableScanner::isExecutableAddress(uint32_t addr) const {
+  return binary_.isExecutable(addr);
 }
 
-std::optional<u32> VTableScanner::ReadWord(u32 addr) const {
-  const auto* section = binary_.FindSection(addr);
+std::optional<uint32_t> VTableScanner::readDword(uint32_t addr) const {
+  const auto* section = binary_.findSection(addr);
   if (!section || !section->data) {
     return std::nullopt;
   }
 
-  u32 offset = addr - section->base_address;
+  uint32_t offset = addr - section->baseAddress;
   if (offset + 4 > section->size) {
     return std::nullopt;
   }
 
-  return memory::load<be_u32>(section->data + offset);
+  return load_and_swap<uint32_t>(section->data + offset);
 }
 
-std::string VTableScanner::ReadString(u32 addr, size_t max_len) const {
-  const auto* section = binary_.FindSection(addr);
+std::string VTableScanner::readString(uint32_t addr, size_t maxLen) const {
+  const auto* section = binary_.findSection(addr);
   if (!section || !section->data) {
     return "";
   }
 
-  u32 offset = addr - section->base_address;
+  uint32_t offset = addr - section->baseAddress;
   size_t available = section->size - offset;
-  size_t len = std::min(max_len, available);
+  size_t len = std::min(maxLen, available);
 
   const char* str = reinterpret_cast<const char*>(section->data + offset);
-  size_t actual_len = strnlen(str, len);
+  size_t actualLen = strnlen(str, len);
 
-  return std::string(str, actual_len);
+  return std::string(str, actualLen);
 }
 
 }  // namespace rex::codegen

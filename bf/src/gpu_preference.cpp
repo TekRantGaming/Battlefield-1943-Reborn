@@ -5,17 +5,13 @@
 
 #include "gpu_preference.h"
 
-#include <algorithm>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
-#include <vulkan/vulkan.h>
-#if !defined(_WIN32)
-#include <dlfcn.h>
-#endif
+#include <rex/ui/vulkan/instance.h>
 
 #include "gpu_choice.h"
 
@@ -143,62 +139,22 @@ void ChooseD3D12() {
 #endif
 
 void ChooseVulkan() {
-  // The system's Vulkan loader (SDK v0.11+ port: the SDK's instance class is private to its driver), before the
-  // window and SDL's video exist: the same device order as the SDK's driver and DiligentCore's instance in
-  // NativeXRenderer, both what vkEnumeratePhysicalDevices gives.
-#if defined(_WIN32)
-  HMODULE loader = LoadLibraryA("vulkan-1.dll");
-  auto get = loader ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(loader, "vkGetInstanceProcAddr"))
-                    : nullptr;
-  struct Unload {
-    HMODULE m;
-    ~Unload() {
-      if (m) FreeLibrary(m);
-    }
-  } unload{loader};
-#else
-  void* loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
-  auto get = loader ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(loader, "vkGetInstanceProcAddr")) : nullptr;
-  struct Unload {
-    void* m;
-    ~Unload() {
-      if (m) dlclose(m);
-    }
-  } unload{loader};
-#endif
-  auto create = get ? reinterpret_cast<PFN_vkCreateInstance>(get(nullptr, "vkCreateInstance")) : nullptr;
-  if (!create) {
-    REXLOG_WARN("BF GPU: Vulkan: the loader has no vkCreateInstance; the SDK chooses");
-    return;
-  }
-  VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-  app.pApplicationName = "bf1943 GPU choice";
-  app.apiVersion = VK_API_VERSION_1_1;
-  VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-  info.pApplicationInfo = &app;
-  VkInstance instance = VK_NULL_HANDLE;
-  if (create(&info, nullptr, &instance) != VK_SUCCESS) {
+  // The SDK's own instance class: the same loader and the same device order as VulkanProvider (and as DiligentCore's
+  // instance in NativeXRenderer: both list what vkEnumeratePhysicalDevices gives).
+  auto instance = rex::ui::vulkan::VulkanInstance::Create(false, false);
+  if (!instance) {
     REXLOG_WARN("BF GPU: Vulkan: no Vulkan instance; the SDK chooses");
     return;
   }
-  auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(get(instance, "vkDestroyInstance"));
-  auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(get(instance, "vkEnumeratePhysicalDevices"));
-  auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(get(instance, "vkGetPhysicalDeviceProperties"));
-  auto memory = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
-      get(instance, "vkGetPhysicalDeviceMemoryProperties"));
+  const auto& ifn = instance->functions();
   std::vector<VkPhysicalDevice> devices;
-  uint32_t count = 0;
-  if (enumerate && enumerate(instance, &count, nullptr) == VK_SUCCESS && count) {
-    devices.resize(count);
-    if (enumerate(instance, &count, devices.data()) != VK_SUCCESS) devices.clear();
-    devices.resize(std::min<size_t>(devices.size(), count));
-  }
+  instance->EnumeratePhysicalDevices(devices);
   std::vector<Candidate> list;
-  for (size_t i = 0; i < devices.size() && properties && memory; ++i) {
+  for (size_t i = 0; i < devices.size(); ++i) {
     VkPhysicalDeviceProperties p{};
-    properties(devices[i], &p);
+    ifn.vkGetPhysicalDeviceProperties(devices[i], &p);
     VkPhysicalDeviceMemoryProperties m{};
-    memory(devices[i], &m);
+    ifn.vkGetPhysicalDeviceMemoryProperties(devices[i], &m);
     Candidate c;
     c.index = int(i);
     c.name = p.deviceName;
@@ -214,7 +170,6 @@ void ChooseVulkan() {
         c.local_memory = m.memoryHeaps[h].size;
     list.push_back(c);
   }
-  if (destroy) destroy(instance, nullptr);
   Apply("vulkan_device", "Vulkan", list, gpu_choice::Choose(list));
 }
 

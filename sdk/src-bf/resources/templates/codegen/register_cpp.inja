@@ -1,15 +1,10 @@
+//=============================================================================
 // ReXGlue Generated - {{ project }} Function Registration
+//=============================================================================
 
 #include "{{ project }}_init.h"
-#include <rex/kernel/function_dispatcher.h>
-#include <rex/kernel/module.h>
+#include <rex/system/function_dispatcher.h>
 
-{% for fn in functions %}{% if fn.is_module_import %}
-DEFINE_REX_FUNC({{ fn.name }}) {
-  static rex::kernel::ModuleImport target{"{{ fn.import_library }}", {{ fn.import_ordinal }}};
-  rex::kernel::ResolveModuleImport(target)(ctx, base);
-}
-{% endif %}{% endfor %}
 {% if is_dll %}
 #ifdef _WIN32
 #define REX_MODULE_EXPORT __declspec(dllexport)
@@ -18,9 +13,9 @@ DEFINE_REX_FUNC({{ fn.name }}) {
 #endif
 
 extern "C" REX_MODULE_EXPORT
-void ReXRegisterModule(rex::kernel::IFunctionRegistrar* registrar) {
+void ReXModule_Register(rex::runtime::IModuleRegistrar* registrar) {
 {% else %}
-void {{ project }}_RegisterFunctions(rex::kernel::IFunctionRegistrar* registrar) {
+void {{ project }}_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) {
 {% endif %}
 {% for fn in functions %}{% if not fn.below_code_base or fn.is_import %}  registrar->SetFunction({{ fn.address }}, {{ fn.name }});
 {% endif %}{% endfor %}}
@@ -29,7 +24,7 @@ void {{ project }}_RegisterFunctions(rex::kernel::IFunctionRegistrar* registrar)
 // The runtime uses this baked layout for the dispatch table. It must match the
 // constants used by this module's REX_LOOKUP_FUNC macro.
 extern "C" REX_MODULE_EXPORT
-const rex::ppc::PPCImage* ReXGetModuleImage() {
-  return &kPPCImageConfig;
+const rex::PPCImageInfo* ReXModule_GetImageInfo() {
+  return &PPCImageConfig;
 }
 {% endif %}

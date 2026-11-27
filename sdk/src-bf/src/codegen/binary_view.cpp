@@ -1,114 +1,135 @@
+/**
+ * @file        codegen/binary_view.cpp
+ *
+ * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
+ *              All rights reserved.
+ *
+ * @license     BSD 3-Clause License
+ *              See LICENSE file in the project root for full license text.
+ */
+
 #include <limits>
 
-#include "binary_view.h"
-#include <rex/logging/log_category.h>
-#include "codegen_categories.h"
+#include <rex/codegen/binary_view.h>
+#include <rex/logging.h>
 
-#include <rex/kernel/symbol_map.h>
-#include <rex/kernel/module.h>
+#include "codegen_logging.h"
+#include <rex/system/binary_types.h>
+#include <rex/system/module.h>
 
 namespace rex::codegen {
 
-BinaryView BinaryView::FromModule(const kernel::GuestModule& module) {
+BinaryView BinaryView::fromModule(const runtime::Module& module) {
   BinaryView view;
 
-  view.base_address_ = module.GetBaseAddress();
-  view.image_size_ = module.GetImageSize();
-  view.entry_point_ = module.GetEntryPoint();
-  view.exception_directory_addr_ = module.GetExceptionDirectoryAddress();
-  view.exception_directory_size_ = module.GetExceptionDirectorySize();
-  view.export_table_addr_ = module.GetExportTableAddress();
+  // Copy metadata
+  view.baseAddress_ = module.base_address();
+  view.imageSize_ = module.image_size();
+  view.entryPoint_ = module.entry_point();
+  view.exceptionDirectoryAddr_ = module.exception_directory_address();
+  view.exceptionDirectorySize_ = module.exception_directory_size();
+  view.exportTableAddr_ = module.export_table_address();
 
-  // Import thunk table and the export table after it extend to the end of .text
-  u32 min_import_addr = std::numeric_limits<u32>::max();
-  for (const auto& sym : module.GetBinarySymbols()) {
-    if (sym.type == kernel::BinarySymbolType::kImport) {
-      view.import_symbols_.push_back(ImportSymbol{.address = sym.address, .name = sym.name});
+  // Copy import symbols and calculate import thunk table start
+  // The import thunk table (and export table after it) extends to end of .text
+  uint32_t minImportAddr = std::numeric_limits<uint32_t>::max();
+  for (const auto& sym : module.binary_symbols()) {
+    if (sym.type == runtime::BinarySymbolType::Import) {
+      // Copy symbol for Register phase to use
+      view.importSymbols_.push_back(ImportSymbol{.address = sym.address, .name = sym.name});
 
-      if (sym.address != 0 && sym.address < min_import_addr) {
-        min_import_addr = sym.address;
+      // Track minimum address for thunk table range
+      if (sym.address != 0 && sym.address < minImportAddr) {
+        minImportAddr = sym.address;
       }
     }
   }
-  if (min_import_addr != std::numeric_limits<u32>::max()) {
-    view.import_thunk_table_start_ = min_import_addr;
-    REXCG_DEBUG("BinaryView: import thunk table starts at 0x{:08X}", min_import_addr);
+  if (minImportAddr != std::numeric_limits<uint32_t>::max()) {
+    view.importThunkTableStart_ = minImportAddr;
+    REXCODEGEN_DEBUG("BinaryView: import thunk table starts at 0x{:08X}", minImportAddr);
 
-    for (const auto& section : module.GetBinarySections()) {
-      u32 section_end = section.virtual_address + section.virtual_size;
-      if (min_import_addr >= section.virtual_address && min_import_addr < section_end) {
-        view.import_export_range_end_ = section_end;
-        REXCG_DEBUG("BinaryView: import/export range ends at 0x{:08X} (end of {} section)",
-                    view.import_export_range_end_, section.name);
+    // Find section containing the import thunk table to determine end of import/export range
+    for (const auto& section : module.binary_sections()) {
+      uint32_t sectionEnd = section.virtual_address + section.virtual_size;
+      if (minImportAddr >= section.virtual_address && minImportAddr < sectionEnd) {
+        view.importExportRangeEnd_ = sectionEnd;
+        REXCODEGEN_DEBUG("BinaryView: import/export range ends at 0x{:08X} (end of {} section)",
+                         view.importExportRangeEnd_, section.name);
         break;
       }
     }
   }
-  REXCG_DEBUG("BinaryView: copied {} import symbols", view.import_symbols_.size());
+  REXCODEGEN_DEBUG("BinaryView: copied {} import symbols", view.importSymbols_.size());
 
-  const auto& binary_sections = module.GetBinarySections();
-  view.section_names_.reserve(binary_sections.size());
-  view.section_data_.reserve(binary_sections.size());
-  view.sections_.reserve(binary_sections.size());
+  // Copy section data
+  const auto& binarySections = module.binary_sections();
+  view.sectionNames_.reserve(binarySections.size());
+  view.sectionData_.reserve(binarySections.size());
+  view.sections_.reserve(binarySections.size());
 
-  u32 image_end = view.base_address_ + view.image_size_;
-  for (const auto& section : binary_sections) {
+  uint32_t imageEnd = view.baseAddress_ + view.imageSize_;
+  for (const auto& section : binarySections) {
+    // Skip sections not mapped into memory
     if (!section.host_data || section.virtual_size == 0) {
-      REXCG_DEBUG("BinaryView: skipping unmapped section '{}'", section.name);
+      REXCODEGEN_DEBUG("BinaryView: skipping unmapped section '{}'", section.name);
       continue;
     }
-    if (section.virtual_address + section.virtual_size > image_end) {
-      REXCG_DEBUG("BinaryView: skipping section '{}' (extends past image end 0x{:08X})",
-                  section.name, image_end);
+    // Skip sections that extend beyond the loaded image
+    if (section.virtual_address + section.virtual_size > imageEnd) {
+      REXCODEGEN_DEBUG("BinaryView: skipping section '{}' (extends past image end 0x{:08X})",
+                       section.name, imageEnd);
       continue;
     }
 
-    view.section_names_.push_back(std::string(section.name));
+    // Copy name
+    view.sectionNames_.push_back(std::string(section.name));
 
-    view.section_data_.emplace_back(section.host_data, section.host_data + section.virtual_size);
+    // Copy bytes
+    view.sectionData_.emplace_back(section.host_data, section.host_data + section.virtual_size);
 
-    view.sections_.push_back(SectionView{.name = view.section_names_.back(),
-                                         .base_address = section.virtual_address,
+    // Create view pointing into our owned data
+    view.sections_.push_back(SectionView{.name = view.sectionNames_.back(),
+                                         .baseAddress = section.virtual_address,
                                          .size = section.virtual_size,
-                                         .data = view.section_data_.back().data(),
+                                         .data = view.sectionData_.back().data(),
                                          .executable = section.executable});
 
-    REXCG_DEBUG("BinaryView: section '{}' at 0x{:08X} size 0x{:X} exec={}", section.name,
-                section.virtual_address, section.virtual_size, section.executable);
+    REXCODEGEN_DEBUG("BinaryView: section '{}' at 0x{:08X} size 0x{:X} exec={}", section.name,
+                     section.virtual_address, section.virtual_size, section.executable);
   }
 
-  REXCG_DEBUG("BinaryView: loaded {} sections, base=0x{:08X}, size=0x{:X}", view.sections_.size(),
-              view.base_address_, view.image_size_);
+  REXCODEGEN_DEBUG("BinaryView: loaded {} sections, base=0x{:08X}, size=0x{:X}",
+                   view.sections_.size(), view.baseAddress_, view.imageSize_);
 
   return view;
 }
 
-const u8* BinaryView::Translate(u32 addr) const {
+const uint8_t* BinaryView::translate(uint32_t addr) const {
   for (const auto& section : sections_) {
-    if (auto* ptr = section.Translate(addr)) {
+    if (auto* ptr = section.translate(addr)) {
       return ptr;
     }
   }
   return nullptr;
 }
 
-bool BinaryView::IsExecutable(u32 addr) const {
-  if (auto* section = FindSection(addr)) {
+bool BinaryView::isExecutable(uint32_t addr) const {
+  if (auto* section = findSection(addr)) {
     return section->executable;
   }
   return false;
 }
 
-const SectionView* BinaryView::FindSection(u32 addr) const {
+const SectionView* BinaryView::findSection(uint32_t addr) const {
   for (const auto& section : sections_) {
-    if (section.Contains(addr)) {
+    if (section.contains(addr)) {
       return &section;
     }
   }
   return nullptr;
 }
 
-const SectionView* BinaryView::FindSectionByName(std::string_view name) const {
+const SectionView* BinaryView::findSectionByName(std::string_view name) const {
   for (const auto& section : sections_) {
     if (section.name == name) {
       return &section;

@@ -12,11 +12,6 @@
 //     newest arrival; never one moved in the last 15 minutes;
 //   - a Change Team that would leave a gap of bf_balance_gap or more is refused (bf_balance_block_stacking);
 //   - nothing between a round's end and the next level's load.
-// Real players and bots (TekRantGaming, 27 Nov 2026, hotfix 0.4.8.1: "one team can have lots of real players, and the
-// other team can have like 3 real players and the rest filled by bots"): the counts above are the REAL players only.
-// Bots are never moved here; they keep the totals even themselves (bots.cpp's even teams rule: a bot on the side with
-// more players leaves and one joins the other side). A real player moved to a side at its cap first has a bot there
-// leave (bf1943::BotsMakeRoom), and the move goes through once it is leaving. Without bots it is as before.
 // The move is the game's own (as its join with a friend does, sub_8239A418): the player leaves its team and squad, then
 // sub_82399AE8 seats it on the other team (with a squad there, and the team's cap kept), on the server thread.
 //
@@ -47,7 +42,6 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
-#include "guest_readable.h"
 #include "player_limits.h"
 
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
@@ -68,11 +62,6 @@ REXCVAR_DEFINE_STRING(bf_balance_events, "", "BF1943/Server",
 REX_EXTERN(sub_82374F90);  // the game's Player::setTeam(player, team)
 REX_EXTERN(sub_8237B320);  // the game's squad change (player, squad; 24: none)
 REX_EXTERN(sub_82399AE8);  // the game's team pick (player, team, find a squad, keep the team's cap): true when seated
-
-namespace bf1943 {
-bool IsBotPlayer(uint32_t player);             // bots.cpp
-bool BotsMakeRoom(uint8_t* base, int team);    // bots.cpp: a bot on `team` leaves; true when one is leaving
-}  // namespace bf1943
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -99,7 +88,17 @@ bool Readable(uint32_t address, uint32_t size) {
   if (!memory) return false;
   // Committed pages only: a reserved page answers QueryProtect with its protection too, and a read of it crashed the
   // second run (tb_dump2: guest 01000000).
-  return bf1943::GuestCommittedReadable(memory, address, size);  // guest_readable.h (was a QueryRegionInfo walk)
+  for (uint32_t page = address & ~0xFFFu; page < address + size;) {
+    rex::memory::BaseHeap* heap = memory->LookupHeap(page);
+    rex::memory::HeapAllocationInfo info{};
+    if (!heap || !heap->QueryRegionInfo(page, &info)) return false;
+    if (!(info.state & rex::memory::kMemoryAllocationCommit) || !(info.protect & rex::memory::kMemoryProtectRead))
+      return false;
+    const uint32_t next = info.base_address + info.region_size;
+    if (next <= page) return false;
+    page = next;
+  }
+  return true;
 }
 
 // What we keep of a player, by its object's address (a new player in a reused object: told apart by its arrival).
@@ -123,7 +122,6 @@ struct Player {
   uint32_t addr = 0;
   int team = 0;
   uint32_t squad = kNoSquad;
-  bool bot = false;  // one of our bots (bots.cpp): not counted, never moved
 };
 
 // The server's players (empty before the game context is made, or when its list looks wrong).
@@ -140,7 +138,6 @@ std::vector<Player> Players(const uint8_t* base) {
     if (!Readable(p, 0x300) || !InImage(Load32(base, p))) continue;
     Player pl;
     pl.addr = p, pl.team = int(Load32(base, p + 48)), pl.squad = Load32(base, p + 52);
-    pl.bot = bf1943::IsBotPlayer(p);
     out.push_back(pl);
   }
   return out;
@@ -271,36 +268,14 @@ void TeamBalanceTick(PPCContext& ctx, uint8_t* base) {
 #endif
   std::lock_guard lock(g.mutex);
   for (auto& [addr, s] : g.seen) s.present = false;
-  int n1 = 0, n2 = 0;  // the real players on each side (bots: bots.cpp keeps the totals even)
+  int n1 = 0, n2 = 0;
   for (const Player& p : players) {
     Seen& s = g.seen[p.addr];
     if (s.arrived == Clock::time_point{}) s.arrived = now, s.team = p.team;
     s.present = true;
-    if (p.bot) continue;
     n1 += p.team == 1, n2 += p.team == 2;
   }
   for (auto it = g.seen.begin(); it != g.seen.end();) it = it->second.present ? std::next(it) : g.seen.erase(it);
-#if defined(BF_DEV_TOOLS)
-  // BF_DEV_HUMANS_TEAM=1|2 (tests, dev builds; hotfix 0.4.8.1): each real player is put on that side once, while it has
-  // no soldier yet, so the real players are stacked and the balance below must even them again.
-  static const int stack_on = [] {
-    const char* v = std::getenv("BF_DEV_HUMANS_TEAM");
-    return v && (*v == '1' || *v == '2') ? *v - '0' : 0;
-  }();
-  if (stack_on) {
-    static std::map<uint32_t, bool> stacked;
-    for (const Player& p : players) {
-      if (p.bot || stacked[p.addr] || (p.team != 1 && p.team != 2) || SoldierOf(ctx, base, p.addr) != 0) continue;
-      stacked[p.addr] = true;
-      if (p.team == stack_on) continue;
-      const bool ok = Move(ctx, base, p.addr, stack_on);
-      REXLOG_INFO("BF team balance: BF_DEV_HUMANS_TEAM: {} put on {} for the test: {}", NameOf(base, p.addr),
-                  TeamName(stack_on), ok ? "moved" : "the game refused");
-      if (ok) g.seen[p.addr].arrived = now;
-      return;  // counted again next second
-    }
-  }
-#endif
   if (!REXCVAR_GET(bf_team_balance) || g.round_over) return;
   const int gap = std::clamp(REXCVAR_GET(bf_balance_gap), 2, 6);
   const int need = std::max(2, REXCVAR_GET(bf_balance_min_players));
@@ -334,7 +309,7 @@ void TeamBalanceTick(PPCContext& ctx, uint8_t* base) {
   };
   std::vector<Pick> picks;
   for (const Player& p : players) {
-    if (p.team != bigger || p.bot) continue;
+    if (p.team != bigger) continue;
     const Seen& s = g.seen[p.addr];
     if (s.was_moved && std::chrono::duration<double>(now - s.moved).count() < kMovedRest) continue;
     if (SoldierOf(ctx, base, p.addr) != 0) continue;  // alive: never killed to balance
@@ -348,10 +323,7 @@ void TeamBalanceTick(PPCContext& ctx, uint8_t* base) {
   const uint32_t who = picks.front().addr;
   const std::string name = NameOf(base, who);
   if (!Move(ctx, base, who, smaller)) {
-    // The side at its cap: a bot there leaves (bots.cpp) and the next try, 2 s on, passes over the cap.
-    const bool room = bf1943::BotsMakeRoom(base, smaller);
-    REXLOG_INFO("BF team balance: the game refused to move {} to {} ({} US, {} Japan real players){}", name,
-                TeamName(smaller), n1, n2, room ? ": a bot there makes room, trying again" : "");
+    REXLOG_INFO("BF team balance: the game refused to move {} to {} ({} US, {} Japan)", name, TeamName(smaller), n1, n2);
     g.last_move = now;
     return;
   }
@@ -359,7 +331,7 @@ void TeamBalanceTick(PPCContext& ctx, uint8_t* base) {
   s.was_moved = true, s.moved = now, s.chose = false, s.team = smaller;
   g.last_move = now;
   const int m1 = n1 + (smaller == 1) - (bigger == 1), m2 = n2 + (smaller == 2) - (bigger == 2);
-  REXLOG_INFO("BF team balance: {} moved from {} to {} while down ({} US, {} Japan real players now; {} s uneven)", name,
+  REXLOG_INFO("BF team balance: {} moved from {} to {} while down ({} US, {} Japan now; {} s uneven)", name,
               TeamName(bigger), TeamName(smaller), m1, m2, int(uneven_for));
   Event("moved", name, bigger, smaller, m1, m2);
 }
@@ -371,9 +343,9 @@ bool TeamBalanceAllowSwitch(uint8_t* base, uint32_t player, int to) {
   const int from = int(Load32(base, player + 48));
   if (to == from || (to != 1 && to != 2) || (from != 1 && from != 2)) return true;  // a joiner's first team: the game's
   const std::vector<Player> players = Players(base);
-  int n[3] = {0, 0, 0};  // the real players (bots even the totals themselves)
+  int n[3] = {0, 0, 0};
   for (const Player& p : players)
-    if (!p.bot && (p.team == 1 || p.team == 2)) ++n[p.team];
+    if (p.team == 1 || p.team == 2) ++n[p.team];
   const int gap = std::clamp(REXCVAR_GET(bf_balance_gap), 2, 6);
   const bool on = REXCVAR_GET(bf_team_balance) && REXCVAR_GET(bf_balance_block_stacking);
   const bool enough = n[1] + n[2] >= std::max(2, REXCVAR_GET(bf_balance_min_players));

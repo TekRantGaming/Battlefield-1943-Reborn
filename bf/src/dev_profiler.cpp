@@ -36,7 +36,6 @@
 #include <tlhelp32.h>
 
 #include <rex/logging.h>
-#include "compat/sdk_module.h"
 
 namespace bf1943 {
 bool LoadingScreenShown();  // auto_join.cpp: the level's loading screen is up after a join's load began
@@ -68,12 +67,9 @@ std::string ThreadName(HANDLE h, DWORD id) {
 
 // The game, the runtime and the GPU plugins: where a wait's caller is worth naming.
 bool IsOurs(DWORD64 image) {
-  // (SDK v0.11+: the runtime is several modules; rexruntime.dll is gone.)
-  static const DWORD64 ours[] = {DWORD64(GetModuleHandleW(nullptr)), DWORD64(bf1943::SdkModule("rexkernel")),
-                                 DWORD64(bf1943::SdkModule("rexxam")), DWORD64(bf1943::SdkModule("rexbase")),
-                                 DWORD64(bf1943::SdkModule("rexppc")), DWORD64(bf1943::SdkModule("rexapu")),
-                                 DWORD64(bf1943::SdkModule("rexgpu-xenos-bfnative")),
-                                 DWORD64(bf1943::SdkModule("rexgpu-xenos-vulkan"))};
+  static const DWORD64 ours[] = {DWORD64(GetModuleHandleW(nullptr)), DWORD64(GetModuleHandleW(L"rexruntime.dll")),
+                                 DWORD64(GetModuleHandleW(L"rexgpu-bfnative.dll")),
+                                 DWORD64(GetModuleHandleW(L"rexgpu-xenos.dll"))};
   for (DWORD64 m : ours)
     if (m && m == image) return true;
   return false;

@@ -244,10 +244,6 @@ class Sky {
   // D190: the world's depth before the sea was drawn (the night's copy, pixel for pixel with the fog's picture; null:
   // none): how deep the water is, the reflection kept off the shallows where the sea's own wash runs up the shore.
   Diligent::ITextureView* sea_floor = nullptr;
-  // D252: the planar reflection (DrawPath::DrawPlanar: the world drawn again mirrored in the sea, of the scene's size,
-  // sea_mask_uv its share as the mask's) and its depth (0 where nothing was drawn); null: the SSR march instead.
-  Diligent::ITextureView* planar = nullptr;
-  Diligent::ITextureView* planar_depth = nullptr;
  private:  // D191: the last constants Fill made (the view's), for the glass's reflection
   // Drying fades every drop away together ("The drying effect looks like it's reversing the droplets. The screen
   // effect should just fade away entirely", 14 Nov 2026): how many drops there are stays at the most there were

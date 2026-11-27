@@ -499,13 +499,7 @@ def package_flags():
     # "main_backend": false (TekRantGaming, 14 Nov 2026: official servers on a second machine, a VPS in the US): the
     # servers are official (the key's code at registering) but the package runs no backend of its own; they register
     # with the main one (server.json "backend", MAIN_BACKEND by default).
-    # Night Ops and Daybreak: every package from 0.4.8 on has them (its game is built with BF_NIGHT_OPS ON, the
-    # packagers refuse one without), so its version says so too. Until 0.4.8.1 only package.json did, and the Linux
-    # server package had none, and an update keeps the old package.json (install_package): Linux community servers and
-    # Windows ones updated from 0.4.7 ran with Night Ops and Daybreak off (TekRantGaming, 27 Nov 2026, from community
-    # server owners: "missing their JSON files ... preventing NightOps and Daybreak from loading correctly").
-    night_ops = bool(flags.get('night_ops')) or version_key(package_version())[0] >= (0, 4, 8, 0)
-    return {'official': bool(flags.get('official')), 'night_ops': night_ops,
+    return {'official': bool(flags.get('official')), 'night_ops': bool(flags.get('night_ops')),
             'main_backend': bool(flags.get('official')) and flags.get('main_backend', True) is not False}
 
 
@@ -1275,11 +1269,6 @@ class Manager:
             host += ['--official-key-file', self.official_key()]
         env = dict(os.environ)
         env.update({'BF_LOOPBACK_ONLY': '1', 'BF_LOOPBACK_ADDR': address, 'SDL_WINDOW_ACTIVATE_WHEN_SHOWN': '0'})
-        # No sound card on a server (27 Nov 2026, SDK v0.11): SDL 3's audio needs libasound.so.2 on Linux, which a
-        # server has no reason to have, and a Windows server often has no audio device at all (the official machine:
-        # none); v0.11 stops the game when no audio driver starts ("module 'rexapu' failed to init, no audio driver is
-        # available"). A server plays nothing anyway: SDL's dummy driver, on every platform.
-        env.setdefault('SDL_AUDIO_DRIVER', 'dummy')
         if not WINDOWS:  # no display on a server: SDL's offscreen video driver; the program's own libraries first
             env.setdefault('SDL_VIDEO_DRIVER', 'offscreen')
             env.setdefault('SDL_VIDEODRIVER', 'offscreen')
@@ -1678,7 +1667,6 @@ class Manager:
             out = os.path.join(LOGS, 'install', 'install.out')
             os.makedirs(os.path.dirname(out), exist_ok=True)
             env = dict(os.environ)
-            env.setdefault('SDL_AUDIO_DRIVER', 'dummy')  # as the servers' (commands): no sound card on a server
             if not WINDOWS:
                 env.setdefault('SDL_VIDEO_DRIVER', 'offscreen')
                 env.setdefault('SDL_VIDEODRIVER', 'offscreen')
@@ -2243,25 +2231,6 @@ class Manager:
         return cleaned
 
 
-def merge_package_flags(new_path, old_path):
-    """The new package's package.json game flags (night_ops) into the host's own (which keeps official and
-    main_backend); written only when something changes."""
-    try:
-        new = json.loads(read_text(new_path, '{}') or '{}')
-    except ValueError:
-        return
-    try:
-        old = json.loads(read_text(old_path, '{}') or '{}') if os.path.exists(old_path) else {}
-    except ValueError:
-        old = {}
-    merged = dict(old)
-    if new.get('night_ops'):
-        merged['night_ops'] = True
-    if merged != old:
-        with open(old_path, 'w', encoding='ascii', newline='') as f:
-            f.write(json.dumps(merged, separators=(',', ':')))
-
-
 def install_package(archive, target):
     """A release's server package (a zip, or a tar.gz) over the program in `target`. The host's own things are never
     touched: server.json, official.key, the game, the logs, the updates. A file in use on Windows (the running
@@ -2302,11 +2271,6 @@ def install_package(archive, target):
                 continue
             os.makedirs(os.path.join(target, *parts), exist_ok=True)
             for name in files:
-                if not parts and name == 'package.json':
-                    # The owner's package.json is kept (official, main_backend), but what the new package's game has
-                    # (night_ops) comes with it.
-                    merge_package_flags(os.path.join(folder, name), os.path.join(target, name))
-                    continue
                 if not parts and name in keep_names:
                     continue
                 source, destination = os.path.join(folder, name), os.path.join(target, *parts, name)
@@ -2923,32 +2887,7 @@ def newer_program():
     return other if version_key(theirs) > version_key(package_version()) else None
 
 
-def plain_core_files_off():
-    """Linux: no core files written as plain files into the servers' working folder (the package's bin/).
-
-    27 Nov 2026, community hosts: with a core_pattern that is a file name (Debian's default "core"), a crash of a server
-    left a 7.2 GB bin/core: every later start hashed it for 30 s, and the build check failed ("its files are not those of
-    the official package") until it was deleted. When the kernel hands cores to a collector instead (core_pattern starting
-    with "|": systemd-coredump, which caps its own storage), they stay on. The limit is the manager's own, so the
-    servers it starts inherit it. BF_FULL_CORE=1 leaves cores on whatever the pattern."""
-    if WINDOWS or os.environ.get('BF_FULL_CORE') == '1':
-        return
-    try:
-        import resource
-        with open('/proc/sys/kernel/core_pattern', encoding='utf-8') as f:
-            pattern = f.read().strip()
-        if pattern.startswith('|'):
-            return
-        _, hard = resource.getrlimit(resource.RLIMIT_CORE)
-        resource.setrlimit(resource.RLIMIT_CORE, (0, hard))
-        print('Crash dumps off for the servers: this system writes them as plain files (core_pattern %r) into the '
-              'package folder. BF_FULL_CORE=1 keeps them.' % pattern, flush=True)
-    except (OSError, ValueError, ImportError):
-        pass
-
-
 def run(args):
-    plain_core_files_off()
     other = newer_program()
     if other and not os.environ.get('BF_SERVER_NO_HANDOVER'):
         env = dict(os.environ, BF_SERVER_ROOT=os.path.join(DATA, 'program'), BF_SERVER_DATA=DATA)

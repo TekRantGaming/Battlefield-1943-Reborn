@@ -1,6 +1,6 @@
 // The keyboard and mouse's binding sets for each kind of vehicle (vehicle_binds.h). The keyboard driver (the SDK's
-// mnk_input_driver.cpp) asks for each bind's keys at each read (SetBindSource); in any seat of a vehicle the answer is
-// that vehicle kind's setting, else the infantry's own.
+// mnk_input_driver.cpp) asks for each bind's keys at each read (SetBindSource); in a vehicle's driver or pilot seat
+// the answer is that vehicle kind's setting, else the infantry's own.
 
 #include "vehicle_binds.h"
 
@@ -8,12 +8,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <mutex>
-#include <utility>
-#include <vector>
 #include <string>
 #include <string_view>
 
@@ -64,16 +58,6 @@ REXCVAR_DEFINE_STRING(keybind_ground_free_look, "Shift", "Input/Keybinds/Ground 
                       "Ground vehicles: Free-Look (hold: the mouse turns a tank's third person view)");
 REXCVAR_DEFINE_STRING(keybind_air_free_look, "Shift", "Input/Keybinds/Air vehicles",
                       "Air vehicles: Free-Look (hold: the mouse turns the view)");
-
-// Seat keys (issue 80; the user, 27 Nov 2026: "default seat keys be 1-9, not F1-F9"): in any seat of a vehicle, a
-// seat's key moves there (SeatKeysPad presses the game's own Change seat until the seat is reached). One setting each
-// for every vehicle; their rows are in the ground vehicles' and the boats' tabs of the bindings.
-#define BF_SEAT_KEY(n)                                                                                   \
-  REXCVAR_DEFINE_STRING(keybind_seat_##n, #n, "Input/Keybinds/Vehicle seats",                            \
-                        "Vehicles: move to seat " #n " (1 the driver or pilot) if it is free")
-BF_SEAT_KEY(1); BF_SEAT_KEY(2); BF_SEAT_KEY(3); BF_SEAT_KEY(4); BF_SEAT_KEY(5);
-BF_SEAT_KEY(6); BF_SEAT_KEY(7); BF_SEAT_KEY(8); BF_SEAT_KEY(9);
-#undef BF_SEAT_KEY
 
 // The controller's button remapping for each vehicle kind (the infantry's is bf_remap_*, input_settings.cpp): what each
 // button presses, its own by default.
@@ -137,10 +121,7 @@ int SetOfSeat() {
     case SeatKind::kPlane:
     case SeatKind::kBomber: return kBindAir;
     case SeatKind::kDriver: return seat.boat ? kBindBoat : kBindGround;  // its names (native_input.cpp)
-    // A gunner's or a passenger's seat, or a stationary gun: its vehicle's set (issue 78: the turrets and passenger
-    // seats took the infantry's keys, so Change seat there was the infantry's Jump). The planes have no such seats.
-    case SeatKind::kGunner: return !seat.vehicle ? kBindInfantry : seat.boat ? kBindBoat : kBindGround;
-    default: return kBindInfantry;  // on foot, not known
+    default: return kBindInfantry;  // on foot, a gunner or a passenger, a stationary gun, not known
   }
 }
 
@@ -168,13 +149,8 @@ const char* BindSetName(int set) {
 
 bool VehicleBindAction(std::string_view infantry_cvar) { return !ActionOf(infantry_cvar).empty(); }
 
-bool SeatKeyBind(std::string_view cvar) {
-  return cvar.size() == 14 && cvar.substr(0, 13) == "keybind_seat_" && cvar[13] >= '1' && cvar[13] <= '9';
-}
-
 bool BindInSet(int set, std::string_view infantry_cvar) {
   if (infantry_cvar == kFreeLookBind) return set == kBindGround || set == kBindAir;
-  if (SeatKeyBind(infantry_cvar)) return set == kBindGround || set == kBindBoat;  // a plane has one seat
   return set == kBindInfantry || VehicleBindAction(infantry_cvar);
 }
 
@@ -226,8 +202,7 @@ const char* BindLabel(int set, std::string_view infantry_cvar, const char* label
     if (a == "lstick_down") return "Brake, reverse";
     if (a == "lstick_left") return "Turn left";
     if (a == "lstick_right") return "Turn right";
-    if (a == "left_trigger") return "Second weapon (gun seats: zoom)";  // input_settings.cpp ThrottleSeat
-    if (a == "right_shoulder") return "Second weapon";
+    if (a == "left_trigger" || a == "right_shoulder") return "Second weapon";
     if (a == "left_shoulder") return "Brake";
     if (a == "right_trigger") return "Fire";
     if (a == "rstick_up") return "Look, turret up (mouse camera off)";
@@ -284,122 +259,6 @@ const char* AxisLabel(int set, int axis) {
 }
 
 void InstallVehicleBinds() { rex::input::mnk::SetBindSource(&DriverBind); }
-
-// ---- Seat keys (issue 80). The UI thread notes a press (SeatKeysFrame); the pad hook then presses the game's Change
-// seat (A) for 80 ms, waits for the seat to change, and again, until the seat is the one asked for. The game moves to
-// the next free seat at each press, so a seat that is taken or not in this vehicle is never reached: the presses stop
-// when the player is back in the seat they started from, after nine, or after 3 s.
-namespace {
-std::atomic<int> g_seat_request{-1};  // the seat index asked for, -1 none
-struct SeatWalk {
-  int target = -1;
-  uint32_t start_seat = 0, key_before = 0;
-  int presses = 0;
-  enum { kPress, kWait, kGap } phase = kPress;
-  Clock::time_point until{}, deadline{};
-};
-SeatWalk g_walk;
-std::mutex g_walk_mutex;
-// A seat there are others to move to (a plane has only its pilot's).
-bool InVehicle(const SeatInfo& seat) {
-  return seat.vehicle && (seat.kind == SeatKind::kDriver || seat.kind == SeatKind::kGunner);
-}
-}  // namespace
-
-bool KeyBindPressed(const std::string& bind);  // comms_ui.cpp
-
-void SeatKeysFrame() {
-  if (ActiveBindSet() == kBindInfantry) return;
-  static const char* kKeys[9] = {"keybind_seat_1", "keybind_seat_2", "keybind_seat_3", "keybind_seat_4", "keybind_seat_5",
-                                 "keybind_seat_6", "keybind_seat_7", "keybind_seat_8", "keybind_seat_9"};
-  for (int i = 0; i < 9; ++i) {
-    const std::string keys = rex::cvar::GetFlagByName(kKeys[i]);
-    if (!keys.empty() && KeyBindPressed(keys)) {
-      g_seat_request.store(i, std::memory_order_relaxed);
-      return;
-    }
-  }
-}
-
-void SeatKeysPad(uint8_t* gamepad) {
-  std::unique_lock lock(g_walk_mutex, std::try_to_lock);  // the game reads the pad from more than one thread
-  if (!lock.owns_lock()) return;
-  const auto now = Clock::now();
-  SeatInfo seat;
-  const bool known = LocalSeat(seat) && InVehicle(seat);
-#if defined(BF_DEV_TOOLS)
-  // BF_DEV_SEAT_KEYS="20:2,32:1" (developer builds, tests): seat 2's key 20 s after the player first sits in a vehicle,
-  // seat 1's at 32 s.
-  if (static const char* dev = std::getenv("BF_DEV_SEAT_KEYS"); dev && known) {
-    static Clock::time_point first{};
-    static size_t next = 0;
-    static std::vector<std::pair<double, int>> keys = [] {
-      std::vector<std::pair<double, int>> out;
-      double at = 0;
-      int n = 0;
-      for (const char* s = std::getenv("BF_DEV_SEAT_KEYS"); s && std::sscanf(s, "%lf:%d", &at, &n) == 2;) {
-        out.push_back({at, n - 1});
-        s = std::strchr(s, ',');
-        if (s) ++s;
-      }
-      return out;
-    }();
-    if (first == Clock::time_point{}) first = now;
-    if (next < keys.size() && now - first >= std::chrono::duration<double>(keys[next].first))
-      g_seat_request.store(keys[next++].second, std::memory_order_relaxed);
-  }
-#endif
-  const int asked = g_seat_request.exchange(-1, std::memory_order_relaxed);
-  if (asked >= 0) {
-    if (!known || seat.seat == uint32_t(asked)) {
-      if (known) REXLOG_INFO("BF seats: already in seat {}", asked + 1);
-      g_walk.target = -1;
-      return;
-    }
-    g_walk = SeatWalk{};
-    g_walk.target = asked, g_walk.start_seat = seat.seat, g_walk.key_before = seat.key;
-    g_walk.until = now + std::chrono::milliseconds(80), g_walk.deadline = now + std::chrono::seconds(3);
-    REXLOG_INFO("BF seats: to seat {} from seat {} ({})", asked + 1, seat.seat + 1, seat.vehicle_name);
-  }
-  SeatWalk& w = g_walk;
-  if (w.target < 0) return;
-  if (!known || now > w.deadline) {
-    REXLOG_INFO("BF seats: seat {} not reached ({})", w.target + 1, known ? "the game did not move the player" : "out of the vehicle");
-    w.target = -1;
-    return;
-  }
-  if (seat.seat == uint32_t(w.target)) {
-    REXLOG_INFO("BF seats: in seat {} after {} change(s)", w.target + 1, w.presses + 1);
-    w.target = -1;
-    return;
-  }
-  switch (w.phase) {
-    case SeatWalk::kPress:
-      if (now < w.until) {
-        gamepad[0] |= 0x10;  // A (0x1000, the buttons big endian): the game's Change seat
-        return;
-      }
-      w.phase = SeatWalk::kWait, w.until = now + std::chrono::milliseconds(700);
-      return;
-    case SeatWalk::kWait:
-      if (seat.key != w.key_before) {
-        ++w.presses;
-        if (seat.seat == w.start_seat || w.presses >= 9) {
-          REXLOG_INFO("BF seats: seat {} is taken or not in this vehicle", w.target + 1);
-          w.target = -1;
-          return;
-        }
-        w.phase = SeatWalk::kGap, w.until = now + std::chrono::milliseconds(120);
-      } else if (now > w.until) {
-        REXLOG_INFO("BF seats: seat {} not reached (the game did not change seat)", w.target + 1);
-        w.target = -1;
-      }
-      return;
-    case SeatWalk::kGap:
-      if (now >= w.until) w.phase = SeatWalk::kPress, w.until = now + std::chrono::milliseconds(80), w.key_before = seat.key;
-      return;
-  }
-}
 
 // The controller's button remapping as it was (one for everywhere) into each vehicle's set, once.
 static bool SeedVehiclePad(std::map<std::string, std::string>& values) {

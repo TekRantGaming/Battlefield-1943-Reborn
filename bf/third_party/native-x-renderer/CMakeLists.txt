@@ -69,23 +69,48 @@ endif()
 # the register, texture and draw utilities. The SDK compiles it only into its GPU plugin, with hidden
 # symbols. It is compiled again here, except the cvar definitions, which stay the plugin's
 # (src/sdk_cvars.cpp explains why and how).
-# SDK v0.11+ port (.handoff/SDK-0.11-PORT-PLAN.md): v0.11 builds that code as static libraries, rexxenos (registers,
-# formats, texture layout) and rexgpu-xenos-base (the shader translator, texture cache, primitive processor), so they
-# are linked instead of compiled again; v0.10's draw utilities are its draw_state (src/compat/rex/graphics/util/draw.h).
-# Its settings are the bfnative driver's (XenosSettings), so only the frame counter of sdk_cvars.cpp is left here.
+set(_nxr_sdk_graphics "${REXSDK_DIR}/src/graphics")
 add_library(native_x_renderer_sdk STATIC
+    ${_nxr_sdk_graphics}/register_file.cpp
+    ${_nxr_sdk_graphics}/registers.cpp
+    ${_nxr_sdk_graphics}/xenos.cpp
+    ${_nxr_sdk_graphics}/sampler_info.cpp
+    ${_nxr_sdk_graphics}/format/ucode.cpp
+    ${_nxr_sdk_graphics}/pipeline/shader/shader.cpp
+    ${_nxr_sdk_graphics}/pipeline/shader/translator.cpp
+    ${_nxr_sdk_graphics}/pipeline/shader/translator_disasm.cpp
+    ${_nxr_sdk_graphics}/pipeline/shader/spirv.cpp
+    ${_nxr_sdk_graphics}/pipeline/shader/spirv_builder.cpp
+    ${_nxr_sdk_graphics}/pipeline/shader/spirv_translator.cpp
+    ${_nxr_sdk_graphics}/pipeline/shader/spirv_translator_alu.cpp
+    ${_nxr_sdk_graphics}/pipeline/shader/spirv_translator_fetch.cpp
+    ${_nxr_sdk_graphics}/pipeline/shader/spirv_translator_memexport.cpp
+    ${_nxr_sdk_graphics}/pipeline/shader/spirv_translator_rb.cpp
+    ${_nxr_sdk_graphics}/pipeline/texture/info.cpp
+    ${_nxr_sdk_graphics}/pipeline/texture/info_formats.cpp
+    ${_nxr_sdk_graphics}/pipeline/texture/util.cpp
+    ${_nxr_sdk_graphics}/pipeline/texture/conversion.cpp
+    ${_nxr_sdk_graphics}/pipeline/texture/extent.cpp
+    ${_nxr_sdk_graphics}/shared_memory.cpp
     src/sdk_cvars.cpp
+    src/sdk_draw.cpp
+    src/sdk_primitive_processor.cpp
+    src/sdk_texture_cache.cpp
     # glslang's default resource limits, for NativeXRenderer's utility shaders (src/glsl.cpp, decision D16).
     ${REXSDK_DIR}/thirdparty/glslang/StandAlone/ResourceLimits.cpp
 )
+target_compile_definitions(native_x_renderer_sdk PRIVATE
+    NATIVE_X_RENDERER_SDK_DRAW_CPP="${_nxr_sdk_graphics}/util/draw.cpp"
+    NATIVE_X_RENDERER_SDK_PRIMITIVE_PROCESSOR_CPP="${_nxr_sdk_graphics}/primitive_processor.cpp"
+    NATIVE_X_RENDERER_SDK_TEXTURE_CACHE_CPP="${_nxr_sdk_graphics}/pipeline/texture/cache.cpp")
 target_compile_features(native_x_renderer_sdk PUBLIC cxx_std_23)
 target_compile_options(native_x_renderer_sdk PRIVATE -Wno-unused-variable)
-# v0.11's private headers (gpu/xenos/..., under src) and its generated ones, as rexgpu-xenos-base has them.
-target_include_directories(native_x_renderer_sdk PUBLIC "${REXSDK_DIR}/src" "${REXSDK_DIR}"
-    "${CMAKE_BINARY_DIR}/rexglue-sdk/include" "${REXSDK_DIR}/thirdparty/renderdoc" "${REXSDK_DIR}/thirdparty/glslang")
-target_include_directories(native_x_renderer_sdk BEFORE PUBLIC "${CMAKE_SOURCE_DIR}/src/compat")
-target_link_libraries(native_x_renderer_sdk PUBLIC bf_compat_headers rexgpu-xenos-spirv rexgpu-xenos-base rexxenos Vulkan::Headers
-    glslang glslang::SPIRV PRIVATE xxHash::xxhash)
+# The same third-party pieces the plugin compiles these files with.
+target_include_directories(native_x_renderer_sdk PRIVATE "${REXSDK_DIR}")
+# The SDK's graphics headers include renderdoc_app.h (through rex/ui) and glslang's.
+target_include_directories(native_x_renderer_sdk PUBLIC "${REXSDK_DIR}/thirdparty/renderdoc" "${REXSDK_DIR}/thirdparty/glslang")
+target_link_libraries(native_x_renderer_sdk PUBLIC rex::runtime Vulkan::Headers glslang glslang::SPIRV
+    PRIVATE xxHash::xxhash)
 rexglue_apply_target_settings(native_x_renderer_sdk)
 
 # ---------------------------------------------------------------------------------------------------
@@ -104,7 +129,6 @@ add_library(native_x_renderer STATIC
     src/targets.cpp
     src/blit.cpp
     src/overlay.cpp
-    src/pregame.cpp
     src/aa.cpp
     src/grass.cpp
     src/gtao.cpp
@@ -144,7 +168,7 @@ add_library(native_x_renderer::native_x_renderer ALIAS native_x_renderer)
 
 target_include_directories(native_x_renderer PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # The SDK's precompiled SPIR-V shaders (texture loading), included by guest_textures.cpp.
-target_include_directories(native_x_renderer PRIVATE "${REXSDK_DIR}/src/gpu/xenos/shaders")
+target_include_directories(native_x_renderer PRIVATE "${REXSDK_DIR}/src/graphics/shaders")
 # The SDK's ImGui headers (overlay.cpp draws its dialogs, D75): rexruntime does not pass them on when the SDK is
 # built from source; the symbols come from its DLL.
 target_include_directories(native_x_renderer PRIVATE "${REXSDK_DIR}/thirdparty/imgui")
@@ -177,8 +201,7 @@ target_include_directories(native_x_renderer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR
                                                 "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_features(native_x_renderer PUBLIC cxx_std_23)
 # Cvars, logging, keybinds, and the PPC context the hooks receive.
-target_include_directories(native_x_renderer BEFORE PRIVATE "${CMAKE_SOURCE_DIR}/src/compat")
-target_link_libraries(native_x_renderer PUBLIC bf_compat_headers rex::sdk)
+target_link_libraries(native_x_renderer PUBLIC rex::runtime)
 target_link_libraries(native_x_renderer PRIVATE
     native_x_renderer_sdk
     Diligent-GraphicsEngineVk-static

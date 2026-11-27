@@ -20,9 +20,9 @@ struct TrackedCall;
 
 namespace native_x_renderer::renderer {
 
-// Reads the native_x_renderer cvar. On: creates the host device on the game's window and sets the bfnative
-// driver's hooks (`graphics`, or rex::system::bfnative_graphics() when null). Returns true if the renderer is on,
-// so the hooks must report the calls.
+// Reads the native_x_renderer cvar. On: creates the host device on the game's window (detaching the SDK's
+// presenter from it) and turns the SDK's host rendering off. Returns true if the renderer is on, so the
+// hooks must report the calls.
 bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, rex::ui::Window* window,
                 const std::filesystem::path& cache_root);
 

@@ -40,7 +40,6 @@
 #include <rex/ppc/context.h>
 
 #include "player_name.h"
-#include "compat/sdk_module.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -62,7 +61,7 @@ constexpr uint32_t kSignedInToLive = 2;
 // The runtime DLL's own export of an import, the one our definition hides.
 PPCFunc* Original(const char* name) {
 #if defined(_WIN32)
-  static HMODULE runtime = bf1943::SdkModule("rexkernel");  // v0.11: the kernel and XAM exports (__imp__*) are rexkernel's
+  static HMODULE runtime = GetModuleHandleA("rexruntime.dll");
   auto* f = reinterpret_cast<PPCFunc*>(GetProcAddress(runtime, name));
 #else
   auto* f = reinterpret_cast<PPCFunc*>(dlsym(RTLD_NEXT, name));

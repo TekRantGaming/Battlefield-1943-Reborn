@@ -1,60 +1,82 @@
+/**
+ * @file        rexcodegen/codegen_context.cpp
+ *
+ * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
+ *              All rights reserved.
+ *
+ * @license     BSD 3-Clause License
+ *              See LICENSE file in the project root for full license text.
+ */
+
 #include "decoded_binary.h"
 
-#include <format>
+#include <fmt/format.h>
 
-#include "codegen_context.h"
-#include <rex/logging/log_category.h>
-#include "codegen_categories.h"
+#include <rex/codegen/codegen_context.h>
+#include <rex/logging.h>
 
-#include <rex/kernel/title_runtime.h>
-#include <rex/kernel/object/module_object.h>
-#include <rex/kernel/module.h>
-#include <rex/kernel/object/object_table.h>
+#include "codegen_logging.h"
+#include <rex/runtime.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/user_module.h>
+#include <rex/system/xex_module.h>
 
 namespace rex::codegen {
 
-Result<CodegenContext> CodegenContext::Create(const std::filesystem::path& config_path,
-                                              rex::kernel::TitleRuntime& runtime) {
+Result<CodegenContext> CodegenContext::Create(const std::filesystem::path& configPath,
+                                              Runtime& runtime) {
   CodegenContext ctx;
 
-  if (!ctx.config_.Load(config_path.string())) {
-    return Err<CodegenContext>(ErrorCategory::kConfig,
-                               std::format("Failed to load config: {}", config_path.string()));
+  // Load configuration
+  if (!ctx.config_.Load(configPath.string())) {
+    return Err<CodegenContext>(ErrorCategory::Config,
+                               fmt::format("Failed to load config: {}", configPath.string()));
   }
-  ctx.config_dir_ = config_path.parent_path();
+  ctx.configDir_ = configPath.parent_path();
 
-  std::filesystem::path xex_path = ctx.config_dir_ / ctx.config_.file_path;
+  std::filesystem::path xexPath = ctx.configDir_ / ctx.config_.filePath;
 
-  if (std::filesystem::exists(xex_path)) {
-    xex_path = std::filesystem::canonical(xex_path);
+  // Resolve path
+  if (std::filesystem::exists(xexPath)) {
+    xexPath = std::filesystem::canonical(xexPath);
   } else {
-    return Err<CodegenContext>(ErrorCategory::kNotFound,
-                               std::format("XEX file not found: {}", xex_path.string()));
+    return Err<CodegenContext>(ErrorCategory::NotFound,
+                               fmt::format("XEX file not found: {}", xexPath.string()));
   }
 
-  auto user_module = runtime.GetObjectTable().Get<rex::kernel::ModuleObject>(
-      runtime.GetModuleRegistry().GetExecutable().value_or(0));
+  // Load XEX via Runtime
+  auto xexFilename = xexPath.filename();
+  auto vfsPath = "game:\\" + xexFilename.string();
+  auto status = runtime.LoadXexImage(vfsPath);
+  if (status != X_STATUS_SUCCESS) {
+    return Err<CodegenContext>(
+        ErrorCategory::Format,
+        fmt::format("Failed to load XEX: {} (status {:#x})", xexPath.string(), status));
+  }
+
+  // Get module and create BinaryView
+  auto user_module = runtime.kernel_state()->GetExecutableModule();
   if (!user_module) {
-    return Err<CodegenContext>(ErrorCategory::kFormat,
+    return Err<CodegenContext>(ErrorCategory::Format,
                                "Failed to get executable module after loading");
   }
 
-  auto* module = user_module->GetXEX();
+  auto* module = user_module->xex_module();
   if (!module) {
-    return Err<CodegenContext>(ErrorCategory::kFormat,
-                               "Failed to get XEXModule from the executable module");
+    return Err<CodegenContext>(ErrorCategory::Format, "Failed to get XexModule from UserModule");
   }
 
-  ctx.binary_ = BinaryView::FromModule(*module);
+  ctx.binary_ = BinaryView::fromModule(*module);
+  ctx.resolver_ = runtime.export_resolver();
 
-  REXCG_TRACE("Loaded XEX: base=0x{:08X}, size=0x{:X}, entry=0x{:08X}",
-              ctx.binary_.GetBaseAddress(), ctx.binary_.GetImageSize(),
-              ctx.binary_.GetEntryPoint());
+  REXCODEGEN_TRACE("Loaded XEX: base=0x{:08X}, size=0x{:X}, entry=0x{:08X}",
+                   ctx.binary_.baseAddress(), ctx.binary_.imageSize(), ctx.binary_.entryPoint());
 
-  ctx.analysis_state_.format = "xex";
-  ctx.analysis_state_.load_address = ctx.binary_.GetBaseAddress();
-  ctx.analysis_state_.entry_point = ctx.binary_.GetEntryPoint();
-  ctx.analysis_state_.image_size = ctx.binary_.GetImageSize();
+  // Initialize AnalysisState from binary
+  ctx.analysisState_.format = "xex";
+  ctx.analysisState_.loadAddress = ctx.binary_.baseAddress();
+  ctx.analysisState_.entryPoint = ctx.binary_.entryPoint();
+  ctx.analysisState_.imageSize = ctx.binary_.imageSize();
 
   return ctx;
 }
@@ -67,22 +89,22 @@ CodegenContext CodegenContext::Create(BinaryView binary, RecompilerConfig config
 }
 
 CodegenContext::~CodegenContext() = default;
-CodegenContext::CodegenContext(CodegenContext&&) noexcept(false) = default;
-CodegenContext& CodegenContext::operator=(CodegenContext&&) noexcept(false) = default;
+CodegenContext::CodegenContext(CodegenContext&&) = default;
+CodegenContext& CodegenContext::operator=(CodegenContext&&) = default;
 
-DecodedBinary& CodegenContext::GetDecoded() {
-  assert(decoded_ && "decoded_ is null until InitDecoded runs");
+DecodedBinary& CodegenContext::decoded() {
+  assert(decoded_ && "Call initDecoded() before accessing decoded()");
   return *decoded_;
 }
 
-const DecodedBinary& CodegenContext::GetDecoded() const {
-  assert(decoded_ && "decoded_ is null until InitDecoded runs");
+const DecodedBinary& CodegenContext::decoded() const {
+  assert(decoded_ && "Call initDecoded() before accessing decoded()");
   return *decoded_;
 }
 
-void CodegenContext::InitDecoded() {
+void CodegenContext::initDecoded() {
   decoded_ = std::make_unique<DecodedBinary>(binary_);
-  decoded_->Decode();
+  decoded_->decode();
 }
 
 }  // namespace rex::codegen

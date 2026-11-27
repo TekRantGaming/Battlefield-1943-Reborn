@@ -1,6 +1,6 @@
 /**
  * @file        codegen/codegen.cpp
- * @brief       The code generation pipeline
+ * @brief       Codegen pipeline implementation
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
@@ -9,15 +9,14 @@
  *              See LICENSE file in the project root for full license text.
  */
 
-#include <format>
+#include <fmt/format.h>
 
-#include "codegen_categories.h"
-#include "pipeline.h"
-#include "codegen_writer.h"
-#include <rex/logging/log_category.h>
-#include <rex/kernel/title_runtime.h>
-
-#include "tool_runtime.h"
+#include <rex/codegen/analyze.h>
+#include <rex/codegen/codegen.h>
+#include <rex/codegen/codegen_writer.h>
+#include <rex/kernel/init.h>
+#include <rex/logging.h>
+#include <rex/runtime.h>
 
 namespace rex::codegen {
 
@@ -25,37 +24,44 @@ CodegenPipeline::~CodegenPipeline() = default;
 CodegenPipeline::CodegenPipeline(CodegenPipeline&&) noexcept = default;
 CodegenPipeline& CodegenPipeline::operator=(CodegenPipeline&&) noexcept = default;
 
-Result<CodegenPipeline> CodegenPipeline::Create(const std::filesystem::path& config_path,
-                                                ToolApp& tools) {
+Result<CodegenPipeline> CodegenPipeline::Create(const std::filesystem::path& configPath) {
   CodegenPipeline pipeline;
 
-  RecompilerConfig temp_config;
-  if (!temp_config.Load(config_path.string())) {
-    return Err<CodegenPipeline>(ErrorCategory::kConfig,
-                                std::format("Failed to load config: {}", config_path.string()));
+  // Load config to get XEX path
+  RecompilerConfig tempConfig;
+  if (!tempConfig.Load(configPath.string())) {
+    return Err<CodegenPipeline>(ErrorCategory::Config,
+                                fmt::format("Failed to load config: {}", configPath.string()));
   }
 
-  auto config_dir = config_path.parent_path();
+  auto configDir = configPath.parent_path();
 
-  std::filesystem::path xex_path = config_dir / temp_config.file_path;
+  std::filesystem::path xexPath = configDir / tempConfig.filePath;
 
-  if (!std::filesystem::exists(xex_path)) {
-    return Err<CodegenPipeline>(ErrorCategory::kIO,
-                                std::format("XEX file not found: {}", xex_path.string()));
+  if (!std::filesystem::exists(xexPath)) {
+    return Err<CodegenPipeline>(ErrorCategory::IO,
+                                fmt::format("XEX file not found: {}", xexPath.string()));
   }
-  xex_path = std::filesystem::canonical(xex_path);
+  xexPath = std::filesystem::canonical(xexPath);
 
-  auto tool = tools.Open(xex_path.parent_path(), xex_path.filename().string());
-  if (!tool) {
-    return Err<CodegenPipeline>(tool.error());
+  // Create Runtime
+  auto xexDir = xexPath.parent_path();
+  pipeline.runtime_ = std::make_unique<Runtime>(xexDir.string());
+  auto status = pipeline.runtime_->Setup(rex::RuntimeConfig{
+      .kernel_init = rex::kernel::InitializeKernel,
+      .tool_mode = true,
+  });
+  if (status != X_STATUS_SUCCESS) {
+    return Err<CodegenPipeline>(ErrorCategory::IO,
+                                fmt::format("Failed to initialize Runtime: {:#x}", status));
   }
-  pipeline.runtime_ = std::make_unique<ToolRuntime>(std::move(*tool));
 
-  auto ctx_result = CodegenContext::Create(config_path, pipeline.runtime_->GetRuntime());
-  if (!ctx_result) {
-    return Err<CodegenPipeline>(ctx_result.error());
+  // Create CodegenContext (AnalysisState is populated from binary there)
+  auto ctxResult = CodegenContext::Create(configPath, *pipeline.runtime_);
+  if (!ctxResult) {
+    return Err<CodegenPipeline>(ctxResult.error());
   }
-  pipeline.ctx_ = std::make_unique<CodegenContext>(std::move(*ctx_result));
+  pipeline.ctx_ = std::make_unique<CodegenContext>(std::move(*ctxResult));
 
   return Ok(std::move(pipeline));
 }
@@ -68,17 +74,18 @@ Result<void> CodegenPipeline::Run(bool force) {
 }
 
 Result<void> CodegenPipeline::RunAnalyze() {
-  auto analyze_result = Analyze(*ctx_);
-  if (!analyze_result) {
-    REXCG_FAIL(analyze_result, "Analysis failed: {}", analyze_result.error().message);
+  auto analyzeResult = Analyze(*ctx_);
+  if (!analyzeResult) {
+    REXLOG_ERROR("Analysis failed: {}", analyzeResult.error().message);
+    return analyzeResult;
   }
   return Ok();
 }
 
 Result<void> CodegenPipeline::RunWrite(bool force) {
-  CodegenWriter writer(*ctx_);
-  if (!writer.Write(force))
-    return Err(ErrorCategory::kValidation, "Code generation failed.");
+  CodegenWriter writer(*ctx_, runtime_.get());
+  if (!writer.write(force))
+    return Err(ErrorCategory::Validation, "Code generation failed.");
   return Ok();
 }
 

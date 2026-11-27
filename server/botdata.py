@@ -51,12 +51,7 @@ KEEP_VERSIONS = 3        # published sets kept in out/
 SMALLEST = 0.01          # a faded count below this is dropped (the set stays bounded)
 MAX_FILE = 32 << 20      # a hand-off's size, as it comes in
 MAX_LINES = 8000000
-GRID_MAGIC = 0x42475232  # "BGR2", bots.cpp SaveGrid from 0.4.8.1
-# "BGR1": 0.4.8's grids. Its servers kept the last level's water height over a level change (Wake's sea, 215 m, on
-# Guadalcanal and Iwo Jima): those levels were "mapped" in no time as mostly sea (139 cells in 0 s), and the bots took
-# the land for water. Only Wake's own (the first level, its water found on it) are kept; a BGR2 grid takes over a BGR1.
-GRID_MAGIC_OLD = 0x42475231
-OLD_GRID_MAPS = ('Wake_Island',)
+GRID_MAGIC = 0x42475231  # "BGR1", bots.cpp SaveGrid
 MAX_GRID_CELLS = 20000000
 CELL_LIMIT = 1 << 20     # as bots.cpp ReadLearned
 HEADER_LEARNED = 'BF1943 Reborn bots, what they learned on %s (1)'
@@ -225,16 +220,12 @@ def format_style(s):
     return HEADER_STYLE + '\n' + ''.join('%s %s\n' % (f, _num(s.get(f, 0.0))) for f in STYLE_FIELDS)
 
 
-def check_grid(data, m=None):
-    """'' when data is a finished level grid (bots.cpp SaveGrid: magic, done 1, count, 15 bytes a cell) of map m (a
-    0.4.8 grid only of the maps in OLD_GRID_MAPS), else why not."""
+def check_grid(data):
+    """'' when data is a finished level grid (bots.cpp SaveGrid: magic, done 1, count, 15 bytes a cell), else why not."""
     if len(data) < 16:
         return 'too short for a grid'
     magic, done, count = struct.unpack_from('<IIQ', data, 0)
-    if magic == GRID_MAGIC_OLD:
-        if m not in OLD_GRID_MAPS:
-            return "a 0.4.8 grid of a level after the first (the last level's water height)"
-    elif magic != GRID_MAGIC:
+    if magic != GRID_MAGIC:
         return 'not a grid'
     if done != 1:
         return 'a scan in part'
@@ -250,21 +241,6 @@ def grid_cells(path):
         return struct.unpack_from('<IIQ', head, 0)[2] if len(head) == 16 else 0
     except OSError:
         return 0
-
-
-def grid_better(data, path, m):
-    """Whether the grid data should take the place of the one at path (map m): a good one over a bad or missing one,
-    a 0.4.8.1 grid over a 0.4.8 one, else the one with more cells."""
-    try:
-        have = _read(path)
-    except OSError:
-        return True
-    if check_grid(have, m):
-        return True
-    new_v, have_v = struct.unpack_from('<I', data, 0)[0], struct.unpack_from('<I', have, 0)[0]
-    if new_v != have_v:
-        return new_v == GRID_MAGIC
-    return struct.unpack_from('<Q', data, 8)[0] > struct.unpack_from('<Q', have, 8)[0]
 
 
 # ---- writing
@@ -289,7 +265,7 @@ def ingest(root, server, name, data):
     if not isinstance(data, (bytes, bytearray)) or not data or len(data) > MAX_FILE:
         return 'an empty or too big file'
     if name.endswith('.grid'):
-        why = check_grid(data, _map_of(name))
+        why = check_grid(data)
         if why:
             return why
     elif not data.startswith(b'BF1943 Reborn bots, '):
@@ -350,13 +326,13 @@ def _take(maps, style, root, path, name, note, weight=1.0):
     """One hand-off into the totals: its lines checked (bad ones left out), a grid kept when it is the most complete."""
     data = _read(path)
     if name.endswith('.grid'):
+        why = check_grid(data)
         m = _map_of(name)
-        why = check_grid(data, m)
         if why or not m:
             note('  %s: left out (%s)' % (path, why or 'its name'))
             return
         have = os.path.join(root, 'grids', m + '.grid')
-        if grid_better(data, have, m):
+        if struct.unpack_from('<Q', data, 8)[0] > grid_cells(have):
             write_whole(have, data)
             note('  %s: the most complete grid of %s now (%d cells)' % (path, m, struct.unpack_from('<Q', data, 8)[0]))
         return
@@ -406,12 +382,7 @@ def _publish(root, maps, style, key, note):
     try:
         for n in sorted(os.listdir(gd)):
             if n.endswith('.grid') and re.match(r'^[A-Za-z0-9_]{1,48}\.grid$', n):
-                d = _read(os.path.join(gd, n))
-                why = check_grid(d, n[:-5])
-                if why:
-                    note('  grids/%s: not published (%s)' % (n, why))
-                    continue
-                files[n] = d
+                files[n] = _read(os.path.join(gd, n))
     except OSError:
         pass
     built = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
@@ -463,9 +434,9 @@ def _seed(root, maps, style, meta, seed, note, today):
             style.update(parse_style(_read(path).decode('utf-8', 'replace')))
         elif re.match(r'^[A-Za-z0-9_]{1,48}\.txt$', n) and n != 'version.txt':
             maps[n[:-4]] = parse_learned(_read(path).decode('utf-8', 'replace'))[0]
-        elif re.match(r'^[A-Za-z0-9_]{1,48}\.grid$', n) and not check_grid(_read(path), n[:-5]):
+        elif re.match(r'^[A-Za-z0-9_]{1,48}\.grid$', n) and not check_grid(_read(path)):
             have = os.path.join(root, 'grids', n)
-            if grid_better(_read(path), have, n[:-5]):
+            if grid_cells(path) > grid_cells(have):
                 write_whole(have, _read(path))
     meta['faded_to'] = today.isoformat()
     note('started from the shipped set (%s): %s' % (seed, ', '.join(sorted(maps)) or 'its style only'))

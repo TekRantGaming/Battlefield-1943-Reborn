@@ -1,12 +1,7 @@
-// {{ names.original }} - ReXGlue Recompiled Project
+// {{ names.snake_case }} - ReXGlue Recompiled Project
 
-#include <rex/app/title_app.h>
+#include "{{ entrypoint_out_dir }}/{{ names.snake_case }}_init.h"
 
-#include "{{ entrypoint_out_dir }}/{{ names.original }}_init.h"
+#include "{{ names.snake_case }}_app.h"
 
-class {{ names.pascal_case }}App : public rex::app::TitleApp {
- public:
-  {{ names.pascal_case }}App() : TitleApp("{{ names.original }}", kPPCImageConfig) {}
-};
-
-REX_TITLE_APP({{ names.pascal_case }}App)
+REX_DEFINE_APP({{ names.snake_case }}, {{ names.pascal_case }}App::Create)

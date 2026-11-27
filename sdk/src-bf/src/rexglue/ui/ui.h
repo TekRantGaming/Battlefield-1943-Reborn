@@ -1,5 +1,6 @@
 /**
  * @file        rexglue/ui/ui.h
+ * @brief       Presentation layer for the rexglue CLI
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
@@ -20,9 +21,7 @@
 #include <string_view>
 #include <vector>
 
-#include <rex/logging/logger.h>
-#include <rex/types.h>
-#include <rex/utility.h>
+#include <spdlog/sinks/base_sink.h>
 
 namespace rexglue::ui {
 
@@ -30,30 +29,30 @@ namespace detail {
 class GlobalSinkAccessor;
 }
 
-/** Log sink that owns presentation output for the rexglue CLI. */
-class PresentationSink final : public rex::log::ILogSink {
+/** spdlog sink that also owns direct presentation output for the rexglue CLI. */
+class PresentationSink final : public spdlog::sinks::base_sink<std::mutex> {
  public:
   PresentationSink(std::ostream& out, bool tty, bool color);
 
-  void Write(const rex::log::Message& message) override;
-  void Flush() override;
+  bool tty() const { return tty_; }
+  bool color() const { return color_; }
 
-  bool IsTTY() const { return tty_; }
-  bool IsColorEnabled() const { return color_; }
+  void setActiveProgress(bool active);
 
-  void SetActiveProgress(bool active);
+ protected:
+  void sink_it_(const spdlog::details::log_msg& msg) override;
+  void flush_() override;
 
  private:
   friend class detail::GlobalSinkAccessor;
 
-  std::mutex& GetSinkMutex() { return mutex_; }
-  std::ostream& GetSinkOut() { return out_; }
+  std::mutex& sink_mutex() { return this->mutex_; }
+  std::ostream& sink_out() { return out_; }
 
   std::ostream& out_;
   bool tty_;
   bool color_;
   bool active_progress_ = false;
-  std::mutex mutex_;
 };
 
 struct InitOptions {
@@ -63,9 +62,6 @@ struct InitOptions {
 
 void Init(const InitOptions& opts);
 void Shutdown();
-
-/** Returns the sink to pass to Logger::AddSink. */
-rex::log::ILogSink& GetLogSink();
 
 void Banner(std::string_view title);
 
@@ -89,33 +85,34 @@ namespace detail {
 
 void SetGlobalSinkForTesting(std::unique_ptr<PresentationSink> sink);
 
-bool IsSinkTTY();
+bool SinkIsTty();
 
 void SetSinkActiveProgress(bool active);
 
-/** Holds the global sink's mutex while writing. */
-class GlobalSinkAccessor : public rex::NonCopyable {
+/** RAII lock on the global sink's mutex for write access. */
+class GlobalSinkAccessor {
  public:
   GlobalSinkAccessor();
+  ~GlobalSinkAccessor();
+  GlobalSinkAccessor(const GlobalSinkAccessor&) = delete;
+  GlobalSinkAccessor& operator=(const GlobalSinkAccessor&) = delete;
 
-  void WriteLine(std::string_view s);
-  void WriteRaw(std::string_view s);
-  void Flush();
+  void writeLine(std::string_view s);
+  void writeRaw(std::string_view s);
+  void flush();
 
-  bool GetColor() const;
+  bool color() const;
 
-  void WriteColored(std::string_view code, std::string_view text);
-
- private:
-  std::unique_lock<std::mutex> lock_;
+  void writeColored(std::string_view code, std::string_view text);
 };
 
 }  // namespace detail
 
 namespace color {
-inline constexpr std::string_view kReset = rex::log::kColorReset;
+inline constexpr std::string_view kReset = "\033[0m";
 inline constexpr std::string_view kBold = "\033[1m";
 inline constexpr std::string_view kDim = "\033[2m";
+inline constexpr std::string_view kRed = "\033[31m";
 inline constexpr std::string_view kGreen = "\033[32m";
 inline constexpr std::string_view kCyan = "\033[36m";
 inline constexpr std::string_view kBoldGreen = "\033[1;32m";

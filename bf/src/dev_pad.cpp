@@ -7,7 +7,7 @@
 //   lb rb lt rt ls rs, and the left stick held fully over: lsr lsl lsu lsd (right, left, up, down; walk tests).
 //
 // Same script format as Sneak King's dev_pad.cpp, but as an input driver (no title addresses): the runtime calls it
-// for XamInputGetState and GetCapabilities; SDK v0.11+ makes the keystrokes from the button changes itself.
+// for XamInputGetState, GetCapabilities and GetKeystroke. Keystrokes are made from the button changes.
 
 #if defined(BF_DEV_TOOLS)
 
@@ -21,21 +21,18 @@
 #include <string>
 #include <vector>
 
-#include <array>
-#include <span>
-#include <string_view>
-
-#include <rex/driver.h>
-#include <rex/driver_context.h>
-#include <rex/driver_module.h>
-#include <rex/driver_registration.h>
-#include <rex/hid/input_driver.h>
-#include <rex/hid/pad.h>
+#include <rex/input/device_assignment.h>
+#include <rex/input/input_system.h>
 #include <rex/logging.h>
-#include <rex/module.h>
+#include <rex/system/xtypes.h>
 
 namespace bf1943 {
 namespace {
+
+using rex::X_RESULT;
+using rex::X_STATUS;
+using rex::input::DeviceId;
+using rex::input::DeviceInfo;
 
 struct Press {
   double at;
@@ -46,7 +43,7 @@ struct Press {
 struct Button {
   const char* name;
   uint32_t mask;
-  uint16_t vk;  // VK_PAD_* (v0.10 made its keystrokes; v0.11's input system makes them from the state)
+  uint16_t vk;  // VK_PAD_* for keystrokes
 };
 
 constexpr Button kButtons[] = {
@@ -88,63 +85,74 @@ std::vector<Press> ParseScript(const std::string& s) {
   return presses;
 }
 
-// SDK v0.11+: an input driver ("devpad") in a module of the program's own (DevPadModule, App::OnRegisterModules); the
-// app selects it alone (hid.drivers) when BF_DEV_PAD is set. The input system makes the keystrokes from its state.
-class DevPadDriver final : public rex::hid::IInputDriver {
+class DevPadDriver final : public rex::input::InputDriver {
  public:
-  DevPadDriver() {
-    const char* script = std::getenv("BF_DEV_PAD");
-    presses_ = ParseScript(script ? script : "");
-    REXLOG_INFO("BF dev pad: {} scripted presses, real pads ignored for this run", presses_.size());
+  explicit DevPadDriver(std::vector<Press> presses) : InputDriver(nullptr, 0), presses_(std::move(presses)) {}
+
+  X_STATUS Setup() override { return X_STATUS_SUCCESS; }
+
+  void EnumerateDevices(std::vector<DeviceInfo>& out) override {
+    DeviceInfo info;
+    info.id = kId;
+    info.name = "BF dev pad";
+    info.guid = "bf-dev-pad";
+    out.push_back(info);
   }
 
-  std::string_view GetName() const override { return "devpad"; }
-  rex::Result<void> Initialize(rex::IDriverContext&) override { return {}; }
-  void Shutdown() override {}
-  uint64_t GetDeviceRevision() const override { return 1; }
-
-  void EnumerateDevices(std::vector<rex::hid::PadDevice>& out) override {
-    rex::hid::PadDevice device;
-    device.id = kId;
-    device.name = "BF dev pad";
-    out.push_back(std::move(device));
-  }
-
-  rex::Result<rex::hid::PadState> GetDeviceState(rex::hid::PadDeviceID id) override {
-    if (id != kId) return std::unexpected(rex::Error(rex::ErrorCategory::kNotFound, "not the dev pad"));
+  X_RESULT GetDeviceState(DeviceId id, rex::input::X_INPUT_STATE* out) override {
+    if (id != kId) return X_ERROR_DEVICE_NOT_CONNECTED;
     std::lock_guard<std::mutex> lock(mutex_);
     if (++state_reads_ % 300 == 1) REXLOG_INFO("BF dev pad: state read {}", state_reads_);
     const uint32_t buttons = Update();
-    rex::hid::PadState state;
-    state.buttons = uint16_t(buttons);
-    state.left_trigger = (buttons & 0x10000) ? 255 : 0;
-    state.right_trigger = (buttons & 0x20000) ? 255 : 0;
-    state.thumb_lx = int16_t((buttons & 0x40000) ? 32767 : (buttons & 0x80000) ? -32768 : 0);
-    state.thumb_ly = int16_t((buttons & 0x100000) ? 32767 : (buttons & 0x200000) ? -32768 : 0);
-    return state;
+    std::memset(out, 0, sizeof(*out));
+    out->packet_number = packet_;
+    out->gamepad.buttons = uint16_t(buttons);
+    out->gamepad.left_trigger = (buttons & 0x10000) ? 255 : 0;
+    out->gamepad.right_trigger = (buttons & 0x20000) ? 255 : 0;
+    out->gamepad.thumb_lx = int16_t((buttons & 0x40000) ? 32767 : (buttons & 0x80000) ? -32768 : 0);
+    out->gamepad.thumb_ly = int16_t((buttons & 0x100000) ? 32767 : (buttons & 0x200000) ? -32768 : 0);
+    return X_ERROR_SUCCESS;
   }
 
-  rex::Result<rex::hid::PadCapabilities> GetDeviceCapabilities(rex::hid::PadDeviceID id) override {
-    if (id != kId) return std::unexpected(rex::Error(rex::ErrorCategory::kNotFound, "not the dev pad"));
-    rex::hid::PadCapabilities caps;
-    caps.supported.buttons = 0xF3FF;
-    caps.supported.left_trigger = 0xFF;
-    caps.supported.right_trigger = 0xFF;
-    caps.supported.thumb_lx = caps.supported.thumb_ly = caps.supported.thumb_rx = caps.supported.thumb_ry =
-        int16_t(0xFFC0);
-    caps.motors.left_motor = caps.motors.right_motor = 0xFFFF;
-    return caps;
+  X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags, rex::input::X_INPUT_CAPABILITIES* out) override {
+    (void)flags;
+    if (id != kId) return X_ERROR_DEVICE_NOT_CONNECTED;
+    std::memset(out, 0, sizeof(*out));
+    out->type = rex::input::XINPUT_DEVTYPE_GAMEPAD;
+    out->sub_type = 1;  // XINPUT_DEVSUBTYPE_GAMEPAD
+    out->gamepad.buttons = 0xF3FF;
+    out->gamepad.left_trigger = 0xFF;
+    out->gamepad.right_trigger = 0xFF;
+    out->gamepad.thumb_lx = int16_t(0xFFC0);
+    out->gamepad.thumb_ly = int16_t(0xFFC0);
+    out->gamepad.thumb_rx = int16_t(0xFFC0);
+    out->gamepad.thumb_ry = int16_t(0xFFC0);
+    out->vibration.left_motor_speed = 0xFFFF;
+    out->vibration.right_motor_speed = 0xFFFF;
+    return X_ERROR_SUCCESS;
   }
 
-  rex::Result<void> SetDeviceVibration(rex::hid::PadDeviceID id, const rex::hid::PadVibration&) override {
-    if (id != kId) return std::unexpected(rex::Error(rex::ErrorCategory::kNotFound, "not the dev pad"));
-    return {};
+  X_RESULT SetDeviceVibration(DeviceId id, rex::input::X_INPUT_VIBRATION* vibration) override {
+    (void)vibration;
+    return id == kId ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
+  X_RESULT GetDeviceKeystroke(DeviceId id, uint32_t flags, rex::input::X_INPUT_KEYSTROKE* out) override {
+    (void)flags;
+    if (id != kId) return X_ERROR_DEVICE_NOT_CONNECTED;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (++keystroke_reads_ % 300 == 1) REXLOG_INFO("BF dev pad: keystroke read {}", keystroke_reads_);
+    Update();
+    if (keystrokes_.empty()) return X_ERROR_EMPTY;
+    *out = keystrokes_.front();
+    keystrokes_.pop_front();
+    return X_ERROR_SUCCESS;
   }
 
  private:
-  static constexpr rex::hid::PadDeviceID kId{0xBF1943};
+  static constexpr DeviceId kId = DeviceId(0xBF1943);
 
-  // The script's buttons at this moment.
+  // The script's buttons at this moment; button changes bump the packet number and queue keystrokes.
   uint32_t Update() {
     const auto now = std::chrono::steady_clock::now();
     if (!started_) {
@@ -158,7 +166,17 @@ class DevPadDriver final : public rex::hid::IInputDriver {
     }
     if (buttons != last_) {
       REXLOG_INFO("BF dev pad: {:.1f} s buttons {:05X}", t, buttons);
+      for (const Button& b : kButtons) {
+        const bool was = last_ & b.mask, is = buttons & b.mask;
+        if (was == is || !b.vk) continue;  // the sticks make no keystrokes
+        rex::input::X_INPUT_KEYSTROKE k{};
+        k.virtual_key = b.vk;
+        k.flags = is ? rex::input::X_INPUT_KEYSTROKE_KEYDOWN : rex::input::X_INPUT_KEYSTROKE_KEYUP;
+        k.user_index = 0;
+        if (keystrokes_.size() < 64) keystrokes_.push_back(k);
+      }
       last_ = buttons;
+      ++packet_;
     }
     return buttons;
   }
@@ -168,38 +186,32 @@ class DevPadDriver final : public rex::hid::IInputDriver {
   bool started_ = false;
   std::chrono::steady_clock::time_point start_;
   uint32_t last_ = 0;
+  uint32_t packet_ = 0;
   uint32_t state_reads_ = 0;
-};
-
-std::unique_ptr<rex::IDriver> CreateDevPad() { return std::make_unique<DevPadDriver>(); }
-
-constexpr std::array<rex::DriverRegistration, 1> kDrivers = {
-    rex::DriverRegistration{rex::DriverType::kInput, "devpad", {}, &CreateDevPad}};
-
-class DevPadProvider final : public rex::IModule, public rex::IDriverModule {
- public:
-  REX_MODULE_SERVES(::rex::IDriverModule)
-  std::string_view GetName() const override { return "bf1943-devpad"; }
-  rex::Result<void> Connect(rex::IInterfaceFactory&) override { return {}; }
-  void Disconnect() override {}
-  rex::Result<void> Init() override { return rex::Ok(); }
-  void Shutdown() override {}
-  rex::IInterface* QueryInterface(std::string_view name, uint32_t version) override {
-    return rex::FindModuleInterface<rex::IDriverModule>(*this, name, version);
-  }
-  std::span<const rex::DriverRegistration> GetDrivers() const override { return kDrivers; }
+  uint32_t keystroke_reads_ = 0;
+  std::deque<rex::input::X_INPUT_KEYSTROKE> keystrokes_;
 };
 
 }  // namespace
 
-bool DevPadOn() {
+// The input system for this run: only the scripted pad when BF_DEV_PAD is set, else the runtime's default
+// (SDL pads plus the NOP stand in).
+std::unique_ptr<rex::system::IInputSystem> CreateInputSystem(bool tool_mode) {
   const char* script = std::getenv("BF_DEV_PAD");
-  return script && *script;
-}
-
-rex::IModule* DevPadModule() {
-  static DevPadProvider provider;
-  return DevPadOn() ? &provider : nullptr;
+  if (tool_mode || !script || !*script) {
+    auto system = rex::input::CreateDefaultInputSystem(tool_mode);
+#if !defined(_WIN32)
+    // As bf1943_app.h's CreateSharedInputSystem for players: on Linux every pad is the one player's.
+    system->SetDeviceAssignment(std::make_unique<rex::input::SharedAssignment>());
+#endif
+    return system;
+  }
+  auto presses = ParseScript(script);
+  REXLOG_INFO("BF dev pad: {} scripted presses, real pads ignored for this run", presses.size());
+  auto system = std::make_unique<rex::input::InputSystem>(nullptr);
+  system->AddDriver(std::make_unique<DevPadDriver>(std::move(presses)));
+  system->SetDeviceAssignment(std::make_unique<rex::input::SlotAssignment>());  // as the default system does
+  return system;
 }
 
 }  // namespace bf1943

@@ -31,16 +31,12 @@
 #pragma once
 
 #include <rex/graphics/shared_memory.h>
-#include <rex/guest.h>
-#include <rex/system/kernel_state.h>
-#include <rex/utility.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <thread>
 #include <utility>
-#include <unordered_map>
 #include <vector>
 
 #include "Buffer.h"
@@ -54,58 +50,17 @@
 
 namespace native_x_renderer {
 
-// SDK v0.11+ port: v0.10's guest memory object, as the renderer uses it. v0.11's SharedMemory sits on IPhysicalMemory
-// (whole physical memory, one mapping) and IPhysicalWriteWatch (write listeners) instead: TranslatePhysical is that
-// mapping's base plus the address, TranslateVirtual the title's address space, and an invalidation callback is a
-// write listener (the same contract: the written range in, the range that needs no watch out).
-class PhysicalView {
- public:
-  using InvalidationCallback = std::pair<uint32_t, uint32_t> (*)(void* context, uint32_t start, uint32_t length,
-                                                                 bool exact);
-  PhysicalView(rex::IPhysicalMemory& memory, rex::IPhysicalWriteWatch& watch);
-
-  template <typename T = uint8_t*>
-  T TranslatePhysical(uint32_t address) const {
-    return reinterpret_cast<T>(base_ + (address & 0x1FFFFFFFu));
-  }
-  template <typename T = uint8_t*>
-  T TranslateVirtual(uint32_t address) const {
-    auto* k = rex::system::kernel_state();
-    return k ? k->memory()->TranslateVirtual<T>(address) : T{};
-  }
-  void* RegisterPhysicalMemoryInvalidationCallback(InvalidationCallback callback, void* context) const;
-  void UnregisterPhysicalMemoryInvalidationCallback(void* handle) const;
-  rex::IPhysicalWriteWatch& watch() const { return *watch_; }
-
- private:
-  uint8_t* base_ = nullptr;
-  rex::IPhysicalWriteWatch* watch_;
-};
-
 class GuestMemory final : public rex::graphics::SharedMemory {
  public:
-  GuestMemory(rex::IPhysicalMemory& memory, rex::IPhysicalWriteWatch& watch, Diligent::IRenderDevice* device,
-              Recorder* recorder);
+  GuestMemory(rex::memory::Memory& memory, Diligent::IRenderDevice* device, Recorder* recorder);
   ~GuestMemory() override;
 
   bool Initialize();
   // Every page of the guest memory read once through the view the mirror copies from (TranslatePhysical), on a thread
   // of its own, so that the copies find them mapped (D108).
   void MapAhead();
-  // A device that binds less than 512 MB of a storage buffer (MaxStorageBufferRange): the shaders take the mirror in
-  // `count` bindings (2 or 4, the translator's split shared memory), each 512 MB / count. Their views, in order.
-  void SetBindingCount(uint32_t count);
-  uint32_t binding_count() const { return uint32_t(binding_views_.size()); }
-  Diligent::IDeviceObject* const* binding_views() const { return binding_view_ptrs_.data(); }
-  // The view a pass that writes the mirror binds for a write at `address` of at most a binding's size: the whole
-  // buffer's UAV, or (split) one as wide as a binding from *base, at or below `address`.
-  Diligent::IBufferView* WriteView(uint32_t address, uint32_t* base);
-  // The title detaches (SDK v0.11+: the bfnative driver's detach observer, after its command processor stopped): the
-  // write listeners on the title's memory released, which the title's unload waits for. Nothing reads guest memory
-  // afterwards.
-  void DetachTitle();
   // The guest memory it mirrors, for reading guest data on the CPU.
-  const PhysicalView& memory() const { return view_; }
+  using rex::graphics::SharedMemory::memory;
 
   Diligent::IBuffer* buffer() const { return buffer_; }
   // D174: with a sparse mirror, the 1 MB blocks [start, start + length) falls in get memory before anything writes
@@ -234,9 +189,6 @@ class GuestMemory final : public rex::graphics::SharedMemory {
   Diligent::RefCntAutoPtr<Diligent::IBuffer> buffer_;
   Diligent::IBufferView* srv_ = nullptr;
   Diligent::IBufferView* uav_ = nullptr;
-  std::vector<Diligent::RefCntAutoPtr<Diligent::IBufferView>> binding_views_;  // SetBindingCount; empty: whole
-  std::vector<Diligent::IDeviceObject*> binding_view_ptrs_;
-  std::unordered_map<uint32_t, Diligent::RefCntAutoPtr<Diligent::IBufferView>> write_views_;  // by base
   // D174: the sparse mirror's memory (1 MB pages, one per block bound, in the order bound), the fence its binds
   // signal (the context's next submission waits on it), and per 1 MB block of the mirror whether it has memory.
   static constexpr uint32_t kBlockLog2 = 20;
@@ -263,7 +215,6 @@ class GuestMemory final : public rex::graphics::SharedMemory {
   uint32_t copies_ = 0;
   uint64_t total_copies_ = 0;
   bool in_read_state_ = false;
-  PhysicalView view_;
   void* trace_callback_ = nullptr;
 };
 

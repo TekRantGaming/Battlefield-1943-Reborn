@@ -1,5 +1,6 @@
 /**
  * @file        rexglue/ui/progress.h
+ * @brief       ProgressView -- task-list renderer for codegen pipeline
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
@@ -10,6 +11,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -19,23 +21,25 @@
 #include <thread>
 #include <vector>
 
-#include "codegen/progress_reporter.h"
-#include <rex/types.h>
+#include <rex/codegen/progress_reporter.h>
 
 namespace rexglue::ui {
 
-/** Task list view of a codegen run. */
-class ProgressView final : public rex::codegen::IProgressReporter {
+/** Per-module task-list view that implements rex::codegen::ProgressReporter. */
+class ProgressView final : public rex::codegen::ProgressReporter {
  public:
   explicit ProgressView(std::string_view title);
   ~ProgressView() override;
 
-  void BinaryLoaded(const rex::codegen::BinaryIdentity& info) override;
-  void ModuleStarted(std::string_view name, std::size_t index, std::size_t total) override;
-  void ModulePhaseStarted(std::string_view name) override;
-  void ModuleFinished(std::chrono::milliseconds elapsed) override;
-  void ProjectPhaseStarted(std::string_view name) override;
-  void ProjectPhaseFinished() override;
+  ProgressView(const ProgressView&) = delete;
+  ProgressView& operator=(const ProgressView&) = delete;
+
+  void binaryInfo(const rex::codegen::BinaryInfo& info) override;
+  void moduleStarted(std::string_view name, std::size_t index, std::size_t total) override;
+  void phaseChanged(std::string_view name) override;
+  void moduleFinished(std::chrono::milliseconds elapsed) override;
+  void projectPhaseStarted(std::string_view name) override;
+  void projectPhaseFinished() override;
 
  private:
   struct ModuleEntry {
@@ -45,23 +49,25 @@ class ProgressView final : public rex::codegen::IProgressReporter {
     bool finished = false;
   };
 
-  enum class ActiveLineType : u8 { kNone, kModule, kProjectPhase };
+  enum class ActiveLineKind { None, Module, ProjectPhase };
 
-  void RenderActiveLine();
-  void RunSpinner(const std::stop_token& stop);
+  void renderActiveLine();
+  void clearActiveLine();
+  void spinnerLoop();
 
   std::mutex state_mutex_;
-  std::string heading_;
+  std::string title_;
   std::vector<ModuleEntry> modules_;
   std::size_t current_module_ = 0;
   std::string current_phase_;
   std::string current_project_phase_;
   std::size_t spinner_frame_ = 0;
-  ActiveLineType active_line_type_ = ActiveLineType::kNone;
+  ActiveLineKind active_line_kind_ = ActiveLineKind::None;
   bool tty_ = false;
 
-  std::condition_variable_any spinner_cv_;
-  std::jthread spinner_thread_;
+  std::atomic<bool> stop_spinner_{false};
+  std::condition_variable spinner_cv_;
+  std::thread spinner_thread_;
 };
 
 }  // namespace rexglue::ui

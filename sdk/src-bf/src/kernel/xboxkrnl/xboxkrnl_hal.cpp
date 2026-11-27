@@ -9,27 +9,29 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
-#include <rex/logging/log_category.h>
-#include "kernel/categories.h"
-#include <rex/ppc/hook.h>
+// Disable warnings about unused parameters for kernel functions
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+
+#include <rex/kernel/xboxkrnl/private.h>
+#include <rex/logging.h>
+#include <rex/hook.h>
 #include <rex/types.h>
-#include <rex/kernel/title_runtime.h>
-#include <rex/kernel/title_exit.h>
-#include <rex/kernel/types/status.h>
-#include "kernel/title_state.h"
-#include "kernel/kernel.h"
+#include <rex/system/kernel_state.h>
+#include <rex/system/xtypes.h>
 
 namespace rex::kernel::xboxkrnl {
 
-/**
- * Exits the title on a return to firmware.
- *
- * @param routine The reentry routine, which must be 1 (HalRebootRoutine).
- */
 void HalReturnToFirmware_entry(u32 routine) {
-  REX_ASSERT(routine == 1);
-  REXKRNL_INFO("Title requested a return to firmware");
-  kernel::GetCurrentState().ExitTitle(rex::kernel::TitleExitReason::kHardExit);
+  // void
+  // IN FIRMWARE_REENTRY  Routine
+
+  // Routine must be 1 'HalRebootRoutine'
+  assert_true(routine == 1);
+
+  // TODO(benvank): diediedie much more gracefully
+  // Not sure how to blast back up the stack in LLVM without exceptions, though.
+  REXKRNL_ERROR("Game requested shutdown via HalReturnToFirmware");
+  exit(0);
 }
 
 }  // namespace rex::kernel::xboxkrnl

@@ -32,11 +32,9 @@
 #include <vector>
 
 #include "seat_info.h"
-#include "compat/sdk_module.h"
 #include "vehicle_binds.h"
 #include <rex/cvar.h>
 #include <rex/input/mnk/mnk_input_driver.h>
-#include <rex/logging.h>
 #include <rex/ppc/context.h>
 
 #if defined(_WIN32)
@@ -140,7 +138,7 @@ namespace {
 
 PPCFunc* RuntimeExport(const char* name) {
 #if defined(_WIN32)
-  static HMODULE runtime = bf1943::SdkModule("rexkernel");  // v0.11: the kernel and XAM exports (__imp__*) are rexkernel's
+  static HMODULE runtime = GetModuleHandleA("rexruntime.dll");
   return reinterpret_cast<PPCFunc*>(GetProcAddress(runtime, name));
 #else
   return reinterpret_cast<PPCFunc*>(dlsym(RTLD_NEXT, name));
@@ -324,15 +322,6 @@ void DevPadSticks(uint8_t* gamepad, bool seated) {
 }
 #endif
 
-// The seat drives or flies (it binds the throttle: a driver's, a pilot's), where KeyboardInVehicle's keys apply. A gun
-// seat or a passenger's binds no throttle; its left trigger zooms (the game's map, run veh1: c11=LT, nothing on the left
-// stick), so there the keys stay as on foot: the zoom key zooms and W does nothing (issue 77: W aimed down the sights
-// in every gun seat, through KeyboardInVehicle's throttle). A seat not known yet counts as driving, as before.
-bool ThrottleSeat() {
-  SeatInfo seat;
-  return !LocalSeat(seat) || seat.kind == SeatKind::kNone || seat.throttle;
-}
-
 void KeyboardInVehicle(uint8_t* gamepad) {
   const int key_ly = rex::input::mnk::LastKeyLeftStick(true);
   const bool key_lt = rex::input::mnk::LastKeyTrigger(false) != 0;
@@ -368,7 +357,7 @@ std::vector<std::string> ButtonsPressing(const std::string& game_button) {
 // prompts show first: in a vehicle KeyboardInVehicle's, the walk keys throttle (the left trigger) and brake (the left
 // bumper) and the zoom key fires the second weapon (the right bumper), the bumpers' own keys still pressing them.
 std::vector<const char*> KeybindsPressing(const std::string& button, bool seated) {
-  if (seated && ThrottleSeat()) {
+  if (seated) {
     if (button == "lt") return {"keybind_lstick_up"};
     if (button == "lb") return {"keybind_lstick_down", "keybind_left_shoulder"};
     if (button == "rb") return {"keybind_left_trigger", "keybind_right_shoulder"};
@@ -402,13 +391,6 @@ PPCFunc* RuntimeExportForRumble() { return RuntimeExport("__imp__XamInputSetStat
 // took what it needed. `menu_open`: our menu has the pad (the game got an empty one); the aim toggle lowers.
 // `seated`: the player sits in a vehicle (the keyboard's vehicle keys; no aim toggle, whose trigger is the throttle
 // there).
-// Hotfix 0.4.8.2: the player's keyboard and mouse settings in the log at the start (0.4.8.1 turned them off for every
-// player who never set them: SDK v0.11's defaults were off, v0.10's on).
-void LogInputSettings() {
-  REXLOG_INFO("BF input: Keyboard & mouse {}, the mouse turns the camera {} (mnk_mode, mnk_mouse)",
-              REXCVAR_GET(mnk_mode) ? "on" : "off", REXCVAR_GET(mnk_mouse) ? "on" : "off");
-}
-
 void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated) {
   if (menu_open) {
     g_aim_raised = g_aim_was_down = false;
@@ -418,7 +400,7 @@ void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated) {
   DevPadSticks(gamepad, seated);
 #endif
   AxisRemap(gamepad);
-  if (seated && ThrottleSeat()) KeyboardInVehicle(gamepad);
+  if (seated) KeyboardInVehicle(gamepad);
   uint32_t in = uint32_t(gamepad[0]) << 8 | gamepad[1];
   if (gamepad[2] > 30) in |= 0x10000;
   if (gamepad[3] > 30) in |= 0x20000;

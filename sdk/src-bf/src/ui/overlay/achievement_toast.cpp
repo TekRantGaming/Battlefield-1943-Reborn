@@ -1,40 +1,46 @@
-#include "ui/overlay/achievement_toast.h"
+/**
+ * @file        ui/overlay/achievement_toast.cpp
+ * @brief       Achievement toast implementation. See achievement_toast.h for details.
+ *
+ * @copyright   Copyright (c) 2026 Rien Gupta <rgupta9@scu.edu>
+ *              All rights reserved.
+ *
+ * @license     BSD 3-Clause License
+ *              See LICENSE file in the project root for full license text.
+ */
+#include <rex/ui/overlay/achievement_toast.h>
 #include <imgui.h>
 
 #include <algorithm>
 
-#include <rex/ui/style.h>
+#include <rex/ui/immediate_drawer.h>
 
 namespace rex::ui {
 
-AchievementToastDialog::AchievementToastDialog(const ModuleOverlayContext& context)
-    : AchievementNotificationDialog(context), icon_cache_(context.achievements) {}
+AchievementToastDialog::AchievementToastDialog(ImGuiDrawer* drawer,
+                                               ImmediateDrawer* immediate_drawer,
+                                               rex::Runtime* runtime)
+    : AchievementNotificationDialog(drawer), icon_cache_(immediate_drawer, runtime) {}
 
 AchievementToastDialog::~AchievementToastDialog() {}
 
-void AchievementToastDialog::Push(const Achievement& achievement) {
+void AchievementToastDialog::Push(const rex::system::AchievementEvent& event) {
   std::lock_guard<std::mutex> lock(mutex_);
-  queue_.push_back({achievement, std::chrono::steady_clock::now()});
+  queue_.push_back({event, std::chrono::steady_clock::now()});
 }
 
-bool AchievementToastDialog::NeedsContinuousPaint() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return !queue_.empty();
-}
-
-bool AchievementToastDialog::Draw(ImGuiIO& io) {
+void AchievementToastDialog::OnDraw(ImGuiIO& io) {
   auto now = std::chrono::steady_clock::now();
 
   PendingToast toast;
-  f32 age = 0.0f;
+  float age = 0.0f;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     while (!queue_.empty()) {
-      auto& visible_since = queue_.front().visible_since;
-      if (!visible_since) {
-        visible_since = now;
+      if (!queue_.front().visible_since) {
+        queue_.front().visible_since = now;
       }
-      age = std::chrono::duration<f32>(now - *visible_since).count();
+      age = std::chrono::duration<float>(now - *queue_.front().visible_since).count();
       if (age >= kDisplaySeconds) {
         queue_.pop_front();
       } else {
@@ -42,40 +48,38 @@ bool AchievementToastDialog::Draw(ImGuiIO& io) {
       }
     }
     if (queue_.empty()) {
-      return true;
+      return;
     }
     toast = queue_.front();
   }
 
-  f32 alpha = 1.0f;
+  float alpha = 1.0f;
   if (age < 0.3f)
     alpha = age / 0.3f;
   else if (age > kDisplaySeconds - 0.5f)
     alpha = (kDisplaySeconds - age) / 0.5f;
   alpha = std::max(0.0f, std::min(1.0f, alpha));
 
-  const Style& style = ui_.GetStyle();
-  const Metrics& metrics = style.metrics;
-  const ToastStyle& s = style.toast;
-  const f32 pad = metrics.toast_padding;
-  const f32 w = metrics.toast_width;
-  ImGui::SetNextWindowPos(
-      ImVec2(io.DisplaySize.x - w - pad, io.DisplaySize.y - metrics.toast_stack_height - pad),
-      ImGuiCond_Always);
-  ImGui::SetNextWindowSize(ImVec2(w, metrics.toast_height), ImGuiCond_Always);
-  ImGui::SetNextWindowBgAlpha(metrics.window_alpha.toast * alpha);
+  const float pad = 16.0f;
+  const float w = 320.0f;
+  ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - w - pad, io.DisplaySize.y - 80.0f - pad),
+                          ImGuiCond_Always);
+  ImGui::SetNextWindowSize(ImVec2(w, 70.0f), ImGuiCond_Always);
+  const ToastStyle& s = imgui_drawer()->style().toast;
+  ImGui::SetNextWindowBgAlpha(s.background_alpha * alpha);
 
   ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoNav |
                            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                            ImGuiWindowFlags_NoInputs;
-  auto faded = [alpha](Color c) { return ToImVec4(c.WithAlpha(c.a * alpha)); };
+  // Colors carry the fade envelope; the style holds them at full opacity.
+  auto faded = [alpha](ImVec4 c) { return ImVec4(c.x, c.y, c.z, c.w * alpha); };
 
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, metrics.toast_rounding);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, s.rounding);
   ImGui::PushStyleColor(ImGuiCol_Text, faded(s.text));
   if (ImGui::Begin("##ach_toast", nullptr, flags)) {
-    ImTextureData* icon = icon_cache_.GetIcon(toast.achievement);
+    ImmediateTexture* icon = icon_cache_.GetIcon(toast.event.achievement);
     if (icon) {
-      ImGui::Image(ImTextureRef(icon), ImVec2(metrics.icon_size, metrics.icon_size));
+      ImGui::Image(reinterpret_cast<ImTextureID>(icon), ImVec2(s.icon_size, s.icon_size));
       ImGui::SameLine();
     }
 
@@ -83,15 +87,14 @@ bool AchievementToastDialog::Draw(ImGuiIO& io) {
     ImGui::PushStyleColor(ImGuiCol_Text, faded(s.title));
     ImGui::TextUnformatted("Achievement Unlocked");
     ImGui::PopStyleColor();
-    ImGui::TextUnformatted(toast.achievement.label.c_str());
+    ImGui::TextUnformatted(toast.event.achievement.label.c_str());
     ImGui::SameLine();
-    ImGui::TextDisabled(" (%dG)", static_cast<int>(toast.achievement.gamerscore));
+    ImGui::TextDisabled(" (%dG)", static_cast<int>(toast.event.achievement.gamerscore));
     ImGui::EndGroup();
   }
   ImGui::End();
   ImGui::PopStyleColor();
   ImGui::PopStyleVar();
-  return true;
 }
 
 }  // namespace rex::ui

@@ -1,5 +1,6 @@
 /**
- * @file        tests/unit/codegen/output_stamp_test.cpp
+ * @file        codegen/output_stamp_test.cpp
+ * @brief       Tests for the codegen input fingerprint and output stamp
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
@@ -8,8 +9,7 @@
  *              See LICENSE file in the project root for full license text.
  */
 
-#include "rex_test.h"
-#include "temp_folder.h"
+#include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
 #include <fstream>
@@ -17,8 +17,8 @@
 #include <string>
 #include <vector>
 
-#include "codegen/config.h"
-#include "codegen/output_stamp.h"
+#include <rex/codegen/config.h>
+#include <rex/codegen/output_stamp.h>
 
 namespace fs = std::filesystem;
 using namespace rex::codegen;
@@ -26,11 +26,18 @@ using namespace rex::codegen;
 namespace {
 
 struct Scratch {
-  rex::test::TempFolder folder;
   fs::path root;
 
   explicit Scratch(std::string_view name)
-      : folder(std::string("rexglue_stamp_") + std::string(name) + "_"), root(folder.path) {}
+      : root(fs::temp_directory_path() / "rexglue_stamp_test" / fs::path(name)) {
+    fs::remove_all(root);
+    fs::create_directories(root);
+  }
+
+  ~Scratch() {
+    std::error_code ec;
+    fs::remove_all(root, ec);
+  }
 
   fs::path WriteFile(std::string_view name, std::string_view content) const {
     auto path = root / fs::path(name);
@@ -41,7 +48,7 @@ struct Scratch {
 
 }  // namespace
 
-REX_TEST_CASE("Identical inputs produce identical fingerprints", "[codegen][output_stamp]") {
+TEST_CASE("Identical inputs produce identical fingerprints", "[output_stamp]") {
   Scratch scratch("stable");
   auto binary = scratch.WriteFile("game.xex", "binary bytes");
   auto config = scratch.WriteFile("game.toml", "project = 'x'");
@@ -53,7 +60,7 @@ REX_TEST_CASE("Identical inputs produce identical fingerprints", "[codegen][outp
         ComputeInputFingerprint(inputs, "1.2.3", flags));
 }
 
-REX_TEST_CASE("Changed file content changes the fingerprint", "[codegen][output_stamp]") {
+TEST_CASE("Changed file content changes the fingerprint", "[output_stamp]") {
   Scratch scratch("content");
   auto binary = scratch.WriteFile("game.xex", "binary bytes");
   std::vector<fs::path> inputs{binary};
@@ -65,7 +72,7 @@ REX_TEST_CASE("Changed file content changes the fingerprint", "[codegen][output_
   CHECK(ComputeInputFingerprint(inputs, "1.2.3", flags) != before);
 }
 
-REX_TEST_CASE("Changed SDK version changes the fingerprint", "[codegen][output_stamp]") {
+TEST_CASE("Changed SDK version changes the fingerprint", "[output_stamp]") {
   Scratch scratch("version");
   auto binary = scratch.WriteFile("game.xex", "binary bytes");
   std::vector<fs::path> inputs{binary};
@@ -75,7 +82,7 @@ REX_TEST_CASE("Changed SDK version changes the fingerprint", "[codegen][output_s
         ComputeInputFingerprint(inputs, "1.2.4", flags));
 }
 
-REX_TEST_CASE("Changed codegen flag changes the fingerprint", "[codegen][output_stamp]") {
+TEST_CASE("Changed codegen flag changes the fingerprint", "[output_stamp]") {
   Scratch scratch("flags");
   auto binary = scratch.WriteFile("game.xex", "binary bytes");
   std::vector<fs::path> inputs{binary};
@@ -87,40 +94,32 @@ REX_TEST_CASE("Changed codegen flag changes the fingerprint", "[codegen][output_
         ComputeInputFingerprint(inputs, "1.2.3", after));
 }
 
-REX_TEST_CASE("An unreadable input is not fingerprinted as empty content",
-              "[codegen][output_stamp]") {
+TEST_CASE("An unreadable input is not fingerprinted as empty content", "[output_stamp]") {
   Scratch scratch("unreadable");
   fs::create_directories(scratch.root / "a");
   fs::create_directories(scratch.root / "b" / "input.bin");
 
   auto readable = scratch.root / "a" / "input.bin";
-  std::ofstream(readable, std::ios::binary).close();
+  std::ofstream(readable, std::ios::binary);
 
   // Same basename, so only the digest can separate the two fingerprints.
-  std::vector<fs::path> as_file{readable};
-  std::vector<fs::path> as_directory{scratch.root / "b" / "input.bin"};
+  std::vector<fs::path> asFile{readable};
+  std::vector<fs::path> asDirectory{scratch.root / "b" / "input.bin"};
   std::vector<std::string> flags;
 
-  CHECK(ComputeInputFingerprint(as_file, "1.2.3", flags) !=
-        ComputeInputFingerprint(as_directory, "1.2.3", flags));
+  CHECK(ComputeInputFingerprint(asFile, "1.2.3", flags) !=
+        ComputeInputFingerprint(asDirectory, "1.2.3", flags));
 }
 
-REX_TEST_CASE("A missing input file still yields a usable fingerprint", "[codegen][output_stamp]") {
+TEST_CASE("A missing input file still yields a usable fingerprint", "[output_stamp]") {
   Scratch scratch("missing");
-  fs::create_directories(scratch.root / "present");
-  const auto empty_file = scratch.root / "present" / "absent.xex";
-  std::ofstream(empty_file, std::ios::binary).close();
   std::vector<fs::path> inputs{scratch.root / "absent.xex"};
-  std::vector<fs::path> present{empty_file};
   std::vector<std::string> flags;
 
-  const auto first = ComputeInputFingerprint(inputs, "1.2.3", flags);
-  CHECK_FALSE(first.empty());
-  CHECK(first == ComputeInputFingerprint(inputs, "1.2.3", flags));
-  CHECK(first != ComputeInputFingerprint(present, "1.2.3", flags));
+  CHECK_FALSE(ComputeInputFingerprint(inputs, "1.2.3", flags).empty());
 }
 
-REX_TEST_CASE("Stamp round trips through Serialize and Load", "[codegen][output_stamp]") {
+TEST_CASE("Stamp round-trips through Serialize and Load", "[output_stamp]") {
   Scratch scratch("roundtrip");
 
   OutputStamp stamp;
@@ -131,22 +130,19 @@ REX_TEST_CASE("Stamp round trips through Serialize and Load", "[codegen][output_
   std::ofstream(path, std::ios::binary) << stamp.Serialize();
 
   auto loaded = OutputStamp::Load(path);
-  if (!loaded) {
-    FAIL("the stamp did not load");
-    return;
-  }
+  REQUIRE(loaded.has_value());
   CHECK(loaded->fingerprint == "abc123");
   CHECK(loaded->outputs == stamp.outputs);
 }
 
-REX_TEST_CASE("Loading a malformed stamp yields nullopt", "[codegen][output_stamp]") {
+TEST_CASE("Loading a malformed stamp yields nullopt", "[output_stamp]") {
   Scratch scratch("malformed");
   auto path = scratch.WriteFile("codegen.stamp", "{ not json");
 
   CHECK_FALSE(OutputStamp::Load(path).has_value());
 }
 
-REX_TEST_CASE("A stamp from another layout version is rejected", "[codegen][output_stamp]") {
+TEST_CASE("A stamp from another layout version is rejected", "[output_stamp]") {
   Scratch scratch("otherversion");
   auto path = scratch.WriteFile(
       "codegen.stamp", R"({"version": 2, "fingerprint": "abc123", "outputs": ["proj_init.h"]})");
@@ -154,8 +150,7 @@ REX_TEST_CASE("A stamp from another layout version is rejected", "[codegen][outp
   CHECK_FALSE(OutputStamp::Load(path).has_value());
 }
 
-REX_TEST_CASE("Outputs are up to date when fingerprint matches and files exist",
-              "[codegen][output_stamp]") {
+TEST_CASE("Outputs are up to date when fingerprint matches and files exist", "[output_stamp]") {
   Scratch scratch("uptodate");
   scratch.WriteFile("proj_init.h", "header");
 
@@ -163,10 +158,10 @@ REX_TEST_CASE("Outputs are up to date when fingerprint matches and files exist",
   stamp.fingerprint = "abc123";
   stamp.outputs = {"proj_init.h"};
 
-  CHECK(AreOutputsUpToDate(stamp, "abc123", scratch.root));
+  CHECK(OutputsAreUpToDate(stamp, "abc123", scratch.root));
 }
 
-REX_TEST_CASE("Outputs are stale when the fingerprint differs", "[codegen][output_stamp]") {
+TEST_CASE("Outputs are stale when the fingerprint differs", "[output_stamp]") {
   Scratch scratch("differs");
   scratch.WriteFile("proj_init.h", "header");
 
@@ -174,20 +169,20 @@ REX_TEST_CASE("Outputs are stale when the fingerprint differs", "[codegen][outpu
   stamp.fingerprint = "abc123";
   stamp.outputs = {"proj_init.h"};
 
-  CHECK_FALSE(AreOutputsUpToDate(stamp, "def456", scratch.root));
+  CHECK_FALSE(OutputsAreUpToDate(stamp, "def456", scratch.root));
 }
 
-REX_TEST_CASE("Outputs are stale when a listed file was deleted", "[codegen][output_stamp]") {
+TEST_CASE("Outputs are stale when a recorded file was deleted", "[output_stamp]") {
   Scratch scratch("deleted");
 
   OutputStamp stamp;
   stamp.fingerprint = "abc123";
   stamp.outputs = {"proj_init.h"};
 
-  CHECK_FALSE(AreOutputsUpToDate(stamp, "abc123", scratch.root));
+  CHECK_FALSE(OutputsAreUpToDate(stamp, "abc123", scratch.root));
 }
 
-REX_TEST_CASE("Config lists every TOML it loaded", "[codegen][output_stamp]") {
+TEST_CASE("Config records every TOML it loaded", "[output_stamp]") {
   Scratch scratch("loadedfiles");
   scratch.WriteFile("base.toml", "skip_lr = true\n");
   auto main =
@@ -196,12 +191,12 @@ REX_TEST_CASE("Config lists every TOML it loaded", "[codegen][output_stamp]") {
   RecompilerConfig config;
   REQUIRE(config.Load(main.string()));
 
-  REQUIRE(config.loaded_files.size() == 2);
-  CHECK(config.loaded_files[0].find("main.toml") != std::string::npos);
-  CHECK(config.loaded_files[1].find("base.toml") != std::string::npos);
+  REQUIRE(config.loadedFiles.size() == 2);
+  CHECK(config.loadedFiles[0].find("main.toml") != std::string::npos);
+  CHECK(config.loadedFiles[1].find("base.toml") != std::string::npos);
 }
 
-REX_TEST_CASE("Depfile names the target and every input", "[codegen][output_stamp]") {
+TEST_CASE("Depfile names the target and every input", "[output_stamp]") {
   Scratch scratch("depfile");
   auto depfile = scratch.root / "codegen.d";
   auto target = scratch.root / "codegen.build.stamp";
@@ -218,7 +213,7 @@ REX_TEST_CASE("Depfile names the target and every input", "[codegen][output_stam
   CHECK(content.back() == '\n');
 }
 
-REX_TEST_CASE("Depfile escapes characters make treats as syntax", "[codegen][output_stamp]") {
+TEST_CASE("Depfile escapes characters make treats as syntax", "[output_stamp]") {
   Scratch scratch("depfile_escape");
   auto target = scratch.root / "out.stamp";
   std::vector<fs::path> inputs{scratch.root / "has space.toml", scratch.root / "hash#.toml"};
@@ -229,6 +224,6 @@ REX_TEST_CASE("Depfile escapes characters make treats as syntax", "[codegen][out
   std::ifstream in(depfile, std::ios::binary);
   std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
-  CHECK(content.find("has\\ space.toml") != std::string::npos);
-  CHECK(content.find("hash\\#.toml") != std::string::npos);
+  CHECK(content.find("has\ space.toml") != std::string::npos);
+  CHECK(content.find("hash\#.toml") != std::string::npos);
 }

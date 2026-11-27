@@ -19,7 +19,7 @@
 #endif
 #include <windows.h>
 #else
-#include <rex/memory/virtual_memory.h>  // SDK v0.11+ (v0.10: rex/memory/utils.h)
+#include <rex/memory/utils.h>
 #include <rex/thread.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -117,41 +117,10 @@ bool GuestMemory::TraceLine() {
   return lines.fetch_add(1) < 400;
 }
 
-PhysicalView::PhysicalView(rex::IPhysicalMemory& memory, rex::IPhysicalWriteWatch& watch) : watch_(&watch) {
-  // The whole of physical memory is one mapping (rex/guest.h): its first byte is the base.
-  auto span = memory.GetWritablePhysicalSpan({0, 1});
-  if (span) base_ = reinterpret_cast<uint8_t*>(span->data());
-}
-
-namespace {
-struct InvalidationListener final : rex::IPhysicalWriteListener {
-  PhysicalView::InvalidationCallback callback = nullptr;
-  void* context = nullptr;
-  rex::ScopeGuard guard;
-  rex::PhysicalRange OnPhysicalWrite(rex::PhysicalRange range, bool exact) override {
-    auto [start, length] = callback(context, range.address, range.length, exact);
-    return {start, length};
-  }
-};
-}  // namespace
-
-void* PhysicalView::RegisterPhysicalMemoryInvalidationCallback(InvalidationCallback callback, void* context) const {
-  auto* listener = new InvalidationListener;
-  listener->callback = callback;
-  listener->context = context;
-  listener->guard = watch_->AddWriteListener(*listener);
-  return listener;
-}
-
-void PhysicalView::UnregisterPhysicalMemoryInvalidationCallback(void* handle) const {
-  delete static_cast<InvalidationListener*>(handle);  // its guard removes it
-}
-
-GuestMemory::GuestMemory(rex::IPhysicalMemory& memory, rex::IPhysicalWriteWatch& watch, IRenderDevice* device,
-                         Recorder* recorder)
-    : SharedMemory(memory, watch), device_(device), recorder_(recorder), view_(memory, watch) {
+GuestMemory::GuestMemory(rex::memory::Memory& memory, IRenderDevice* device, Recorder* recorder)
+    : SharedMemory(memory), device_(device), recorder_(recorder) {
   if (TracePage()) {
-    trace_callback_ = view_.RegisterPhysicalMemoryInvalidationCallback(
+    trace_callback_ = memory.RegisterPhysicalMemoryInvalidationCallback(
         [](void* self, uint32_t start, uint32_t length, bool exact) -> std::pair<uint32_t, uint32_t> {
           const uint32_t page = TracePage();
           if (length && start >> 12 <= page && page <= (start + length - 1) >> 12 && TraceLine()) {
@@ -166,58 +135,6 @@ GuestMemory::GuestMemory(rex::IPhysicalMemory& memory, rex::IPhysicalWriteWatch&
   }
 }
 
-void GuestMemory::SetBindingCount(uint32_t count) {
-  binding_views_.clear();
-  binding_view_ptrs_.clear();
-  write_views_.clear();
-  if (count <= 1 || !buffer_) return;
-  const uint32_t part = kBufferSize / count;
-  for (uint32_t i = 0; i < count; ++i) {
-    BufferViewDesc desc;
-    desc.Name = "NativeXRenderer guest memory mirror part";
-    desc.ViewType = BUFFER_VIEW_SHADER_RESOURCE;
-    desc.ByteOffset = uint64_t(i) * part;
-    desc.ByteWidth = part;
-    RefCntAutoPtr<IBufferView> view;
-    buffer_->CreateView(desc, &view);
-    if (!view) {
-      REXLOG_ERROR("[native_x_renderer] guest memory mirror: part {} of {} could not be made", i, count);
-      binding_views_.clear();
-      binding_view_ptrs_.clear();
-      return;
-    }
-    binding_views_.push_back(view);
-    binding_view_ptrs_.push_back(view.RawPtr());
-  }
-}
-
-IBufferView* GuestMemory::WriteView(uint32_t address, uint32_t* base) {
-  *base = 0;
-  if (binding_views_.empty()) return uav_;
-  const uint32_t part = kBufferSize / uint32_t(binding_views_.size());
-  // From the 64 KB below the address (aligned for any device), as wide as a binding, inside the buffer.
-  const uint32_t start = std::min(address & ~0xFFFFu, kBufferSize - part);
-  *base = start;
-  RefCntAutoPtr<IBufferView>& view = write_views_[start];
-  if (!view) {
-    BufferViewDesc desc;
-    desc.Name = "NativeXRenderer guest memory mirror write window";
-    desc.ViewType = BUFFER_VIEW_UNORDERED_ACCESS;
-    desc.ByteOffset = start;
-    desc.ByteWidth = part;
-    buffer_->CreateView(desc, &view);
-  }
-  return view;
-}
-
-void GuestMemory::DetachTitle() {
-  if (trace_callback_) memory().UnregisterPhysicalMemoryInvalidationCallback(trace_callback_);
-  trace_callback_ = nullptr;
-  stop_mapping_ = true;
-  if (map_thread_.joinable()) map_thread_.join();
-  ShutdownCommon();  // the SharedMemory's write listener
-}
-
 GuestMemory::~GuestMemory() {
   if (trace_callback_) memory().UnregisterPhysicalMemoryInvalidationCallback(trace_callback_);
   stop_mapping_ = true;
@@ -227,9 +144,9 @@ GuestMemory::~GuestMemory() {
 
 bool GuestMemory::Initialize() {
   InitializeCommon();
-  page_hashes_.assign(kBufferSize >> GetPageSizeLog2(), 0);
-  page_writes_.assign(kBufferSize >> GetPageSizeLog2(), PageWrites{});
-  checked_window_.assign(kBufferSize >> GetPageSizeLog2(), 0);
+  page_hashes_.assign(kBufferSize >> page_size_log2(), 0);
+  page_writes_.assign(kBufferSize >> page_size_log2(), PageWrites{});
+  checked_window_.assign(kBufferSize >> page_size_log2(), 0);
   BufferDesc desc;
   desc.Name = "NativeXRenderer guest memory";
   desc.Size = kBufferSize;
@@ -303,7 +220,7 @@ bool GuestMemory::Initialize() {
                 kBufferSize >> 20);
   }
   copy_committed_.assign(kBufferSize / kCopyCommitSize, false);
-  copy_valid_.assign(kBufferSize >> GetPageSizeLog2(), false);
+  copy_valid_.assign(kBufferSize >> page_size_log2(), false);
   compare_unwatched_ = copy_ && REXCVAR_GET(native_x_renderer_compare_unwatched);
   return true;
 }
@@ -333,7 +250,7 @@ void GuestMemory::MapAhead() {
 }
 
 bool GuestMemory::UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
-  const uint32_t page_shift = GetPageSizeLog2();
+  const uint32_t page_shift = page_size_log2();
   const uint32_t page_size = UINT32_C(1) << page_shift;
   for (const auto& [page_first, page_count] : upload_page_ranges) {
     if (const uint32_t trace = TracePage(); trace >= page_first && trace < page_first + page_count && TraceLine())
@@ -417,13 +334,13 @@ bool GuestMemory::UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>&
 
 bool GuestMemory::UnwatchedUnchanged(uint32_t page) const {
   if (!copy_valid_[page]) return false;
-  const uint32_t page_shift = GetPageSizeLog2();
+  const uint32_t page_shift = page_size_log2();
   const uint32_t start = page << page_shift;
   return !std::memcmp(memory().TranslatePhysical<const uint8_t*>(start), copy_ + start, size_t(1) << page_shift);
 }
 
 bool GuestMemory::UploadUnwatched(uint32_t page_first, uint32_t page_count) {
-  const uint32_t page_shift = GetPageSizeLog2();
+  const uint32_t page_shift = page_size_log2();
   const uint32_t start = page_first << page_shift, length = page_count << page_shift;
   for (uint32_t block = start / kCopyCommitSize; block <= (start + length - 1) / kCopyCommitSize; ++block) {
     if (copy_committed_[block]) continue;
@@ -465,11 +382,7 @@ bool GuestMemory::KeepUnwatched(uint32_t page) {
     if (writes.watching == Watching::kUnwatched) {
       // The game's writes while it was unwatched told no watch: told now, for a texture there.
       Watch(page);
-      {
-        // SDK v0.11+: v0.10's MemoryInvalidationCallback is OnPhysicalWrite, under the watch lock.
-        auto watch_lock = AcquireLock();
-        OnPhysicalWrite({page << GetPageSizeLog2(), UINT32_C(1) << GetPageSizeLog2()}, true);
-      }
+      MemoryInvalidationCallback(page << page_size_log2(), UINT32_C(1) << page_size_log2(), true);
     }
     if (texture_requests_ > 0) writes.watching = Watching::kAlways;
     return false;
@@ -492,7 +405,7 @@ void GuestMemory::MakeValid(uint32_t page_first, uint32_t page_count, bool alway
   // hold what guest memory does: the game rewrites single pages of a few small textures every frame, and their
   // widened invalidations made hundreds of texture pages around them be protected again and hashed every frame
   // (D97). The flag has no other use in the SDK.
-  MarkRangeValid(page_first << GetPageSizeLog2(), page_count << GetPageSizeLog2(), always_watched);
+  MakeRangeValid(page_first << page_size_log2(), page_count << page_size_log2(), always_watched);
 }
 
 void GuestMemory::Watch(uint32_t page) {
@@ -509,14 +422,14 @@ void GuestMemory::ResolveWritten(uint32_t start, uint32_t length) {
       length && start >> 12 <= trace && trace <= (start + length - 1) >> 12 && TraceLine())
     REXLOG_INFO("[native_x_renderer] trace {:08X}: resolve wrote {:08X} size {:X}", trace << 12, start, length);
   if (length && start < kBufferSize) {
-    const uint32_t page_shift = GetPageSizeLog2();
+    const uint32_t page_shift = page_size_log2();
     uint32_t last = std::min(start + (length - 1), kBufferSize - 1);
     for (uint32_t page = start >> page_shift; page <= last >> page_shift; ++page) {
       Watch(page);
       page_writes_[page].watching = Watching::kAlways;
     }
   }
-  MarkRangeValid(start, length, true);
+  MakeRangeValid(start, length, true);
 }
 
 void GuestMemory::EndFrame() {
@@ -578,16 +491,13 @@ bool GuestMemory::WriteIfChanged(uint32_t address, const uint8_t* data, uint32_t
   in_read_state_ = false;
   // The mirror holds the old data there now: the next request copies the pages from guest memory again, hashes
   // or not.
-  const uint32_t page_shift = GetPageSizeLog2();
+  const uint32_t page_shift = page_size_log2();
   for (uint32_t page = address >> page_shift; page <= (address + size - 1) >> page_shift; ++page) {
     page_hashes_[page] = 0;
     copy_valid_[page] = false;
     checked_window_[page] = 0;
   }
-  {
-    auto watch_lock = AcquireLock();  // (SDK v0.11+: OnPhysicalWrite runs under the watch lock)
-    OnPhysicalWrite({address, size}, true);
-  }
+  MemoryInvalidationCallback(address, size, true);
   return true;
 }
 
@@ -618,10 +528,7 @@ void GuestMemory::EnsureMirror(uint32_t start, uint32_t length) {
   if (ranges.empty()) return;
   const uint64_t value = ++sparse_fence_value_;
   // In order with the copies recorded around it: the bind first (it flushes the context), then what the context
-  // submits next waits for it on the GPU. The flush starts a new command buffer, with no descriptor set bound: the next
-  // draw commits its binding set again (Recorder::NoteSubmit; before, a draw after a block's first bind ran with none,
-  // which Mesa's lavapipe crashed on: the port's Linux client, 25 Nov 2026).
-  recorder_->NoteSubmit();
+  // submits next waits for it on the GPU.
   recorder_->Do([buffer = buffer_.RawPtr(), fence = sparse_fence_.RawPtr(), value,
                  ranges = std::move(ranges)](IDeviceContext* context) {
     SparseBufferMemoryBindInfo bind;
@@ -648,7 +555,7 @@ void GuestMemory::EnsureMirror(uint32_t start, uint32_t length) {
 void GuestMemory::Upload(uint32_t page_first, uint32_t page_count) {
   // The recorded hashes must be of the bytes the mirror receives, and the CPU may write the pages at any
   // time: copy them once, then hash and upload that copy.
-  const uint32_t page_shift = GetPageSizeLog2();
+  const uint32_t page_shift = page_size_log2();
   const uint32_t page_size = UINT32_C(1) << page_shift;
   uint32_t start = page_first << page_shift, length = page_count << page_shift;
   snapshot_.resize(length);
@@ -673,7 +580,7 @@ void GuestMemory::Upload(uint32_t page_first, uint32_t page_count) {
 
 uint64_t GuestMemory::MirrorHash(uint32_t start, uint32_t length) const {
   if (!length || start >= kBufferSize || length > kBufferSize - start) return 0;
-  const uint32_t page_shift = GetPageSizeLog2();
+  const uint32_t page_shift = page_size_log2();
   const uint32_t first = start >> page_shift, last = (start + (length - 1)) >> page_shift;
   for (uint32_t page = first; page <= last; ++page)
     if (!page_hashes_[page]) return 0;

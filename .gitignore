@@ -22,8 +22,6 @@
 !/bf/data/startup/trg_studios.png
 !/bf/data/linux/bf1943-reborn.png
 !/bf/data/achievements/*.png
-# The server type page's card pictures: stills from TekRantGaming's own 0.4.8 trailer footage (27 Nov 2026).
-!/bf/data/modes/*.jpg
 
 # Builds, test runs and tool output
 /bf/out/

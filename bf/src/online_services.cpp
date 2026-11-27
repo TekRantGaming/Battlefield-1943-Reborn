@@ -53,7 +53,6 @@
 #endif
 
 #include <rex/cvar.h>
-#include "compat/sdk_module.h"
 REXCVAR_DECLARE(std::string, bf_online_host);  // game_menu.cpp: the main backend
 
 namespace {
@@ -66,7 +65,7 @@ constexpr uint32_t kLogonConnectionEstablished = 0x001510F0;  // XONLINE_S_LOGON
 
 PPCFunc* RuntimeExport(const char* name) {
 #if defined(_WIN32)
-  static HMODULE runtime = bf1943::SdkModule("rexkernel");  // v0.11: the kernel and XAM exports (__imp__*) are rexkernel's
+  static HMODULE runtime = GetModuleHandleA("rexruntime.dll");
   return reinterpret_cast<PPCFunc*>(GetProcAddress(runtime, name));
 #else
   return reinterpret_cast<PPCFunc*>(dlsym(RTLD_NEXT, name));

@@ -28,7 +28,6 @@
 #else
 #include <dlfcn.h>
 #endif
-#include "compat/sdk_module.h"
 
 REXCVAR_DEFINE_DOUBLE(bf_master_volume, 100.0, "BF1943/Audio", "How loud all game audio is, 0 to 100 (%)");
 
@@ -36,7 +35,7 @@ namespace {
 
 PPCFunc* RuntimeExport(const char* name) {
 #if defined(_WIN32)
-  static HMODULE runtime = bf1943::SdkModule("rexkernel");  // v0.11: the kernel and XAM exports (__imp__*) are rexkernel's
+  static HMODULE runtime = GetModuleHandleA("rexruntime.dll");
   return reinterpret_cast<PPCFunc*>(GetProcAddress(runtime, name));
 #else
   return reinterpret_cast<PPCFunc*>(dlsym(RTLD_NEXT, name));

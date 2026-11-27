@@ -33,11 +33,6 @@ def main():
         # Reborn's own achievement pictures: drawn by tools/make_reborn_achievements.py (no game art).
         elif re.fullmatch(r'bf/data/achievements/\d+\.png', lower):
             pass
-        # The server type page's four card pictures (27 Nov 2026): stills from TekRantGaming's own 0.4.8 trailer
-        # footage, his recordings (no game art files, nothing generated).
-        elif lower in ('bf/data/modes/all.jpg', 'bf/data/modes/classic.jpg', 'bf/data/modes/night_ops.jpg',
-                       'bf/data/modes/daybreak.jpg'):
-            pass
         # Microsoft's WebView2 SDK for the news window's video (TekRantGaming, 16 Nov 2026: "Allow it in git"): its
         # header (over 1 MB) and the loader DLL Microsoft signs, these two files only.
         elif lower in ('bf/third_party/webview2/include/webview2.h', 'bf/third_party/webview2/x64/webview2loader.dll'):

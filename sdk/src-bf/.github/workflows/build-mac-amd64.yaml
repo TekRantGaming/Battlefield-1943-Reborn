@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -16,6 +15,5 @@ jobs:
     with:
       platform: mac-amd64
       ref: ${{ github.ref }}
-      publish_mode: ${{ github.ref_type == 'tag' && 'release' || 'artifact' }}
-      artifact_name: mac-amd64
+      publish_mode: release
     secrets: inherit

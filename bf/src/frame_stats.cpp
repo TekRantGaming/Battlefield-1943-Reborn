@@ -13,7 +13,6 @@
 #include <mutex>
 #include <vector>
 
-#include <rex/system/interfaces/graphics.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
@@ -28,7 +27,6 @@
 #else
 #include <dlfcn.h>
 #endif
-#include "compat/sdk_module.h"
 
 namespace bf1943 {
 uint64_t TakeLimitWaitedUs();  // frame_rate.cpp: our limit's waits since the last call
@@ -38,7 +36,7 @@ namespace {
 
 PPCFunc* RuntimeExport(const char* name) {
 #if defined(_WIN32)
-  static HMODULE runtime = bf1943::SdkModule("rexkernel");  // v0.11: the kernel and XAM exports (__imp__*) are rexkernel's
+  static HMODULE runtime = GetModuleHandleA("rexruntime.dll");
   return reinterpret_cast<PPCFunc*>(GetProcAddress(runtime, name));
 #else
   return reinterpret_cast<PPCFunc*>(dlsym(RTLD_NEXT, name));
@@ -168,9 +166,6 @@ extern "C" REX_FUNC(__imp__VdSwap) {
   static PPCFunc* original = RuntimeExport("__imp__VdSwap");
   LimitFrame();
   if (original) original(ctx, base);
-  // The swap is in the ring buffer: counted for NativeXRenderer's presenting with the guest's swaps (SDK v0.11+ port:
-  // v0.10's kernel did this in VdSwap; the bfnative driver's hooks keep the count now).
-  if (auto* graphics = rex::system::bfnative_graphics()) graphics->NoteSwapIssued();
   NoteRecent();
   NoteHitch();
   bf1943::LookFrame();  // look.cpp

@@ -14,7 +14,7 @@
 #include <cstring>
 
 namespace native_x_renderer::sdk {
-// Bumps the frame counter (sdk_cvars.cpp).
+// The SDK cvars forwarded to the GPU plugin's values (sdk_cvars.h) are looked up again from the next frame on.
 // The renderer calls it at the end of every frame.
 void NextFrame();
 }  // namespace native_x_renderer::sdk

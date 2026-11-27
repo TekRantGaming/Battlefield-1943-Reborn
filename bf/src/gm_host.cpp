@@ -86,12 +86,6 @@ REXCVAR_DEFINE_BOOL(bf_world_dynamic_storm, false, "BF1943/World",
 // regular storm"): the storm's type, NativeXRenderer's storm.h StormType.
 REXCVAR_DEFINE_INT32(bf_world_storm_type, 0, "BF1943/World",
                      "The match's storm: 0 a thunderstorm (the default), 1 a hurricane; both local to where they are");
-// Night Ops and Daybreak in a Custom Match (TekRantGaming, 27 Nov 2026: "custom match screen parity in settings ... a
-// toggle for daybreak and nightops presets like the servers have"): the match runs the event's schedule as the server
-// package's host does (server/gmhost.py World: NIGHT_OPS_STAGES, DAYBREAK_STAGES), and says so to every player's game.
-REXCVAR_DEFINE_INT32(bf_world_event, 0, "BF1943/World",
-                     "The match's event: 0 none (Classic), 1 Night Ops (18:30, a storm building with the tickets), 2 "
-                     "Daybreak (06:10, the same build); its schedule then drives the clock, clouds, weather and fog");
 REXCVAR_DEFINE_STRING(bf_world_admins, "", "BF1943/World",
                       "Player IDs (as the game's settings show them, separated by commas) whose games may change the "
                       "match's world while it runs");
@@ -124,7 +118,6 @@ struct MatchClock {  // match_rules.cpp: the match's rules and the round's clock
   int time_limit = 0;
   float seconds_left = -1;
   uint32_t round = 0;
-  float left = 1;
 };
 MatchClock CurrentMatchClock();
 // bots.cpp: a player's chat line as this host relayed it (a bot may answer it).
@@ -514,124 +507,7 @@ class Host {
     double storm_base = 0, storm_t = 0;
     uint32_t round = 0;
     Clock::time_point at;
-    // Night Ops and Daybreak (bf_world_event): the event, what an admin set this round (kHeld*), how far the round has
-    // gone (the build never goes back within a round), the stage said last, and the round the build is on.
-    int event = 0;
-    int held = 0;
-    double progress = 0;
-    int stage = -1;
-    uint32_t event_round = 0;
-    Clock::time_point ramp_from;
   } world;
-
-  // ---- Night Ops and Daybreak: server/gmhost.py's World (NIGHT_OPS_STAGES, DAYBREAK_STAGES), for a Custom Match.
-  // Night Ops (TekRantGaming, 20 and 25 Nov 2026): 18:30 held for the whole match, a clear night that clouds over from
-  // 40% of the round (the share of its tickets the team with fewer has lost) and a storm rolling in to the full storm
-  // at 80%. Daybreak (26 Nov 2026): 06:10 held, the same build with its own fog, mist and wind. Each new round starts
-  // clear (and at sunrise). An admin's F9 holds what it moved for the rest of the round; "Back to Night Ops" (the ask's
-  // flag 8) hands everything back to the schedule.
-  struct EventRow {
-    double at, cover, weather, fog, ground_fog, wind;  // wind < 0: not the build's (Night Ops' is the admin's)
-  };
-  static constexpr EventRow kNightOpsRows[5] = {
-      {0.00, 0.15, 0.00, 0.00, 0.00, -1},  // a clear night: stars and the moon
-      {0.40, 0.15, 0.00, 0.00, 0.00, -1},  // still clear at 40%
-      {0.55, 0.60, 0.30, 0.00, 0.00, -1},  // the clouds gather, the storm forms out at sea
-      {0.80, 0.90, 1.00, 0.50, 0.50, -1},  // it rolls in: rain over the map, the fog rises with it
-      {1.00, 0.90, 1.00, 0.50, 0.50, -1},  // the full storm to the end
-  };
-  static constexpr EventRow kDaybreakRows[5] = {
-      {0.00, 0.15, 0.00, 0.15, 0.35, 0.15},  // first light: clear, the low sun, a morning haze and a thin mist
-      {0.40, 0.15, 0.00, 0.10, 0.10, 0.20},  // still clear at 40%, the mist gone
-      {0.55, 0.60, 0.30, 0.10, 0.10, 0.35},  // the clouds gather, the storm forms out at sea
-      {0.80, 0.90, 1.00, 0.50, 0.35, 0.80},  // it rolls in: rain over the map, lightning, its mist
-      {1.00, 0.90, 1.00, 0.50, 0.35, 0.80},  // the full storm to the end
-  };
-  static constexpr const char* kNightOpsStages[] = {"a clear night", "the clouds gather", "the storm rolls in", "the full storm"};
-  static constexpr const char* kDaybreakStages[] = {"first light", "the clouds gather", "the storm rolls in", "the full storm"};
-  static constexpr double kNightOpsHour = 18.5, kDaybreakHour = 6.0 + 10.0 / 60.0;
-  enum : int { kHeldClock = 1, kHeldClouds = 2, kHeldWeather = 4, kHeldFog = 8, kHeldGroundFog = 16, kHeldWind = 32 };
-  const char* EventName() const { return world.event == 2 ? "Daybreak" : "Night Ops"; }
-  std::string HeldList() const {
-    std::string s;
-    const std::pair<int, const char*> names[] = {{kHeldClock, "clock"}, {kHeldClouds, "clouds"}, {kHeldWeather, "weather"},
-                                                 {kHeldFog, "fog"}, {kHeldGroundFog, "ground fog"}, {kHeldWind, "wind"}};
-    for (const auto& [bit, name] : names)
-      if (world.held & bit) s += (s.empty() ? "" : ", ") + std::string(name);
-    return s;
-  }
-  std::string HeldSaid() const {
-    const std::string list = HeldList();
-    return list.empty() ? list : "; held by an admin this round: " + list;
-  }
-  std::string WorldSaid() const {
-    return fmt::format("day and night {}, {:.1f} h, a day in {:.0f} min, clouds {:.0f}% at rate {:.0f}%, weather {:.0f}%, "
-                       "fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m",
-                       world.day_night ? "on" : "off", world.hour, world.day_minutes, world.cover * 100, world.rate * 100,
-                       world.weather * 100, world.fog * 100, world.ground_fog * 100, world.wind * 100, world.cloud_height);
-  }
-  void EventClock() {  // the event's clock at a round's start: held at its hour
-    world.day_night = true, world.day_minutes = 0;
-    world.hour = world.event == 2 ? kDaybreakHour : kNightOpsHour;
-  }
-  // The event's build at a round's progress (0 to 1), on every setting an admin has not set this round.
-  void EventSet(double progress) {
-    world.progress = progress;
-    const EventRow* rows = world.event == 2 ? kDaybreakRows : kNightOpsRows;
-    constexpr int n = 5;
-    const double p = std::clamp(progress, 0.0, 1.0);
-    int i = 0;
-    while (i < n - 2 && p > rows[i + 1].at) ++i;
-    const EventRow &a = rows[i], &b = rows[i + 1];
-    const double t = b.at <= a.at ? 0.0 : std::clamp((p - a.at) / (b.at - a.at), 0.0, 1.0);
-    auto lerp = [t](double x, double y) { return x + (y - x) * t; };
-    if (!(world.held & kHeldClouds)) world.cover = lerp(a.cover, b.cover);
-    if (!(world.held & kHeldWeather)) world.weather = lerp(a.weather, b.weather);
-    if (!(world.held & kHeldFog)) world.fog = lerp(a.fog, b.fog);
-    if (!(world.held & kHeldGroundFog)) world.ground_fog = lerp(a.ground_fog, b.ground_fog);
-    if (a.wind >= 0 && !(world.held & kHeldWind)) world.wind = lerp(a.wind, b.wind);
-    const int stage = p <= rows[1].at ? 0 : std::min(3, p < rows[n - 2].at ? i : i + 1);
-    if (stage != world.stage) {
-      world.stage = stage;
-      Note(fmt::format("world: {} at {:.0f}% of the round: {}, {}{}", EventName(), p * 100,
-                       (world.event == 2 ? kDaybreakStages : kNightOpsStages)[stage], WorldSaid(), HeldSaid()));
-    }
-  }
-  // Each step: the round's progress from the match's rules (match_rules.cpp); a new round starts clear.
-  void EventStep() {
-    if (!world.event) return;
-    const bf1943::MatchClock clock = bf1943::CurrentMatchClock();
-    double progress = std::clamp(1.0 - double(clock.left), 0.0, 1.0);
-#if defined(BF_DEV_TOOLS)
-    // Tests: the whole build in this many seconds, not the tickets (gmhost.py's BF_DEV_EVENT_RAMP).
-    static const double ramp_s = [] {
-      const char* v = std::getenv("BF_DEV_EVENT_RAMP");
-      return v && *v ? std::max(1.0, std::atof(v)) : 0.0;
-    }();
-    if (ramp_s > 0)
-      progress = std::min(1.0, std::chrono::duration<double>(Clock::now() - world.ramp_from).count() / ramp_s);
-#endif
-    if (clock.round != world.event_round) {
-      if (world.event_round != 0)
-        Note(fmt::format("world: {} round {} starts {}{}", EventName(), clock.round, world.event == 2 ? "at sunrise" : "clear",
-                         world.held ? ", the last round's admin settings ended" : ""));
-      if (world.held || world.event == 2) world.held = 0, EventClock();
-      world.event_round = clock.round, world.stage = -1, world.ramp_from = Clock::now();
-      EventSet(0.0);
-      return;
-    }
-    if (progress > world.progress + 1e-6) EventSet(progress);
-  }
-  // "Back to Night Ops" / "Back to Daybreak": everything an admin set this round back on the schedule.
-  void EventBack(const std::string& who) {
-    if (!world.event || !world.held) return;  // on it already (the panel sends it until an answer says so)
-    const std::string had = HeldList();
-    world.held = 0;
-    EventClock();
-    world.stage = -1;
-    Note(fmt::format("world: {} put {} back on its schedule ({})", who.empty() ? "an admin" : who, EventName(), had));
-    EventSet(world.progress);
-  }
   void StormBegin() { world.storm_base = world.weather, world.storm_t = 0; }
   void StormSet(double weather) {
     if (std::abs(world.wind - world.weather) < 0.006) world.wind = weather;
@@ -682,15 +558,6 @@ class Host {
       world.cloud_height = std::clamp(REXCVAR_GET(bf_world_cloud_height), 100.0, 1500.0);
       world.storm = REXCVAR_GET(bf_world_dynamic_storm);
       world.storm_type = std::clamp(REXCVAR_GET(bf_world_storm_type), 0, 1);
-      world.event = std::clamp(REXCVAR_GET(bf_world_event), 0, 2);
-      if (world.event) {
-        // The event drives the world (no dynamic storm of its own): its clock, and Daybreak's calf deep mist in patches.
-        world.storm = false;
-        if (world.event == 2) world.ground_fog_height = 1.2, world.ground_fog_sparse = 0.6;
-        EventClock();
-        world.ramp_from = now;
-        EventSet(0.0);
-      }
       StormBegin();
       const bf1943::MatchClock clock = bf1943::CurrentMatchClock();
       Note(fmt::format("world: day and night {}, {:.1f} h, a day in {:.0f} min, clouds {:.0f}% at rate {:.0f}%, weather "
@@ -701,7 +568,6 @@ class Host {
                        world.cloud_height, world.storm ? "on" : "off", world.storm_type == 1 ? "hurricane" : "storm",
                        clock.tickets > 0 ? std::to_string(clock.tickets) : std::string("the level's own"),
                        clock.time_limit > 0 ? fmt::format("{} min", clock.time_limit) : std::string("none")));
-      if (world.event) Note(fmt::format("world: a {} match: its schedule drives the clock, clouds, weather and fog", EventName()));
     }
     const double dt = std::chrono::duration<double>(now - world.at).count();
     world.at = now;
@@ -712,7 +578,6 @@ class Host {
     const double storm_t = std::clamp((world.weather - 0.25) / 0.75, 0.0, 1.0);
     world.evolve += dt * world.rate * (1.0 + 2.0 * storm_t * storm_t * (3.0 - 2.0 * storm_t));
     StormStep(dt);
-    EventStep();
   }
   // A joined player from that address (the game's own socket has another port: the IP and the name) whose ID, the
   // low half of its XUID as eight hex digits, is in bf_world_admins.
@@ -777,7 +642,6 @@ class Host {
         pings.erase(name);
       }
     }
-    if ((flags & 8) && admin) EventBack(name);  // Night Ops / Daybreak: "Back to Night Ops" (24 Nov 2026)
     if ((flags & 1) && admin) {
       const int day_night = u8();
       const double hour = f32(), minutes = f32(), cover = f32(), rate = f32(), weather = f32(), fog = f32(),
@@ -795,49 +659,6 @@ class Host {
       if (at != Bytes::npos && at + 8 <= data.size()) {
         fog_height = std::clamp(f32(), 0.2, 5.0);
         fog_sparse = std::clamp(f32(), 0.0, 1.0);
-      }
-      // Last (24 Nov 2026, as gmhost.py reads it): which settings the admin moved, a u16; -1 from a game without it.
-      int touched = -1;
-      if (at != Bytes::npos && at + 2 <= data.size()) touched = int(Get16(data, at)), at += 2;
-      if (at != Bytes::npos && world.event) {
-        // An event: each setting the admin moved takes their value, and those the build drives are held for the rest
-        // of the round; the rest stay as they are (gmhost.py night_ops_set). Its storm is the build's (no dynamic one).
-        enum { kDayNight = 1, kHour = 2, kMinutes = 4, kCover = 8, kRate = 16, kWeather = 32, kFog = 64, kGroundFog = 128,
-               kWind = 256, kHeight = 512 };
-        if (touched < 0) {  // a game from before the mask: what is not the server's
-          touched = ((day_night != 0) != world.day_night ? kDayNight : 0) |
-                    (std::abs(hour - world.hour) > 0.5 / 3600 ? kHour : 0) |
-                    (std::abs(minutes - world.day_minutes) > 0.5 ? kMinutes : 0) |
-                    (std::abs(cover - world.cover) > 0.005 ? kCover : 0) | (std::abs(rate - world.rate) > 0.005 ? kRate : 0) |
-                    (std::abs(weather - world.weather) > 0.005 ? kWeather : 0) |
-                    (std::abs(fog - world.fog) > 0.005 ? kFog : 0) |
-                    (std::abs(ground_fog - world.ground_fog) > 0.005 ? kGroundFog : 0) |
-                    (std::abs(wind - world.wind) > 0.005 ? kWind : 0) |
-                    (std::abs(cloud_height - world.cloud_height) > 0.5 ? kHeight : 0);
-        }
-        const std::string before = WorldSaid();
-        const int held_before = world.held;
-        if (touched & (kDayNight | kHour | kMinutes)) {
-          world.day_night = day_night != 0;
-          world.hour = std::fmod(std::max(hour, 0.0), 24.0);
-          world.day_minutes = std::clamp(minutes, 0.0, 1440.0);
-          world.held |= kHeldClock;
-        }
-        if (touched & kCover) world.cover = std::clamp(cover, 0.0, 1.0), world.held |= kHeldClouds;
-        if (touched & kWeather) world.weather = std::clamp(weather, 0.0, 1.0), world.held |= kHeldWeather;
-        if (touched & kFog) world.fog = std::clamp(fog, 0.0, 1.0), world.held |= kHeldFog;
-        if (touched & kGroundFog) world.ground_fog = std::clamp(ground_fog, 0.0, 1.0), world.held |= kHeldGroundFog;
-        if (touched & kRate) world.rate = std::clamp(rate, 0.0, 1.0);
-        if (touched & kWind) {
-          world.wind = std::clamp(wind, 0.0, 1.0);
-          if (world.event == 2) world.held |= kHeldWind;  // Daybreak's build drives the wind too
-        }
-        if (touched & kHeight) world.cloud_height = cloud_height;
-        world.storm_type = storm_type;
-        world.ground_fog_height = fog_height, world.ground_fog_sparse = fog_sparse;
-        if (WorldSaid() != before || world.held != held_before)
-          Note(fmt::format("world: {} set {}{}", name.empty() ? "an admin" : name, WorldSaid(), HeldSaid()));
-        at = Bytes::npos;  // done: not the plain path below
       }
       double weather_set = weather, wind_set = wind;
       if (storm && world.storm) {
@@ -878,10 +699,7 @@ class Host {
     }
     Bytes reply = "BF43WRLR";
     reply += char(1);
-    // Flags 4, 8 and 16 (as gmhost.py sends them since 24 and 26 Nov 2026; a game from before reads only 1 and 2): an
-    // event match (Night Ops or Daybreak), an admin's settings hold some of its build this round, the event is Daybreak.
-    reply += char((world.day_night ? 1 : 0) | (admin ? 2 : 0) | (world.event ? 4 : 0) | (world.event && world.held ? 8 : 0) |
-                  (world.event == 2 ? 16 : 0));
+    reply += char((world.day_night ? 1 : 0) | (admin ? 2 : 0));
     for (double v : {world.hour, world.day_minutes, world.cover, world.rate, world.weather, world.fog, world.ground_fog,
                      world.wind}) {
       const float f = float(v);
@@ -1641,9 +1459,6 @@ void Serve() {
         JsonQuote((REXCVAR_GET(bf_gm_password).empty() ? "" : std::string(bf1943::kLockedTag) + " ") +
                   REXCVAR_GET(bf_gm_description).substr(0, 180)),
         maps, st.listed ? "true" : "false");
-    // Night Ops or Daybreak (bf_world_event; plasma.py's Registry "night", "daybreak"): the browser's TYPE.
-    if (const int event = REXCVAR_GET(bf_world_event); event == 1) reg += ", \"night\": true";
-    else if (event == 2) reg += ", \"daybreak\": true";
     // A host on one address of its own (tests) says where; one on every address is found by the backend.
     if (host.listen.sin_addr.s_addr != htonl(INADDR_ANY)) {
       char ip[32] = {};

@@ -1,6 +1,6 @@
 /**
  * @file        codegen/phase_discover.cpp
- * @brief       Discover phase that iterates function block discovery
+ * @brief       Discover phase: iterative function block discovery
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
@@ -9,267 +9,424 @@
  *              See LICENSE file in the project root for full license text.
  */
 
+#include "codegen_flags.h"
 #include "decoded_binary.h"
-#include "function_scanner.h"
+#include <rex/codegen/function_scanner.h>
 
 #include <array>
 #include <bitset>
 #include <unordered_set>
 
-#include "pipeline.h"
-#include "known_function.h"
+#include <rex/codegen/phases.h>
+#include "phase_helpers.h"
 
-#include "vtable_scanner.h"
-#include <rex/logging/log_category.h>
-#include "codegen_categories.h"
+#include <rex/codegen/vtable_scanner.h>
+#include <rex/logging.h>
 
-#include <rex/memory/endian.h>
+#include "codegen_logging.h"
+#include <rex/memory/utils.h>
 
 #include <ppc.h>
+
+using rex::codegen::ppc::Opcode;
+using rex::memory::load_and_swap;
 
 namespace rex::codegen {
 
 namespace {
 
-void DiscoverFunction(CodegenContext& ctx, u32 func_addr,
-                      const std::unordered_set<u32>& known_functions) {
-  auto& graph = ctx.graph;
-  auto& binary = ctx.GetBinary();
-  auto& decoded = ctx.GetDecoded();
+//=============================================================================
+// Discover Phase: iterative function block discovery
+//=============================================================================
 
-  auto* node = graph.GetFunction(func_addr);
+void discoverFunction(CodegenContext& ctx, uint32_t funcAddr,
+                      const std::unordered_set<uint32_t>& knownFunctions) {
+  auto& graph = ctx.graph;
+  auto& binary = ctx.binary();
+  auto& decoded = ctx.decoded();
+
+  auto* node = graph.getFunction(funcAddr);
   if (!node)
     return;
 
-  if (!node->CanDiscover()) {
-    REXCG_TRACE("Analyze: function 0x{:08X} already discovered, skipping", func_addr);
+  // Skip if already discovered
+  if (!node->canDiscover()) {
+    REXCODEGEN_TRACE("Analyze: function 0x{:08X} already discovered, skipping", funcAddr);
     return;
   }
 
-  if (node->IsImport()) {
-    node->DiscoverAsImport();
+  // Imports don't need block discovery
+  if (node->isImport()) {
+    node->discoverAsImport();
     return;
   }
 
-  REXCG_TRACE("Analyze: discovering function 0x{:08X} ({})", func_addr, node->GetName());
+  REXCODEGEN_TRACE("Analyze: discovering function 0x{:08X} ({})", funcAddr, node->name());
 
-  u32 pdata_size = 0;
+  // Lookup pdataSize for exception handler boundary
+  uint32_t pdataSize = 0;
 
-  // CONFIG sizes are entry point hints, so only a declared size applies and PDATA is ignored.
-  if (node->GetAuthority() == FunctionAuthority::kConfig) {
-    pdata_size = node->GetSize();
-    REXCG_TRACE("Analyze: 0x{:08X} is CONFIG, using declared size={}", func_addr, pdata_size);
+  // For CONFIG functions: use only the explicitly declared size (if any)
+  // If no size specified (size=0), let discovery find natural boundaries via region
+  // Don't inherit PDATA sizes for CONFIG functions - they're user hints for entry points
+  if (node->authority() == FunctionAuthority::CONFIG) {
+    pdataSize = node->size();  // 0 if not specified, which is correct
+    REXCODEGEN_TRACE("Analyze: 0x{:08X} is CONFIG, using declared size={}", funcAddr, pdataSize);
   } else {
-    auto pdata_it = ctx.scan.pdata_sizes.find(func_addr);
-    if (pdata_it != ctx.scan.pdata_sizes.end()) {
-      pdata_size = pdata_it->second;
-      REXCG_TRACE("Analyze: 0x{:08X} using PDATA size={}", func_addr, pdata_size);
+    // For non-CONFIG functions, use PDATA size if available
+    auto pdataIt = ctx.scan.pdataSizes.find(funcAddr);
+    if (pdataIt != ctx.scan.pdataSizes.end()) {
+      pdataSize = pdataIt->second;
+      REXCODEGEN_TRACE("Analyze: 0x{:08X} using PDATA size={}", funcAddr, pdataSize);
     }
   }
 
+  // Find the code region containing this function
   const CodeRegion* region = nullptr;
-  for (const auto& r : ctx.scan.code_regions) {
-    if (r.Contains(func_addr)) {
+  for (const auto& r : ctx.scan.codeRegions) {
+    if (r.contains(funcAddr)) {
       region = &r;
       break;
     }
   }
   if (!region) {
-    REXCG_WARN("Analyze: function 0x{:08X} not in any code region", func_addr);
+    REXCODEGEN_WARN("Analyze: function 0x{:08X} not in any code region", funcAddr);
     return;
   }
 
-  auto result = DiscoverBlocks(decoded, ctx.GetLimits(), func_addr, *region, known_functions,
-                               pdata_size, &ctx.GetConfig().switch_tables);
-
-  if (node->GetAuthority() == FunctionAuthority::kGapFill && pdata_size == 0) {
-    if (const auto cut = FindReturnCut(result, func_addr)) {
-      REXCG_TRACE("GapFill: cut sub_{:08X} after the return at 0x{:08X}", func_addr, *cut - 4);
-      result = DiscoverBlocks(decoded, ctx.GetLimits(), func_addr, *region, known_functions,
-                              *cut - func_addr, &ctx.GetConfig().switch_tables);
-    }
-  }
+  // Pass pdataSize so forward branches within function extent are correctly identified
+  auto result = discoverBlocks(decoded, funcAddr, *region, knownFunctions, pdataSize,
+                               &ctx.Config().switchTables);
 
   if (result.blocks.empty()) {
-    REXCG_WARN("Analyze: no blocks found for function 0x{:08X}", func_addr);
+    REXCODEGEN_WARN("Analyze: no blocks found for function 0x{:08X}", funcAddr);
     return;
   }
 
-  node->Discover(std::move(result.blocks), std::move(result.instructions),
+  // snooper the function with the discovered blocks and instructions
+  node->discover(std::move(result.blocks), std::move(result.instructions),
                  std::move(result.labels));
-  node->SetFallThroughs(std::move(result.fall_throughs));
 
-  for (const auto& jt : result.jump_tables) {
-    graph.AddJumpTableToFunction(func_addr, jt);
+  // Add jump tables (targets become labels in the function)
+  for (const auto& jt : result.jumpTables) {
+    graph.addJumpTableToFunction(funcAddr, jt);
   }
 
-  for (u32 target : result.external_calls) {
-    if (!graph.IsEntryPoint(target) && !graph.IsImport(target)) {
-      if (binary.IsInImportExportRange(target)) {
+  // Register external call targets as new functions (bl only, not b)
+  for (uint32_t target : result.externalCalls) {
+    if (!graph.isEntryPoint(target) && !graph.isImport(target)) {
+      if (binary.isInImportExportRange(target)) {
         continue;
       }
-      graph.AddFunction(target, 4, FunctionAuthority::kDiscovered, true);
+      graph.addFunction(target, 4, FunctionAuthority::DISCOVERED, true);
     }
   }
 
-  for (const auto& branch : result.unresolved_jumps) {
-    graph.AddUnresolvedJumpToFunction(func_addr, branch.site, branch.target, branch.is_call,
-                                      branch.is_conditional);
+  // Add unresolved branches for later resolution
+  for (const auto& branch : result.unresolvedBranches) {
+    graph.addUnresolvedJumpToFunction(funcAddr, branch.site, branch.target, branch.isCall,
+                                      branch.isConditional);
   }
 
-  if (pdata_size > 0) {
-    std::unordered_set<u32> discovered_addrs;
+  // Scan exception handler regions for branches not in discovered blocks
+  if (pdataSize > 0) {
+    std::unordered_set<uint32_t> discoveredAddrs;
     for (const auto& block : result.blocks) {
-      for (u32 addr = block.base; addr < block.base + block.size; addr += 4) {
-        discovered_addrs.insert(addr);
+      for (uint32_t addr = block.base; addr < block.base + block.size; addr += 4) {
+        discoveredAddrs.insert(addr);
       }
     }
 
-    u32 pdata_end = func_addr + pdata_size;
-    const u8* func_data = binary.Translate(func_addr);
-    if (func_data) {
-      for (u32 offset = 0; offset < pdata_size; offset += 4) {
-        u32 site = func_addr + offset;
+    uint32_t pdataEnd = funcAddr + pdataSize;
+    const uint8_t* funcData = binary.translate(funcAddr);
+    if (funcData) {
+      for (uint32_t offset = 0; offset < pdataSize; offset += 4) {
+        uint32_t site = funcAddr + offset;
 
-        if (discovered_addrs.count(site))
+        // Skip if already discovered by normal control flow
+        if (discoveredAddrs.count(site))
           continue;
 
-        auto invalid_it = ctx.GetAnalysisState().invalid_instructions.find(site);
-        if (invalid_it != ctx.GetAnalysisState().invalid_instructions.end()) {
+        // Skip if marked invalid
+        auto invalidIt = ctx.analysisState().invalidInstructions.find(site);
+        if (invalidIt != ctx.analysisState().invalidInstructions.end()) {
           continue;
         }
 
-        u32 insn = memory::load<be_u32>(func_data + offset);
-        u32 opcode = PPC_OP(insn);
+        uint32_t insn = load_and_swap<uint32_t>(funcData + offset);
+        uint32_t opcode = PPC_OP(insn);
 
         if (opcode != PPC_OP_B && opcode != PPC_OP_BC)
           continue;
 
-        u32 target = 0;
-        bool is_call = PPC_BL(insn);
-        bool is_absolute = PPC_BA(insn);
+        uint32_t target = 0;
+        bool isCall = PPC_BL(insn);
+        bool isAbsolute = PPC_BA(insn);
 
         if (opcode == PPC_OP_B) {
-          i32 branch_offset = PPC_BI(insn);
-          target = is_absolute ? static_cast<u32>(branch_offset) : site + branch_offset;
+          int32_t branchOffset = PPC_BI(insn);
+          target = isAbsolute ? static_cast<uint32_t>(branchOffset) : site + branchOffset;
         } else {
-          i32 branch_offset = PPC_BD(insn);
-          target = is_absolute ? static_cast<u32>(branch_offset) : site + branch_offset;
+          int32_t branchOffset = PPC_BD(insn);
+          target = isAbsolute ? static_cast<uint32_t>(branchOffset) : site + branchOffset;
         }
 
-        if (!is_call && target >= func_addr && target < pdata_end) {
+        // Skip internal jumps within pdata region
+        if (!isCall && target >= funcAddr && target < pdataEnd) {
           continue;
         }
 
-        graph.AddUnresolvedJumpToFunction(func_addr, site, target, is_call, false);
+        graph.addUnresolvedJumpToFunction(funcAddr, site, target, isCall, false);
 
-        if (is_call && !graph.IsEntryPoint(target) && !graph.IsImport(target)) {
-          if (binary.IsInImportExportRange(target)) {
+        // Register call targets as new functions
+        if (isCall && !graph.isEntryPoint(target) && !graph.isImport(target)) {
+          if (binary.isInImportExportRange(target)) {
             continue;
           }
-          graph.AddFunction(target, 4, FunctionAuthority::kDiscovered, true);
+          graph.addFunction(target, 4, FunctionAuthority::DISCOVERED, true);
         }
       }
     }
   }
 }
 
-void DiscoverAllFunctions(CodegenContext& ctx) {
-  REXCG_TRACE("Analyze: starting iterative discovery...");
+void discoverAllFunctions(CodegenContext& ctx) {
+  REXCODEGEN_TRACE("Analyze: starting iterative discovery...");
 
   auto& graph = ctx.graph;
-  auto& binary = ctx.GetBinary();
+  auto& binary = ctx.binary();
 
+  // Iterative discovery
   size_t iteration = 0;
-  size_t last_function_count = 0;
-  const size_t max_iterations = ctx.GetLimits().max_discovery_iterations;
+  size_t lastFunctionCount = 0;
+  const size_t maxIterations = REXCVAR_GET(max_discovery_iterations);
 
-  while (iteration < max_iterations) {
+  while (iteration < maxIterations) {
     iteration++;
 
-    size_t current_function_count = graph.GetFunctionCount();
-    if (current_function_count == last_function_count && iteration > 1) {
-      REXCG_DEBUG("Analyze: fixed point at iteration {} ({} functions)", iteration,
-                  current_function_count);
+    size_t currentFunctionCount = graph.functionCount();
+    if (currentFunctionCount == lastFunctionCount && iteration > 1) {
+      REXCODEGEN_DEBUG("Analyze: fixed point at iteration {} ({} functions)", iteration,
+                       currentFunctionCount);
       break;
     }
 
-    last_function_count = current_function_count;
+    lastFunctionCount = currentFunctionCount;
 
-    auto known_functions = BuildKnownFunctions(graph);
-    if (DiscoverPendingFunctions(ctx, known_functions) == 0) {
+    auto knownFunctions = buildKnownFunctions(graph);
+    if (discoverPendingFunctions(ctx, knownFunctions) == 0) {
       break;
     }
   }
 
-  REXCG_TRACE("Analyze: {} functions after call graph expansion", graph.GetFunctionCount());
+  REXCODEGEN_TRACE("Analyze: {} functions after call graph expansion", graph.functionCount());
 
+  // VTable scanning
   {
-    VTableScanner vt_scanner(binary);
-    auto vtables = vt_scanner.Scan();
+    VTableScanner vtScanner(binary);
+    auto vtables = vtScanner.scan();
 
-    size_t new_functions = 0;
+    size_t newFunctions = 0;
 
     for (const auto& vt : vtables) {
-      for (u32 func_addr : vt.slots) {
-        if (graph.IsEntryPoint(func_addr))
+      for (size_t i = 0; i < vt.slots.size(); i++) {
+        uint32_t funcAddr = vt.slots[i];
+
+        if (graph.isEntryPoint(funcAddr))
           continue;
-        if (binary.IsInImportExportRange(func_addr))
+        if (binary.isInImportExportRange(funcAddr))
           continue;
 
-        graph.AddFunction(func_addr, 4, FunctionAuthority::kVTable, true);
-        new_functions++;
+        graph.addFunction(funcAddr, 4, FunctionAuthority::VTABLE, true);
+        newFunctions++;
       }
     }
 
-    REXCG_TRACE("Analyze: VTable scan found {} vtables, {} new functions", vtables.size(),
-                new_functions);
+    REXCODEGEN_TRACE("Analyze: VTable scan found {} vtables, {} new functions", vtables.size(),
+                     newFunctions);
 
-    if (new_functions > 0) {
-      size_t vtable_iteration = 0;
-      const size_t max_vtable_iterations = ctx.GetLimits().max_vtable_iterations;
+    // Continue discovery for vtable functions
+    if (newFunctions > 0) {
+      size_t vtableIteration = 0;
+      const size_t maxVtableIterations = REXCVAR_GET(max_vtable_iterations);
 
-      while (vtable_iteration < max_vtable_iterations) {
-        vtable_iteration++;
+      while (vtableIteration < maxVtableIterations) {
+        vtableIteration++;
 
-        auto known_functions = BuildKnownFunctions(graph);
-        if (DiscoverPendingFunctions(ctx, known_functions) == 0)
+        auto knownFunctions = buildKnownFunctions(graph);
+        if (discoverPendingFunctions(ctx, knownFunctions) == 0)
           break;
 
-        if (graph.GetFunctionCount() == last_function_count)
+        if (graph.functionCount() == lastFunctionCount)
           break;
-        last_function_count = graph.GetFunctionCount();
+        lastFunctionCount = graph.functionCount();
       }
     }
   }
 
-  REXCG_TRACE("Analyze: {} total functions after vtable scan", graph.GetFunctionCount());
+  REXCODEGEN_TRACE("Analyze: {} total functions after vtable scan", graph.functionCount());
+}
+
+//=============================================================================
+// Function Pointer Scan: find lis/addi pairs loading code addresses
+// TODO(tomc): THIS IS WIP AND PROB A BAD IDEA LOL LETS SEE
+//=============================================================================
+void functionPointerScan(CodegenContext& ctx) {
+  if (!ctx.hasDecoded()) {
+    REXCODEGEN_WARN("functionPointerScan: DecodedBinary not initialized, skipping");
+    return;
+  }
+
+  auto& graph = ctx.graph;
+  auto& decoded = ctx.decoded();
+  const auto& codeRegions = decoded.codeRegions();
+
+  if (codeRegions.empty()) {
+    REXCODEGEN_WARN("functionPointerScan: no code regions, skipping");
+    return;
+  }
+
+  // Build set of existing functions to avoid duplicates
+  std::unordered_set<uint32_t> existingFunctions;
+  for (const auto& [addr, node] : graph.functions()) {
+    existingFunctions.insert(addr);
+  }
+
+  // Track lis values: register -> (high_value, lis_address)
+  // We scan linearly and track the most recent lis for each register
+  // PPC has exactly 32 GPRs, so a fixed-size array is more efficient than a map
+  std::array<std::pair<uint32_t, uint32_t>, 32> lisValues{};
+  std::bitset<32> lisValid;
+
+  size_t foundCount = 0;
+
+  for (const auto& region : codeRegions) {
+    lisValid.reset();  // Reset tracking at region boundaries
+
+    for (uint32_t addr = region.start; addr < region.end; addr += 4) {
+      auto* insn = decoded.get(addr);
+      if (!insn)
+        continue;
+
+      // Track lis rD, IMM
+      if (isLis(*insn)) {
+        uint8_t rd = static_cast<uint8_t>(insn->D.RT);
+        uint32_t hi = static_cast<uint32_t>(static_cast<int16_t>(insn->D.d)) << 16;
+        lisValues[rd] = {hi, addr};
+        lisValid.set(rd);
+        continue;
+      }
+
+      // Check for addi rD, rA, IMM where rA was set by lis
+      if (insn->opcode == rex::codegen::ppc::Opcode::addi) {
+        uint8_t ra = static_cast<uint8_t>(insn->D.RA);
+        if (ra == 0)
+          continue;  // li pseudo-op, not addi
+
+        if (!lisValid.test(ra))
+          continue;
+
+        uint32_t hi = lisValues[ra].first;
+        int16_t lo = static_cast<int16_t>(insn->D.d);
+        uint32_t fullAddr = hi + lo;  // Sign-extended add
+
+        // PPC instructions are 4-byte aligned
+        if (fullAddr & 0x3)
+          continue;
+
+        // Check if this address is in a code region
+        const CodeRegion* targetRegion = decoded.regionContaining(fullAddr);
+        if (!targetRegion)
+          continue;
+
+        // Skip if already a known function
+        if (existingFunctions.contains(fullAddr))
+          continue;
+
+        // Skip if it's an internal address (within same function's likely range)
+        // Heuristic: if target is very close to current address, probably internal label
+        int32_t distance = static_cast<int32_t>(fullAddr) - static_cast<int32_t>(addr);
+        if (distance > -0x1000 && distance < 0x1000) {
+          // Could be local label, skip for now
+          continue;
+        }
+
+        // Register as function with DISCOVERED authority and hasXrefs=true
+        graph.addFunction(fullAddr, 4, FunctionAuthority::DISCOVERED, true);
+        existingFunctions.insert(fullAddr);
+        foundCount++;
+
+        REXCODEGEN_TRACE("functionPointerScan: found 0x{:08X} via lis/addi at 0x{:08X}", fullAddr,
+                         addr);
+      }
+
+      // Also check ori rD, rA, IMM (alternative to addi for unsigned)
+      if (insn->opcode == rex::codegen::ppc::Opcode::ori) {
+        uint8_t ra = static_cast<uint8_t>(insn->D.RA);
+        if (!lisValid.test(ra))
+          continue;
+
+        uint32_t hi = lisValues[ra].first;
+        uint16_t lo = static_cast<uint16_t>(insn->D.d);
+        uint32_t fullAddr = hi | lo;  // Unsigned OR
+
+        // PPC instructions are 4-byte aligned
+        if (fullAddr & 0x3)
+          continue;
+
+        const CodeRegion* targetRegion = decoded.regionContaining(fullAddr);
+        if (!targetRegion)
+          continue;
+
+        if (existingFunctions.contains(fullAddr))
+          continue;
+
+        int32_t distance = static_cast<int32_t>(fullAddr) - static_cast<int32_t>(addr);
+        if (distance > -0x1000 && distance < 0x1000)
+          continue;
+
+        graph.addFunction(fullAddr, 4, FunctionAuthority::DISCOVERED, true);
+        existingFunctions.insert(fullAddr);
+        foundCount++;
+
+        REXCODEGEN_TRACE("functionPointerScan: found 0x{:08X} via lis/ori at 0x{:08X}", fullAddr,
+                         addr);
+      }
+
+      // Clear lis tracking if register is overwritten by other instruction
+      // (Simplified: we clear on any write to the register)
+      // This is conservative - could miss some patterns but avoids false positives
+    }
+  }
+
+  REXCODEGEN_TRACE("functionPointerScan: found {} new function pointer targets", foundCount);
 }
 
 }  // anonymous namespace
 
-size_t DiscoverPendingFunctions(CodegenContext& ctx,
-                                const std::unordered_set<u32>& known_functions) {
-  std::vector<u32> pending;
-  for (const auto& [addr, node] : ctx.graph.GetFunctions()) {
-    if (node->CanDiscover()) {
+/// Discover blocks for all pending functions (shared helper, declared in phase_helpers.h).
+size_t discoverPendingFunctions(CodegenContext& ctx,
+                                const std::unordered_set<uint32_t>& knownFunctions) {
+  std::vector<uint32_t> pending;
+  for (const auto& [addr, node] : ctx.graph.functions()) {
+    if (node->canDiscover()) {
       pending.push_back(addr);
     }
   }
-  for (u32 func_addr : pending) {
-    DiscoverFunction(ctx, func_addr, known_functions);
+  for (uint32_t funcAddr : pending) {
+    discoverFunction(ctx, funcAddr, knownFunctions);
   }
   return pending.size();
 }
 
-namespace detail {
+namespace phases {
 
-[[nodiscard]] Result<void> DiscoverFunctions(CodegenContext& ctx, IProgressReporter* reporter) {
+VoidResult Discover(CodegenContext& ctx, ProgressReporter* reporter) {
   (void)reporter;
-  DiscoverAllFunctions(ctx);
+  discoverAllFunctions(ctx);
   return Ok();
 }
 
-}  // namespace detail
+}  // namespace phases
 
 }  // namespace rex::codegen

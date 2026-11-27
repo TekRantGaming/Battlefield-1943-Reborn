@@ -5,22 +5,17 @@
 #include "guest_memory.h"
 
 #include <rex/logging.h>
-#include <rex/system/interfaces/graphics.h>
 
 namespace native_x_renderer {
 
 using namespace Diligent;
 namespace rg = rex::graphics;
 
-Primitives::Primitives(const rg::RegisterFile& registers, rex::IPhysicalMemory& memory, rex::IPhysicalWriteWatch& watch,
-                       GuestMemory& guest_memory, IRenderDevice* device, Recorder* recorder)
-    : PrimitiveProcessor(registers, *rex::system::bfnative_graphics()->xenos_settings(), memory, watch, guest_memory),
-      device_(device),
-      recorder_(recorder) {}
+Primitives::Primitives(const rg::RegisterFile& registers, rex::memory::Memory& memory, GuestMemory& guest_memory,
+                       IRenderDevice* device, Recorder* recorder)
+    : PrimitiveProcessor(registers, memory, guest_memory), device_(device), recorder_(recorder) {}
 
 Primitives::~Primitives() { ShutdownCommon(); }
-
-void Primitives::DetachTitle() { ShutdownCommon(); }  // the PrimitiveProcessor's write listener
 
 bool Primitives::Initialize() {
   // Full 32-bit indices (the device has fullDrawIndexUint32). DiligentCore has no triangle fans and no
@@ -57,13 +52,13 @@ void* Primitives::RequestHostConvertedIndexBufferForCurrentFrame(rg::xenos::Inde
                                                                  size_t& backend_handle_out) {
   uint32_t index_size = format == rg::xenos::IndexFormat::kInt16 ? 2 : 4;
   uint32_t start = (arena_used_ + 3) & ~3u;
-  uint64_t size = uint64_t(index_size) * index_count + (coalign_for_simd ? REXGPU_PRIMITIVE_PROCESSOR_SIMD_SIZE : 0);
+  uint64_t size = uint64_t(index_size) * index_count + (coalign_for_simd ? XE_GPU_PRIMITIVE_PROCESSOR_SIMD_SIZE : 0);
   if (start + size > kConvertedBufferSize) {
     REXLOG_ERROR("[native_x_renderer] converted indices: the frame needs more than {} MB", kConvertedBufferSize >> 20);
     return nullptr;
   }
   uint8_t* mapping = arena_.get() + start;
-  if (coalign_for_simd) mapping += GetSIMDCoalignmentOffset(mapping, coalignment_original_address);
+  if (coalign_for_simd) mapping += GetSimdCoalignmentOffset(mapping, coalignment_original_address);
   arena_used_ = start + uint32_t(size);
   backend_handle_out = converted_offsets_.size();
   converted_offsets_.push_back(uint64_t(mapping - arena_.get()));

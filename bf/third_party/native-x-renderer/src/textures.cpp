@@ -223,16 +223,16 @@ void Textures::FindSwizzle(uint32_t fetch_constant, const xenos::xe_gpu_texture_
           case TEX_FORMAT_R16_UNORM:
           case TEX_FORMAT_R16_FLOAT:
           case TEX_FORMAT_R32_FLOAT:
-            host_format_swizzle = XE_GPU_TEXTURE_SWIZZLE_RRRR;
+            host_format_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR;
             break;
           case TEX_FORMAT_RG8_UNORM:
           case TEX_FORMAT_RG16_UNORM:
           case TEX_FORMAT_RG16_FLOAT:
           case TEX_FORMAT_RG32_FLOAT:
-            host_format_swizzle = XE_GPU_TEXTURE_SWIZZLE_RGGG;
+            host_format_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG;
             break;
           default:
-            host_format_swizzle = XE_GPU_TEXTURE_SWIZZLE_RGBA;
+            host_format_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA;
             break;
         }
         swizzle = rex::graphics::TextureCache::GuestToHostSwizzle(fetch.swizzle, host_format_swizzle);
@@ -320,10 +320,10 @@ ISampler* Textures::FindSampler(const xenos::xe_gpu_texture_fetch_t& fetch,
       (mip == xenos::TextureFilter::kPoint || mip == xenos::TextureFilter::kLinear)) {
     aniso = xenos::AnisoFilter(forced);
   }
-  aniso = std::min(aniso, xenos::AnisoFilter::kMax161);
+  aniso = std::min(aniso, xenos::AnisoFilter::kMax_16_1);
   // At most what the device supports (16x on desktop GPUs). kMax_1_1 is 1x, each level doubles it.
   uint32_t supported = std::max<uint32_t>(device_->GetAdapterInfo().Sampler.MaxAnisotropy, 1);
-  while (aniso > xenos::AnisoFilter::kMax11 && (1u << (uint32_t(aniso) - 1)) > supported) {
+  while (aniso > xenos::AnisoFilter::kMax_1_1 && (1u << (uint32_t(aniso) - 1)) > supported) {
     aniso = xenos::AnisoFilter(uint32_t(aniso) - 1);
   }
   xenos::BorderColor border = fetch.border_color;
@@ -338,7 +338,7 @@ ISampler* Textures::FindSampler(const xenos::xe_gpu_texture_fetch_t& fetch,
   desc.Name = "NativeXRenderer sampler";
   if (aniso != xenos::AnisoFilter::kDisabled) {
     desc.MinFilter = desc.MagFilter = desc.MipFilter = FILTER_TYPE_ANISOTROPIC;
-    desc.MaxAnisotropy = 1u << (uint32_t(aniso) - uint32_t(xenos::AnisoFilter::kMax11));
+    desc.MaxAnisotropy = 1u << (uint32_t(aniso) - uint32_t(xenos::AnisoFilter::kMax_1_1));
   } else {
     desc.MagFilter = mag == xenos::TextureFilter::kLinear ? FILTER_TYPE_LINEAR : FILTER_TYPE_POINT;
     desc.MinFilter = min == xenos::TextureFilter::kLinear ? FILTER_TYPE_LINEAR : FILTER_TYPE_POINT;

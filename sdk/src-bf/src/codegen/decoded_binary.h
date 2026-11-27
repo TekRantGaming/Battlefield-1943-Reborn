@@ -1,5 +1,5 @@
 /**
- * @file        codegen/decoded_binary.h
+ * @file        rex/codegen/decoded_binary.h
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
@@ -17,14 +17,16 @@
 #include <optional>
 #include <vector>
 
-#include "binary_view.h"
-#include "function_scanner.h"
-#include <rex/types.h>
-#include <rex/utility.h>
+#include <rex/codegen/binary_view.h>
+#include <rex/codegen/code_region.h>
 
 namespace rex::codegen {
 
-using DecodedInsn = rex::codegen::detail::Instruction;
+using DecodedInsn = rex::codegen::ppc::Instruction;
+
+//=============================================================================
+// Instruction Range Iterator
+//=============================================================================
 
 class InsnRange {
  public:
@@ -69,71 +71,80 @@ class InsnRange {
   DecodedInsn* end_;
 };
 
-class DecodedBinary : public rex::NonCopyable {
+//=============================================================================
+// Decoded Binary - Single-pass instruction decoder
+//=============================================================================
+
+class DecodedBinary {
  public:
   explicit DecodedBinary(const BinaryView& binary);
 
-  void Decode();
+  // Non-copyable, non-movable (holds reference to binary)
+  DecodedBinary(DecodedBinary&&) = delete;
+  DecodedBinary& operator=(DecodedBinary&&) = delete;
+  DecodedBinary(const DecodedBinary&) = delete;
+  DecodedBinary& operator=(const DecodedBinary&) = delete;
 
-  /**
-   * Returns the instruction at an address in O(1), or null when the address is not in an executable
-   * section.
-   */
-  DecodedInsn* FindInsn(u32 addr);
-  const DecodedInsn* FindInsn(u32 addr) const;
+  /// Decode all executable sections (call once after construction)
+  void decode();
 
-  /**
-   * Returns the instructions in [start, end), empty when the addresses are not in the same section.
-   *
-   * @param end Address after the last instruction.
-   */
-  InsnRange GetRange(u32 start, u32 end);
+  /// Get instruction at address (O(1) lookup)
+  /// Returns nullptr if address not in any executable section
+  DecodedInsn* get(uint32_t addr);
+  const DecodedInsn* get(uint32_t addr) const;
 
-  /**
-   * Returns raw section bytes such as jump table data. It is null when the span is not in a
-   * section.
-   */
-  const u8* GetRawData(u32 addr, size_t len) const;
+  /// Get range of instructions [start, end)
+  /// Returns empty range if addresses not in same section
+  InsnRange range(uint32_t start, uint32_t end);
 
-  /**
-   * Reads a value at an address, byte swapping from big endian.
-   *
-   * @tparam T Integer type of 2, 4 or 8 bytes.
-   * @return The value, or nullopt when the bytes are not in a section.
-   */
+  /// Get raw data at address (for reading non-instruction data like jump tables)
+  const uint8_t* rawData(uint32_t addr, size_t len) const;
+
+  /// Read a value at address (with byte-swap for big-endian)
   template <typename T>
-  std::optional<T> Read(u32 addr) const;
+  std::optional<T> read(uint32_t addr) const;
 
-  /** Returns the code regions, separated by null padding. */
-  const std::vector<CodeRegion>& GetCodeRegions() const { return code_regions_; }
+  /// Get all code regions (separated by null padding)
+  const std::vector<CodeRegion>& codeRegions() const { return codeRegions_; }
 
-  /** Returns the code region containing an address, or null when none contains the address. */
-  const CodeRegion* FindRegionContaining(u32 addr) const;
+  /// Find code region containing address
+  const CodeRegion* regionContaining(uint32_t addr) const;
 
-  size_t GetInstructionCount() const;
+  /// Check if branch from->to crosses a null boundary
+  bool crossesNullBoundary(uint32_t from, uint32_t to) const;
+
+  /// Check if address is in any code region
+  bool isInCodeRegion(uint32_t addr) const;
+
+  /// Check if instruction at address is null/invalid
+  bool isNullPadding(uint32_t addr) const;
+
+  /// Statistics
+  size_t instructionCount() const;
+  size_t sectionCount() const { return sections_.size(); }
 
  private:
   struct Section {
-    u32 base;
-    u32 size;
+    uint32_t base;
+    uint32_t size;
     std::vector<DecodedInsn> instructions;
-    std::vector<u8> data;
+    std::vector<uint8_t> data;  // Copy of raw section data
 
-    bool Contains(u32 addr) const { return addr >= base && addr < base + size; }
+    bool contains(uint32_t addr) const { return addr >= base && addr < base + size; }
 
-    DecodedInsn* FindInsn(u32 addr) {
-      if (!Contains(addr))
+    DecodedInsn* get(uint32_t addr) {
+      if (!contains(addr))
         return nullptr;
-      u32 idx = (addr - base) / 4;
+      uint32_t idx = (addr - base) / 4;
       if (idx >= instructions.size())
         return nullptr;
       return &instructions[idx];
     }
 
-    const DecodedInsn* FindInsn(u32 addr) const {
-      if (!Contains(addr))
+    const DecodedInsn* get(uint32_t addr) const {
+      if (!contains(addr))
         return nullptr;
-      u32 idx = (addr - base) / 4;
+      uint32_t idx = (addr - base) / 4;
       if (idx >= instructions.size())
         return nullptr;
       return &instructions[idx];
@@ -142,59 +153,95 @@ class DecodedBinary : public rex::NonCopyable {
 
   const BinaryView& binary_;
   std::vector<Section> sections_;
-  std::vector<CodeRegion> code_regions_;
+  std::vector<CodeRegion> codeRegions_;
 
-  void ComputeCodeRegions();
+  /// Compute code regions by finding null padding boundaries
+  void computeCodeRegions();
 
-  Section* FindSection(u32 addr);
-  const Section* FindSection(u32 addr) const;
+  /// Find section containing address
+  Section* findSection(uint32_t addr);
+  const Section* findSection(uint32_t addr) const;
 };
 
+//=============================================================================
+// Template Implementation
+//=============================================================================
+
 template <typename T>
-std::optional<T> DecodedBinary::Read(u32 addr) const {
-  const u8* data = GetRawData(addr, sizeof(T));
+std::optional<T> DecodedBinary::read(uint32_t addr) const {
+  const uint8_t* data = rawData(addr, sizeof(T));
   if (!data)
     return std::nullopt;
 
   T value;
   std::memcpy(&value, data, sizeof(T));
 
-  return rex::byte_swap(value);
+  // Byte-swap for big-endian PPC
+  if constexpr (sizeof(T) == 2) {
+    value = static_cast<T>((value >> 8) | (value << 8));
+  } else if constexpr (sizeof(T) == 4) {
+    value = static_cast<T>(((value >> 24) & 0xFF) | ((value >> 8) & 0xFF00) |
+                           ((value << 8) & 0xFF0000) | ((value << 24) & 0xFF000000));
+  } else if constexpr (sizeof(T) == 8) {
+    value = static_cast<T>(((value >> 56) & 0xFF) | ((value >> 40) & 0xFF00) |
+                           ((value >> 24) & 0xFF0000) | ((value >> 8) & 0xFF000000) |
+                           ((value << 8) & 0xFF00000000ULL) | ((value << 24) & 0xFF0000000000ULL) |
+                           ((value << 40) & 0xFF000000000000ULL) |
+                           ((value << 56) & 0xFF00000000000000ULL));
+  }
+
+  return value;
 }
 
-inline bool IsBranch(const DecodedInsn& insn) {
-  return insn.IsBranch();
+//=============================================================================
+// Helper functions for branch analysis (using existing arch::ppc)
+//=============================================================================
+
+/// Check if instruction is a branch
+inline bool isBranch(const DecodedInsn& insn) {
+  return insn.is_branch();
 }
 
-/** Reports whether the instruction is a call, a branch with link. */
-inline bool IsCall(const DecodedInsn& insn) {
-  return insn.IsCall();
+/// Check if instruction is a call (branch with link)
+inline bool isCall(const DecodedInsn& insn) {
+  return insn.is_call();
 }
 
-/** Reports whether the instruction is a return, blr. */
-inline bool IsReturn(const DecodedInsn& insn) {
-  return insn.IsReturn();
+/// Check if instruction is a return (blr)
+inline bool isReturn(const DecodedInsn& insn) {
+  return insn.is_return();
 }
 
-/** Reports whether the instruction ends a block, as an unconditional branch, return or bctr. */
-inline bool IsTerminator(const DecodedInsn& insn) {
-  return rex::codegen::detail::IsTerminatorInstruction(insn.opcode);
+/// Check if instruction is indirect branch (bcctr/bclr)
+inline bool isIndirect(const DecodedInsn& insn) {
+  return insn.is_indirect_branch();
 }
 
-inline bool IsConditional(const DecodedInsn& insn) {
-  return insn.IsConditional();
+/// Check if instruction is a terminator (unconditional branch, return, bctr)
+inline bool isTerminator(const DecodedInsn& insn) {
+  return rex::codegen::ppc::is_terminator_instruction(insn.opcode);
 }
 
-/** Returns the target of a direct branch, nullopt when there is none. */
-inline std::optional<u32> GetBranchTarget(const DecodedInsn& insn) {
+/// Check if instruction is conditional branch
+inline bool isConditional(const DecodedInsn& insn) {
+  return insn.is_conditional();
+}
+
+/// Check if instruction is lis (addis rD, 0, imm)
+inline bool isLis(const DecodedInsn& insn) {
+  return insn.opcode == rex::codegen::ppc::Opcode::lis;
+}
+
+/// Get branch target address (for direct branches)
+inline std::optional<uint32_t> getBranchTarget(const DecodedInsn& insn) {
   return insn.branch_target;
 }
 
-/** Reports whether the instruction is null padding or invalid. */
-inline bool IsInvalid(const DecodedInsn& insn) {
-  u32 raw = static_cast<u32>(insn.code);
+/// Check if instruction is null/invalid (null padding)
+inline bool isInvalid(const DecodedInsn& insn) {
+  uint32_t raw = static_cast<uint32_t>(insn.code);
   return raw == 0x00000000 || raw == 0xFFFFFFFF ||
-         insn.opcode == rex::codegen::detail::Opcode::kUnknown;
+         insn.opcode == rex::codegen::ppc::Opcode::kUnknown;
 }
 
 }  // namespace rex::codegen

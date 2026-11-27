@@ -31,7 +31,6 @@
 #include <string>
 
 #include "bf1943_pch.h"
-#include "guest_readable.h"
 
 #include <fmt/format.h>
 #include <rex/cvar.h>
@@ -137,7 +136,16 @@ bool Readable(uint32_t address, uint32_t size) {
   auto* state = rex::system::kernel_state();
   rex::memory::Memory* memory = state ? state->memory() : nullptr;
   if (!memory) return false;
-  return bf1943::GuestCommittedReadable(memory, address, size);  // guest_readable.h (was a QueryRegionInfo walk)
+  for (uint32_t page = address & ~0xFFFu; page < address + size;) {
+    rex::memory::BaseHeap* heap = memory->LookupHeap(page);
+    rex::memory::HeapAllocationInfo info{};
+    if (!heap || !heap->QueryRegionInfo(page, &info)) return false;
+    if (!(info.state & rex::memory::kMemoryAllocationCommit) || !(info.protect & rex::memory::kMemoryProtectRead)) return false;
+    const uint32_t next = info.base_address + info.region_size;
+    if (next <= page) return false;
+    page = next;
+  }
+  return true;
 }
 // An eastl string object (begin, end) as text.
 std::string Eastl(const uint8_t* base, uint32_t obj, uint32_t max = 96) {

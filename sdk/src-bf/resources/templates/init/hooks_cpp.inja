@@ -1,3 +1,0 @@
-// {{ names.original }} - ReXGlue Recompiled Project
-
-#include "{{ entrypoint_out_dir }}/{{ names.original }}_funcs.h"

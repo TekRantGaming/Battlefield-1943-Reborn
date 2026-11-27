@@ -19,8 +19,6 @@
 
 #include "bf1943_pch.h"
 
-#include <rex/cvar.h>  // (v0.10's generated precompiled header brought these)
-#include <rex/logging.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
@@ -71,7 +69,7 @@ extern "C" REX_FUNC(sub_8275B690) {
   // lwz r31,32(r3)
   ctx.r31.u64 = REX_LOAD_U32(ctx.r3.u32 + 32);
   // cmplw cr6,r31,r27
-  ctx.cr6.Compare<uint32_t>(ctx.r31.u32, ctx.r27.u32, ctx.xer);
+  ctx.cr6.compare<uint32_t>(ctx.r31.u32, ctx.r27.u32, ctx.xer);
   // lwz r10,0(r11)
   ctx.r10.u64 = REX_LOAD_U32(ctx.r11.u32 + 0);
   // clrlwi r28,r10,31
@@ -118,7 +116,7 @@ loc_8275B6C0:
   // and r4,r9,r8
   ctx.r4.u64 = ctx.r9.u64 & ctx.r8.u64;
   // cmplwi cr6,r4,0
-  ctx.cr6.Compare<uint32_t>(ctx.r4.u32, 0, ctx.xer);
+  ctx.cr6.compare<uint32_t>(ctx.r4.u32, 0, ctx.xer);
   // beq cr6,0x8275b718
   if (ctx.cr6.eq) goto loc_8275B718;
   // lwz r11,0(r3)
@@ -138,7 +136,7 @@ loc_8275B718:
   // addi r31,r31,4
   ctx.r31.s64 = ctx.r31.s64 + 4;
   // cmplw cr6,r31,r27
-  ctx.cr6.Compare<uint32_t>(ctx.r31.u32, ctx.r27.u32, ctx.xer);
+  ctx.cr6.compare<uint32_t>(ctx.r31.u32, ctx.r27.u32, ctx.xer);
   // bne cr6,0x8275b6c0
   if (!ctx.cr6.eq) goto loc_8275B6C0;
 loc_8275B724:

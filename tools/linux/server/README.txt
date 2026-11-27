@@ -16,11 +16,5 @@ On a VPS with no desktop, run it as a service that starts at boot and comes back
 bf1943-reborn-server.service in this folder says how (a user of its own, its paths, systemctl enable --now). A server
 that crashes is started again within seconds; its stack is kept in <data>/logs/server<n>/game.out.
 
-What a server needs (measured 27 Nov 2026 on a 4 vCPU KVM VPS, 64 players with 62 bots): about 3 GB of memory for
-each server (the game's console memory, ~2.7 GB, plus ~0.3 GB), so 4 GB or more for one server and 3 GB more for each
-other one; with less, the system swaps or stops the server. The game's simulation runs on one thread: each busy server
-wants one fast CPU core of its own (a 64 player server with bots used ~80% of one), and the core's speed decides how
-many bots it holds at 60 ticks.
-
 This archive needs python3 (3.9 or newer) and a 64 bit Linux with glibc 2.35 or newer (Ubuntu 22.04, Linux Mint 21,
 Debian 12 and newer). The AppImage carries its own Python and needs the same glibc.

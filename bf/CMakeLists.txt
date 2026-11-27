@@ -1,8 +1,6 @@
 # bf1943 - ReXGlue Recompiled Project
 #
-# SDK v0.11+ port (.handoff/SDK-0.11-PORT-PLAN.md): the SDK is our copy in sdk/src-bf, built here with
-# add_subdirectory (REXSDK_DIR), as upstream's project template does. Never the installed SDK package: the shared
-# builds find theirs through the CMake package registry.
+# SDK boilerplate lives in generated/rexglue.cmake.
 
 cmake_minimum_required(VERSION 3.25)
 project(bf1943 LANGUAGES C CXX)
@@ -10,42 +8,22 @@ project(bf1943 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(REXSDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src-bf" CACHE PATH "Our ReXGlue SDK copy")
-# Linux x86_64: the SDK's targets in the default (small) code model too, as the game's own (rexglue_target.cmake,
-# REXGLUE_SMALL_CODE_MODEL): a ThinLTO link refuses to mix the large model's objects with the small ones.
-if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    set(REXGLUE_SMALL_CODE_MODEL ON CACHE BOOL "The SDK in the default code model (Linux x86_64)" FORCE)
+include(generated/rexglue.cmake)
+
+# 14 Nov 2026 (TekRantGaming: the exe's antivirus false positive, Trapmine "ml.score" on VirusTotal since 0.2.2): on
+# Windows the game calls the runtime's own SDL, which rexruntime.dll exports (our SDK copy, src/system/CMakeLists.txt),
+# instead of linking a second, complete SDL into bf1943.exe. That copy (pulled in whole by SDL's dynamic API table
+# from the voice chat's first SDL call) put SDL's window, keyboard hook and clipboard code in the exe; 0.2.1 without it
+# was clean, 0.2.2 with it flagged. SDL's headers stay; an SDL function the runtime does not export fails the link.
+if(WIN32 AND TARGET rex::runtime AND TARGET SDL3::Headers)
+    get_target_property(_bf_runtime_links rex::runtime INTERFACE_LINK_LIBRARIES)
+    list(REMOVE_ITEM _bf_runtime_links SDL3::SDL3-static)
+    list(APPEND _bf_runtime_links SDL3::Headers)
+    set_target_properties(rex::runtime PROPERTIES INTERFACE_LINK_LIBRARIES "${_bf_runtime_links}")
 endif()
-add_subdirectory("${REXSDK_DIR}" rexglue-sdk)
-rexglue_project(bf1943 OUTPUT_DIR generated/default)
-
-# SDL: v0.11 links SDL3 as a shared library beside the exe (SDL3.dll, a runtime file of rexglue_configure_target), so
-# the game no longer carries a second, static SDL (the 0.2.2 antivirus false positive, 14 Nov 2026).
-
-# v0.10's SDK interfaces the game still uses, kept in the game (src/compat, SDK v0.11+ port phase 2): v0.10's cvar
-# registry as the game's own, bridged to v0.11's settings, and headers for the names v0.11 moved. Before the SDK's
-# include folders, for the game and NativeXRenderer alike.
-add_library(bf_compat_headers INTERFACE)
-target_include_directories(bf_compat_headers BEFORE INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/src/compat"
-                           "${REXSDK_DIR}/thirdparty/cli11/include"
-                           "${REXSDK_DIR}/thirdparty/xxHash")  # header only (XXH_INLINE_ALL), as before
-target_link_libraries(bf_compat_headers INTERFACE rex::sdk tomlplusplus)
-# The game calls SDL itself (voice chat, the launcher): the SDK's shared SDL3.dll.
-target_link_libraries(bf_compat_headers INTERFACE SDL3::SDL3)
-# src/gpu_preference.cpp: Vulkan's headers, the SDK's copy (thirdparty/Vulkan-Headers).
-target_link_libraries(bf_compat_headers INTERFACE rex-vulkan-headers)
 
 # Sources
 set(BF1943_SOURCES
-    src/compat/cvar.cpp
-    src/compat/kernel_state.cpp
-    src/compat/ui_compat.cpp
-    src/compat/display_mode.cpp
-    src/compat/graphics_hooks.cpp
-    src/bf1943_app.cpp
-    src/compat/cvar_bridge.cpp
-    src/compat/sdk_cvars.cpp
-    src/compat/input_compat.cpp
     src/main.cpp
     src/cpu_check.cpp
     src/gpu_lost.cpp
@@ -53,9 +31,8 @@ set(BF1943_SOURCES
     src/live_layers.cpp
     src/online_services.cpp
     src/socket_fixes.cpp
-    # src/socket_overlapped.cpp: v0.10 only (v0.11 has overlapped WSARecvFrom; its filtering is in socket_fixes.cpp).
-    # src/kernel_fixes.cpp: v0.10 only. v0.11's ObDereferenceObject finds the object by its guest address and
-    # dereferences that object, which is what this fix did (SDK v0.11+ port, phase 4).
+    src/socket_overlapped.cpp
+    src/kernel_fixes.cpp
     src/game_fixes.cpp
     src/shader_prep.cpp
     src/frame_stats.cpp
@@ -177,21 +154,17 @@ endif()
 # Players get our Vulkan renderer only (DECISIONS.md, 5 Nov 2026 evening). The SDK's Xenos plugin (D3D12) is in the
 # developer build only, to capture reference frames.
 option(BF_DEV_TOOLS "Build the developer aids" OFF)
-# v0.11: the graphics drivers are modules beside the exe, selected by gpu.driver (rexgpu-xenos-vulkan, -d3d12, -null;
-# ours, rexgpu-xenos-bfnative, comes in phase 5).
-rexglue_setup_target(bf1943)
-target_link_libraries(bf1943 PRIVATE bf_compat_headers)
-# The keyboard and mouse pad's additions (rex/hid/bf_mnk.h, our SDK patch; compat rex/input/mnk): exported by the
-# input module, which the SDK loads as a plugin too (the same DLL).
-target_link_libraries(bf1943 PRIVATE rexhid)
-# The compatibility headers first, ahead of the SDK's: some keep a name v0.11 still uses (rex/ui/window.h).
-target_include_directories(bf1943 BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/compat")
+if(BF_DEV_TOOLS)
+    rexglue_setup_target(bf1943 GPU_PLUGINS xenos)
+else()
+    rexglue_setup_target(bf1943)
+endif()
 # Linux: the SDK compiles every target with -mcmodel=large ("large executable support"), which makes each call and
 # global access an absolute 64 bit load. The program is far under the 2 GB the default model allows, so the game's
 # own code goes back to it (the flag given last wins). King Kong found this on the ROG Ally (its commit 39064772):
 # its recompiled movie decoder went from 13 to 30 FPS. (The renderer's targets: after their add_subdirectory below.)
 if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    foreach(_bf_target bf1943 bf1943_recomp bf1943_recompiled)
+    foreach(_bf_target bf1943 bf1943_recomp)
         if(TARGET ${_bf_target})
             target_compile_options(${_bf_target} PRIVATE -mcmodel=small)
         endif()
@@ -205,12 +178,32 @@ endif()
 # texture code from our SDK copy's source (REXSDK_DIR here only, after generated/rexglue.cmake, so the game still
 # builds against the installed SDK), and wants the SDK's third party targets by their in tree names: given here
 # from our SDK copy's own folders, so DiligentCore uses the same Vulkan and SPIR-V headers as the SDK.
-set(BF_SDK_SOURCE_DIR "${REXSDK_DIR}")
-# SDK v0.11+ port: the SDK's own targets are in this build (add_subdirectory), under v0.11's names. Vulkan's headers
-# are its rex-vulkan-headers (thirdparty/Vulkan-Headers), xxHash's and glslang's targets keep their names. v0.11 has
-# no SPIRV-Headers of its own (its translator uses glslang's spirv.hpp): DiligentCore then uses its own copy.
+set(BF_SDK_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src-bf")
+set(REXSDK_DIR "${BF_SDK_SOURCE_DIR}")
 if(NOT TARGET Vulkan::Headers)
-    add_library(Vulkan::Headers ALIAS rex-vulkan-headers)
+    add_library(bf_vulkan_headers INTERFACE)
+    target_include_directories(bf_vulkan_headers INTERFACE "${BF_SDK_SOURCE_DIR}/thirdparty/vulkan-headers/include")
+    add_library(Vulkan::Headers ALIAS bf_vulkan_headers)
+endif()
+if(NOT TARGET SPIRV-Headers)
+    add_library(SPIRV-Headers INTERFACE)
+    target_include_directories(SPIRV-Headers INTERFACE "${BF_SDK_SOURCE_DIR}/thirdparty/spirv-headers/include")
+endif()
+if(NOT TARGET xxHash::xxhash)
+    add_library(bf_xxhash INTERFACE)
+    target_link_libraries(bf_xxhash INTERFACE rex::xxhash)
+    target_include_directories(bf_xxhash INTERFACE "${BF_SDK_SOURCE_DIR}/thirdparty/xxHash")
+    add_library(xxHash::xxhash ALIAS bf_xxhash)
+endif()
+if(NOT TARGET glslang)
+    add_library(glslang INTERFACE)
+    target_link_libraries(glslang INTERFACE rex::glslang rex::MachineIndependent rex::GenericCodeGen rex::OSDependent)
+    target_include_directories(glslang INTERFACE "${BF_SDK_SOURCE_DIR}/thirdparty/glslang")
+endif()
+if(NOT TARGET glslang::SPIRV)
+    add_library(bf_glslang_spirv INTERFACE)
+    target_link_libraries(bf_glslang_spirv INTERFACE rex::SPIRV glslang)
+    add_library(glslang::SPIRV ALIAS bf_glslang_spirv)
 endif()
 add_subdirectory(third_party/native-x-renderer)
 # Linux: the renderer back to the default code model as well (see the game's own targets above). Until 13 Nov 2026
@@ -235,7 +228,7 @@ endforeach()
 target_link_libraries(bf1943 PRIVATE native_x_renderer)
 # The launcher's menu music from the player's game files (src/game_music.cpp): FFmpeg's XMA2 decoder from the SDK's
 # own FFmpeg (LGPL 2.1, decoders only; its headers from the SDK's source).
-target_link_libraries(bf1943 PRIVATE libavcodec libavutil)
+target_link_libraries(bf1943 PRIVATE rex::libavcodec rex::libavutil)
 set_source_files_properties(src/game_music.cpp PROPERTIES INCLUDE_DIRECTORIES
     "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src-bf/thirdparty/FFmpeg")
 # The weather's sounds (src/weather_audio.cpp): the same FFmpeg's MP3 decoder and parser.
@@ -270,9 +263,21 @@ add_custom_target(bf1943_data ALL
     COMMENT "Copying our shader list, fonts and button glyphs next to bf1943")
 add_dependencies(bf1943 bf1943_data)
 
-# SDK v0.11+ port: v0.10's GPU plugins (rexgpu-xenos, rexgpu-bfnative) copied from the installed SDK are gone. The
-# SDK's driver modules are built here and copied beside the exe by rexglue_configure_target; NativeXRenderer's own
-# driver module is phase 5.
+# The GPU plugins from our SDK copy (sdk/src-bf, build_bf.bat) over the pinned SDK's: rexgpu-xenos with the
+# shader storage progress the shader screen shows (game_menu.cpp), and rexgpu-bfnative, the Vulkan only native
+# renderer (docs/native-renderer.md). Skipped when the SDK copy has not been built.
+set(BF_SDK_PLUGIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src-bf/out/install/win-amd64/bin" CACHE PATH
+    "Where our SDK copy installs its GPU plugins")
+set(_bf_plugins rexgpu-bfnative.dll)
+if(BF_DEV_TOOLS)
+    list(APPEND _bf_plugins rexgpu-xenos.dll)
+endif()
+foreach(_plugin ${_bf_plugins})
+    if(EXISTS "${BF_SDK_PLUGIN_DIR}/${_plugin}")
+        add_custom_command(TARGET bf1943 POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${BF_SDK_PLUGIN_DIR}/${_plugin}" $<TARGET_FILE_DIR:bf1943>)
+    endif()
+endforeach()
 
 # Developer aids (src/break_trace.cpp, src/dev_pad.cpp, src/net_trace.cpp, src/online_trace.cpp,
 # src/dev_stacks.cpp). Never in a release build.

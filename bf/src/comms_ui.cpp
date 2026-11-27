@@ -34,7 +34,6 @@ namespace bf1943 {
 
 bool GameMenuOpen();          // game_menu.cpp
 bool InMatch();               // auto_join.cpp
-void SeatKeysFrame();         // vehicle_binds.cpp: the seat keys (issue 80), read here with the chat's keys
 ImFont* MenuFont(int which);  // game_menu.cpp: 0 bold, 1 semibold
 float PerfOverlayBottom();    // perf_overlay.cpp
 
@@ -150,8 +149,7 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
     } else if (typing) {
       Edit(io);
     }
-    if (!typing) SeatKeysFrame();
-    DrawChat(io);
+    Draw(io);
   }
 
  private:
@@ -234,7 +232,7 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
     dl->AddRectFilled(ImVec2(x0 + 8 * s, y0 + h - 4 * s), ImVec2(x0 + 8 * s + (w - 8 * s) * left, y0 + h), accent);
   }
 
-  void DrawChat(ImGuiIO& io) {  // (v0.11: IDialog::Draw is the UI system's)
+  void Draw(ImGuiIO& io) {
     const float s = io.DisplaySize.y / 1080.0f;
     ImFont* bold = MenuFont(0) ? MenuFont(0) : ImGui::GetFont();
     ImFont* font = MenuFont(1) ? MenuFont(1) : ImGui::GetFont();
@@ -359,8 +357,5 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
 void CreateCommsOverlay(rex::ui::ImGuiDrawer* drawer) {
   new CommsOverlay(drawer);  // lives for the rest of the session
 }
-
-// A bind ("1", or keys separated by commas) pressed this frame (the UI thread only).
-bool KeyBindPressed(const std::string& bind) { return BindPressed(bind); }
 
 }  // namespace bf1943

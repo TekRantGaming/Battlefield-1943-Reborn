@@ -43,7 +43,9 @@
 #include "scale.h"
 #include "state.h"
 
-#include <rex/graphics/compat.h>  // rex::graphics::RegisterFile (SDK v0.11+: rex::xenos::RegisterFile)
+namespace rex::graphics {
+class RegisterFile;
+}  // namespace rex::graphics
 namespace rex::memory {
 class Memory;
 }  // namespace rex::memory
@@ -82,11 +84,6 @@ class DrawPath {
   DrawPath();
   ~DrawPath();
 
-  // The title detaches (SDK v0.11+: the bfnative driver's detach observer, after its command processor stopped): the
-  // write listeners on the title's memory released, which the title's unload waits for. Nothing reads guest memory
-  // afterwards.
-  void DetachTitle();
-
   // `registers`: the renderer's copy of the register file (D71), which outlives the draw path.
   // `storage`: where the shaders and pipelines are kept between runs, a path without extension (D42);
   // empty for none.
@@ -124,7 +121,6 @@ class DrawPath {
   // Something else bound render targets (a clear, a resolve, Present): the next draw binds its own again, sets
   // its viewport and scissor again (DiligentCore resets the viewport with the render targets, D81), and commits
   // its shader resources again (D82: the other work committed its own, or submitted the command buffer).
-  uint64_t committed_direct_uses_ = 0;  // Recorder::direct_uses at the last commit of a binding set
   void TargetsChanged() {
     bound_valid_ = false;
     viewport_valid_ = false;
@@ -354,18 +350,6 @@ class DrawPath {
   // D191: the window glass's draws of this frame drawn again into `mask` (R32 float, cleared to 0 by the caller): each
   // pixel the nearest pane's depth, untested (the reflection's pass tests it against the world's depth). The count.
   uint32_t DrawGlassMask(Diligent::ITextureView* mask, bool sea = false, Diligent::ITextureView* depth = nullptr);
-  // D252: the planar reflection (Reflections: Planar). While on, the main view's world draws (those that write depth,
-  // but the first person weapon's and the sea's) are kept, to be drawn again mirrored in the sea's plane.
-  void SetPlanarReflection(bool on) { planar_on_ = on; }
-  uint32_t planar_draw_count() const { return uint32_t(planar_draws_.size()); }
-  bool sea_seen() const { return sea_seen_; }  // a draw of the sea's in the view this frame (D252)
-  // Draws the kept draws into `color` (RGBA16F) with `depth` (D32_FLOAT, cleared to 0: the depth grows toward the
-  // eye), mirrored in the plane y = `sea` (each depth partition's view-projection from this frame's terrain, `terrain`),
-  // what is under the water clipped by an oblique near plane. `debug` 1: drawn as they were (no mirror), a check that
-  // the replay matches the view. `scale`: the targets' size over the view's (0.5: half; the viewports and scissors
-  // scaled by it). Returns how many were drawn; the list is emptied.
-  uint32_t DrawPlanar(Diligent::ITextureView* color, Diligent::ITextureView* depth, float sea, int debug,
-                      const TerrainFrame* terrain, float scale = 1.0f);
   uint32_t glass_draw_count() const { return uint32_t(glass_draws_.size()); }
   uint32_t sea_draw_count() const { return uint32_t(sea_draws_.size()); }  // D190: the sea's, the same way
   // D190: the picture as it was just after the sea's last draw this frame (null: not taken), before anything
@@ -451,10 +435,6 @@ class DrawPath {
   void KeepSkinDraw(rex::graphics::SpirvShader& vertex_shader, uint64_t vertex_modification, const PipelineState& state,
                     const Diligent::Viewport& viewport, const Diligent::Rect& scissor, Diligent::IBuffer* index_buffer,
                     uint64_t index_offset, Diligent::VALUE_TYPE index_type, uint32_t vertex_count);
-  void KeepPlanarDraw(rex::graphics::SpirvShader& vertex_shader, const rex::graphics::SpirvShader* pixel_shader,
-                      const PipelineState& state, const Diligent::Viewport& viewport, const Diligent::Rect& scissor,
-                      Diligent::IBuffer* index_buffer, uint64_t index_offset, Diligent::VALUE_TYPE index_type,
-                      uint32_t vertex_count, const float blend[4]);
   void KeepGlassDraw(rex::graphics::SpirvShader& vertex_shader, uint64_t vertex_modification, const PipelineState& state,
                      const Diligent::Viewport& viewport, const Diligent::Rect& scissor, Diligent::IBuffer* index_buffer,
                      uint64_t index_offset, Diligent::VALUE_TYPE index_type, uint32_t vertex_count, bool sea = false);
@@ -656,52 +636,6 @@ class DrawPath {
   bool skip_game_sky_ = false;
   bool own_sea_reflection_ = false;
   bool own_sea_sky_ = false;  // D240
-  // D252: the planar reflection's kept draws: the mirrored pipeline (one colour target, its own depth), the draw's
-  // packed vertex and pixel float constants then its system, bool/loop and fetch constants (planar_data_), where its
-  // world-view-projection is among the vertex constants, and its textures and samplers (planar_objects_, as
-  // binding_objects_ lists them).
-  struct PlanarDraw {
-    Pipeline* pipeline;
-    size_t data;
-    uint32_t vs_size, ps_size;
-    // The world-view-projections it may draw with: the first register of each perspective block among the packed
-    // vertex constants (up to 4; a shader that indexes its constants has all 256, with blocks left from other draws).
-    uint32_t matrices[4];
-    bool transposed[4];
-    uint32_t matrix_count;
-    uint32_t objects, object_count;
-    Diligent::Viewport viewport;
-    Diligent::Rect scissor;
-    Diligent::IBuffer* index_buffer;
-    uint64_t index_offset;
-    Diligent::VALUE_TYPE index_type;
-    uint32_t vertex_count;
-    float blend[4];
-  };
-  bool planar_on_ = false;
-  bool sea_seen_ = false;
-  std::vector<PlanarDraw> planar_draws_;
-  std::vector<uint8_t> planar_data_;
-  std::vector<Diligent::IDeviceObject*> planar_objects_;
-  std::vector<Diligent::IDeviceObject*> planar_set_objects_;  // (one draw's, for FindSet)
-  std::vector<uint8_t> pixel_constants_;  // this draw's pixel shader float constants, packed (while planar_on_)
-  uint32_t planar_no_matrix_ = 0, planar_not_ready_ = 0, planar_under_ = 0, planar_culled_ = 0;
-  bool planar_cull_ = true;  // native_x_renderer_planar_cull
- public:
-  void SetPlanarCull(bool on) { planar_cull_ = on; }
- private:
-  // D252: this draw's terrain patch (CaptureTerrain): its corner in the world (c21), its grid step (c20.x), its
-  // heightmap's corner (c22.zw) and the heightmap's fetch; `terrain_patch_` false for any other draw.
-  bool terrain_patch_ = false;
-  float terrain_patch_at_[5] = {};  // corner x, z; step; heightmap u, v of the corner
-  rex::graphics::xenos::xe_gpu_texture_fetch_t terrain_patch_fetch_{};
-  float terrain_patch_height_[2] = {};  // c20.y, c21.y: height = texel x the first plus the second
-  // The heightmap's highest point in each 16 x 16 texel cell (128 x 128 for 2048 x 2048), in the world's metres, read
-  // from the game's memory once for each heightmap (its address): a patch whose cells are all under the water is not
-  // drawn in the mirror (all of it would be clipped there anyway).
-  uint32_t planar_heights_address_ = 0, planar_heights_size_ = 0;
-  std::vector<float> planar_cell_top_;
-  bool PlanarPatchUnderWater();
   float sea_level_ = std::numeric_limits<float>::quiet_NaN();  // D205
   bool sea_after_due_ = false;
   Diligent::RefCntAutoPtr<Diligent::ITexture> sea_after_source_, sea_after_;

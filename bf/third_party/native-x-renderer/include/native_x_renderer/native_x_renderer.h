@@ -243,13 +243,6 @@ struct Profile {
 void Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, rex::ui::Window* window,
                 const std::filesystem::path& cache_root = {});
 
-// The pages before the title (a launcher: the UI system's Dear ImGui dialogs) on the game's window, until the renderer
-// starts (SDK v0.11+: no presenter draws them; pregame.cpp). Start once the window is open, present once per frame of
-// the pages, and stop before Initialize (or when the program ends without the title). All on the UI thread.
-bool StartPreGamePresenter(rex::ui::Window* window);
-void PresentPreGameFrame();
-void StopPreGamePresenter();
-
 // Whether NativeXRenderer draws the game (the native_x_renderer cvar, and the renderer started), as of Initialize.
 // For game settings that NativeXRenderer does not support yet (for example POTCAWE's 2x MSAA, rendered in two
 // EDRAM tiles).
