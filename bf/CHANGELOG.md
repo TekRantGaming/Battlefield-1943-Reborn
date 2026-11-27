@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.8.2 (27 November 2026): a hotfix
+
+Earlier versions update to it by themselves, and the servers only let the newest version in. Every update builds your
+shaders again from scratch at the first start.
+
+**Fixed**
+- **Keyboard and mouse work again.** 0.4.8.1 turned Keyboard & mouse off for every player who had never changed it,
+  leaving a controller only. It is on again, and a keyboard, mouse and controller all work together as before. If
+  you turned it off yourself in Settings, Controls, it stays off.
+
 ## 0.4.8.1 (27 November 2026): a hotfix
 
 Earlier versions update to it by themselves, and the servers only let the newest version in. Every update builds your
