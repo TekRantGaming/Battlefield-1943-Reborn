@@ -812,11 +812,21 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     open_ = true;
     // The game's own options as saved (it starts each run from its defaults): sent from our next draw, as this runs
     // in the menu driver's step, under its lock, which GameCommand takes too.
+    const bool first_sign_in = !signed_in_once_;
     if (!signed_in_once_) send_game_settings_ = true;
     signed_in_once_ = true;
     if (page_ == Page::kJoining && !failed_) return;
     // Signed in under the launcher's pages (BF's menu is up behind them): they stay; Play goes on from here.
     if (LauncherPage(page_) && page_ != Page::kStarting) {
+      main_cursor_ = 0;
+      return;
+    }
+    // The game's first sign in of the run, while the player is on one of our menu's pages (the first start after an
+    // update starts the game behind the shader page, PrepareShadersAtStart, and the player goes on to the server type
+    // page, the browser, Stats...): that page stays. It was replaced by the main menu, and a player who had just opened
+    // the server browser was put back on the main menu a few seconds later (0.4.8.11 on the ROG Ally, 27 Nov 2026).
+    if (first_sign_in && page_ != Page::kStarting && page_ != Page::kShaders && page_ != Page::kMain &&
+        page_ != Page::kPause && page_ != Page::kLeaving) {
       main_cursor_ = 0;
       return;
     }
