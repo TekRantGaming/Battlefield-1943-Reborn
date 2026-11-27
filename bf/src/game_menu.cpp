@@ -6223,6 +6223,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
       last_input_ms_.store(SteadyMs(), std::memory_order_relaxed);
     }
+    if (mouse_used) mouse_last_ = true;
+    if (key_used || pad_pressed) mouse_last_ = false;
     const Device was = device_.load(std::memory_order_relaxed);
     Device to = was;
     if (key_used || mouse_used) to = Device::kKeyboard;
@@ -6354,6 +6356,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   std::atomic<Device> device_{Device::kPad};  // the UI thread (TrackDevice) and the game's pad reads (NoteMatchDevice)
   std::atomic<bool> game_flip_y_{false};      // GameFlipY: the game's own Vertical look, for the pad hook's thread
   int mouse_frames_ = 0;
+  // The mouse moved or clicked after the last key or controller press (TrackDevice): a pointer left resting over a
+  // list is not the player's choice (the server browser's scrolling names).
+  bool mouse_last_ = false;
   std::atomic<int64_t> last_input_ms_{SteadyMs()};  // the last key, mouse or controller input (IdleFor)
   bool launcher_idling_ = false;                    // PaceLauncher
   std::chrono::steady_clock::time_point launcher_next_{};
