@@ -171,7 +171,7 @@ using Clock = std::chrono::steady_clock;
 // in BotsTick and its parts, logged every 30 s while bots play.
 struct BotCost {
   double total = 0, worst = 0, learn = 0, scan = 0, think = 0, drive = 0, save = 0, input_step = 0;
-  int ticks = 0, searches = 0;
+  int ticks = 0, searches = 0, cut_short = 0;  // cut_short: searches the ray budget stopped (FindPath's starved)
   Clock::time_point since{};
 } cost;
 struct CostTimer {
@@ -304,6 +304,12 @@ struct Bot {
   bool kit_warned = false;  // "no live kit" logged (once until it has one again)
   float yaw = 0, pitch = 0;
   uint32_t tick = 0;
+  // Its own share of the game's input step over the cost line's 30 s, and where it was at the line before (the census
+  // beside the cost line: which soldiers make the step dear).
+  double step_ms = 0;
+  float census_at[3] = {};
+  bool census_set = false;
+  bool was_following = false, was_at_flag = false;  // its last plan (the census)
   // The brain (Think, 4 times a second) and what it asks of the next ticks (Drive).
   Clock::time_point next_think{}, next_look{}, detour_until{}, burst_until{}, burst_pause_until{};
   float forward = 0, strafe = 0, want_yaw = 0, want_pitch = 0;
@@ -383,6 +389,13 @@ struct Bot {
   bool watching = false;  // at a flag, facing where the enemy came from
   float watch_yaw = 0;
   int no_reach = 0;  // plans in a row that ended short of the goal
+  // Pinned (Guadalcanal, 27 Nov 2026): asked to move, off its flag, and come less than 3 m in 20 s, pressed against
+  // something it cannot get past. Where it was when it last came 3 m, since when, and what it has done about it: its
+  // flag given up for a while (shun_flag until shun_until), then a rest (no pushing) until rest_until.
+  float pin_at[3] = {};
+  Clock::time_point pin_since{}, shun_until{}, rest_until{};
+  int pin_level = 0, shun_flag = -1, stucks = 0;
+  bool plan_starved = false;  // its last search was cut short by the ray budget and left it no path
   // Bailing out (BailCheck): the vehicle whose health it watches, its health then and when, how fast it falls (a
   // second), whether it is getting out (since when), and when it opens its parachute (out of a plane).
   uint32_t hp_vehicle = 0;
@@ -902,6 +915,12 @@ bool InCaptureArea(const uint8_t* base, const Flag& f, uint32_t player, uint32_t
   return false;
 }
 
+// The path searches' ray time left this tick (ms): the grid's rays' own time comes off it (GridRay); set where the
+// tick's thinking starts (BotsTickImpl). Until 27 Nov 2026 their 0.6 ms was a clock deadline set before the bots' loop,
+// which then spent ~5 ms in the game's input steps: a bot whose search came later found the time gone and was cut
+// short at its first step not yet known (two searches in three on Guadalcanal), whatever its rays had cost.
+double g_path_ray_ms_left = 0;
+
 // The game's ray test against the level (the deep water test's, sub_8252FB10): the physics world of a soldier's
 // character physics (soldier+304, its +104), its ray caster (vtable +144), cast (vtable +0: from, to, result, 2,
 // filter {ignored physics, 0}); the result's fraction at +44 (1: nothing hit), the hit point at +0.
@@ -982,11 +1001,16 @@ struct Nav {
   float water = -1e9f;
   uint64_t rays = 0;
   double ray_ms = 0;
+  // Steps a stuck bot could not take (StepKey -> Nav seconds until which they stay shut), out of its own cell as well:
+  // a step out of the searching bot's own cell goes by the ground alone (Step), so without this the next search sent
+  // the bot the same way into the same wall, every 2 s for the whole round (27 Nov 2026, Guadalcanal: the dearest
+  // soldiers in the game's input step, 0.3 to 0.5 ms a tick each, were bots pressed against the Japanese base's walls).
+  std::unordered_map<uint64_t, float> stuck;
 } nav;
 
 uint64_t CellKey(int ix, int iz) { return (uint64_t(uint32_t(ix)) << 32) | uint32_t(iz); }
 float NavNow() { return std::chrono::duration<float>(Clock::now() - nav.epoch).count(); }
-bool RaysSpent() { return nav.rays_left <= 0 || Clock::now() > nav.ray_deadline; }
+bool RaysSpent() { return nav.rays_left <= 0 || Clock::now() > nav.ray_deadline || g_path_ray_ms_left <= 0; }
 // A step's key (StepKey: the cell's key shifted by 3, the direction in the low 3) back to its cell: x keeps 29 bits.
 int StepCellX(uint64_t k) { return int32_t(uint32_t(k >> 35) << 3) >> 3; }
 int StepCellZ(uint64_t k) { return int(uint32_t(k >> 3)); }
@@ -1005,6 +1029,15 @@ float CellCenter(int i) { return (float(i) + 0.5f) * kCell; }
 constexpr int kDx[8] = {1, -1, 0, 0, 1, 1, -1, -1}, kDz[8] = {0, 0, 1, -1, 1, -1, 1, -1};
 constexpr int kBack[8] = {1, 0, 3, 2, 7, 6, 5, 4};  // the opposite direction
 
+// A ray for the grid (ProbeCell, Step): its time off the path searches' budget (g_path_ray_ms_left).
+bool GridRay(PPCContext& ctx, uint8_t* base, uint32_t soldier, const float from[3], const float to[3], float* fraction,
+             float hit[3] = nullptr) {
+  const double before = g.ray_ms;
+  const bool r = Ray(ctx, base, soldier, from, to, fraction, hit);
+  g_path_ray_ms_left -= g.ray_ms - before;
+  return r;
+}
+
 // The cell's ground near the height y_ref: a ray from 1.6 m above (over the highest step, under a shelter's roof:
 // from 3 m, run bots_s1e's spawns under a roof found the roof) down to 5 m below. False: out of this tick's budget.
 bool ProbeCell(PPCContext& ctx, uint8_t* base, uint32_t soldier, int ix, int iz, float y_ref, NavCell* out) {
@@ -1019,12 +1052,12 @@ bool ProbeCell(PPCContext& ctx, uint8_t* base, uint32_t soldier, int ix, int iz,
   const float from[3] = {cx, y_ref + 1.6f, cz}, to[3] = {cx, y_ref - 5.0f, cz};
   float frac = 1.0f, hit[3] = {};
   NavCell c;
-  if (Ray(ctx, base, soldier, from, to, &frac, hit) && frac < 1.0f) {
+  if (GridRay(ctx, base, soldier, from, to, &frac, hit) && frac < 1.0f) {
     c.y = from[1] + (to[1] - from[1]) * frac;
     // Headroom: a ray up from the ground; a ceiling under 1.7 m (a wall's top, a table) is no place to stand.
     const float up_from[3] = {cx, c.y + 0.3f, cz}, up_to[3] = {cx, c.y + 1.8f, cz};
     float uf = 1.0f;
-    const bool low = Ray(ctx, base, soldier, up_from, up_to, &uf) && uf < 1.0f;
+    const bool low = GridRay(ctx, base, soldier, up_from, up_to, &uf) && uf < 1.0f;
     c.state = low ? 2 : 1;
     if (c.y < nav.water - 0.9f) c.state = 3, c.y = nav.water - 0.2f;  // under the water: a swimmer's, at its surface
   } else {
@@ -1070,8 +1103,13 @@ constexpr float kSwimCost = 10.0f;
 // The ray test hits soldiers too (its filter keeps out no character: run bots_s1g, every step out of a bot's own cell
 // closed), so a step out of the searching bot's own cell (own) goes by the ground alone and is not kept, and a
 // closed step is tried again 20 s on (a soldier who stood there has moved).
+uint64_t StepKey(int ix, int iz, int d);
 int Step(PPCContext& ctx, uint8_t* base, uint32_t soldier, int ix, int iz, float ya, int d, bool own = false) {
   const uint8_t bit = uint8_t(1 << d);
+  if (own && !nav.stuck.empty()) {
+    const auto s = nav.stuck.find(StepKey(ix, iz, d));
+    if (s != nav.stuck.end() && NavNow() < s->second) return 2;
+  }
   if (!own) {
     const auto it = nav.cells.find(CellKey(ix, iz));
     if (it != nav.cells.end()) {
@@ -1094,7 +1132,7 @@ int Step(PPCContext& ctx, uint8_t* base, uint32_t soldier, int ix, int iz, float
     const float h = std::max(ya, b.y) + 0.9f;  // knee to chest of the higher end
     const float from[3] = {ax, h, az}, to[3] = {bx, h, bz};
     float frac = 1.0f;
-    r = Ray(ctx, base, soldier, from, to, &frac) && frac < 0.99f ? 2 : 1;
+    r = GridRay(ctx, base, soldier, from, to, &frac) && frac < 0.99f ? 2 : 1;
     by_ray = r == 2;
   }
   // Closed by the ground (too steep, no ground, a low roof) for good; closed by a ray (a wall, or a soldier who stood
@@ -1895,6 +1933,8 @@ bool ScanTick(PPCContext& ctx, uint8_t* base, uint32_t soldier, double budget_ms
   nav.scan_rays_left = kScanRaysPerTick;
   // Its own time budget (the optimization pass: with players on the server a little each tick, alone more).
   const auto keep_deadline = nav.ray_deadline;
+  const double keep_ray_ms = g_path_ray_ms_left;  // (the scan's rays go by its own deadline, not the searches' time)
+  g_path_ray_ms_left = 1e9;
   nav.ray_deadline = Clock::now() + std::chrono::microseconds(int64_t(budget_ms * 1000));
   while (!nav.scan.empty() && Clock::now() <= nav.ray_deadline) {
     const uint64_t k = nav.scan.front();
@@ -1925,6 +1965,7 @@ bool ScanTick(PPCContext& ctx, uint8_t* base, uint32_t soldier, double budget_ms
     nav.scan.pop_front();
   }
   nav.ray_deadline = keep_deadline;
+  g_path_ray_ms_left = keep_ray_ms;
   if (nav.scan.empty()) {
     nav.scan_done = true;
     REXLOG_INFO("BF bots: the level is mapped: {} cells in {:.0f} s", nav.cells.size(),
@@ -2645,15 +2686,17 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
   // flag until its team holds it (no turning back and forth as others come and go), or 60 s at most.
   int best = -1;
   float best_d = 1e9f;
+  // A flag it was pinned short of (Bot::pin_at) is left alone until shun_until.
+  auto shunned = [&](int i) { return i == bot.shun_flag && now < bot.shun_until; };
   const bool keep = bot.goal >= 0 && bot.goal < int(g.flags.size()) && now < bot.goal_until &&
-                    FlagOwner(base, g.flags[bot.goal]) != team;
+                    FlagOwner(base, g.flags[bot.goal]) != team && !shunned(bot.goal);
   if (keep) {
     best = bot.goal, best_d = Dist2D(pos, g.flags[best].pos);
   } else if (bot.goal_until < now && Rand01() > (AttackShare() + (1.0 - AttackShare()) * 0.6 * aggro) * bot.jitter[4]) {
     // Defending, as the players do part of the time: its side's nearest held flag.
     for (size_t i = 0; i < g.flags.size(); ++i) {
       const Flag& f = g.flags[i];
-      if (!f.takeable || FlagOwner(base, f) != team) continue;
+      if (!f.takeable || FlagOwner(base, f) != team || shunned(int(i))) continue;
       const float d = Dist2D(pos, f.pos);
       if (d < best_d) best_d = d, best = int(i);
     }
@@ -2662,7 +2705,7 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
     for (int pass = 0; pass < 2 && best < 0; ++pass)
       for (size_t i = 0; i < g.flags.size(); ++i) {
         const Flag& f = g.flags[i];
-        if (!f.takeable) continue;
+        if (!f.takeable || shunned(int(i))) continue;
         if (pass == 0 && FlagOwner(base, f) == team) continue;
         const float d = Dist2D(pos, f.pos);
         if (d < best_d) best_d = d, best = int(i);
@@ -2691,7 +2734,7 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
           else following = true, std::copy(lp, lp + 3, follow);
         }
       } else if (const auto order = g.orders.find({team, sq}); order != g.orders.end() && order->second.flag >= 0 &&
-                                    size_t(order->second.flag) < g.flags.size()) {
+                                    size_t(order->second.flag) < g.flags.size() && !shunned(order->second.flag)) {
         best = order->second.flag, best_d = Dist2D(pos, g.flags[size_t(best)].pos);
         if (leader != bot.player && alive && Dist2D(pos, lp) > 30.0f && Dist2D(lp, g.flags[size_t(best)].pos) + 10.0f < best_d)
           following = true, std::copy(lp, lp + 3, follow);
@@ -2803,6 +2846,7 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
   }
   if (!moved_off && bot.goal_moved_off && !at_flag) std::copy(g.flags[best].pos, g.flags[best].pos + 3, bot.goal_pos);
   bot.goal_moved_off = moved_off;
+  bot.was_following = following && !at_flag, bot.was_at_flag = at_flag;
   // The way there: a path over the navigation grid, planned again every 3 s, when the goal moves, when the path is
   // used up, or when the bot is stuck.
   const uint32_t phys = Load32(base, soldier + 304);
@@ -2812,6 +2856,59 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
     stuck = bot.check_at != Clock::time_point{} && Dist2D(pos, bot.check_pos) < 0.6f && bot.forward > 0.5f;
     std::memcpy(bot.check_pos, pos, sizeof(bot.check_pos));
     bot.check_at = now;
+  }
+  // What holds a pinned bot (its log): rays 1.5 m ahead along its facing at 0.3, 0.6, 0.9 and 1.5 m over its feet (the
+  // distance to a hit, - for none), and the soldiers within 1.5 m of it.
+  auto pin_probe = [&]() {
+    std::string out = " ahead";
+    const float fx = -std::sin(bot.yaw), fz = std::cos(bot.yaw);
+    for (float h : {0.3f, 0.6f, 0.9f, 1.5f}) {
+      const float a[3] = {pos[0], pos[1] + h, pos[2]}, b[3] = {pos[0] + fx * 1.5f, pos[1] + h, pos[2] + fz * 1.5f};
+      float f = 1.0f;
+      const bool hit = Ray(ctx, base, soldier, a, b, &f) && f < 0.99f;
+      out += hit ? fmt::format(" {:.1f}", f * 1.5f) : std::string(" -");
+    }
+    int close = 0;
+    for (const Bot& o : g.bots) {
+      if (&o == &bot || !o.player) continue;
+      const uint32_t os = Load32(base, o.player + 288);
+      float op[3];
+      if (os && os != soldier && CachedPosition(ctx, base, os, op) && Dist2D(op, pos) < 1.5f &&
+          std::fabs(op[1] - pos[1]) < 2.0f)
+        ++close;
+    }
+    return out + fmt::format(", {} soldiers within 1.5 m, path {}", close, bot.path.size());
+  };
+  // Pinned: off its flag, its goal more than 4 m off, and come less than 3 m in 20 s (the side steps, knife and jumps
+  // below have not got it past). First its flag is given up for 2 minutes (another one, or its squad's order unless
+  // that is the same flag); still pinned 25 s on, it stops pushing for 20 s, then tries again. A soldier pressed
+  // against a wall costs the game's input step more than a walking one (27 Nov 2026, Guadalcanal, 62 bots: about 20 of
+  // the 55 on foot at a time, in the bases' alleys and short of flags out of reach, 0.13 ms a tick each against 0.08,
+  // the worst 0.3 to 0.5), and it never meets the enemy, so it never dies and spawns afresh.
+  {
+    const bool asked = !at_flag && Dist2D(pos, bot.goal_pos) > 4.0f;
+    const bool came = Dist2D(pos, bot.pin_at) >= 3.0f;
+    if (!asked || came || bot.pin_since == Clock::time_point{}) {
+      if (!asked || came) bot.pin_level = 0, bot.stucks = 0;
+      if (came) bot.rest_until = {};  // (a new life, or pushed free)
+      std::copy(pos, pos + 3, bot.pin_at), bot.pin_since = now;
+    } else if (now >= bot.rest_until && now - bot.pin_since >= std::chrono::seconds(bot.pin_level == 0 ? 20 : 25)) {
+      ++bot.pin_level;
+      bot.pin_since = now;
+      if (bot.pin_level == 1) {
+        bot.shun_flag = best, bot.shun_until = now + std::chrono::minutes(2);
+        bot.goal = -1, bot.goal_until = now;  // a new flag at its next think
+        REXLOG_INFO("BF bots: {} is pinned at {:.1f} {:.1f} {:.1f} ({:.0f} m from its goal, {:.0f} m from flag '{}';{}): "
+                    "leaves that flag for 2 minutes",
+                    bot.name, pos[0], pos[1], pos[2], Dist2D(pos, bot.goal_pos), best_d, g.flags[best].name, pin_probe());
+      } else {
+        bot.rest_until = now + std::chrono::seconds(20);
+        bot.pin_since = bot.rest_until;
+        REXLOG_INFO("BF bots: {} is still pinned at {:.1f} {:.1f} {:.1f} ({:.0f} m from its goal{};{}): stops pushing for 20 s",
+                    bot.name, pos[0], pos[1], pos[2], Dist2D(pos, bot.goal_pos), following ? ", following its leader" : "",
+                    pin_probe());
+      }
+    }
   }
   const bool goal_moved = Dist2D(bot.goal_pos, bot.path_goal) > 4.0f;
   // At most kSearchesPerTick searches a server tick (the optimization pass: 23 bots replanning in one tick cost tens
@@ -2827,7 +2924,13 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
       const int ddx = (CellOf(bot.path.front()[0]) > cx) - (CellOf(bot.path.front()[0]) < cx);
       const int ddz = (CellOf(bot.path.front()[2]) > cz) - (CellOf(bot.path.front()[2]) < cz);
       for (int d = 0; d < 8; ++d)
-        if (kDx[d] == ddx && kDz[d] == ddz) SetStep(cx, cz, d, false, NavNow() + 60.0f);
+        if (kDx[d] == ddx && kDz[d] == ddz) {
+          SetStep(cx, cz, d, false, NavNow() + 60.0f);
+          if (nav.stuck.size() > 4096)  // the expired ones dropped now and then
+            for (auto it = nav.stuck.begin(); it != nav.stuck.end();)
+              it = it->second <= NavNow() ? nav.stuck.erase(it) : std::next(it);
+          nav.stuck[StepKey(cx, cz, d)] = NavNow() + 60.0f;
+        }
     }
     const auto ways = learn.ways_in.find(g.flags[best].name);
     ++cost.searches;
@@ -2838,15 +2941,24 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
         field::Waypoint(best, pos, plan_to))
       by_field = Dist2D(plan_to, bot.goal_pos) > 4.0f;
     if (!by_field) std::copy(bot.goal_pos, bot.goal_pos + 3, plan_to);
-    bot.path = FindPath(ctx, base, soldier, pos, plan_to, &complete, &starved, team,
-                        ways != learn.ways_in.end() ? &ways->second : nullptr);
+    auto fresh = FindPath(ctx, base, soldier, pos, plan_to, &complete, &starved, team,
+                          ways != learn.ways_in.end() ? &ways->second : nullptr);
+    // A search the ray budget cut short before its first step leaves nothing: the bot keeps the path it had (not when
+    // stuck on it), else it waits for its next plan (below) instead of running straight at a goal hundreds of metres
+    // off. 27 Nov 2026, Guadalcanal: a crowd of stuck bots in the bases' alleys, each searching at once, spent the
+    // budget for one another; their plans came back empty, they ran at the walls, stuck again, for minutes on end.
+    if (starved) ++cost.cut_short;
+    if (!(fresh.empty() && starved && !stuck && !bot.path.empty())) bot.path = std::move(fresh);
+    bot.plan_starved = starved && bot.path.empty();
     if (!complete && !starved && !bot.path.empty() && Dist2D(bot.path.back().data(), bot.goal_pos) > 4.0f) ++bot.no_reach;
     if (complete) bot.no_reach = 0;
     std::memcpy(bot.path_goal, bot.goal_pos, sizeof(bot.path_goal));
     bot.replan_at = now + std::chrono::seconds(complete ? 6 : 2);
     if (bot.path.empty() && starved) bot.replan_at = now + std::chrono::milliseconds(500);  // the budget, next ticks
-    if (bot.path.empty() && !starved && !stuck) {
-      // No way found from here (a spawn inside walls the grid has closed): a walk in a random direction for 2 s.
+    if (bot.path.empty() && !starved && !stuck && !complete) {
+      // No way found from here (a spawn inside walls the grid has closed): a walk in a random direction for 2 s. (An
+      // empty path that is complete is a goal in the bot's own cell: there already, nothing to log; 27 Nov 2026, most
+      // of US Central's "finds no way" lines on Guadalcanal were squad members beside their leader, goal = their spot.)
       if (now >= bot.no_path_log) {
         bot.no_path_log = now + std::chrono::seconds(10);
         std::string around;
@@ -2890,9 +3002,12 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
       REXLOG_INFO("BF bots: {} is stuck at {:.1f} {:.1f} {:.1f}{}", bot.name, pos[0], pos[1], pos[2],
                   fence ? ", something low ahead: the knife" : ", a side step");
     if (stuck && !fence) {
-      // Stuck on something the grid does not know (a vehicle, a soldier, a corner): a side step first.
+      // Stuck on something the grid does not know (a vehicle, a soldier, a corner): a side step first, and every
+      // second time in a row a jump with it (A, as the parachute's press: digital concepts 12 and 29), over a kerb,
+      // a sandbag or a step the collision holds it at.
       bot.detour_yaw = WrapAngle(bot.yaw + (Rand01() < 0.5f ? -1 : 1) * (1.2f + Rand01()));
       bot.detour_until = now + std::chrono::milliseconds(900);
+      if (++bot.stucks % 2 == 0) bot.chute_press_until = now + std::chrono::milliseconds(250);
     }
   }
   // Points already reached drop off; the bot heads for the next one.
@@ -2901,6 +3016,9 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
   if (now < bot.detour_until) want = bot.detour_yaw;
   bot.want_yaw = want;
   bot.forward = at_flag ? 0.6f : 1.0f;
+  if (bot.path.empty() && now >= bot.detour_until &&
+      (Dist2D(pos, bot.goal_pos) < 1.5f || (bot.plan_starved && Dist2D(pos, bot.goal_pos) > 4.0f)))
+    bot.forward = 0;  // there, or its plan still to come
   const bool alert = contact != nullptr;  // an enemy another bot saw close by: faced as it goes
   if ((at_flag && bot.watching || alert) && now >= bot.detour_until) {
     // Facing the watched way, moving the wanted way: forward and sideways from the angle between them (strafe -1
@@ -2914,6 +3032,7 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
   }
   // Sprint on the way, not at the flag, when turning hard, or watching for an enemy.
   bot.sprint = bot.sprinter && !at_flag && !alert && best_d > 20.0f && std::fabs(WrapAngle(want - bot.yaw)) < 0.5f;
+  if (now < bot.rest_until) bot.forward = bot.strafe = 0, bot.sprint = false;  // pinned: no pushing for now
 }
 
 // The tanks bots drive (the user, 19 Nov 2026: "understand how to use the plane and the tank"): the US Sherman and the
@@ -3259,8 +3378,10 @@ void Drive(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t soldier, double 
   call.r3.u64 = soldier, call.r4.u64 = 0;
   // (vtable 82013A40 +260: sub_822F05C8, the step a human's input runs too, 60 a second each, about 0.05 ms: run
   // botsstep2 of the optimization pass. Most of what a bot costs is this, as a human player's soldier costs.)
-  CostTimer t(&cost.input_step);
+  const auto s0 = Clock::now();
   CallGuest(call, base, Load32(base, vtable + 260));
+  const double ms = std::chrono::duration<double, std::milli>(Clock::now() - s0).count();
+  cost.input_step += ms, bot.step_ms += ms;
 }
 
 // A bot in a vehicle's seat, each server tick: it sits still (no stick, no trigger) and gets off where a passenger
@@ -3432,8 +3553,10 @@ void Ride(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t vehicle, Clock::t
   if (!InImage(vtable)) return;
   call = outer;
   call.r3.u64 = vehicle, call.r4.u64 = uint32_t(seat);
-  CostTimer t(&cost.input_step);
+  const auto s0 = Clock::now();
   CallGuest(call, base, Load32(base, vtable + 260));
+  const double ms = std::chrono::duration<double, std::milli>(Clock::now() - s0).count();
+  cost.input_step += ms, bot.step_ms += ms;
 }
 
 // A bot in a place where it keeps its own weapon (TekRantGaming, 27 Nov 2026: "when bots use boats when they reach land
@@ -4010,6 +4133,7 @@ void BotsLevelChange() {
   g.level_seen = false;
   nav.cells.clear();
   nav.scan.clear(), nav.scanned.clear(), nav.scan_started = nav.scan_done = false;
+  nav.stuck.clear();
   // The new level's water found on it (0.4.8 kept the last level's: Wake's sea, 215 m, on Guadalcanal, whose sea is at
   // 173, and on Iwo Jima: their land "under water", mapped as sea in no time (139 cells in 0 s), and the bots swam it).
   nav.water = -1e9f;
@@ -4049,6 +4173,64 @@ static void NoteBotsPlaying() {
   written = n, rewrite = now + std::chrono::seconds(10);
 }
 
+// Beside the cost line, every 30 s: the game's input step by where the bots are (on foot, down, each vehicle's name:
+// how many, and their share in ms a tick), and the dearest soldiers with where they are and how far they came in the
+// 30 s (Guadalcanal's step grew from 7.7 to 13 ms a tick through a round on US Central, 27 Nov 2026, while Wake's
+// stayed flat: which soldiers cost it).
+static void StepCensus(PPCContext& ctx, uint8_t* base, double ticks) {
+  struct Kind {
+    int bots = 0;
+    double ms = 0;
+  };
+  std::map<std::string, Kind> kinds;
+  struct Dear {
+    double ms;
+    std::string text;
+  };
+  std::vector<Dear> dear;
+  Kind moving, standing, pushing;  // on foot over the 30 s: came 3 m or more; less, asked to stand; less, asked to move
+  for (Bot& b : g.bots) {
+    const double ms = b.step_ms / ticks;
+    b.step_ms = 0;
+    std::string where = "down";
+    float at[3] = {};
+    bool placed = false;
+    if (b.player && Readable(b.player, 0x140)) {
+      const uint32_t soldier = Load32(base, b.player + 288), entity = Load32(base, b.player + 312);
+      if (soldier && Readable(soldier, 0x140)) {
+        where = !entity || entity == soldier ? "on foot" : VehicleName(base, entity);
+        if (where.empty()) where = "a vehicle";
+        placed = CachedPosition(ctx, base, entity && entity != soldier ? entity : soldier, at);
+      }
+    }
+    Kind& k = kinds[where];
+    ++k.bots, k.ms += ms;
+    const float moved = placed && b.census_set ? Dist2D(at, b.census_at) : -1.0f;
+    if (placed) std::copy(at, at + 3, b.census_at);
+    b.census_set = placed;
+    if (where == "on foot" && moved >= 0) {
+      Kind& m = moved >= 3.0f ? moving : std::fabs(b.forward) > 0.3f || std::fabs(b.strafe) > 0.3f ? pushing : standing;
+      ++m.bots, m.ms += ms;
+    }
+    if (placed)
+      dear.push_back({ms, fmt::format("{} {} {:.2f} ms at {:.0f} {:.0f} {:.0f}{} (forward {:.1f}, path {}, goal {:.0f} m{}{})",
+                                      b.name, where, ms, at[0], at[1], at[2],
+                                      moved < 0 ? std::string() : fmt::format(", {:.0f} m in 30 s", moved), b.forward,
+                                      b.path.size(), Dist2D(at, b.goal_pos), b.was_following ? ", following" : "",
+                                      b.was_at_flag ? ", at its flag" : "")});
+  }
+  std::string by;
+  for (const auto& [name, k] : kinds) by += fmt::format("{}{} {} ({:.2f} ms)", by.empty() ? "" : ", ", name, k.bots, k.ms);
+  std::sort(dear.begin(), dear.end(), [](const Dear& a, const Dear& b) { return a.ms > b.ms; });
+  std::string top;
+  for (size_t i = 0; i < dear.size() && i < 6; ++i) top += fmt::format("{}{}", top.empty() ? "" : "; ", dear[i].text);
+  auto each = [](const Kind& k) { return k.bots ? k.ms / k.bots : 0.0; };
+  REXLOG_INFO("BF bots: the input step by place: {}; on foot moving {} ({:.2f} ms, {:.3f} each), standing {} ({:.2f} ms, "
+              "{:.3f} each), pushing without moving {} ({:.2f} ms, {:.3f} each); the dearest: {}",
+              by, moving.bots, moving.ms, each(moving), standing.bots, standing.ms, each(standing), pushing.bots, pushing.ms,
+              each(pushing), top.empty() ? "none" : top);
+}
+
 // Every server tick (server_rotation.cpp, after the game's own tick).
 static void BotsTickImpl(PPCContext& ctx, uint8_t* base);
 void BotsTick(PPCContext& ctx, uint8_t* base) {
@@ -4074,9 +4256,11 @@ void BotsTick(PPCContext& ctx, uint8_t* base) {
     const double n = std::max(1, cost.ticks);
     REXLOG_INFO("BF bots: cost over {:.0f} s with {} bots: {:.3f} ms a tick on average, {:.1f} ms the worst; learning "
                 "{:.3f}, mapping {:.3f}, thinking {:.3f}, steering {:.3f} (the game's input step {:.3f}), saving {:.3f} ms a "
-                "tick; {} path searches",
+                "tick; {} path searches ({} cut short by the ray budget)",
                 std::chrono::duration<double>(t1 - cost.since).count(), g.bots.size(), cost.total / n, cost.worst,
-                cost.learn / n, cost.scan / n, cost.think / n, cost.drive / n, cost.input_step / n, cost.save / n, cost.searches);
+                cost.learn / n, cost.scan / n, cost.think / n, cost.drive / n, cost.input_step / n, cost.save / n, cost.searches,
+                cost.cut_short);
+    StepCensus(ctx, base, n);
     cost = BotCost{};
     cost.since = t1;
   }
@@ -4337,6 +4521,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
   }
 #endif
   nav.rays_left = kRaysPerTick;
+  nav.ray_deadline = {};  // no grid rays until the thinking's budget below (the scan has its own)
   static Clock::time_point ray_log{};
   if (now - ray_log > std::chrono::seconds(60)) {
     if (ray_log != Clock::time_point{})
@@ -4789,8 +4974,10 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     }
     holders[f.entity] = h;
   }
-  // The path searches' rays: a time budget for this tick's thinking as well as a count.
-  nav.ray_deadline = Clock::now() + std::chrono::microseconds(int64_t(kPathRayMs * 1000));
+  // The path searches' rays: a time budget for this tick's thinking as well as a count: the rays' own time
+  // (g_path_ray_ms_left), not a clock deadline the bots' input steps would use up; the deadline only ends the tick's.
+  g_path_ray_ms_left = kPathRayMs;
+  nav.ray_deadline = Clock::time_point::max();
   // No human on the server (TekRantGaming, 20 Nov 2026: "Yes, pause them"): the bots stand still and do not think,
   // steer, spawn or learn until a player joins (about 10% of a core saved on an empty server with 24 bots; the bots
   // play as backfill all the time). The level's mapping goes on meanwhile, so a map is ready when players come.
