@@ -294,6 +294,14 @@ class REX_KERNEL_API BaseHeap {
   bool QueryRegionInfo(u32 base_address, HeapAllocation* out_info);
 
   /**
+   * Battlefield 1943 Reborn patch (hotfix 0.4.8.1, the Linux server optimisation): true when every page of
+   * [low_address, high_address] (both in this heap) is committed and readable. Looks only at those pages;
+   * QueryRegionInfo walks the whole region to measure it, thousands of pages in the game's big heaps, and the game's
+   * own code checked one or two pages that way per read of a guest object (5% of a 62-bot server's main thread).
+   */
+  bool QueryRangeCommittedReadable(u32 low_address, u32 high_address);
+
+  /**
    * Returns the size of the region containing the given address.
    *
    * @param out_size Receives the size in bytes.

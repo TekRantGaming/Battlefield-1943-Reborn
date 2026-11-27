@@ -1650,6 +1650,25 @@ bool BaseHeap::ProtectLocked(u32 address, u32 size, u32 protect, u32* old_protec
   return true;
 }
 
+bool BaseHeap::QueryRangeCommittedReadable(u32 low_address, u32 high_address) {
+  if (low_address > high_address || low_address < heap_base_ || (high_address - heap_base_) >= heap_size_) {
+    return false;
+  }
+  const u32 low_page_number = (low_address - heap_base_) >> page_size_shift_;
+  const u32 high_page_number = (high_address - heap_base_) >> page_size_shift_;
+  if (high_page_number >= page_table_.size()) {
+    return false;
+  }
+  std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  for (u32 i = low_page_number; i <= high_page_number; ++i) {
+    const auto& page_entry = page_table_[i];
+    if (!(page_entry.state & kMemoryAllocationCommit) || !(page_entry.current_protect & kMemoryProtectRead)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool BaseHeap::QueryRegionInfo(u32 base_address, HeapAllocation* out_info) {
   u32 start_page_number = (base_address - heap_base_) >> page_size_shift_;
   if (start_page_number >= page_table_.size()) {
