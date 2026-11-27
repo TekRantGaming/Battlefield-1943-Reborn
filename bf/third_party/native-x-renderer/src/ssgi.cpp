@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <tuple>
@@ -66,6 +67,11 @@ REXCVAR_DEFINE_DOUBLE(native_gi_sunlit, 0.65, "NativeXRenderer",
                       "0: the plain lit colour");
 
 namespace native_x_renderer {
+namespace renderer {
+void SkySectionBegin(int part);  // renderer.cpp: GPU sections
+void SkySectionEnd(int part);
+bool AoDiscardOldNow();  // renderer.cpp: BF_AO_DISCARD_AB
+}  // namespace renderer
 
 using namespace Diligent;
 
@@ -102,7 +108,7 @@ struct Constants {
   float gather[4];         // slices, steps per side, largest radius on the screen (working pixels), intensity x 3
   float ambient[4];        // rgb the flat ambient light (picture values), w the albedo limit (linear)
   float mode[4];           // occlusion, debug view, radiance mips, denoise step
-  float extra[4];          // unused, noise index, history (1 or 0), the new light's weight
+  float extra[4];          // 1: the composite writes every pixel (tests), noise index, history (1 or 0), the new light's weight
   float reprojection[16];  // rows: last clip = R x this clip
   float depth_range[4];    // z_max - z_min, z_min, last frame's depth unpack mul and add
   float shape[4];          // multi-bounce strength, largest darkening share, gamma, sunlit restoration
@@ -695,6 +701,7 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
   k.mode[1] = float(s.mode >= 2 && s.debug == 0 ? 1 : s.debug);
   k.mode[2] = float(kRadianceMips);
   k.mode[3] = 1.0f;
+  k.extra[0] = renderer::AoDiscardOldNow() ? 1.0f : 0.0f;  // 1: the composite writes every pixel (BF_AO_DISCARD_AB)
   k.extra[1] = float(noise);
   k.extra[2] = history ? 1.0f : 0.0f;
   k.extra[3] = kNewWeight;
@@ -723,9 +730,11 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
   // The depth is read as a texture and the colour copied: neither left bound as a target.
   context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
   {
+    renderer::SkySectionBegin(8);
     CopyTextureAttribs copy{color_texture, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, copy_,
                             RESOURCE_STATE_TRANSITION_MODE_TRANSITION};
     context->CopyTexture(copy);
+    renderer::SkySectionEnd(8);
   }
   ITextureView* copy_srv = copy_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
   ITextureView* raw_srv = raw_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
@@ -740,6 +749,7 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
   ITextureView* b_srv = gi_b_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
   ITextureView* b_uav = gi_b_->GetDefaultView(TEXTURE_VIEW_UNORDERED_ACCESS);
 
+  renderer::SkySectionBegin(3);  // the GPU time of the depth and normals (renderer.cpp's sections)
   bool ok =
       Dispatch(context, prepare_, {{"g_srcSceneDepth", depth_srv}, {"g_outRawDepth", raw_uav}}, pw / 8, ph / 8) &&
       Dispatch(context, prefilter_,
@@ -750,7 +760,10 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
                 {"g_outWorkingDepthMIP3", depth_mip_uav_[3].RawPtr()},
                 {"g_outWorkingDepthMIP4", depth_mip_uav_[4].RawPtr()}},
                pw / 16, ph / 16) &&
-      Dispatch(context, normals_, {{"g_srcRawDepth", raw_srv}, {"g_outNormalmap", normals_uav}}, pw / 8, ph / 8) &&
+      Dispatch(context, normals_, {{"g_srcRawDepth", raw_srv}, {"g_outNormalmap", normals_uav}}, pw / 8, ph / 8);
+  renderer::SkySectionEnd(3);
+  renderer::SkySectionBegin(5);
+  ok = ok &&
       Dispatch(context, radiance_pass_,
                {{"g_srcSceneColor", copy_srv},
                 {"g_srcSourceDepth", depth_srv},
@@ -767,6 +780,8 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
                 {"g_srcRawDepth", raw_srv},
                 {"g_outGi", a_uav}},
                pw / 8, ph / 8);
+  renderer::SkySectionEnd(5);
+  renderer::SkySectionBegin(6);
   // Temporal accumulation: a into b with the history (or a alone without one), b kept as the next frame's history
   // with this frame's view depth; the blur then starts from b.
   bool from_b = false;
@@ -811,9 +826,11 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
                   pw / 8, ph / 8);
     last = a_to_b ? gi_b_.RawPtr() : gi_a_.RawPtr();
   }
+  renderer::SkySectionEnd(6);
   result_ = ok ? last : nullptr;
 
   // Into the scene's colour: one triangle over the picture, reading the copy.
+  renderer::SkySectionBegin(9);
   Pass* composite = ok ? CompositePass(in.color->GetDesc().Format) : nullptr;
   bool bound = false;
   if (composite) {
@@ -835,6 +852,9 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
     }
   }
   if (bound) {
+    // BF_AO_DISCARD_CHECK=1 (tests): every 60th composite drawn this way and the old way (every pixel written) on the
+    // same picture, both read back and compared (the colour kept before its target is bound).
+    const bool check = (int(k.extra[0]) & 1) == 0 && check_.Begin(device_, context, color_texture);
     ITextureView* color = in.color;
     context->SetRenderTargets(1, &color, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     Viewport viewport;
@@ -852,9 +872,22 @@ bool Ssgi::Apply(IDeviceContext* context, const Inputs& in) {
     DrawAttribs draw;
     draw.NumVertices = 3;
     context->Draw(draw);
+    if (check) {
+      check_.TakeFirst(context, color_texture);
+      k.extra[0] = float(int(k.extra[0]) | 1);
+      WriteConstants(context, &k, sizeof(k));
+      context->SetRenderTargets(1, &color, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->SetViewports(1, &viewport, 0, 0);
+      context->SetScissorRects(1, &scissor, 0, 0);
+      context->SetPipelineState(composite->pso);
+      context->CommitShaderResources(composite->srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->Draw(draw);
+      check_.Finish(context, color_texture, "global illumination: composite");
+    }
     // The renderer binds its own targets again (DrawPath::TargetsChanged).
     context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
   }
+  renderer::SkySectionEnd(9);
   TimerEnd(context);
   if (!bound) return refuse("a pass could not be bound or the colour format has no pipeline");
 

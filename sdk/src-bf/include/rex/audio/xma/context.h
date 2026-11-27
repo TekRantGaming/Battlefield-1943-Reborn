@@ -259,6 +259,9 @@ class XmaContext {
   void WriteSilencePad(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data);
 
   memory::RingBuffer PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data);
+  // Hands an open decoder to the pool of idle ones (context released).
+  void ReturnDecoder();
+  // 0: decoder already in this format; 1: opened one; 2: took one from the pool; -1: open failed.
   int PrepareDecoder(int sample_rate, bool is_two_channel);
   void PreparePacket(uint32_t frame_size, uint32_t frame_padding);
   bool DecodePacket(AVCodecContext* av_context, const AVPacket* av_packet, AVFrame* av_frame);

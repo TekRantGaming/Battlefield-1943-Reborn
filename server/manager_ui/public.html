@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Battlefield 1943 Reborn server</title>
+<style>
+  /* A community server's own page (server/manager.py PublicHandler, docs/DASHBOARD.md): the server owner's name,
+     words, logo, theme, links and how to join, then the numbers they chose to show. Everything the owner or a player
+     wrote goes in as text, never markup; nothing is loaded from anywhere but this server. */
+  :root, [data-theme="field"] {
+    --bg: #23271c; --bar: #14170f; --card: #2b3022; --line: #3a4030; --cream: #ece4cc; --khaki: #b9ad7c; --faint: #9d9578;
+    --accent: #6e9a3c; --accent-ink: #fff;
+  }
+  [data-theme="night"] { --bg: #111722; --bar: #0a0e15; --card: #1a2232; --line: #2b3549; --cream: #e6ebf5; --khaki: #9fb0cc; --faint: #7d8aa3; --accent: #4f86d1; }
+  [data-theme="desert"] { --bg: #3a2f22; --bar: #261e15; --card: #4a3c2b; --line: #5e4c37; --cream: #f3e7d0; --khaki: #d8bf8f; --faint: #b49d77; --accent: #d1a03a; --accent-ink: #201a08; }
+  [data-theme="steel"] { --bg: #23262b; --bar: #15171a; --card: #2e3238; --line: #3d434b; --cream: #e8eaed; --khaki: #b8bec6; --faint: #8d949d; --accent: #ce3e30; }
+  [data-theme="light"] { --bg: #e9e4d6; --bar: #2b3022; --card: #f7f3e8; --line: #d4cbb0; --cream: #24251f; --khaki: #5f5a46; --faint: #7a7259; --accent: #3d74b8; }
+  :root { --paper: #f1ead6; --ink: #24251f;
+    --head: "Bahnschrift SemiBold Condensed", "Bahnschrift Condensed", "Oswald", "Arial Narrow", "Segoe UI", sans-serif;
+    --body: "Segoe UI", system-ui, -apple-system, "Noto Sans", sans-serif; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--bg); color: var(--cream); font: 15px/1.5 var(--body); }
+  h1, h2, h3 { font-family: var(--head); font-weight: 600; letter-spacing: .04em; margin: 0; text-transform: uppercase; }
+  a { color: inherit; }
+  header { background: var(--bar); color: #ece4cc; border-bottom: 4px solid var(--accent); }
+  .top { max-width: 1180px; margin: 0 auto; padding: 22px 16px 18px; display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+  .logo { width: 92px; height: 92px; object-fit: contain; border-radius: 4px; background: rgba(255,255,255,.04); flex: none; }
+  .who { flex: 1; min-width: 240px; }
+  .who small { display: block; font: 600 11px Consolas, monospace; letter-spacing: .16em; color: #b9ad7c; margin-bottom: 4px; }
+  .who h1 { font-size: 34px; line-height: 1.1; overflow-wrap: anywhere; }
+  .live { font: 600 12px/1 var(--body); letter-spacing: .14em; padding: 8px 12px; background: var(--accent); color: var(--accent-ink); border-radius: 2px; white-space: nowrap; }
+  .live.off { background: #5d5d55; color: #fff; }
+  main { max-width: 1180px; margin: 0 auto; padding: 22px 16px 40px; }
+  .intro { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; margin-bottom: 18px; }
+  .box { background: var(--card); border: 1px solid var(--line); border-radius: 2px; padding: 18px 20px; min-width: 0; }
+  .box h2 { font-size: 20px; margin-bottom: 10px; }
+  .words { white-space: pre-line; margin: 0; color: var(--cream); }
+  .links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .links a { text-decoration: none; padding: 9px 14px; border-radius: 2px; font: 600 13px var(--body); letter-spacing: .04em; background: var(--line); color: var(--cream); border: 1px solid transparent; }
+  .links a.download { background: var(--accent); color: var(--accent-ink); }
+  .links a:hover { border-color: var(--khaki); }
+  .join { display: grid; gap: 10px; }
+  .server { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 12px; align-items: center; padding: 10px 12px; background: rgba(0,0,0,.14); border-radius: 2px; }
+  .server b { font: 600 17px var(--head); letter-spacing: .04em; overflow-wrap: anywhere; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #5d5d55; } .dot.running { background: #7dc24a; box-shadow: 0 0 0 3px rgba(125,194,74,.18); }
+  .server .count { color: var(--khaki); font-size: 13px; white-space: nowrap; }
+  .addr { grid-column: 2 / 4; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .addr code { font: 14px Consolas, "DejaVu Sans Mono", monospace; background: var(--bar); color: #ece4cc; padding: 4px 8px; border-radius: 2px; }
+  .addr button { font: 600 11px var(--body); letter-spacing: .1em; text-transform: uppercase; padding: 5px 9px; border: 0; border-radius: 2px; background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+  .how { margin-top: 12px; color: var(--khaki); font-size: 14px; white-space: pre-line; }
+  .rules { margin-top: 14px; }
+  .muted { color: var(--faint); }
+  footer { max-width: 1180px; margin: 0 auto; padding: 0 16px 30px; color: var(--faint); font-size: 12.5px; display: flex; gap: 8px 18px; flex-wrap: wrap; justify-content: space-between; }
+  .error { background: #4a2a22; border: 1px solid #7a3a30; color: #f6d3cc; padding: 12px 16px; border-radius: 2px; }
+  .dsection { color: var(--cream); }
+  @media (max-width: 860px) { .intro { grid-template-columns: 1fr; } .who h1 { font-size: 26px; } .logo { width: 64px; height: 64px; } }
+</style>
+</head>
+<body>
+<header><div class="top">
+  <img class="logo" id="logo" alt="" hidden>
+  <div class="who"><small>BATTLEFIELD 1943 REBORN · COMMUNITY SERVER</small><h1 id="title">Server</h1></div>
+  <span class="live off" id="live">CONNECTING</span>
+</div></header>
+<main>
+  <div class="intro" id="intro"></div>
+  <div id="root"></div>
+  <div class="box rules" id="rules" hidden><h2>Server rules</h2><p class="words" id="rules-text"></p></div>
+</main>
+<footer><span id="when"></span><span>Names only, never player ids or addresses of players. Playtime and history cover 90 days. <a id="project" href="#" rel="noopener nofollow" target="_blank">Battlefield 1943 Reborn</a></span></footer>
+<script src="dash.js"></script>
+<script>
+'use strict';
+const h = Dash.h, $ = id => document.getElementById(id);
+let failed = 0, shown = '', css = null;
+function copy(text, button) {
+  const done = () => { button.textContent = 'Copied'; setTimeout(() => { button.textContent = 'Copy'; }, 1500); };
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text).then(done, () => {});
+  const field = h('textarea', { style: 'position:fixed;left:-1000px' }); field.value = text; document.body.append(field);
+  field.select(); try { document.execCommand('copy'); done(); } catch (e) {} field.remove();
+}
+function howTo(page) {
+  if (page.instructions) return page.instructions;
+  const listed = page.join.some(j => j.listed && !j.lan);
+  return (listed ? 'Start Battlefield 1943 Reborn, choose Server Browser and find the server on the Community tab. Or choose Direct connect in the Server Browser and type its address.'
+                 : 'Start Battlefield 1943 Reborn, choose Server Browser, then Direct connect, and type the server\'s address.');
+}
+function intro(d) {
+  const p = d.page, about = [];
+  if (p.description) about.push(h('p', { class: 'words', text: p.description }));
+  else about.push(h('p', { class: 'words muted', text: 'A Battlefield 1943 Reborn server. Battlefield 1943 Reborn is the free fan port of Battlefield 1943 to PC.' }));
+  if (p.links.length) about.push(h('div', { class: 'links' }, p.links.map(l => h('a', { href: l.url, class: l.kind, target: '_blank', rel: 'noopener nofollow', text: l.label }))));
+  const boxes = [h('div', { class: 'box' }, h('h2', { text: 'About' }), about)];
+  if (p.sections.connect !== false) {
+    boxes.push(h('div', { class: 'box' }, h('h2', { text: 'How to join' }),
+      h('div', { class: 'join' }, p.join.map(j => h('div', { class: 'server' }, h('span', { class: 'dot ' + j.state }), h('b', { text: j.name }),
+        h('span', { class: 'count', text: j.state === 'running' ? j.players + ' / ' + j.max + ' players' : j.state === 'stopped' ? 'Offline' : 'Starting' }),
+        j.address ? h('div', { class: 'addr' }, h('code', { text: j.address }), h('button', { onclick: e => copy(j.address, e.target) }, 'Copy')) : null))),
+      h('p', { class: 'how', text: howTo(p) })));
+  }
+  return boxes;
+}
+function theme(p) {
+  document.documentElement.dataset.theme = p.theme || 'field';
+  if (p.accent) {
+    document.documentElement.style.setProperty('--accent', p.accent);
+    const n = parseInt(p.accent.slice(1), 16), lum = 0.299 * (n >> 16) + 0.587 * (n >> 8 & 255) + 0.114 * (n & 255);
+    document.documentElement.style.setProperty('--accent-ink', lum > 150 ? '#201a08' : '#fff');
+  } else { document.documentElement.style.removeProperty('--accent'); document.documentElement.style.removeProperty('--accent-ink'); }
+}
+async function load() {
+  try {
+    const r = await fetch('stats.json', { cache: 'no-store' });
+    if (!r.ok) throw new Error('The server said ' + r.status);
+    const d = await r.json();
+    failed = 0;
+    const p = d.page;
+    theme(p);
+    if ((p.css || '') !== css) {  // the owner's own CSS, last so it wins (the Community page tab, "Your own code")
+      css = p.css || '';
+      let el = $('owner-css');
+      if (!el) { el = document.createElement('style'); el.id = 'owner-css'; document.head.append(el); }
+      el.textContent = css;
+    }
+    $('title').textContent = d.title || 'Battlefield 1943 Reborn server';
+    document.title = (d.title || 'Server') + ' · Battlefield 1943 Reborn';
+    const logo = $('logo');
+    if (p.logo) { if (logo.getAttribute('src') !== p.logo) logo.src = p.logo; logo.hidden = false; } else logo.hidden = true;
+    $('project').href = p.project;
+    const live = $('live');
+    live.textContent = d.cards.online + ' PLAYING NOW'; live.className = 'live' + (d.servers.some(s => s.state === 'running') ? '' : ' off');
+    $('when').textContent = 'Updated ' + new Date(d.now * 1000).toLocaleTimeString();
+    const key = JSON.stringify([p, d.servers.map(s => [s.state, s.players])]);
+    if (key !== shown) { shown = key; $('intro').replaceChildren(...intro(d)); }
+    Dash.render($('root'), d, { public: true, sections: p.sections });
+    $('rules').hidden = !(p.rules && p.sections.rules !== false);
+    $('rules-text').textContent = p.rules || '';
+  } catch (e) {
+    if (++failed >= 2) {
+      $('live').textContent = 'NO ANSWER'; $('live').className = 'live off';
+      if (!document.querySelector('.dcards')) $('root').replaceChildren(h('div', { class: 'error', text: 'The server\'s stats did not answer. It may be restarting: this page tries again by itself.' }));
+    }
+  }
+}
+load(); setInterval(load, 15000);
+</script>
+</body>
+</html>

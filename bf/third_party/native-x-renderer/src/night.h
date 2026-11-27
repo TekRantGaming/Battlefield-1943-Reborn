@@ -1,26 +1,24 @@
-// NativeXRenderer - night (internal, D162): the finished scene graded to a moonlit night, before the HUD.
+// NativeXRenderer - night (internal): the night's lights on the finished scene, before the HUD.
 //
-// Battlefield 1943 Reborn's Night Ops servers (TekRantGaming, 11 Nov 2026: "cant be pitch black due to it being
-// unplayable"): the game's own day, drawn as night on its composite (the first draw of the output's size after the
-// profile's scene copy, Profile::scene_resolve_caller: the picture with the game's bloom and exposure), so the HUD drawn
-// after it keeps its colours. At the scene copy itself the game's automatic exposure brightened it back. Per pixel, in
-// linear light:
-//   - moonlight: the colour mostly taken out (the eye sees little colour at night), a cool blue, much less light;
-//   - a night haze with distance from the main view's depth (Battlefield 1943's world stores 0.1 / distance), which
-//     also turns the day sky, far away, into a dark night sky with its clouds faintly lit.
-// Muzzle flashes and explosions are darkened like the rest (still the brightest things on screen): keeping the
-// brightest pixels as they were kept sunlit sand, rock and grass glowing too (run night_wake3).
-// D163: the lights too: the effects' own light (the game's half size layer of emissive particles), what they light,
-// the level's lamps and models' lamps, from the camera kept from the terrain's draws.
-// Header only: renderer.cpp alone includes it. Off unless native_x_renderer_night is on.
+// Battlefield 1943 Reborn: the day and night cycle (sky.h) darkens the game's own light at night; this pass adds the
+// lights that come on with the dark (D163, D170, D175), on the game's composite (the first draw of the output's size
+// after the profile's scene copy, Profile::scene_resolve_caller: the picture with the game's bloom and exposure), so
+// the HUD drawn after it keeps its colours:
+//   - the effects' own light (the game's half size layer of emissive particles) and what they light;
+//   - the level's lamps and the models' lamps, from the camera kept from the terrain's draws.
+// The scene itself stays as the cycle drew it. (The separate night look this pass began as, D162 and D169: a moonlit
+// grade, a haze and a night sky over the game's day, went on 16 Nov 2026 with the night maps.)
+// Header only: renderer.cpp alone includes it. Runs while the cycle is dark enough for the lights.
 
 #pragma once
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -40,12 +38,20 @@
 namespace native_x_renderer {
 
 struct NightSettings {
-  float brightness = 1.0f;  // the moonlight: 1 the default, 0.5 darker, 2 brighter
-  float haze_m = 700.0f;    // the distance at which the night haze hides about two thirds of what is there
   float glow = 1.0f;        // D163: the effects' own light (muzzle flashes, tracers, fire, explosions); 0 none
   float lamps = 1.0f;       // D163: the lamps' light and glow; 0 none
+  // D177: how much darker than the game's day the cycle has made the scene (1 by day): a surface's own colour for the
+  // lamps' light is the picture times this, or a lamp at midnight would light a nearly black ground.
+  float scene_gain = 1.0f;
+  // D183: a lamp's bloom round its lit glass, and the camera's lens flare from the brightest lamps in view (0 off, 1 on;
+  // Settings > Enhancements).
+  float bloom = 1.0f;
+  float flare = 1.0f;
+  bool seen_pass = true;  // each lamp's visibility found once a frame (false: per pixel, for comparisons)
+  bool compute_lights = true;  // the effects' lights found by the compute search (false: the pixel pass, for comparisons)
+  bool tiles = true;  // each pixel loops over its screen tile's lights (false: over all of them, for comparisons)
+  bool timing = false;  // the night pass's GPU time (native_x_renderer_gpu_sections)
   int debug = 0;            // D163, tests: 1 each pixel's place in the world, 2 the lights alone
-  float sky = 1.0f;         // D169: the night sky's stars, Milky Way and moon; 0 none
 };
 
 // D163: a light chosen for this frame (Night::Apply takes kMaxLights): a point light, or a spot when `direction` is set.
@@ -58,17 +64,21 @@ struct NightLight {
   float cos_inner = 1.0f;   // a spot: its full light within this angle
 };
 
-// D163: a lamp's bulb on screen: a glow where nothing nearer hides it.
+// D163: a lamp's bulb on screen. D183: its glass lit where the lamp's own mesh is (no glow in the air), a bloom round it
+// and, for the brightest few, the lens flare, while nothing nearer hides its middle.
 struct NightSprite {
   float uv[2] = {};      // the target's texture coordinates
-  float radius[2] = {};  // in those coordinates, across and down
+  float radius[2] = {};  // in those coordinates, across and down: the bloom's reach
   float depth = 0.0f;    // the bulb's stored depth (0.1 / distance): nearer pixels hide it
   float color[3] = {};   // linear, times its strength
+  float world[3] = {};   // D183: the bulb in the world
+  float bulb = 0.1f;     // D183: its radius, metres: the surface within it glows
+  float flare = 0.0f;    // D183: its lens flare's strength, 0 to 1 (the first sprites; 0 none)
 };
 
 // What one night pass reads besides the picture.
 struct NightFrame {
-  // The main view's depth at its end and the world's from before the first person weapon (D162), each with the share
+  // The main view's depth at its end and the world's from before the first person weapon, each with the share
   // of its texture the view covers.
   Diligent::ITextureView* depth = nullptr;
   float depth_uv[2] = {1.0f, 1.0f};
@@ -84,13 +94,6 @@ struct NightFrame {
   float inverse[3][3] = {};
   float inverse_t[3] = {};
   float eye[3] = {};
-  // D169: the sky's directions (the sky dome's camera, or the terrain's), as `to_ndc` and `inverse`; the level's style.
-  bool sky_camera = false;
-  float sky_to_ndc[4] = {};
-  float sky_inverse[3][3] = {};
-  const NightSkyStyle* sky_style = nullptr;
-  bool sun_valid = false;  // the game's sun (toward it), from the sky dome's draw: the moon goes there
-  float sun[3] = {};
   const NightLight* lights = nullptr;
   uint32_t light_count = 0;
   const NightSprite* sprites = nullptr;
@@ -99,28 +102,34 @@ struct NightFrame {
 
 class Night {
  public:
-  static constexpr uint32_t kMaxLights = 24;
-  static constexpr uint32_t kMaxSprites = 24;
+  static constexpr uint32_t kMaxLights = 96;  // D195: the lamps in view across the map (was 24)
+  static constexpr uint32_t kMaxSprites = 64;  // D195: across the map (was 24)
+  static constexpr uint32_t kTilesX = 16, kTilesY = 9;  // the lights' screen tiles (TileLights)
 
-  // `texture`, the finished scene, graded in place (drawn into `target`, its render target view). `f.depth`: the main
-  // view's depth (its shader view) and the share of it the view covers; null for no haze and no sky. `f.world`: the
-  // world's depth taken before the first person weapon's draws clear it (an R32 float copy, its red channel; null
-  // without one). Per pixel the nearer of the two is taken: on foot the view's depth at its end holds only the weapon
-  // (run nightzip1: everything else read as far away, all haze), and the world's copy has no weapon yet.
+  // `texture`, the finished scene, lit in place (drawn into `target`, its render target view). `f.depth`: the main
+  // view's depth (its shader view) and the share of it the view covers. `f.world`: the world's depth taken before the
+  // first person weapon's draws clear it (an R32 float copy, its red channel; null without one). Per pixel the nearer
+  // of the two is taken: on foot the view's depth at its end holds only the weapon, and the world's copy has no
+  // weapon yet.
   // D163: the lights (lamps and what the effects light), the lamps' glows and the effects' own light, from `f`.
   void Apply(Diligent::IRenderDevice* device, Diligent::IDeviceContext* context, Diligent::ITexture* texture,
              Diligent::ITextureView* target, const NightFrame& f, const NightSettings& s) {
     using namespace Diligent;
     if (!device || !context || !texture || !target) return;
     const TextureDesc& desc = texture->GetDesc();
-    Pass* pass = PassFor(device, desc.Format);
-    if (!pass || !EnsureCopy(device, desc)) return;
+    if (!EnsureCopy(device, desc)) return;
     const uint32_t lights = f.camera && s.lamps > 0.0f ? std::min(f.light_count, kMaxLights) : 0;
     const uint32_t sprites = s.lamps > 0.0f ? std::min(f.sprite_count, kMaxSprites) : 0;
     const bool glow = f.glow && s.glow > 0.0f;
+    // The lamps' visibility found once each (SeenPass) when a glow or a flare wants it.
+    const bool seen_pass = s.seen_pass && sprites > 0 && (s.bloom > 0.0f || s.flare > 0.0f) && SeenPass(device);
+    bool check_tiles = false;
+    Pass* pass = PassFor(device, desc.Format, seen_pass);
+    if (!pass) return;
+    if (s.timing) timer_.Begin(device, context);
     {
       Constants k = {};
-      k.night[0] = s.brightness, k.night[1] = std::max(s.haze_m, 1.0f);
+      k.night[0] = std::clamp(s.scene_gain, 1.0f, 64.0f);
       k.night[2] = f.depth_uv[0], k.night[3] = f.depth_uv[1];
       k.flags[0] = f.depth ? 1.0f : 0.0f, k.flags[1] = f.world ? 1.0f : 0.0f;
       k.flags[2] = f.world_uv[0], k.flags[3] = f.world_uv[1];
@@ -134,25 +143,9 @@ class Night {
       k.counts[0] = float(lights), k.counts[1] = float(sprites);
       k.counts[2] = float(desc.Width) / float(std::max(1u, desc.Height));  // the target's aspect, for round glows
       k.counts[3] = float(s.debug);
-      k.sky[0] = s.sky;
-      k.sky[1] = f.sky_camera ? 1.0f : 0.0f;
-      std::memcpy(k.sky_to_ndc, f.sky_to_ndc, sizeof(k.sky_to_ndc));
-      for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c) k.sky_inverse[r][c] = f.sky_inverse[r][c];
-      {
-        const NightSkyStyle st = f.sky_style ? *f.sky_style : NightSkyStyle{};
-        const float* md = f.sun_valid ? f.sun : st.moon_direction;  // the game's sun when its sky gave it
-        const float ml = std::sqrt(md[0] * md[0] + md[1] * md[1] + md[2] * md[2]);
-        for (int i = 0; i < 3; ++i) {
-          k.moon[i] = ml > 1e-6f ? md[i] / ml : (i == 1 ? 1.0f : 0.0f);
-          k.moon_color[i] = st.moon_color[i];
-          k.horizon[i] = st.horizon_color[i];
-        }
-        k.moon[3] = std::clamp(st.moon_radius, 0.0f, 0.1f);
-        k.moon_color[3] = std::clamp(st.cloud_dim, 0.0f, 1.0f);
-        k.horizon[3] = std::clamp(st.horizon_height, 0.01f, 0.9f);
-        k.stars[0] = std::max(st.stars, 0.0f), k.stars[1] = std::max(st.milky_way, 0.0f), k.stars[2] = st.seed;
-      }
+      k.night[1] = std::clamp(s.bloom, 0.0f, 2.0f);  // D183
+      k.extra[0] = seen_pass ? 1.0f : 0.0f;
+      k.glow2[3] = std::clamp(s.flare, 0.0f, 2.0f);   // D183
       // The effects' lights: found in the effects' layer's mip about 48 texels wide.
       const bool effect_lights = glow && f.camera;
       if (effect_lights && device && LightsPass(device)) {
@@ -161,6 +154,8 @@ class Night {
         k.glow2[1] = 1.1f * s.glow;
         k.glow2[2] = 1.0f;
       }
+      TileLights(f, lights, s.tiles, k);
+      TileSprites(f, sprites, s.tiles, k);
       for (uint32_t i = 0; i < lights; ++i) {
         const NightLight& l = f.lights[i];
         float* a = k.lights[i * 3];
@@ -170,18 +165,114 @@ class Night {
       }
       for (uint32_t i = 0; i < sprites; ++i) {
         const NightSprite& p = f.sprites[i];
-        float* a = k.sprites[i * 2];
+        float* a = k.sprites[i * 3];
         a[0] = p.uv[0], a[1] = p.uv[1], a[2] = p.radius[0], a[3] = p.radius[1];
         a[4] = p.color[0], a[5] = p.color[1], a[6] = p.color[2], a[7] = p.depth;
+        a[8] = p.world[0], a[9] = p.world[1], a[10] = p.world[2], a[11] = 2.0f * std::round(255.0f * std::clamp(p.flare, 0.0f, 1.0f)) + std::clamp(p.bulb, 0.0f, 1.9f);
       }
       void* data = nullptr;
       context->MapBuffer(constants_, MAP_WRITE, MAP_FLAG_DISCARD, data);
       std::memcpy(data, &k, sizeof(k));
       context->UnmapBuffer(constants_, MAP_WRITE);
+      // BF_NIGHT_TILES_CHECK=1 (tests): every 60th pass with lights is drawn a second time with every light in every
+      // tile, and the two pictures compared (TilesCheck).
+      static const bool tiles_check = [] {
+        const char* v = std::getenv("BF_NIGHT_TILES_CHECK");
+        return v && *v == '1';
+      }();
+      check_tiles = tiles_check && s.tiles && lights > 0 && f.camera && (tiles_check_count_++ % 60) == 0;
+      if (check_tiles) {
+        untiled_ = std::make_unique<Constants>(k);
+        std::memset(untiled_->tiles, 0, sizeof(untiled_->tiles));
+        for (uint32_t t = 0; t < kTilesX * kTilesY; ++t)
+          for (uint32_t i = 0; i < lights; ++i) untiled_->tiles[t][i / 32] |= 1u << (i % 32);
+        std::memset(untiled_->sprite_tiles, 0, sizeof(untiled_->sprite_tiles));
+        for (uint32_t t = 0; t < kTilesX * kTilesY; ++t)
+          for (uint32_t i = 0; i < sprites; ++i) untiled_->sprite_tiles[t / 2][(t % 2) * 2 + i / 32] |= 1u << (i % 32);
+      }
     }
-    // D163: the effects' lights into their 4 x 2 texture, first.
+    // D163: the effects' lights into their 4 x 2 texture, first: by the compute search, or the pixel pass without it.
     const bool effect_lights = glow && f.camera && LightsPass(device);
-    if (effect_lights) {
+    const bool compute_lights = effect_lights && s.compute_lights && ComputeLights(device);
+    // BF_NIGHT_FX_CHECK=1 (tests): every 10th search, the pixel pass's result first, kept, then the compute search's,
+    // both read back and compared (the largest difference logged): the two must pick the same lights.
+    static const bool fx_check = [] {
+      const char* v = std::getenv("BF_NIGHT_FX_CHECK");
+      return v && *v == '1';
+    }();
+    const bool check = compute_lights && fx_check && (check_count_++ % 10) == 0 && Staging(device);
+    if (check) {
+      context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+      auto set = [&](const char* name, ITextureView* view) {
+        if (auto* v = lights_pass_.srb->GetVariableByName(SHADER_TYPE_PIXEL, name)) v->Set(view);
+      };
+      ITextureView* any = f.glow;
+      set("glowTex", f.glow);
+      set("depthTex", f.depth ? f.depth : any);
+      set("worldDepthTex", f.world ? f.world : any);
+      set("colorTex", any);
+      set("effectLightsTex", any);
+      ITextureView* rtv = effect_lights_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET);
+      context->SetRenderTargets(1, &rtv, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      Viewport small;
+      small.Width = 4.0f;
+      small.Height = 2.0f;
+      small.MaxDepth = 1.0f;
+      context->SetViewports(1, &small, 0, 0);
+      context->SetPipelineState(lights_pass_.pso);
+      context->CommitShaderResources(lights_pass_.srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      DrawAttribs d;
+      d.NumVertices = 3;
+      context->Draw(d);
+      context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+      CopyTextureAttribs keep{effect_lights_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, staging_[0],
+                              RESOURCE_STATE_TRANSITION_MODE_TRANSITION};
+      context->CopyTexture(keep);
+    }
+    if (compute_lights) {
+      context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+      auto set = [&](const char* name, IDeviceObject* object) {
+        if (auto* v = compute_lights_.srb->GetVariableByName(SHADER_TYPE_COMPUTE, name)) v->Set(object);
+      };
+      ITextureView* any = f.glow;
+      set("glowTex", f.glow);
+      set("depthTex", f.depth ? f.depth : any);
+      set("worldDepthTex", f.world ? f.world : any);
+      set("colorTex", any);
+      set("effectLightsTex", any);
+      set("effectLightsOut", effect_lights_->GetDefaultView(TEXTURE_VIEW_UNORDERED_ACCESS));
+      context->SetPipelineState(compute_lights_.pso);
+      context->CommitShaderResources(compute_lights_.srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      if (s.timing) lights_timer_.Begin(device, context);
+      context->DispatchCompute(DispatchComputeAttribs(1, 1, 1));
+      lights_timer_.End(context);
+      ++applied_effect_lights_, ++applied_compute_lights_;
+      if (check) {
+        CopyTextureAttribs keep{effect_lights_, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, staging_[1],
+                                RESOURCE_STATE_TRANSITION_MODE_TRANSITION};
+        context->CopyTexture(keep);
+        context->WaitForIdle();
+        float v[2][8][4] = {};
+        for (int i = 0; i < 2; ++i) {
+          MappedTextureSubresource m;
+          context->MapTextureSubresource(staging_[i], 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, m);
+          if (!m.pData) continue;
+          for (int y = 0; y < 2; ++y)
+            std::memcpy(v[i][y * 4], static_cast<const uint8_t*>(m.pData) + size_t(y) * m.Stride, 4 * 16);
+          context->UnmapTextureSubresource(staging_[i], 0, 0);
+        }
+        float most = 0.0f;
+        int lit = 0;
+        for (int t = 0; t < 8; ++t) {
+          for (int c = 0; c < 4; ++c) most = std::max(most, std::fabs(v[0][t][c] - v[1][t][c]));
+          if (t < 4 && v[1][t][3] > 0.0f) ++lit;
+        }
+        REXLOG_INFO("[native_x_renderer] night: effects' lights check: {} lights; the compute search and the pixel pass "
+                    "differ by {:.6f} at most (light 0 at {:.2f} {:.2f} {:.2f} range {:.2f} / {:.2f} {:.2f} {:.2f} range {:.2f})",
+                    lit, most, v[1][0][0], v[1][0][1], v[1][0][2], v[1][0][3], v[0][0][0], v[0][0][1], v[0][0][2],
+                    v[0][0][3]);
+      }
+    } else if (effect_lights) {
       context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
       auto set = [&](const char* name, ITextureView* view) {
         if (auto* v = lights_pass_.srb->GetVariableByName(SHADER_TYPE_PIXEL, name)) v->Set(view);
@@ -203,9 +294,38 @@ class Night {
       context->CommitShaderResources(lights_pass_.srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
       DrawAttribs lights_draw;
       lights_draw.NumVertices = 3;
+      if (s.timing) lights_timer_.Begin(device, context);
       context->Draw(lights_draw);
+      lights_timer_.End(context);
       context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
       ++applied_effect_lights_;
+    }
+    // The lamps' visibility, into its kMaxSprites x 1 texture (only the first `sprites` texels are read).
+    if (seen_pass) {
+      context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+      auto set = [&](const char* name, ITextureView* view) {
+        if (auto* v = seen_pass_.srb->GetVariableByName(SHADER_TYPE_PIXEL, name)) v->Set(view);
+      };
+      ITextureView* any = f.depth ? f.depth : f.world ? f.world : copy_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+      set("depthTex", f.depth ? f.depth : any);
+      set("worldDepthTex", f.world ? f.world : any);
+      set("colorTex", any);
+      set("glowTex", any);
+      set("effectLightsTex", any);
+      ITextureView* rtv = sprite_seen_->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET);
+      context->SetRenderTargets(1, &rtv, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      Viewport row;
+      row.Width = float(sprites);
+      row.Height = 1.0f;
+      row.MaxDepth = 1.0f;
+      context->SetViewports(1, &row, 0, 0);
+      context->SetPipelineState(seen_pass_.pso);
+      context->CommitShaderResources(seen_pass_.srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      DrawAttribs seen_draw;
+      seen_draw.NumVertices = 3;
+      context->Draw(seen_draw);
+      context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+      ++applied_seen_;
     }
     // The input: a copy of the scene, which the pass writes over (the antialiasing's way: unbound first).
     context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
@@ -219,6 +339,8 @@ class Night {
     pass->srb->GetVariableByName(SHADER_TYPE_PIXEL, "glowTex")->Set(glow ? f.glow : color);
     if (auto* v = pass->srb->GetVariableByName(SHADER_TYPE_PIXEL, "effectLightsTex"))
       v->Set(effect_lights ? effect_lights_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : color);
+    if (auto* v = pass->srb->GetVariableByName(SHADER_TYPE_PIXEL, "spriteSeenTex"))
+      v->Set(seen_pass ? sprite_seen_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE) : color);
     context->SetRenderTargets(1, &target, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     const TextureDesc& out = target->GetTexture()->GetDesc();
     Viewport viewport;
@@ -232,19 +354,21 @@ class Night {
     draw.NumVertices = 3;
     context->Draw(draw);
     context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+    timer_.End(context);
+    if (check_tiles) TilesCheck(device, context, texture, target, pass, viewport);
     ++applied_;
     if (f.world) ++applied_world_;
     if (glow) ++applied_glow_;
     lights_ += lights, sprites_ += sprites;
     if (!logged_) {
       logged_ = true;
-      REXLOG_INFO("[native_x_renderer] night: on the finished scene, {}x{} format {}, {}{} (D162)", desc.Width,
-                  desc.Height, int(desc.Format), f.depth ? "with the view's depth (haze and sky)" : "without the view's depth",
+      REXLOG_INFO("[native_x_renderer] night: its lights on the finished scene, {}x{} format {}, {}{}", desc.Width,
+                  desc.Height, int(desc.Format), f.depth ? "with the view's depth" : "without the view's depth",
                   f.world ? ", and the world's from before the weapon" : "");
     }
     if (f.world && !logged_world_) {
       logged_world_ = true;
-      REXLOG_INFO("[native_x_renderer] night: the world's depth from before the first person weapon in use (D162)");
+      REXLOG_INFO("[native_x_renderer] night: the world's depth from before the first person weapon in use");
     }
     if (glow && !logged_glow_) {
       logged_glow_ = true;
@@ -266,6 +390,17 @@ class Night {
     applied_ = 0;
     return n;
   }
+  // The night pass's GPU time since the last call (its own passes, the scene's copy and the lights' and lamps'
+  // visibility included): the average and the most of one frame, over `frames` timed; and the visibility passes drawn.
+  void TakeGpu(double& average_ms, double& max_ms, uint64_t& frames, uint64_t& seen, double& lights_ms,
+              uint64_t& compute_lights) {
+    timer_.Take(average_ms, max_ms, frames);
+    double lights_max = 0.0;
+    uint64_t lights_frames = 0;
+    lights_timer_.Take(lights_ms, lights_max, lights_frames);
+    seen = applied_seen_, applied_seen_ = 0;
+    compute_lights = applied_compute_lights_, applied_compute_lights_ = 0;
+  }
 
  private:
   struct Pass {
@@ -284,7 +419,8 @@ void main() {
   // What both passes read: the constants, the textures, and the helpers.
   static constexpr const char* kCommon = R"(#version 450
 layout(set = 0, binding = 0) uniform NightConstants {
-  vec4 night;   // x: brightness, y: haze distance (m), z, w: the view's share of the depth texture
+  vec4 night;   // x: the scene's gain back to its day brightness (D177), y: the lamps' bloom (D183), z, w: the view's
+                // share of the depth texture
   vec4 flags;   // x: 1 with the view's depth, y: 1 with the world's (from before the first person weapon), z, w: its share
   vec4 glowp;   // D163: x: 1 with the effects' layer, y: its strength, z, w: its share
   vec4 to_ndc;  // D163: the night target's texture coordinate to NDC (uv * xy + zw)
@@ -294,18 +430,14 @@ layout(set = 0, binding = 0) uniform NightConstants {
   vec4 inv_t;   // xyz: clip x, y and w at the world's origin; w: 1 with the camera
   vec4 eye;     // xyz: the camera; w: the lamps' strength
   vec4 counts;  // x: lights, y: glows, z: the target's aspect, w: tests (1 the world's place, 2 the lights alone)
-  vec4 glow2;   // x: the coarse mip the effects' lights are found in, y: their strength, z: 1 with them
-  vec4 skyp;    // D169: x: the night sky's strength (stars, Milky Way, moon); 0 none; y: 1 with its directions
-  vec4 sky0;    // D169: the sky's directions from clip x, y and w (rows), and its NDC from a texture coordinate
-  vec4 sky1;
-  vec4 sky2;
-  vec4 skyndc;
-  vec4 moonp;   // D169, the level's sky: xyz toward the moon, w its radius
-  vec4 moonc;   //   rgb the moon's colour, w the sky's share behind clouds
-  vec4 horizon; //   rgb the haze low on the sky, w how high it reaches
-  vec4 starp;   //   x the stars, y the Milky Way, z the stars' seed
-  vec4 lights[72];   // 24 x (position, range), (colour, cos outer), (direction, cos inner)
-  vec4 sprites[48];  // 24 x (uv, radius), (colour, the bulb's depth)
+  vec4 glow2;   // x: the coarse mip the effects' lights are found in, y: their strength, z: 1 with them, w: the lens
+                // flare (D183)
+  vec4 extra;   // x: 1 with each lamp's visibility found once a frame (spriteSeenTex: LampSeen, GlassAt)
+  uvec4 beams;  // the lights that are turning beams: bits 0 to 95 in x, y, z (TileLights)
+  uvec4 tiles[144];  // 16 x 9 screen tiles: each its lights, bits 0 to 95 in x, y, z (TileLights)
+  uvec4 sprite_tiles[72];  // the same tiles' lamp glows: tile 2k in xy, 2k + 1 in zw, bits 0 to 63 (TileLights)
+  vec4 lights[288];  // 96 x (position, range), (colour, cos outer), (direction, cos inner)
+  vec4 sprites[192];  // 64 x (uv, radius), (colour, the bulb's depth), (the bulb in the world, its radius + 2 x 255 x flare)
 };
 layout(set = 0, binding = 1) uniform sampler2D colorTex;
 layout(set = 0, binding = 2) uniform sampler2D depthTex;
@@ -326,6 +458,34 @@ vec3 WorldAt(vec2 uv, float depth) {
   vec2 ndc = uv * to_ndc.xy + to_ndc.zw;
   vec3 c = vec3(ndc * w, w) - inv_t.xyz;
   return vec3(dot(inv0.xyz, c), dot(inv1.xyz, c), dot(inv2.xyz, c));
+}
+// D183: how much of a lamp's middle is in view (0 to 1): the scene's distance at three points across it against the
+// bulb's, with the lamp's own housing (within `tol` metres in front of the bulb) not hiding it.
+float LampSeen(vec2 c, vec2 r, float bulb_depth, float tol) {
+  float lamp = 0.1 / max(bulb_depth, 1e-7);
+  float seen = 0.0;
+  for (int k = -1; k <= 1; ++k) {
+    float d = DepthAt(clamp(c + vec2(float(k) * 0.12 * r.x, 0.0), vec2(0.0), vec2(1.0)));
+    float dist = d > 1e-7 ? 0.1 / d : 1e9;
+    seen += smoothstep(lamp - tol - 0.6, lamp - tol, dist);
+  }
+  return seen / 3.0;
+}
+// D195: how much of a lamp's own glass is at its middle (0 to 1): the surface seen at five points across the bulb against
+// its place in the world, as the glass is lit. Its bloom and its flare only where that is, so nothing glows in the air
+// where a lamp's point is off its mesh (the user, 18 Nov 2026: "I thought we got rid of these floating orbs"). 1 with
+// no camera to place it by.
+float GlassAt(vec2 c, vec2 r, vec3 bulb_at, float bulb) {
+  if (inv_t.w < 0.5) return 1.0;
+  float most = 0.0;
+  for (int k = 0; k < 5; ++k) {
+    vec2 o = k == 0 ? vec2(0.0) : vec2(k == 1 ? 1.0 : k == 2 ? -1.0 : 0.0, k == 3 ? 1.0 : k == 4 ? -1.0 : 0.0) * 0.3 * r;
+    vec2 p = clamp(c + o, vec2(0.0), vec2(1.0));
+    float d = DepthAt(p);
+    if (d <= 2e-5) continue;
+    most = max(most, 1.0 - smoothstep(bulb * 0.45, bulb * 1.5, length(WorldAt(p, d) - bulb_at)));
+  }
+  return most;
 }
 // How much of the effects' layer is light of its own: fire, flashes and tracers are coloured or very bright; the grey
 // smoke and dust drawn with them is neither (it would glow white at night).
@@ -390,145 +550,132 @@ void main() {
 }
 )";
 
+  // D163's search of the effects' layer as a compute shader (the Night Ops performance pass, 20 Nov 2026: the pixel
+  // pass above ran on 8 threads, each scanning the whole coarse mip up to four times one texel after another, 1.24 ms
+  // of the GPU's frame whenever the effects were on screen). Here 256 threads share each of the four scans and keep
+  // the best of their texels; ties go to the first in the pixel pass's order (rows, then columns), so the same four
+  // places are picked. Then threads 0 to 3 place their light as the pixel pass did, into the same 4 x 2 texture.
+  static constexpr const char* kComputeLights = R"(
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 8, rgba32f) uniform writeonly image2D effectLightsOut;
+shared float s_best[256];
+shared int s_at[256];
+shared ivec2 s_picked[4];
+shared float s_energy[4];
+void main() {
+  int me = int(gl_LocalInvocationIndex);
+  if (glowp.x < 0.5 || inv_t.w < 0.5) {
+    if (me < 8) imageStore(effectLightsOut, ivec2(me % 4, me / 4), vec4(0.0));
+    return;
+  }
+  int lod = int(glow2.x + 0.5);
+  ivec2 size = textureSize(glowTex, lod);
+  int count = size.x * size.y;
+  for (int k = 0; k < 4; ++k) {
+    float best = 0.0;
+    int at = 0x7fffffff;
+    for (int i = me; i < count; i += 256) {
+      int x = i % size.x, y = i / size.x;
+      bool taken = false;
+      for (int j = 0; j < k; ++j) {
+        if (max(abs(x - s_picked[j].x), abs(y - s_picked[j].y)) <= 4) taken = true;
+      }
+      if (taken) continue;
+      vec3 e = max(texelFetch(glowTex, ivec2(x, y), lod).rgb, vec3(0.0));
+      float w = dot(e, vec3(0.2126, 0.7152, 0.0722)) * Hot(e);
+      if (w > best) best = w, at = i;  // within a thread its texels come in order: the first of a tie stays
+    }
+    s_best[me] = best;
+    s_at[me] = at;
+    barrier();
+    for (int stride = 128; stride > 0; stride >>= 1) {
+      if (me < stride) {
+        float b = s_best[me + stride];
+        int a = s_at[me + stride];
+        if (b > s_best[me] || (b == s_best[me] && a < s_at[me])) s_best[me] = b, s_at[me] = a;
+      }
+      barrier();
+    }
+    if (me == 0) {
+      // As the pixel pass: no texel above 0 leaves the pick at (-1, -1), which still keeps the next picks away.
+      s_picked[k] = s_best[0] > 0.0 ? ivec2(s_at[0] % size.x, s_at[0] / size.x) : ivec2(-1);
+      s_energy[k] = s_best[0];
+    }
+    barrier();
+  }
+  if (me >= 4) return;
+  ivec2 at = s_picked[me];
+  float energy = s_energy[me];
+  vec4 row0 = vec4(0.0), row1 = vec4(0.0);
+  if (at.x >= 0 && energy >= 0.004) {
+    vec2 euv = (vec2(at) + 0.5) / vec2(size);
+    vec2 cell = 1.0 / vec2(size);
+    float depth = 0.0;
+    for (int j = -2; j <= 2; ++j) {
+      for (int i = -2; i <= 2; ++i) depth = max(depth, DepthAt((euv + vec2(i, j) * cell * 0.75) / glowp.zw));
+    }
+    if (depth >= 2e-5) {
+      vec3 P = WorldAt(euv / glowp.zw, depth);
+      vec3 toward = eye.xyz - P;
+      P += toward * min(0.35, length(toward) * 0.3) / max(length(toward), 1e-3);
+      float power = min(energy * exp2(2.0 * float(lod)) / (float(textureSize(glowTex, 0).x) * 0.25), 2.5);
+      vec3 colour = max(texelFetch(glowTex, at, lod).rgb, vec3(0.0));
+      colour /= max(max(colour.r, max(colour.g, colour.b)), 1e-4);
+      float range = clamp(3.5 + sqrt(power) * 5.0, 3.5, 16.0);
+      row0 = vec4(P, range);
+      row1 = vec4(colour * power * glow2.y, 0.0);
+    }
+  }
+  imageStore(effectLightsOut, ivec2(me, 0), row0);
+  imageStore(effectLightsOut, ivec2(me, 1), row1);
+}
+)";
+
+  // The lamps' visibility, once a frame: texel i of a kMaxSprites x 1 target is lamp i's LampSeen (x) and GlassAt
+  // (y). The main pass used to find both for every pixel in a lamp's bloom, and for the lens flare's four lamps for
+  // every pixel of the picture (16 depth reads a lamp each), though neither depends on the pixel.
+  static constexpr const char* kPixelSeen = R"(
+layout(location = 0) out vec4 out_seen;
+void main() {
+  int i = int(gl_FragCoord.x);
+  out_seen = vec4(0.0);
+  if (i >= int(counts.y + 0.5)) return;
+  vec4 s0 = sprites[i * 3], s1 = sprites[i * 3 + 1], s2 = sprites[i * 3 + 2];
+  float bulb = s2.w - 2.0 * floor(s2.w * 0.5);
+  out_seen = vec4(LampSeen(s0.xy, s0.zw, s1.w, max(3.0 * bulb, 0.3)), GlassAt(s0.xy, s0.zw, s2.xyz, bulb), 0.0, 0.0);
+}
+)";
+
   static constexpr const char* kPixel = R"(
+layout(set = 0, binding = 6) uniform sampler2D spriteSeenTex;
 layout(location = 0) in vec2 v_texcoord;
 layout(location = 0) out vec4 out_color;
 
-// D169: the night sky, made here (nothing drawn or licensed: TekRantGaming, 14 Nov 2026, "a nighttime skybox ... open
-// for us to distribute ... the stars look good. Not over the top"). `d` is a direction in the world (y up), `px` the
-// angle one pixel covers there. Stars on a grid of each cube face, one at most a cell, kept within its cell's middle
-// so a pixel looks in its own cell only; a faint Milky Way band; a moon with a soft halo.
-float Hash13(vec3 p) {
-  p = fract(p * 0.1031);
-  p += dot(p, p.zyx + 31.32);
-  return fract((p.x + p.y) * p.z);
-}
-vec3 Hash33(vec3 p) {
-  p = fract(p * vec3(0.1031, 0.1030, 0.0973));
-  p += dot(p, p.yxz + 33.33);
-  return fract((p.xxy + p.yxx) * p.zyx);
-}
-float Noise3(vec3 p) {
-  vec3 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(mix(Hash13(i), Hash13(i + vec3(1, 0, 0)), f.x), mix(Hash13(i + vec3(0, 1, 0)), Hash13(i + vec3(1, 1, 0)), f.x), f.y),
-             mix(mix(Hash13(i + vec3(0, 0, 1)), Hash13(i + vec3(1, 0, 1)), f.x), mix(Hash13(i + vec3(0, 1, 1)), Hash13(i + vec3(1, 1, 1)), f.x), f.y), f.z);
-}
-float Fbm(vec3 p) {
-  float v = 0.0, a = 0.5;
-  for (int i = 0; i < 4; ++i) {
-    v += a * Noise3(p);
-    p = p * 2.03 + 17.1;
-    a *= 0.5;
-  }
-  return v;
-}
-// One layer of stars: `cells` across a cube face, `chance` of a star in a cell, `bright` the brightest.
-vec3 StarLayer(vec3 d, float px, float cells, float chance, float bright, float seed) {
-  vec3 a = abs(d);
-  float face, m;
-  vec2 uv;
-  if (a.x >= a.y && a.x >= a.z) {
-    face = d.x > 0.0 ? 0.0 : 1.0; m = a.x; uv = d.yz;
-  } else if (a.y >= a.z) {
-    face = d.y > 0.0 ? 2.0 : 3.0; m = a.y; uv = d.xz;
-  } else {
-    face = d.z > 0.0 ? 4.0 : 5.0; m = a.z; uv = d.xy;
-  }
-  uv = uv / m * cells;
-  vec2 cell = floor(uv);
-  vec3 h = Hash33(vec3(cell, face * 7.0 + seed));
-  if (h.z > chance) return vec3(0.0);
-  vec2 at = cell + 0.25 + 0.5 * h.xy;  // the star, in the cell's middle half
-  float dist = length(uv - at) / cells * m;  // about the angle, on that face
-  float b = Hash13(vec3(cell * 1.7, face + seed * 3.1));
-  float strength = bright * pow(b, 6.0) + bright * 0.06;  // a few bright, many faint
-  float sigma = max(px * 0.55, 0.00035);
-  float shape = exp(-dist * dist / (2.0 * sigma * sigma));
-  // A star smaller than a pixel keeps its light: spread over the pixel, not lost.
-  strength *= min(1.0, 0.00045 / sigma) + 0.15;
-  float t = Hash13(vec3(cell * 3.3, face + seed * 5.7));
-  vec3 tint = t < 0.15 ? vec3(1.0, 0.80, 0.62) : t < 0.35 ? vec3(1.0, 0.93, 0.84) : t < 0.8 ? vec3(0.95, 0.97, 1.0) : vec3(0.78, 0.86, 1.0);
-  return tint * strength * shape;
-}
-// `veil`: the stars' share left (the day sky's clouds and the haze low on the sky); the moon shows through more.
-vec3 NightSky(vec3 d, float px, float veil, float clear) {
-  vec3 c = vec3(0.0);
-  // The Milky Way: a soft band across the sky, patchy, with darker lanes; very faint.
-  const vec3 band_n = normalize(vec3(0.35, 0.42, 0.84));
-  float across = dot(d, band_n);
-  float band = exp(-across * across / (2.0 * 0.13 * 0.13));
-  float patches = Fbm(d * 5.0 + 3.0);
-  float lanes = smoothstep(0.42, 0.62, Fbm(d * 11.0 + 41.0)) * exp(-across * across / (2.0 * 0.05 * 0.05));
-  c += vec3(0.85, 0.88, 1.0) * band * (0.35 + 0.9 * patches) * (1.0 - 0.75 * lanes) * 0.0045 * starp.y;
-  // Stars: a sparse bright layer and denser faint ones, more of the faint ones in the band; fewer and dimmer on a hazy
-  // night (the faint ones go first).
-  float st = starp.x, seed = starp.z;
-  c += StarLayer(d, px, 34.0, 0.33 * min(st, 1.0), 0.85 * st, 1.0 + seed);
-  c += StarLayer(d, px, 90.0, (0.22 + 0.25 * band * starp.y) * clamp(st * st, 0.0, 1.0), 0.16 * st, 2.0 + seed);
-  c += StarLayer(d, px, 170.0, (0.10 + 0.35 * band * starp.y) * clamp(st * st * st, 0.0, 1.0), 0.06 * st, 3.0 + seed);
-  c *= veil;
-  // The moon: a small disc, not full white, a little texture, its edge darker, a soft halo round it.
-  vec3 moon_d = moonp.xyz;
-  float moon_r = max(moonp.w, 1e-4);
-  float ang = acos(clamp(dot(d, moon_d), -1.0, 1.0));
-  vec3 rel = d - moon_d * dot(d, moon_d);
-  float rim = clamp(ang / moon_r, 0.0, 1.0);
-  float disc = 1.0 - smoothstep(moon_r - px * 1.2, moon_r + px * 0.6, ang);
-  float maria = Fbm(rel / moon_r * 1.6 + 7.0);
-  float surface = (0.78 + 0.22 * smoothstep(0.35, 0.65, maria)) * (1.0 - 0.28 * rim * rim);
-  // The moon down to the horizon (it rises out of the sea), dimmed a little where the day sky was cloud or the sun's
-  // white glow (the sun is where the moon is: D169).
-  float shown = smoothstep(-0.015, 0.03, d.y) * mix(0.75, 1.0, clear);
-  c = mix(c, moonc.rgb * surface * shown, moonp.w > 0.0 ? disc : 0.0);
-  c += mix(vec3(0.30, 0.38, 0.55), moonc.rgb, 0.5) * (exp(-ang / 0.035) * 0.03 + exp(-ang / 0.18) * 0.008) * shown;
-  return c;
+// A lamp's LampSeen (x) and GlassAt (y): found once a frame by the visibility pass (they depend on the lamp alone),
+// else here.
+// (Two shaders, one for each way, rather than a branch: each compiles only the code it runs.)
+vec2 SpriteSeen(int i, vec4 s0, vec4 s1, vec4 s2, float bulb) {
+#ifdef NIGHT_SEEN_PASS
+  return texelFetch(spriteSeenTex, ivec2(i, 0), 0).xy;
+#else
+  return vec2(LampSeen(s0.xy, s0.zw, s1.w, max(3.0 * bulb, 0.3)), GlassAt(s0.xy, s0.zw, s2.xyz, bulb));
+#endif
 }
 
 void main() {
   vec4 src = textureLod(colorTex, v_texcoord, 0.0);
   vec3 lin = pow(clamp(src.rgb, 0.0, 1.0), vec3(2.2));
   float luma = dot(lin, vec3(0.2126, 0.7152, 0.0722));
-  // Moonlight: little colour, a cool blue, a fifth of the light.
-  vec3 moon = mix(vec3(luma), lin, 0.35) * vec3(0.55, 0.72, 1.0) * (0.20 * night.x);
-  // The night haze with distance (0.1 / depth), the day sky far away becoming the night sky.
   // The nearer of the view's depth at its end (on foot: the weapon alone, the rest cleared to far) and the world's from
   // before the weapon.
-  float haze = 0.0, depth = 0.0, view_depth = 0.0, world_depth = 0.0;
+  float depth = 0.0, view_depth = 0.0, world_depth = 0.0;
   if (flags.x > 0.5 || flags.y > 0.5) {
     view_depth = flags.x > 0.5 ? textureLod(depthTex, v_texcoord * night.zw, 0.0).r : 0.0;
     world_depth = flags.y > 0.5 ? textureLod(worldDepthTex, v_texcoord * flags.zw, 0.0).r : 0.0;
     depth = max(view_depth, world_depth);
-    float dist = 0.1 / max(depth, 1e-7);
-    haze = 1.0 - exp(-dist / night.y);
   }
-  vec3 sky = (vec3(0.004, 0.009, 0.024) + luma * 0.03 * vec3(0.6, 0.75, 1.0)) * night.x;
-  vec3 result = mix(moon, sky, haze);
-  // D169: the night sky where the view shows the sky (nothing within 5 km), where the day sky was clear blue (its
-  // clouds, grey or white, keep covering it), fading toward the horizon. The direction is taken for every pixel (the
-  // pixel's angle needs its neighbours').
-  if (skyp.x > 0.0 && skyp.y > 0.5) {
-    vec2 ndc = v_texcoord * skyndc.xy + skyndc.zw;
-    vec3 ray = vec3(ndc, 1.0);
-    vec3 dir = normalize(vec3(dot(sky0.xyz, ray), dot(sky1.xyz, ray), dot(sky2.xyz, ray)));
-    float px = max(length(fwidth(dir)), 1e-5);
-    float open = 1.0 - smoothstep(2e-6, 2e-5, depth);
-    if (open > 0.0) {
-      float hi = max(lin.r, max(lin.g, lin.b)), lo = min(lin.r, min(lin.g, lin.b));
-      float clear = smoothstep(0.30, 0.60, hi > 1e-4 ? (hi - lo) / hi : 0.0);
-      float above = smoothstep(-0.02, horizon.w, dir.y);
-      float low = 1.0 - smoothstep(-0.04, horizon.w * 1.6, dir.y);
-      // The level's haze: strongest low on the sky, a third of it overhead (damp air, dust).
-      result += (NightSky(dir, px, mix(moonc.w, 1.0, clear) * above, clear) + horizon.rgb * mix(0.35, 1.0, low) * night.x) * open * skyp.x;
-    }
-    // Tests (night debug 3): red the sky test, green the clear sky test, blue the direction's height.
-    if (counts.w > 2.5 && counts.w < 3.5) {
-      float hi = max(lin.r, max(lin.g, lin.b)), lo = min(lin.r, min(lin.g, lin.b));
-      result = vec3(open, smoothstep(0.30, 0.60, hi > 1e-4 ? (hi - lo) / hi : 0.0), dir.y * 0.5 + 0.5) * 0.5;
-    }
-  } else if (counts.w > 2.5 && counts.w < 3.5) {
-    result = vec3(0.0, 0.0, 0.0);  // no camera: black
-  }
+  // The scene stays as the day and night cycle drew it: only the lights below are added.
+  vec3 result = lin;
   // D163: the lights (the lamps, and what the effects light), on the surface the pixel shows (its place in the world
   // from its depth, its facing from its neighbours'), lighting its colour without most of the day's sun (the bright
   // and the shaded brought closer).
@@ -540,9 +687,23 @@ void main() {
     float nlen = length(N);
     N = nlen > 1e-8 ? N / nlen : vec3(0.0, 1.0, 0.0);
     if (dot(N, eye.xyz - P) < 0.0) N = -N;
-    vec3 albedo = lin * (0.5 / (luma + 0.2));
+    // The first person arms and weapon (nearer than 3 m and than the world's depth): lit evenly, not by the facing
+    // from the depth's neighbours, which is each flat triangle's own on their few large ones: near a lamp the arms
+    // showed in patches of light and dark ("What are those patchy shadows on the player arms?", 17 Nov 2026).
+    float held = flags.x > 0.5 && flags.y > 0.5 && view_depth > 0.0333 && view_depth > world_depth * 1.02 ? 1.0 : 0.0;
+    // D177: the surface's own colour from the picture as the day would show it (the cycle's dark undone), the day's
+    // bright and shaded brought closer.
+    vec3 day = lin * night.x;
+    vec3 albedo = min(day * (0.5 / (luma * night.x + 0.2)), vec3(1.0));
     vec3 lit = vec3(0.0);
-    for (int i = 0; i < nl; ++i) {
+    // Only the lights whose reach can touch this pixel's screen tile (TileLights), in the same order as all of them.
+    ivec2 tile = clamp(ivec2(v_texcoord * vec2(16.0, 9.0)), ivec2(0), ivec2(15, 8));
+    uvec4 mine = tiles[tile.y * 16 + tile.x];
+    for (int word = 0; word < 3; ++word) {
+     uint bits = mine[word];
+     while (bits != 0u) {
+      int i = word * 32 + findLSB(bits);
+      bits &= bits - 1u;
       vec4 l0 = lights[i * 3], l1 = lights[i * 3 + 1], l2 = lights[i * 3 + 2];
       vec3 L = l0.xyz - P;
       float d2 = dot(L, L), r2 = l0.w * l0.w;
@@ -554,8 +715,9 @@ void main() {
       float k = l0.w > 60.0 ? 100.0 / r2 : 0.25;
       float att = fall * fall / (1.0 + d2 * k);
       float spot = dot(l2.xyz, l2.xyz) > 0.5 ? smoothstep(l1.w, l2.w, dot(-l, l2.xyz)) : 1.0;
-      float facing = clamp(dot(N, l), 0.0, 1.0) * 0.8 + 0.2;
+      float facing = mix(clamp(dot(N, l), 0.0, 1.0) * 0.8 + 0.2, 0.6, held);
       lit += l1.rgb * (att * spot * facing);
+     }
     }
     // Up close a lamp's light rolls off (12 Nov 2026: right under a lamppost the ground looked like the day, its sun
     // shadows and all: run nadenight2); a pool of light seen from afar keeps its strength.
@@ -572,23 +734,128 @@ void main() {
         float d = sqrt(d2);
         float fall = 1.0 - d2 / r2;
         float att = fall * fall / (1.0 + d2 * 0.6);
-        float facing = clamp(dot(N, L / max(d, 1e-3)), 0.0, 1.0) * 0.75 + 0.25;
+        float facing = mix(clamp(dot(N, L / max(d, 1e-3)), 0.0, 1.0) * 0.75 + 0.25, 0.6, held);
         flashes += l1.rgb * (att * facing);
       }
     }
-    result += albedo * (lamps + flashes) * (1.0 - haze);
+    result += albedo * (lamps + flashes);
     if (counts.w > 0.5 && counts.w < 1.5) result = fract(P / 5.0) * 0.6;
     if (counts.w > 1.5) result = (lamps + flashes) * 0.25;
   }
-  // D163: the lamps' bulbs, where nothing nearer hides them.
+  // D195: a lighthouse's beams seen in the air (the user, 18 Nov 2026: "The lighthouses should also have a realistic
+  // rotating long light"): each narrow, far reaching light (a cone under 10 degrees, 150 m or more: only the
+  // lighthouse's turning beams) is a shaft of light 1.6 km long, widening with its cone, fading along it, seen where
+  // the view's ray passes through it before what the pixel shows. From the ray's nearest approach to the beam's axis.
+  if (nl > 0 && inv_t.w > 0.5) {
+    vec3 E = eye.xyz;
+    bool sky_px = depth <= 2e-5;
+    vec3 Pv = WorldAt(v_texcoord, sky_px ? 1e-5 : depth);
+    vec3 rv = Pv - E;
+    float Lv = sky_px ? 1e6 : length(rv);
+    vec3 rdv = rv / max(length(rv), 1e-3);
+    vec3 shaft = vec3(0.0);
+    for (int word = 0; word < 3; ++word) {
+     uint bits = beams[word];
+     while (bits != 0u) {
+      int i = word * 32 + findLSB(bits);
+      bits &= bits - 1u;
+      vec4 l0 = lights[i * 3], l1 = lights[i * 3 + 1], l2 = lights[i * 3 + 2];
+      if (l1.w < 0.985 || l0.w < 150.0 || dot(l2.xyz, l2.xyz) < 0.25) continue;
+      vec3 u = normalize(l2.xyz);
+      const float R = 1600.0;
+      vec3 w0 = E - l0.xyz;
+      float b = dot(rdv, u), dd = dot(rdv, w0), ee = dot(u, w0);
+      float den = max(1.0 - b * b, 1e-4);
+      float sa = clamp((ee - b * dd) / den, 0.0, R);
+      float ta = clamp(dot(l0.xyz + u * sa - E, rdv), 0.0, Lv);
+      sa = clamp(dot(E + rdv * ta - l0.xyz, u), 0.0, R);
+      float tan_outer = sqrt(max(1.0 - l1.w * l1.w, 0.0)) / l1.w;
+      float rad = max(0.6, sa * tan_outer);
+      float dist = length(E + rdv * ta - (l0.xyz + u * sa));
+      float core = exp(-2.0 * (dist / rad) * (dist / rad));
+      float chord = min(2.0 * rad / sqrt(den), 300.0);
+      float fall = exp(-sa / 650.0) * smoothstep(0.0, 4.0, sa);
+      shaft += l1.rgb * core * chord * fall * 0.0005;
+     }
+    }
+    result += shaft * min(eye.w, 1.0);
+  }
+  // D163, D183 (the user, 17 Nov 2026: "illuminate without that floating light ball ... color the mesh the light is
+  // coming from when lit and give it a bloom with a clean and subtle camera lens flare"): each lamp lights its own
+  // glass, the surface within the bulb's radius of it (where no mesh is, nothing glows), with a soft bloom round it
+  // while its middle is in view.
   int ns = int(counts.y + 0.5);
-  for (int i = 0; i < ns; ++i) {
-    vec4 s0 = sprites[i * 2], s1 = sprites[i * 2 + 1];
+  bool placed = inv_t.w > 0.5 && depth > 2e-5;
+  vec3 Pw = placed ? WorldAt(v_texcoord, depth) : vec3(0.0);
+  float aspect = counts.z;
+  // Only the glows whose reach touches this pixel's screen tile (TileLights), in the same order as all of them.
+  int sprite_tile = clamp(int(v_texcoord.y * 9.0), 0, 8) * 16 + clamp(int(v_texcoord.x * 16.0), 0, 15);
+  uvec4 sprite_pair = sprite_tiles[sprite_tile >> 1];
+  uvec2 sprite_mine = (sprite_tile & 1) == 0 ? sprite_pair.xy : sprite_pair.zw;
+  for (int word = 0; word < 2; ++word) {
+   uint sbits = sprite_mine[word];
+   while (sbits != 0u) {
+    int i = word * 32 + findLSB(sbits);
+    sbits &= sbits - 1u;
+    vec4 s0 = sprites[i * 3], s1 = sprites[i * 3 + 1], s2 = sprites[i * 3 + 2];
     vec2 q = (v_texcoord - s0.xy) / s0.zw;
     float r2 = dot(q, q);
-    if (r2 >= 1.0 || depth > s1.w * 1.05) continue;
-    float g = exp(-r2 * 40.0) * 3.0 + exp(-r2 * 8.0) * 0.35 + (1.0 - r2) * 0.04;
-    result += s1.rgb * (g * eye.w);
+    if (r2 >= 1.0) continue;
+    float bulb = s2.w - 2.0 * floor(s2.w * 0.5);
+    // The lamp's own colour, a touch whiter, its brightest channel held near 1.3 so the glass keeps its colour
+    // instead of burning white.
+    float peak = max(s1.r, max(s1.g, s1.b));
+    vec3 hue = mix(s1.rgb, vec3(peak), 0.12) * (min(peak * 0.9, 1.3) / max(peak, 1e-4));
+    if (placed) {
+      float d = length(Pw - s2.xyz);
+      float lit = 1.0 - smoothstep(bulb * 0.45, bulb * 1.5, d);
+      result += hue * lit * min(eye.w, 1.0);
+    }
+    if (night.y > 0.0) {
+      // (Far off its glass is under a pixel and may not be drawn at all: from 60 m to 150 m away its glow needs none.)
+      float far = smoothstep(60.0, 150.0, 0.1 / max(s1.w, 1e-7));
+      vec2 lg = SpriteSeen(i, s0, s1, s2, bulb);
+      float seen = lg.x * max(lg.y, far);
+      float r = sqrt(r2), edge = 1.0 - r;
+      float glare = exp(-r2 * 160.0) * 1.2 + 0.010 / (r2 + 0.010) * edge * edge * edge * 0.45;
+      result += s1.rgb * glare * seen * night.y * eye.w;
+    }
+   }
+  }
+  // D183: the camera's lens flare from the brightest few lamps in view (the first sprites, their strength in s2.w's
+  // whole pairs, 255ths), stronger the more directly the camera looks at one: faint ghosts along the line through the picture's middle,
+  // a soft halo ring and a milky veil round the light (the lens's own haze), in the lamp's colour.
+  if (glow2.w > 0.0) {
+    vec2 A = vec2(aspect, 1.0);
+    for (int i = 0; i < min(ns, 4); ++i) {
+      vec4 s0 = sprites[i * 3], s1 = sprites[i * 3 + 1], s2 = sprites[i * 3 + 2];
+      float pairs = floor(s2.w * 0.5), bulb = s2.w - 2.0 * pairs, strength = pairs / 255.0;
+      if (strength <= 0.0) continue;
+      vec2 c = s0.xy;
+      if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0) continue;
+      vec2 lg = SpriteSeen(i, s0, s1, s2, bulb);
+      float seen = lg.x;
+      if (seen <= 0.0) continue;
+      seen *= lg.y;
+      if (seen <= 0.0) continue;
+      vec2 v = c - 0.5;
+      float look = 1.0 - smoothstep(0.0, 1.0, length(v * A * 2.0 / aspect));
+      float F = strength * seen * (0.3 + 0.7 * look) * glow2.w * eye.w;
+      vec3 col = s1.rgb / max(max(s1.r, max(s1.g, s1.b)), 1e-3);
+      float dl = length((v_texcoord - c) * A);
+      vec3 add = col * (exp(-dl * dl * 30.0) * 0.022 + exp(-pow((dl - 0.12) / 0.010, 2.0)) * 0.006 +
+                        exp(-pow((dl - 0.24) / 0.020, 2.0)) * 0.0025);
+      const float ts[4] = float[4](-0.42, -0.86, -1.30, 0.55);
+      const float rs[4] = float[4](0.030, 0.055, 0.085, 0.020);
+      const vec3 tints[4] = vec3[4](vec3(1.0, 0.72, 0.42), vec3(0.42, 0.80, 1.0), vec3(0.78, 0.55, 1.0), vec3(1.0));
+      for (int g = 0; g < 4; ++g) {
+        vec2 at = 0.5 + v * ts[g];
+        float dg = length((v_texcoord - at) * A);
+        float disc = smoothstep(rs[g], rs[g] * 0.6, dg) * (0.7 + 0.3 * smoothstep(rs[g] * 0.5, rs[g] * 0.95, dg));
+        add += col * tints[g] * disc * 0.018;
+      }
+      result += add * F;
+    }
   }
   // D163: the effects' own light (the game's half size layer of its emissive particles: muzzle flashes, tracers,
   // fire, explosions), as drawn and with a soft glow round it; its grey smoke and dust not. The first person weapon,
@@ -608,11 +875,13 @@ void main() {
   struct Constants {
     float night[4], flags[4], glow[4], to_ndc[4];
     float inverse[3][4];
-    float inverse_t[4], eye[4], counts[4], glow2[4], sky[4];
-    float sky_inverse[3][4], sky_to_ndc[4];  // D169
-    float moon[4], moon_color[4], horizon[4], stars[4];
+    float inverse_t[4], eye[4], counts[4], glow2[4];
+    float extra[4];  // x: 1 with the lamps' visibility found once each (spriteSeenTex)
+    uint32_t beams[4];  // the lights that are turning beams (bits 0 to 95 in x, y, z)
+    uint32_t tiles[kTilesX * kTilesY][4];  // each screen tile's lights (bits 0 to 95 in x, y, z)
+    uint32_t sprite_tiles[kTilesX * kTilesY / 2][4];  // each tile's lamp glows: two tiles a row, 64 bits each
     float lights[kMaxLights * 3][4];
-    float sprites[kMaxSprites * 2][4];
+    float sprites[kMaxSprites * 3][4];
   };
 
   static Diligent::RefCntAutoPtr<Diligent::IShader> Shader(Diligent::IRenderDevice* device,
@@ -633,11 +902,12 @@ void main() {
     return shader;
   }
 
-  Pass* PassFor(Diligent::IRenderDevice* device, Diligent::TEXTURE_FORMAT format) {
+  Pass* PassFor(Diligent::IRenderDevice* device, Diligent::TEXTURE_FORMAT format, bool seen_pass) {
     using namespace Diligent;
-    auto it = passes_.find(format);
+    const uint32_t key = uint32_t(format) * 2u + (seen_pass ? 1u : 0u);
+    auto it = passes_.find(key);
     if (it != passes_.end()) return it->second.pso ? &it->second : nullptr;
-    Pass& pass = passes_[format];
+    Pass& pass = passes_[key];
     if (!constants_) {
       BufferDesc buffer;
       buffer.Name = "NativeXRenderer night constants";
@@ -649,8 +919,11 @@ void main() {
       if (!constants_) return nullptr;
     }
     RefCntAutoPtr<IShader> vs = Shader(device, SHADER_TYPE_VERTEX, kVertex, "NativeXRenderer night VS");
-    RefCntAutoPtr<IShader> ps =
-        Shader(device, SHADER_TYPE_PIXEL, (std::string(kCommon) + kPixel).c_str(), "NativeXRenderer night PS");
+    // kCommon starts with its #version line: the variant's define goes right after it.
+    std::string source = std::string(kCommon) + kPixel;
+    if (seen_pass) source.insert(source.find('\n') + 1, "#define NIGHT_SEEN_PASS 1\n");
+    RefCntAutoPtr<IShader> ps = Shader(device, SHADER_TYPE_PIXEL, source.c_str(),
+                                       seen_pass ? "NativeXRenderer night PS (lamps seen once)" : "NativeXRenderer night PS");
     if (!vs || !ps) {
       REXLOG_ERROR("[native_x_renderer] night: its shaders did not compile: the scene is drawn as day");
       return nullptr;
@@ -677,17 +950,19 @@ void main() {
         {SHADER_TYPE_PIXEL, "depthTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
         {SHADER_TYPE_PIXEL, "worldDepthTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
         {SHADER_TYPE_PIXEL, "glowTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
-        {SHADER_TYPE_PIXEL, "effectLightsTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC}};
+        {SHADER_TYPE_PIXEL, "effectLightsTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
+        {SHADER_TYPE_PIXEL, "spriteSeenTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC}};
     ImmutableSamplerDesc samplers[] = {{SHADER_TYPE_PIXEL, "colorTex", point},
                                        {SHADER_TYPE_PIXEL, "depthTex", point},
                                        {SHADER_TYPE_PIXEL, "worldDepthTex", point},
                                        {SHADER_TYPE_PIXEL, "glowTex", linear},
-                                       {SHADER_TYPE_PIXEL, "effectLightsTex", point}};
+                                       {SHADER_TYPE_PIXEL, "effectLightsTex", point},
+                                       {SHADER_TYPE_PIXEL, "spriteSeenTex", point}};
     info.PSODesc.ResourceLayout.DefaultVariableType = SHADER_RESOURCE_VARIABLE_TYPE_STATIC;
     info.PSODesc.ResourceLayout.Variables = variables;
-    info.PSODesc.ResourceLayout.NumVariables = 5;
+    info.PSODesc.ResourceLayout.NumVariables = 6;
     info.PSODesc.ResourceLayout.ImmutableSamplers = samplers;
-    info.PSODesc.ResourceLayout.NumImmutableSamplers = 5;
+    info.PSODesc.ResourceLayout.NumImmutableSamplers = 6;
     device->CreateGraphicsPipelineState(info, &pass.pso);
     if (!pass.pso) {
       REXLOG_ERROR("[native_x_renderer] night: no pipeline for format {}", int(format));
@@ -711,7 +986,7 @@ void main() {
     t.Height = 2;
     t.Format = TEX_FORMAT_RGBA32_FLOAT;
     t.Usage = USAGE_DEFAULT;
-    t.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+    t.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET | BIND_UNORDERED_ACCESS;
     device->CreateTexture(t, nullptr, &effect_lights_);
     RefCntAutoPtr<IShader> vs = Shader(device, SHADER_TYPE_VERTEX, kVertex, "NativeXRenderer night lights VS");
     RefCntAutoPtr<IShader> ps = Shader(device, SHADER_TYPE_PIXEL, (std::string(kCommon) + kPixelLights).c_str(),
@@ -761,6 +1036,363 @@ void main() {
     return lights_pass_.srb != nullptr;
   }
 
+  // BF_NIGHT_TILES_CHECK: the picture just drawn (tiled) kept, the pass drawn again from the same input with every light
+  // in every tile, both read back and compared: the pixels that differ and by how much (0 and 0: the tiles change
+  // nothing). The second picture stays (the same, or the check says so).
+  void TilesCheck(Diligent::IRenderDevice* device, Diligent::IDeviceContext* context, Diligent::ITexture* texture,
+                  Diligent::ITextureView* target, Pass* pass, const Diligent::Viewport& viewport) {
+    using namespace Diligent;
+    const TextureDesc& desc = texture->GetDesc();
+    for (auto& st : tiles_staging_) {
+      if (st && st->GetDesc().Width == desc.Width && st->GetDesc().Height == desc.Height && st->GetDesc().Format == desc.Format)
+        continue;
+      st.Release();
+      TextureDesc t = desc;
+      t.Name = "NativeXRenderer night tiles check";
+      t.Usage = USAGE_STAGING;
+      t.BindFlags = BIND_NONE;
+      t.CPUAccessFlags = CPU_ACCESS_READ;
+      t.MiscFlags = MISC_TEXTURE_FLAG_NONE;
+      t.MipLevels = 1;
+      device->CreateTexture(t, nullptr, &st);
+      if (!st) return;
+    }
+    CopyTextureAttribs first{texture, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, tiles_staging_[0],
+                             RESOURCE_STATE_TRANSITION_MODE_TRANSITION};
+    context->CopyTexture(first);
+    void* data = nullptr;
+    context->MapBuffer(constants_, MAP_WRITE, MAP_FLAG_DISCARD, data);
+    std::memcpy(data, untiled_.get(), sizeof(Constants));
+    context->UnmapBuffer(constants_, MAP_WRITE);
+    context->SetRenderTargets(1, &target, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    context->SetViewports(1, &viewport, 0, 0);
+    context->SetPipelineState(pass->pso);
+    context->CommitShaderResources(pass->srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    DrawAttribs draw;
+    draw.NumVertices = 3;
+    context->Draw(draw);
+    context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+    CopyTextureAttribs second{texture, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, tiles_staging_[1],
+                              RESOURCE_STATE_TRANSITION_MODE_TRANSITION};
+    context->CopyTexture(second);
+    context->WaitForIdle();
+    MappedTextureSubresource a, b;
+    context->MapTextureSubresource(tiles_staging_[0], 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, a);
+    context->MapTextureSubresource(tiles_staging_[1], 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, b);
+    uint64_t differ = 0;
+    int most = 0;
+    if (a.pData && b.pData) {
+      const uint32_t row_bytes = uint32_t(std::min<uint64_t>(a.Stride, b.Stride));
+      const uint32_t bytes = std::min<uint32_t>(row_bytes, desc.Width * 4);
+      for (uint32_t y = 0; y < desc.Height; ++y) {
+        const uint8_t* pa = static_cast<const uint8_t*>(a.pData) + size_t(y) * a.Stride;
+        const uint8_t* pb = static_cast<const uint8_t*>(b.pData) + size_t(y) * b.Stride;
+        if (std::memcmp(pa, pb, bytes) == 0) continue;
+        for (uint32_t x = 0; x + 4 <= bytes; x += 4) {
+          int d = 0;
+          for (int c = 0; c < 4; ++c) d = std::max(d, std::abs(int(pa[x + c]) - int(pb[x + c])));
+          if (d) ++differ, most = std::max(most, d);
+        }
+      }
+    }
+    if (a.pData) context->UnmapTextureSubresource(tiles_staging_[0], 0, 0);
+    if (b.pData) context->UnmapTextureSubresource(tiles_staging_[1], 0, 0);
+    REXLOG_INFO("[native_x_renderer] night: tiles check: {}x{} format {}: {} pixels differ, by {} at most (a byte)",
+                desc.Width, desc.Height, int(desc.Format), differ, most);
+  }
+
+  // Which lamp glows can show in each tile: a glow shows only within its ellipse on the picture (the pass passes over
+  // every pixel outside it, r2 >= 1), so a tile outside the ellipse's box has none of it; a margin of a hundredth of
+  // the picture as for the lights. `tiled` false: every glow in every tile.
+  static void TileSprites(const NightFrame& f, uint32_t sprites, bool tiled, Constants& k) {
+    for (uint32_t i = 0; i < sprites; ++i) {
+      const NightSprite& p = f.sprites[i];
+      int tx0 = 0, tx1 = int(kTilesX) - 1, ty0 = 0, ty1 = int(kTilesY) - 1;
+      if (tiled) {
+        const float u0 = p.uv[0] - std::fabs(p.radius[0]) - 0.01f, u1 = p.uv[0] + std::fabs(p.radius[0]) + 0.01f;
+        const float v0 = p.uv[1] - std::fabs(p.radius[1]) - 0.01f, v1 = p.uv[1] + std::fabs(p.radius[1]) + 0.01f;
+        if (!(u1 >= 0.0f && v1 >= 0.0f && u0 <= 1.0f && v0 <= 1.0f)) continue;  // off the picture (or not a number)
+        tx0 = std::clamp(int(std::floor(u0 * kTilesX)), 0, int(kTilesX) - 1);
+        tx1 = std::clamp(int(std::floor(u1 * kTilesX)), 0, int(kTilesX) - 1);
+        ty0 = std::clamp(int(std::floor(v0 * kTilesY)), 0, int(kTilesY) - 1);
+        ty1 = std::clamp(int(std::floor(v1 * kTilesY)), 0, int(kTilesY) - 1);
+      }
+      for (int ty = ty0; ty <= ty1; ++ty)
+        for (int tx = tx0; tx <= tx1; ++tx) {
+          const uint32_t t = uint32_t(ty) * kTilesX + uint32_t(tx);
+          k.sprite_tiles[t / 2][(t % 2) * 2 + i / 32] |= 1u << (i % 32);
+        }
+    }
+  }
+
+  // Which lights can reach each of the picture's 16 x 9 tiles (the Night Ops performance pass, 20 Nov 2026: every
+  // pixel looped over every light in view, up to 96, though a light lights only what is within its range; with the
+  // lamps of Wake Island in view that loop was most of the night pass, about 1.3 ms of its 1.85). A light reaches
+  // only points within its range of it, and a point is drawn where it projects: inside the projection of the cube
+  // round the light's sphere. So a tile outside that box has none of the light's pixels, and leaving the light out of
+  // its list changes nothing; the lists keep the lights' order, so each pixel adds the same lights in the same order.
+  // A light whose cube reaches behind the camera, or holds it, is in every tile; so is every light without a camera
+  // or with `tiled` false (comparisons). The turning beams (seen in the air across the picture) go in their own list.
+  static void TileLights(const NightFrame& f, uint32_t lights, bool tiled, Constants& k) {
+    auto set = [](uint32_t* mask, uint32_t i) { mask[i / 32] |= 1u << (i % 32); };
+    for (uint32_t i = 0; i < lights; ++i) {
+      const NightLight& l = f.lights[i];
+      const bool beam = l.cos_outer >= 0.985f && l.range >= 150.0f &&
+                        l.direction[0] * l.direction[0] + l.direction[1] * l.direction[1] + l.direction[2] * l.direction[2] >= 0.25f;
+      if (beam) set(k.beams, i);
+    }
+    // The world to clip x, y and w: the inverse of f.inverse (clip = M world + t).
+    const float(*a)[3] = f.inverse;
+    const float det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+                      a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    const bool camera = tiled && f.camera && std::fabs(det) > 1e-20f && f.to_ndc[0] != 0.0f && f.to_ndc[1] != 0.0f;
+    float m[3][3] = {};
+    if (camera) {
+      const float inv = 1.0f / det;
+      m[0][0] = (a[1][1] * a[2][2] - a[1][2] * a[2][1]) * inv;
+      m[0][1] = (a[0][2] * a[2][1] - a[0][1] * a[2][2]) * inv;
+      m[0][2] = (a[0][1] * a[1][2] - a[0][2] * a[1][1]) * inv;
+      m[1][0] = (a[1][2] * a[2][0] - a[1][0] * a[2][2]) * inv;
+      m[1][1] = (a[0][0] * a[2][2] - a[0][2] * a[2][0]) * inv;
+      m[1][2] = (a[0][2] * a[1][0] - a[0][0] * a[1][2]) * inv;
+      m[2][0] = (a[1][0] * a[2][1] - a[1][1] * a[2][0]) * inv;
+      m[2][1] = (a[0][1] * a[2][0] - a[0][0] * a[2][1]) * inv;
+      m[2][2] = (a[0][0] * a[1][1] - a[0][1] * a[1][0]) * inv;
+    }
+    for (uint32_t i = 0; i < lights; ++i) {
+      const NightLight& l = f.lights[i];
+      // The light's box on the picture, in texture coordinates (0 to 1); all of it when it cannot be found.
+      float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
+      bool boxed = false;
+      if (camera && l.range > 0.0f) {
+        const float r = l.range;
+        const float dx = l.position[0] - f.eye[0], dy = l.position[1] - f.eye[1], dz = l.position[2] - f.eye[2];
+        if (dx * dx + dy * dy + dz * dz > 3.0f * r * r * 1.0201f) {  // the eye outside the cube (its corners' reach)
+          boxed = true;
+          u0 = v0 = 1e30f, u1 = v1 = -1e30f;
+          for (int c = 0; c < 8 && boxed; ++c) {
+            const float w[3] = {l.position[0] + ((c & 1) ? r : -r), l.position[1] + ((c & 2) ? r : -r),
+                                l.position[2] + ((c & 4) ? r : -r)};
+            float clip[3];
+            for (int row = 0; row < 3; ++row)
+              clip[row] = m[row][0] * w[0] + m[row][1] * w[1] + m[row][2] * w[2] + f.inverse_t[row];
+            if (clip[2] <= 1e-3f) {  // a corner at or behind the eye: the box would wrap
+              boxed = false;
+              break;
+            }
+            const float u = (clip[0] / clip[2] - f.to_ndc[2]) / f.to_ndc[0];
+            const float v = (clip[1] / clip[2] - f.to_ndc[3]) / f.to_ndc[1];
+            u0 = std::min(u0, u), u1 = std::max(u1, u), v0 = std::min(v0, v), v1 = std::max(v1, v);
+          }
+          if (!boxed) u0 = v0 = 0.0f, u1 = v1 = 1.0f;
+        }
+      }
+      if (boxed) {
+        // A margin of a hundredth of the picture for the rounding of the pixels' own places.
+        u0 -= 0.01f, v0 -= 0.01f, u1 += 0.01f, v1 += 0.01f;
+        if (u1 < 0.0f || v1 < 0.0f || u0 > 1.0f || v0 > 1.0f) continue;  // off the picture: in no tile
+      }
+      const int tx0 = std::clamp(int(std::floor(u0 * kTilesX)), 0, int(kTilesX) - 1);
+      const int tx1 = std::clamp(int(std::floor(u1 * kTilesX)), 0, int(kTilesX) - 1);
+      const int ty0 = std::clamp(int(std::floor(v0 * kTilesY)), 0, int(kTilesY) - 1);
+      const int ty1 = std::clamp(int(std::floor(v1 * kTilesY)), 0, int(kTilesY) - 1);
+      for (int ty = ty0; ty <= ty1; ++ty)
+        for (int tx = tx0; tx <= tx1; ++tx) set(k.tiles[ty * kTilesX + tx], i);
+    }
+  }
+
+  // The effects' lights' compute search (kComputeLights), made once after LightsPass (its texture); false if that
+  // failed (the pixel pass then searches as before).
+  bool ComputeLights(Diligent::IRenderDevice* device) {
+    using namespace Diligent;
+    if (compute_tried_) return compute_lights_.srb != nullptr;
+    compute_tried_ = true;
+    if (!constants_ || !effect_lights_) return false;
+    std::vector<uint32_t> spirv =
+        CompileGlsl(GlslStage::kCompute, std::string(kCommon) + kComputeLights, "NativeXRenderer night lights CS");
+    if (spirv.empty()) {
+      REXLOG_ERROR("[native_x_renderer] night: the effects' lights' compute search did not compile: the pixel pass searches");
+      return false;
+    }
+    RefCntAutoPtr<IShader> cs;
+    ShaderCreateInfo sci;
+    sci.Desc.Name = "NativeXRenderer night lights CS";
+    sci.Desc.ShaderType = SHADER_TYPE_COMPUTE;
+    sci.Desc.UseCombinedTextureSamplers = true;
+    sci.ByteCode = spirv.data();
+    sci.ByteCodeSize = spirv.size() * sizeof(uint32_t);
+    device->CreateShader(sci, &cs);
+    if (!cs) return false;
+    ComputePipelineStateCreateInfo info;
+    info.PSODesc.Name = "NativeXRenderer night effects' lights (compute)";
+    info.PSODesc.PipelineType = PIPELINE_TYPE_COMPUTE;
+    info.pCS = cs;
+    SamplerDesc point;
+    point.MinFilter = point.MagFilter = point.MipFilter = FILTER_TYPE_POINT;
+    point.AddressU = point.AddressV = point.AddressW = TEXTURE_ADDRESS_CLAMP;
+    ShaderResourceVariableDesc variables[] = {
+        {SHADER_TYPE_COMPUTE, "colorTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
+        {SHADER_TYPE_COMPUTE, "depthTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
+        {SHADER_TYPE_COMPUTE, "worldDepthTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
+        {SHADER_TYPE_COMPUTE, "glowTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
+        {SHADER_TYPE_COMPUTE, "effectLightsTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
+        {SHADER_TYPE_COMPUTE, "effectLightsOut", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC}};
+    ImmutableSamplerDesc samplers[] = {{SHADER_TYPE_COMPUTE, "colorTex", point},
+                                       {SHADER_TYPE_COMPUTE, "depthTex", point},
+                                       {SHADER_TYPE_COMPUTE, "worldDepthTex", point},
+                                       {SHADER_TYPE_COMPUTE, "glowTex", point},
+                                       {SHADER_TYPE_COMPUTE, "effectLightsTex", point}};
+    info.PSODesc.ResourceLayout.DefaultVariableType = SHADER_RESOURCE_VARIABLE_TYPE_STATIC;
+    info.PSODesc.ResourceLayout.Variables = variables;
+    info.PSODesc.ResourceLayout.NumVariables = 6;
+    info.PSODesc.ResourceLayout.ImmutableSamplers = samplers;
+    info.PSODesc.ResourceLayout.NumImmutableSamplers = 5;
+    device->CreateComputePipelineState(info, &compute_lights_.pso);
+    if (!compute_lights_.pso) {
+      REXLOG_ERROR("[native_x_renderer] night: no pipeline for the effects' lights' compute search: the pixel pass searches");
+      return false;
+    }
+    if (auto* variable = compute_lights_.pso->GetStaticVariableByName(SHADER_TYPE_COMPUTE, "NightConstants"))
+      variable->Set(constants_);
+    compute_lights_.pso->CreateShaderResourceBinding(&compute_lights_.srb, true);
+    if (compute_lights_.srb) REXLOG_INFO("[native_x_renderer] night: the effects' lights found by a compute search");
+    return compute_lights_.srb != nullptr;
+  }
+
+  // The lamps' visibility pass and its kMaxSprites x 1 texture (RGBA32F), made once; false if that failed (the main
+  // pass then finds it per pixel as before).
+  bool SeenPass(Diligent::IRenderDevice* device) {
+    using namespace Diligent;
+    if (seen_tried_) return seen_pass_.srb != nullptr;
+    seen_tried_ = true;
+    if (!constants_) return false;
+    TextureDesc t;
+    t.Name = "NativeXRenderer night lamps' visibility";
+    t.Type = RESOURCE_DIM_TEX_2D;
+    t.Width = kMaxSprites;
+    t.Height = 1;
+    t.Format = TEX_FORMAT_RGBA32_FLOAT;
+    t.Usage = USAGE_DEFAULT;
+    t.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+    device->CreateTexture(t, nullptr, &sprite_seen_);
+    RefCntAutoPtr<IShader> vs = Shader(device, SHADER_TYPE_VERTEX, kVertex, "NativeXRenderer night lamps seen VS");
+    RefCntAutoPtr<IShader> ps = Shader(device, SHADER_TYPE_PIXEL, (std::string(kCommon) + kPixelSeen).c_str(),
+                                       "NativeXRenderer night lamps seen PS");
+    if (!sprite_seen_ || !vs || !ps) {
+      REXLOG_ERROR("[native_x_renderer] night: the lamps' visibility pass could not be made: found per pixel instead");
+      return false;
+    }
+    GraphicsPipelineStateCreateInfo info;
+    info.PSODesc.Name = "NativeXRenderer night lamps' visibility";
+    info.PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
+    info.GraphicsPipeline.NumRenderTargets = 1;
+    info.GraphicsPipeline.RTVFormats[0] = TEX_FORMAT_RGBA32_FLOAT;
+    info.GraphicsPipeline.DSVFormat = TEX_FORMAT_UNKNOWN;
+    info.GraphicsPipeline.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    info.GraphicsPipeline.RasterizerDesc.CullMode = CULL_MODE_NONE;
+    info.GraphicsPipeline.DepthStencilDesc.DepthEnable = False;
+    info.pVS = vs;
+    info.pPS = ps;
+    SamplerDesc point;
+    point.MinFilter = point.MagFilter = point.MipFilter = FILTER_TYPE_POINT;
+    point.AddressU = point.AddressV = point.AddressW = TEXTURE_ADDRESS_CLAMP;
+    ShaderResourceVariableDesc variables[] = {
+        {SHADER_TYPE_PIXEL, "colorTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
+        {SHADER_TYPE_PIXEL, "depthTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
+        {SHADER_TYPE_PIXEL, "worldDepthTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
+        {SHADER_TYPE_PIXEL, "glowTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
+        {SHADER_TYPE_PIXEL, "effectLightsTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC}};
+    ImmutableSamplerDesc samplers[] = {{SHADER_TYPE_PIXEL, "colorTex", point},
+                                       {SHADER_TYPE_PIXEL, "depthTex", point},
+                                       {SHADER_TYPE_PIXEL, "worldDepthTex", point},
+                                       {SHADER_TYPE_PIXEL, "glowTex", point},
+                                       {SHADER_TYPE_PIXEL, "effectLightsTex", point}};
+    info.PSODesc.ResourceLayout.DefaultVariableType = SHADER_RESOURCE_VARIABLE_TYPE_STATIC;
+    info.PSODesc.ResourceLayout.Variables = variables;
+    info.PSODesc.ResourceLayout.NumVariables = 5;
+    info.PSODesc.ResourceLayout.ImmutableSamplers = samplers;
+    info.PSODesc.ResourceLayout.NumImmutableSamplers = 5;
+    device->CreateGraphicsPipelineState(info, &seen_pass_.pso);
+    if (!seen_pass_.pso) {
+      REXLOG_ERROR("[native_x_renderer] night: no pipeline for the lamps' visibility: found per pixel instead");
+      return false;
+    }
+    if (auto* variable = seen_pass_.pso->GetStaticVariableByName(SHADER_TYPE_PIXEL, "NightConstants"))
+      variable->Set(constants_);
+    seen_pass_.pso->CreateShaderResourceBinding(&seen_pass_.srb, true);
+    return seen_pass_.srb != nullptr;
+  }
+
+  // D179: the effects' layer without what was in it before the effects were drawn (the game's sky dome, or the
+  // picture it began as): `layer` minus `before`, never under nothing, into `target` (the three of one size).
+ public:
+  bool Subtract(Diligent::IRenderDevice* device, Diligent::IDeviceContext* context, Diligent::ITextureView* layer,
+                Diligent::ITextureView* before, Diligent::ITextureView* target) {
+    using namespace Diligent;
+    if (!device || !context || !layer || !before || !target) return false;
+    if (!subtract_tried_) {
+      subtract_tried_ = true;
+      static constexpr const char* kPixelSubtract = R"(#version 450
+layout(set = 0, binding = 0) uniform sampler2D layerTex;
+layout(set = 0, binding = 1) uniform sampler2D beforeTex;
+layout(location = 0) in vec2 v_texcoord;
+layout(location = 0) out vec4 out_color;
+void main() {
+  vec4 a = textureLod(layerTex, v_texcoord, 0.0), b = textureLod(beforeTex, v_texcoord, 0.0);
+  out_color = vec4(max(a.rgb - b.rgb, vec3(0.0)), a.a);
+}
+)";
+      RefCntAutoPtr<IShader> vs = Shader(device, SHADER_TYPE_VERTEX, kVertex, "NativeXRenderer night subtract VS");
+      RefCntAutoPtr<IShader> ps = Shader(device, SHADER_TYPE_PIXEL, kPixelSubtract, "NativeXRenderer night subtract PS");
+      if (vs && ps) {
+        GraphicsPipelineStateCreateInfo info;
+        info.PSODesc.Name = "NativeXRenderer night effects' layer alone";
+        info.PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
+        info.GraphicsPipeline.NumRenderTargets = 1;
+        info.GraphicsPipeline.RTVFormats[0] = target->GetTexture()->GetDesc().Format;
+        info.GraphicsPipeline.DSVFormat = TEX_FORMAT_UNKNOWN;
+        info.GraphicsPipeline.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        info.GraphicsPipeline.RasterizerDesc.CullMode = CULL_MODE_NONE;
+        info.GraphicsPipeline.DepthStencilDesc.DepthEnable = False;
+        info.pVS = vs;
+        info.pPS = ps;
+        SamplerDesc point;
+        point.MinFilter = point.MagFilter = point.MipFilter = FILTER_TYPE_POINT;
+        point.AddressU = point.AddressV = point.AddressW = TEXTURE_ADDRESS_CLAMP;
+        ShaderResourceVariableDesc variables[] = {{SHADER_TYPE_PIXEL, "layerTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC},
+                                                  {SHADER_TYPE_PIXEL, "beforeTex", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC}};
+        ImmutableSamplerDesc samplers[] = {{SHADER_TYPE_PIXEL, "layerTex", point}, {SHADER_TYPE_PIXEL, "beforeTex", point}};
+        info.PSODesc.ResourceLayout.DefaultVariableType = SHADER_RESOURCE_VARIABLE_TYPE_STATIC;
+        info.PSODesc.ResourceLayout.Variables = variables;
+        info.PSODesc.ResourceLayout.NumVariables = 2;
+        info.PSODesc.ResourceLayout.ImmutableSamplers = samplers;
+        info.PSODesc.ResourceLayout.NumImmutableSamplers = 2;
+        device->CreateGraphicsPipelineState(info, &subtract_pass_.pso);
+        if (subtract_pass_.pso) subtract_pass_.pso->CreateShaderResourceBinding(&subtract_pass_.srb, true);
+      }
+      if (!subtract_pass_.srb) REXLOG_ERROR("[native_x_renderer] night: no pass for the effects' layer alone");
+    }
+    if (!subtract_pass_.srb) return false;
+    context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+    subtract_pass_.srb->GetVariableByName(SHADER_TYPE_PIXEL, "layerTex")->Set(layer);
+    subtract_pass_.srb->GetVariableByName(SHADER_TYPE_PIXEL, "beforeTex")->Set(before);
+    context->SetRenderTargets(1, &target, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    const TextureDesc& out = target->GetTexture()->GetDesc();
+    Viewport viewport;
+    viewport.Width = float(out.Width);
+    viewport.Height = float(out.Height);
+    viewport.MaxDepth = 1.0f;
+    context->SetViewports(1, &viewport, 0, 0);
+    context->SetPipelineState(subtract_pass_.pso);
+    context->CommitShaderResources(subtract_pass_.srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    DrawAttribs draw;
+    draw.NumVertices = 3;
+    context->Draw(draw);
+    context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+    return true;
+  }
+
+ private:
   bool EnsureCopy(Diligent::IRenderDevice* device, const Diligent::TextureDesc& desc) {
     using namespace Diligent;
     if (copy_ && copy_->GetDesc().Width == desc.Width && copy_->GetDesc().Height == desc.Height &&
@@ -781,9 +1413,94 @@ void main() {
   }
 
   Diligent::RefCntAutoPtr<Diligent::IBuffer> constants_;
-  std::map<Diligent::TEXTURE_FORMAT, Pass> passes_;
+  std::map<uint32_t, Pass> passes_;  // by format x 2 + 1 with the lamps' visibility pass
   Diligent::RefCntAutoPtr<Diligent::ITexture> copy_;
   Pass lights_pass_;
+  Pass seen_pass_;  // the lamps' visibility, once a frame
+  Pass compute_lights_;  // the effects' lights' compute search
+  std::unique_ptr<Constants> untiled_;  // BF_NIGHT_TILES_CHECK's constants with every light in every tile
+  Diligent::RefCntAutoPtr<Diligent::ITexture> tiles_staging_[2];
+  uint64_t tiles_check_count_ = 0;
+  // BF_NIGHT_FX_CHECK's two read back copies of the 4 x 2 texture (the pixel pass's, the compute search's).
+  Diligent::RefCntAutoPtr<Diligent::ITexture> staging_[2];
+  uint64_t check_count_ = 0;
+  bool Staging(Diligent::IRenderDevice* device) {
+    using namespace Diligent;
+    if (staging_[0] && staging_[1]) return true;
+    for (auto& st : staging_) {
+      TextureDesc t;
+      t.Name = "NativeXRenderer night effects' lights check";
+      t.Type = RESOURCE_DIM_TEX_2D;
+      t.Width = 4;
+      t.Height = 2;
+      t.Format = TEX_FORMAT_RGBA32_FLOAT;
+      t.Usage = USAGE_STAGING;
+      t.BindFlags = BIND_NONE;
+      t.CPUAccessFlags = CPU_ACCESS_READ;
+      device->CreateTexture(t, nullptr, &st);
+      if (!st) return false;
+    }
+    return true;
+  }
+  bool compute_tried_ = false;
+  uint64_t applied_compute_lights_ = 0;
+  Diligent::RefCntAutoPtr<Diligent::ITexture> sprite_seen_;
+  bool seen_tried_ = false;
+  uint64_t applied_seen_ = 0;
+  // The night pass's GPU time: a duration query around each Apply, read when the query comes round again (8 frames
+  // on), so nothing waits for the GPU.
+  class Timer {
+   public:
+    void Begin(Diligent::IRenderDevice* device, Diligent::IDeviceContext* context) {
+      using namespace Diligent;
+      if (!tried_) {
+        tried_ = true;
+        if (device->GetDeviceInfo().Features.DurationQueries == DEVICE_FEATURE_STATE_ENABLED) {
+          for (auto& q : queries_) {
+            QueryDesc d;
+            d.Name = "NativeXRenderer night pass time";
+            d.Type = QUERY_TYPE_DURATION;
+            device->CreateQuery(d, &q);
+            if (!q) return;
+          }
+          on_ = true;
+        }
+      }
+      if (!on_) return;
+      if (pending_[index_]) {
+        QueryDataDuration data;
+        if (queries_[index_]->GetData(&data, sizeof(data), true) && data.Frequency) {
+          const double ms = double(data.Duration) * 1000.0 / double(data.Frequency);
+          total_ += ms, most_ = std::max(most_, ms), ++frames_;
+        }
+        pending_[index_] = false;
+      }
+      context->BeginQuery(queries_[index_]);
+      active_ = true;
+    }
+    void End(Diligent::IDeviceContext* context) {
+      if (!active_) return;
+      context->EndQuery(queries_[index_]);
+      pending_[index_] = true;
+      index_ = (index_ + 1) % kCount;
+      active_ = false;
+    }
+    void Take(double& average, double& most, uint64_t& frames) {
+      average = frames_ ? total_ / double(frames_) : 0.0, most = most_, frames = frames_;
+      total_ = most_ = 0.0, frames_ = 0;
+    }
+
+   private:
+    static constexpr uint32_t kCount = 8;
+    Diligent::RefCntAutoPtr<Diligent::IQuery> queries_[kCount];
+    bool pending_[kCount] = {};
+    uint32_t index_ = 0;
+    bool tried_ = false, on_ = false, active_ = false;
+    double total_ = 0.0, most_ = 0.0;
+    uint64_t frames_ = 0;
+  } timer_, lights_timer_;  // the whole night pass; the effects' lights' search alone
+  Pass subtract_pass_;  // D179
+  bool subtract_tried_ = false;
   Diligent::RefCntAutoPtr<Diligent::ITexture> effect_lights_;
   bool lights_tried_ = false;
   uint64_t applied_effect_lights_ = 0;

@@ -19,7 +19,7 @@ Reborn servers and community servers, and the options of a modern PC release.
 ![Players](https://img.shields.io/badge/players-24%20a%20server-5b7a8c?style=flat-square&labelColor=1d2016)
 ![Status](https://img.shields.io/badge/status-alpha%20playtest-b33a2b?style=flat-square&labelColor=1d2016)
 
-<a href="https://recomplauncher.com/game/battlefield-1943-reborn"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="44"></picture></a>
+<a href="https://recomplauncher.com/game/battlefield-1943-reborn"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
 
 <br><br>
 
@@ -47,7 +47,7 @@ Reborn servers and community servers, and the options of a modern PC release.
 | 🖱️ **Keyboard and mouse** in every seat, planes flown with the mouse | 🎮 **Any controller**, with Xbox, PlayStation or Steam Deck prompts | 🎚️ **Graphics presets** from Potato to Ultra |
 | 🎙️ **Proximity voice chat** and text chat, with a profanity filter | 🔒 **Custom Match**: your own match, online or LAN, with a password | 🔎 **Server browser** with regions, tick rates and Direct connect |
 | 🗺️ **Lettered flags** and a map of the whole battle in the menu | 🔄 **Updates itself** at every start | 🚂 **Add to Steam** with the game's artwork |
-| 🏅 **Stats & Awards, Leaderboards** and **Achievements**, all 12 plus 3 of Reborn's own | 🏷️ **Clan tags** and **a name you can protect**, with no email or password | ⚖️ **Fairer teams**, with no points lost when you are moved |
+| 🏅 **Stats & Awards, Leaderboards** and **Achievements**, all 12 plus 8 of Reborn's own | 🏷️ **Clan tags** and **a name you can protect**, with no email or password | ⚖️ **Fairer teams**, with no points lost when you are moved |
 | 🐧 **Linux and Steam Deck** as one AppImage, Ubuntu 22.04 and newer | 🖧 **Host your own servers** from a page in your browser | 📰 **News** on the main menu and **your match on Discord** |
 | 🐞 **Report an issue** from the game, no GitHub account needed | 🔊 **The original menu sounds** in our menus | 💬 **[Join the Discord](https://discord.gg/8eakYSvBZS)** right from Home |
 
@@ -93,7 +93,8 @@ player logs in to and which lists every server.
 - **Community servers**: anyone can host dedicated servers with `BF1943-Reborn-Server-<version>-windows.zip`, managed
   from a page in the browser, each with its own name, description, maps, players, region and tick rate. See
   [docs/SERVER.md](docs/SERVER.md)
-- **Custom Match**: a match on your own PC for you and your friends, online or LAN, with a password if you want one
+- **Custom Match**: a match on your own PC for you and your friends, online or LAN, with a password if you want one,
+  bots, a game mode, a map rotation, tickets and a match time ([docs/BOTS-AND-CUSTOM-MATCH.md](docs/BOTS-AND-CUSTOM-MATCH.md))
 - **Fairer teams** on Reborn servers: lopsided teams are evened out one player at a time, with no points lost
 - Messages from a server to everyone on it, for an update or a restart, and a clear message when a server is full or
   the servers are closed for maintenance
@@ -108,7 +109,7 @@ player logs in to and which lists every server.
 - **Stats & Awards**: your rank, kills, flags, headshots, repairs, your time in each kit and vehicle and your results
   on each map, counted by the Reborn servers, for all time, this month and this week
 - **Leaderboards**: Score, Kills, K/D, Flags and Time, with your own row pinned
-- **Achievements**: the game's 12 plus 3 of Reborn's own, with your progress on each, how many players have it, and a
+- **Achievements**: the game's 12 plus 8 of Reborn's own, with your progress on each, how many players have it, and a
   popup with a chime when you unlock one
 - **Clan tags**: 2 to 4 letters or digits before your name, as [TAG]YourName, on the menus, the scoreboard, the kill
   feed and in chat
@@ -171,6 +172,8 @@ Everything is in our Settings menu, from the main menu and the pause menu, with 
 - **Ambient occlusion** (Intel's XeGTAO) and **global illumination**, with quality settings
 - **Grass and shrubs**, placed from each level's own data, drawn as far as the whole map
 - **Motion blur** (Off, Low, Medium, High), animation smoothing, HD textures
+- In detail: [docs/GRAPHICS-UPGRADES.md](docs/GRAPHICS-UPGRADES.md) and the weather, sky and clouds in
+  [docs/WEATHER-AND-SKY.md](docs/WEATHER-AND-SKY.md)
 
 </td>
 </tr>
@@ -353,11 +356,14 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
 - **Battlefield 1943** by DICE, published by Electronic Arts in 2009.
 - **Battlefield 1943 Reborn** by TekRantGaming and contributors (GPL 3, [LICENSE](LICENSE), with an
   [additional permission](LICENSE-EXCEPTION.md); MIT until 25 Nov 2026): the port's own code.
-- **[@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy)**: ultrawide screens, mouse flying, free look in vehicles and
-  the mouse in the game's own input ([pull request 11](../../pull/11)); the mouse in every vehicle seat, Custom Match
+- **[@ThatZaliaSGuy](https://github.com/ThatZaliaSGuy)**, the largest outside contributor (about 84% of the lines added
+  by contributors' merged pull requests, as of 19 November 2026): ultrawide screens, mouse flying, free look in
+  vehicles and the mouse in the game's own input ([pull request 11](../../pull/11)); the mouse in every vehicle seat, Custom Match
   with LAN, key bindings with two keys, HUD scale and minimap size, and the experimental tick rates
   ([pull request 16](../../pull/16)); Custom Match passwords, Iron Sight, motion blur and menu work
-  ([pull request 20](../../pull/20)); the server stall diagnostics ([pull request 22](../../pull/22)).
+  ([pull request 20](../../pull/20)); the server stall diagnostics ([pull request 22](../../pull/22)); the sky, weather
+  and wetness ([pull request 32](../../pull/32)); the hurricane, bots and Custom Match rules, 60 ticks as 30, vehicle
+  key bindings and wetness, soft sun shadows and night lights ([pull request 62](../../pull/62)).
 - **[@DiXN](https://github.com/DiXN)**: the big performance work, the renderer's own drawing thread, Future frame
   rendering, the audio crackling fix, the leaner Linux build and Wayland ([pull request 28](../../pull/28)).
 - **[@Erubadhron](https://github.com/Erubadhron)**: deploy map clicks that land where you click

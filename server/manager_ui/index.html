@@ -97,6 +97,14 @@
   #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); background: var(--paper); color: var(--ink); padding: 12px 20px; border-left: 6px solid var(--green); box-shadow: 4px 5px 0 rgba(0,0,0,.4); display: none; z-index: 30; max-width: 80vw; }
   #toast.bad { border-left-color: var(--red); }
   .muted { color: var(--faint); } .right { margin-left: auto; }
+  /* Moderation: the game's notice pop-up as the refused player sees it. */
+  .refusal { background: var(--paper); color: var(--ink); border: 1px solid #c9bf9f; padding: 14px 18px; max-width: 560px; box-shadow: 4px 5px 0 rgba(0,0,0,.18); transform: rotate(-0.3deg); }
+  .refusal small { display: block; font: 600 11px Consolas, monospace; letter-spacing: .14em; color: var(--red); margin-bottom: 6px; }
+  .refusal b { display: block; font: 600 24px/1.15 var(--head); letter-spacing: .04em; text-transform: uppercase; margin-bottom: 8px; }
+  .refusal p { margin: 0; color: #4d4838; font-size: 14.5px; }
+  .kind { font: 600 10.5px var(--body); letter-spacing: .1em; text-transform: uppercase; padding: 3px 7px; border-radius: 2px; color: #fff; background: #6b6450; white-space: nowrap; }
+  .kind.ban { background: var(--red); } .kind.kick { background: var(--amber); color: #201a08; } .kind.mute { background: var(--blue); } .kind.network { background: #222; }
+  td .row { gap: 6px; flex-wrap: nowrap; } td.small { font-size: 12.5px; color: #6b6450; }
   @media (max-width: 860px) { .layout { flex-direction: column; } nav { width: auto; display: flex; overflow: auto; padding: 0; } nav button { width: auto; white-space: nowrap; border-left: 0; border-bottom: 4px solid transparent; } nav button.on { border-bottom-color: var(--red); } nav .foot { display: none; } .grid2, .choice, .server { grid-template-columns: 1fr; } main { padding: 18px 14px 50px; } }
 </style>
 </head>
@@ -112,8 +120,11 @@
 <div class="layout">
   <nav id="nav">
     <button data-tab="servers" class="on">Servers</button>
+    <button data-tab="dashboard">Dashboard</button>
+    <button data-tab="community">Community page</button>
     <button data-tab="network">Network</button>
     <button data-tab="messages">Messages</button>
+    <button data-tab="moderation">Moderation</button>
     <button data-tab="updates">Updates</button>
     <button data-tab="game">Game files</button>
     <button data-tab="logs">Logs</button>
@@ -127,6 +138,74 @@
       <div class="row"><h2>Your servers</h2><span class="spacer"></span><button class="btn" id="add-server">Add a server</button></div>
       <p class="lead">Each server is one match with its own name, maps and port. Players find a listed server in the game's server browser.</p>
       <div id="server-list"></div>
+    </section>
+
+    <section id="dashboard">
+      <div class="row"><h2>Dashboard</h2><span class="spacer"></span><span class="muted mono" id="dash-when"></span></div>
+      <p class="lead">Your servers live and over time: who plays, when, on which maps, and how this machine copes. History covers the last 90 days, by player name only.</p>
+      <div id="dash-alerts"></div>
+      <div id="dash-root"><p class="muted">Loading...</p></div>
+      <p class="hint" style="margin-top:16px">Want players to see this? The <a href="#" style="color:inherit" onclick="goTab('community'); return false">Community page</a> tab makes a public page of it with your name, logo and links.</p>
+    </section>
+
+    <section id="community">
+      <div class="row"><h2>Community page</h2><span class="spacer"></span><button class="btn" id="cp-preview">Preview</button></div>
+      <p class="lead">A web page of your servers for your players, your website or your Discord: your name, logo, words and links, how to join, and the numbers you choose. It runs on this machine, on its own port. It never shows player ids, addresses of players or anything of this manager.</p>
+      <div class="paper">
+        <h3>The page</h3>
+        <label class="check"><input type="checkbox" id="cp-on"><span>Serve the community page<br><small>Players outside your network reach it once its port is open (UPnP opens it with your servers' ports; on Windows, Open Windows Firewall on the Network page).</small></span></label>
+        <div class="grid2">
+          <label class="field"><span>Port (TCP)</span><input type="number" id="cp-port" min="1024" max="65535"></label>
+          <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Its address</span><div id="cp-where" class="hint"></div></div>
+        </div>
+      </div>
+      <div class="paper">
+        <h3>Your name and words</h3>
+        <label class="field"><span>Name (default: your first server's name)</span><input type="text" id="cp-title" maxlength="60" placeholder="[EU] My Battlefield Community"></label>
+        <label class="field"><span>Description <small id="cp-desc-count" style="float:right"></small></span><textarea id="cp-desc" maxlength="1000" rows="5" placeholder="Who you are, what your servers play, events, anything you want players to know."></textarea></label>
+        <label class="field"><span>Server rules (optional) <small id="cp-rules-count" style="float:right"></small></span><textarea id="cp-rules" maxlength="1500" rows="4" placeholder="No team killing. Be respectful in chat."></textarea></label>
+      </div>
+      <div class="paper">
+        <h3>Your look</h3>
+        <div class="grid2">
+          <label class="field"><span>Theme</span><select id="cp-theme"><option value="field">Field Report (olive, the game's own)</option><option value="night">Night (navy)</option><option value="desert">Desert (sand)</option><option value="steel">Steel (grey)</option><option value="light">Light</option></select></label>
+          <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Accent colour</span>
+            <div class="row"><label class="check" style="margin:0"><input type="checkbox" id="cp-accent-on"><span>Use my own</span></label><input type="color" id="cp-accent" value="#6e9a3c" style="width:60px;height:34px;padding:2px"></div></div>
+        </div>
+        <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Logo (PNG, JPEG, WebP or GIF, 1 MB at most; square looks best)</span>
+          <div class="row"><img id="cp-logo-img" alt="" style="width:64px;height:64px;object-fit:contain;background:#14170f;display:none"><input type="file" id="cp-logo-file" accept="image/png,image/jpeg,image/webp,image/gif" style="max-width:280px"><button class="btn small" id="cp-logo-remove">Remove logo</button></div></div>
+      </div>
+      <div class="paper">
+        <h3>What it shows</h3>
+        <div class="grid2" id="cp-sections"></div>
+        <label class="check"><input type="checkbox" id="cp-names"><span>Show player names (off: counts and charts only, no names anywhere)</span></label>
+      </div>
+      <div class="paper">
+        <h3>Links</h3>
+        <label class="check"><input type="checkbox" id="cp-link-download"><span>Download Battlefield 1943 Reborn (the project's releases)</span></label>
+        <label class="check"><input type="checkbox" id="cp-link-discord"><span>The Battlefield 1943 Reborn Discord</span></label>
+        <p class="hint" style="margin:10px 0 6px">Your own links: your Discord, website, YouTube... (up to 6, http or https)</p>
+        <div id="cp-links"></div>
+        <button class="btn small" id="cp-link-add">Add a link</button>
+      </div>
+      <div class="paper">
+        <h3>How to join</h3>
+        <label class="check"><input type="checkbox" id="cp-addr-on"><span>Show each server's address, with a Copy button (for Direct connect)</span></label>
+        <label class="field"><span>Address to show (optional: a name like play.example.com; default: the address players reach your servers on)</span><input type="text" id="cp-addr" maxlength="80" placeholder="play.example.com"></label>
+        <label class="field"><span>Instructions (optional; default: find it in the Server Browser, or Direct connect)</span><textarea id="cp-how" maxlength="600" rows="3" placeholder="Open the Server Browser, Community tab, and look for [EU] My Community."></textarea></label>
+      </div>
+      <div class="paper">
+        <h3>Your own code (optional)</h3>
+        <p class="hint">Restyle this page with your own CSS, or put a website of your own in its place.</p>
+        <label class="field"><span>Your CSS, laid over this page <small id="cp-css-count" style="float:right"></small></span>
+          <textarea id="cp-css" maxlength="20000" rows="8" spellcheck="false" style="font:13px Consolas,monospace" placeholder=":root { --accent: #c0392b; }  /* the theme's colours: --bg --bar --card --line --cream --accent */
+header { background: url(logo) right center / contain no-repeat, #111; }
+.dcard b { color: #c0392b; }  /* the numbers; .dpanel the white panels, .box About and How to join */"></textarea></label>
+        <label class="check"><input type="checkbox" id="cp-own"><span>Use my own website instead of this page<br><small>Everything in the folder below is your site, with its index.html as the front page. Your code reads the live numbers from /stats.json; /dash.js (our charts) and /logo stay there for you. The folder's README.txt lists every number.</small></span></label>
+        <div class="hint" id="cp-site"></div>
+        <div class="row" style="margin-top:8px"><button class="btn small" id="cp-starter">Make a starter in the folder</button><button class="btn small" id="cp-site-refresh">Look again</button></div>
+      </div>
+      <div class="row"><button class="btn go" id="cp-save">Save</button><span class="hint" id="cp-note"></span></div>
     </section>
 
     <section id="network">
@@ -179,6 +258,38 @@
       <div class="paper"><h3>Sent</h3><div id="sent" class="hint"></div></div>
     </section>
 
+    <section id="moderation">
+      <h2>Moderation</h2>
+      <p class="lead" id="mod-lead">Kick, ban and mute players on your servers. Your bans hold on your servers only. A player banned on the Reborn network is refused by the main backend before they reach you; your log says so, nothing more.</p>
+      <div class="paper">
+        <h3>Players on now</h3>
+        <div id="mod-players" class="hint"></div>
+      </div>
+      <div class="paper">
+        <h3>Find a player</h3>
+        <p class="hint">Players your servers had in the last week, by any part of their name or their player id (a player sees theirs with F9 in a match).</p>
+        <div class="row"><input type="text" id="mod-find" maxlength="32" placeholder="A name or a player id" style="max-width:320px"><button class="btn" id="mod-find-go">Search</button>
+          <label class="check" id="mod-find-net-box" style="margin:0;display:none"><input type="checkbox" id="mod-find-net"><span>Search the Reborn network (everyone online, names seen this week)</span></label></div>
+        <div id="mod-found" class="hint" style="margin-top:12px"></div>
+        <p class="hint" style="margin:14px 0 6px">Someone not seen here? Ban them by their player id or address:</p>
+        <div class="row"><input type="text" id="mod-manual" maxlength="45" placeholder="A player id (8 characters) or an address" style="max-width:320px"><button class="btn" id="mod-manual-go">Ban...</button></div>
+      </div>
+      <div class="paper">
+        <h3>Bans, kicks and mutes on your servers</h3>
+        <div id="mod-bans" class="hint"></div>
+      </div>
+      <div class="paper" id="mod-network-box" style="display:none">
+        <h3>Reborn network bans</h3>
+        <p class="hint">Held by the main backend: these players join no official server and no community server registered with it, Direct connect included. A server on its own backend (LAN only) is not covered. Community admins never see this list.</p>
+        <div id="mod-network" class="hint"></div>
+      </div>
+      <div class="paper">
+        <h3>Moderation log</h3>
+        <p class="hint">Who did what, kept 90 days. No addresses are written here.</p>
+        <div id="mod-log" class="hint"></div>
+      </div>
+    </section>
+
     <section id="updates">
       <h2>Updates</h2>
       <p class="lead">A new release of the game needs the same release on the server. The manager can do it by itself: it tells the players, waits, installs the release and starts your servers again.</p>
@@ -218,6 +329,7 @@
       <div class="paper">
         <h3>Starting</h3>
         <label class="check"><input type="checkbox" id="start-servers"><span>Start my servers when the manager starts</span></label>
+        <label class="check"><input type="checkbox" id="shared-bot-data"><span>Bots start from the shared bot data (what bots learned from players on the official servers, in every update). Off: they learn only on your servers. Applies when a server starts again.</span></label>
         <label class="check" id="autostart-box"><input type="checkbox" id="autostart"><span>Start the manager when I sign in to Windows</span></label>
         <div id="systemd-box" style="display:none"><p class="hint">To start the manager with a Linux machine, save this as a systemd user unit (~/.config/systemd/user/bf1943-server.service), then run: systemctl --user enable --now bf1943-server</p><pre id="systemd-unit"></pre></div>
         <div class="row"><button class="btn go" id="save-settings">Save</button></div>
@@ -254,14 +366,32 @@
   <label class="field"><span>Description (optional)</span><input type="text" id="e-description" maxlength="200" placeholder="Shown when a player selects the server"></label>
   <div class="grid2">
     <label class="field"><span>Players</span><select id="e-max"></select></label>
+    <label class="field"><span>Bots</span><select id="e-bots"></select></label>
+    <label class="field"><span>Tickets, each team</span><select id="e-tickets"></select></label>
     <label class="field"><span>Port (UDP)</span><input type="number" id="e-port" min="1024" max="65535"></label>
     <label class="field"><span>Pause between rounds</span><select id="e-delay"></select></label>
     <label class="field"><span>Tick rate</span><select id="e-tick"></select></label>
   </div>
+  <p class="hint" id="e-tickets-note"></p>
+  <p class="hint" id="e-bots-note">Bots sit out Coral Sea, because they can't fly. They come back on the next map.</p>
   <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Maps, in the order they are played</span><div class="maps" id="e-maps"></div></div>
   <label class="check"><input type="checkbox" id="e-listed"><span>Listed in the server browser<br><small>Off: players join only with Direct connect, by the address you give them.</small></span></label>
-  <label class="check" id="e-night-box"><input type="checkbox" id="e-night"><span>Night Ops: players see the maps at night</span></label>
+  <label class="field" id="e-night-box"><span>Event</span><select id="e-event"><option value="">None: the world below</option><option value="night">Night Ops: 18:30, a storm builds with the tickets</option><option value="daybreak">Daybreak: 06:10, just after sunrise, a storm builds with the tickets</option></select></label>
+  <p class="hint" id="e-event-note">An event sets the time, clouds, weather, fog and wind itself, every round. Admins can still change them with F9 for the rest of a round.</p>
   <label class="check"><input type="checkbox" id="e-balance"><span>Team balance<br><small>When one team has 2 or more players more for 20 seconds, a player who has died on it moves to the other team, with no points lost. A Change Team that would make the teams uneven is refused.</small></span></label>
+  <label class="check"><input type="checkbox" id="e-daynight"><span>Day and night: the light, the shadows and the sky follow the server's clock<br><small>Admins can change all of these while the server runs, with F9 in the game.</small></span></label>
+  <div class="grid2">
+    <label class="field"><span>Time of day at the start (0 to 24)</span><input type="number" id="e-time" min="0" max="23.75" step="0.25"></label>
+    <label class="field"><span>A day lasts, minutes (0: time stands still)</span><input type="number" id="e-dayminutes" min="0" max="1440" step="1"></label>
+    <label class="field"><span>Cloud cover, %</span><input type="number" id="e-cloud" min="0" max="100" step="1"></label>
+    <label class="field"><span>Cloud change rate, %</span><input type="number" id="e-cloudrate" min="0" max="100" step="1"></label>
+    <label class="field"><span>Weather, % (0 fair, 100 a storm: mist, far rain, lightning)</span><input type="number" id="e-weather" min="0" max="100" step="1"></label>
+    <label class="field"><span>Distance fog, %</span><input type="number" id="e-fog" min="0" max="100" step="1"></label>
+    <label class="field"><span>Ground fog, %</span><input type="number" id="e-groundfog" min="0" max="100" step="1"></label>
+    <label class="field"><span>Wind, % (how far the rain leans)</span><input type="number" id="e-wind" min="0" max="100" step="1"></label>
+    <label class="field"><span>Cloud height, m over the sea (low: planes fly through the clouds)</span><input type="number" id="e-cloudheight" min="100" max="1500" step="50"></label>
+    <label class="field"><span>Admin player IDs, separated by commas</span><input type="text" id="e-admins" maxlength="400" placeholder="A player sees their ID by pressing F9 in a match"></label>
+  </div>
   <label class="check"><input type="checkbox" id="e-autostart"><span>Start this server when the manager starts</span></label>
   <div class="row" style="margin-top:14px"><button class="btn go" id="e-save">Save</button><button class="btn" id="e-save-restart">Save and restart it</button><button class="btn" id="e-cancel">Cancel</button><span class="spacer"></span><button class="btn stop" id="e-remove">Remove server</button></div>
   <p class="hint" id="e-note" style="margin-bottom:0"></p>
@@ -280,6 +410,26 @@
   <div class="row" style="margin-top:14px"><button class="btn stop" id="auto-off-yes">Turn them off</button><button class="btn go" id="auto-off-no">Keep them on</button></div>
 </div></div>
 
+<div class="modal" id="mod-modal"><div class="paper">
+  <h3 id="mod-title">Ban</h3>
+  <p class="hint" id="mod-who"></p>
+  <div class="choice" id="mod-list-choice" style="display:none">
+    <label><input type="radio" name="mod-list" value="server" checked><b>My servers</b><p>Held on this manager's servers only.</p></label>
+    <label><input type="radio" name="mod-list" value="network"><b>Reborn network</b><p>Every official server and every community server on the main backend.</p></label>
+  </div>
+  <div class="grid2">
+    <label class="field" id="mod-length-box"><span>How long</span><select id="mod-length">
+      <option value="1h">1 hour</option><option value="1d">1 day</option><option value="7d" selected>7 days</option><option value="30d">30 days</option><option value="permanent">Permanent</option></select></label>
+    <label class="field" id="mod-servers-box"><span>On</span><select id="mod-servers"></select></label>
+  </div>
+  <label class="field"><span>Reason, shown to the player <small id="mod-count" style="float:right"></small></span><input type="text" id="mod-reason" maxlength="120" placeholder="Team killing"></label>
+  <label class="check" id="mod-ip-box"><input type="checkbox" id="mod-ip" checked><span>Also hold their address (30 days at most)<br><small>Catches a new player id from the same home. Leave it off for an address many players share, like a LAN party.</small></span></label>
+  <label class="field" style="max-width:300px"><span>Your name, for the log</span><input type="text" id="mod-by" maxlength="32" placeholder="Admin"></label>
+  <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:6px" id="mod-preview-label">The player will see</span>
+    <div class="refusal" id="mod-preview"><small>MODERATION · COULD NOT JOIN</small><b></b><p></p></div></div>
+  <div class="row" style="margin-top:14px"><button class="btn stop" id="mod-go">Ban</button><button class="btn" id="mod-cancel">Cancel</button></div>
+</div></div>
+
 <div class="modal" id="login-modal"><div class="paper" style="width:420px">
   <h3>Sign in</h3>
   <label class="field"><span>Password</span><input type="password" id="login-password" autocomplete="current-password"></label>
@@ -288,6 +438,7 @@
 
 <div id="toast"></div>
 
+<script src="dash.js"></script>
 <script>
 'use strict';
 // The page of the Battlefield 1943 Reborn server manager (server/manager.py serves it and answers /api/...).
@@ -313,12 +464,29 @@ function sync(el, key, build) {
   return true;
 }
 
-async function api(path, data) {
+// With no password this machine's browser signs itself in, with a code it gets on loopback.
+let signingIn = null;
+function signInHere() {
+  if (!signingIn) signingIn = (async () => {
+    try {
+      const s = await (await fetch('/api/session')).json();
+      if (s.signed_in) return true;
+      if (!s.password) $('login-note').textContent = 'No password is set: type the code that "manager.py code" (Linux: "bf1943-server code") prints on the server\'s machine.';
+      if (!s.local) return false;
+      const { code } = await (await fetch(s.local, { cache: 'no-store', credentials: 'omit' })).json();
+      const done = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'bf1943' }, body: JSON.stringify({ password: code }) });
+      return done.ok;
+    } catch (e) { return false; }
+  })().finally(() => { signingIn = null; });
+  return signingIn;
+}
+async function api(path, data, again) {
   const options = data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'bf1943' }, body: JSON.stringify(data) };
   let reply;
   try { reply = await fetch(path, options); } catch (e) { throw new Error('The manager does not answer. Is it still running?'); }
   let body = {};
   try { body = await reply.json(); } catch (e) {}
+  if (reply.status === 401 && path !== '/api/login' && !again && await signInHere()) { $('login-modal').classList.remove('on'); return api(path, data, true); }
   if (reply.status === 401 && path !== '/api/login') { $('login-modal').classList.add('on'); $('login-password').focus(); throw new Error('Sign in first.'); }
   if (!reply.ok) throw new Error(body.error || ('The manager said ' + reply.status));
   if (body.state) { state = body.state; render(); }
@@ -350,6 +518,9 @@ $('nav').addEventListener('click', e => {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b === e.target));
   document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === tab));
   if (tab === 'logs') loadLog();
+  if (tab === 'moderation') loadModeration();
+  if (tab === 'dashboard') loadDashboard();
+  if (tab === 'community') { cpFilled = false; renderCommunity(); }
 });
 function goTab(tab) { document.querySelector('nav button[data-tab="' + tab + '"]').click(); }
 
@@ -516,6 +687,7 @@ function fillForms() {
   if (![0, 1, 2, 5, 10, 15, 30, 60].includes(c.update_warning_minutes)) warn.append(h('option', { value: c.update_warning_minutes, text: words(c.update_warning_minutes * 60) }));
   warn.value = c.update_warning_minutes;
   $('start-servers').checked = c.start_servers; $('web-remote').checked = c.web_remote;
+  $('shared-bot-data').checked = c.shared_bot_data !== false;
   $('autostart').checked = !!state.autostart;
   const time = $('msg-time');
   time.replaceChildren(h('option', { value: 0, text: 'Now, once' }), ...[30, 60, 120, 300, 600, 900, 1800, 3600].map(t => h('option', { value: t, text: words(t) })));
@@ -534,12 +706,29 @@ function openEdit(n) {
   const fresh = n > state.config.servers.length;
   const used = state.config.servers.map(x => x.port);
   let port = 18300; while (used.includes(port)) port++;
-  const sv = fresh ? { name: 'Battlefield 1943 Reborn ' + n, description: '', maps: state.maps.map(m => m.key), round_end_delay: 45, listed: true, night: false, port: port, max_players: 24, autostart: true, team_balance: true } : state.config.servers[n - 1];
+  const sv = fresh ? { name: 'Battlefield 1943 Reborn ' + n, description: '', maps: state.maps.map(m => m.key), round_end_delay: 45, listed: true, night: false, daybreak: false, port: port, max_players: 32, autostart: true, team_balance: true } : state.config.servers[n - 1];
   $('edit-title').textContent = fresh ? 'A new server' : 'Server ' + n;
   $('e-name').value = sv.name; $('e-description').value = sv.description; $('e-port').value = sv.port;
-  $('e-max').replaceChildren(...[8, 12, 16, 20, 24].map(m => h('option', { value: m, text: m + ' players' })));
-  if (![8, 12, 16, 20, 24].includes(sv.max_players)) $('e-max').append(h('option', { value: sv.max_players, text: sv.max_players + ' players' }));
+  // Server sizes (docs/SERVER-SIZES.md): the game's own 24 (the original) and smaller, 32 (the default since 20 Nov
+  // 2026) and 64.
+  const sizes = [[8, '8 players'], [12, '12 players'], [16, '16 players'], [20, '20 players'], [24, '24 players (original)'],
+                 [32, '32 players (default)'], [64, '64 players']];
+  $('e-max').replaceChildren(...sizes.map(([m, text]) => h('option', { value: m, text: text })));
+  if (!sizes.some(([m]) => m === sv.max_players)) $('e-max').append(h('option', { value: sv.max_players, text: sv.max_players + ' players' }));
   $('e-max').value = sv.max_players;
+  // Bots (TekRantGaming, 20 Nov 2026: the host chooses): how many play; they keep 2 places free and leave as players
+  // join, so a full server has no bots.
+  const drawBots = (size, bots) => {
+    const counts = [0, ...[8, 16, 22, 30, 46, 62].filter(b => b < size - 2), size];
+    $('e-bots').replaceChildren(...counts.map(b => h('option', { value: b, text: b === 0 ? 'No bots' : b === size ? 'Fill the server (' + (size - 2) + ', they leave as players join)' : 'Up to ' + b })));
+    if (!counts.includes(bots)) $('e-bots').append(h('option', { value: bots, text: 'Up to ' + bots }));
+    $('e-bots').value = String(bots);
+    botsNote();
+  };
+  drawBots(sv.max_players, sv.bots ?? 0);
+  drawTickets(sv.max_players, sv.tickets ?? 'auto');
+  $('e-max').onchange = () => { const was = Number($('e-bots').value), size = Number($('e-max').value); drawBots(size, was >= Number($('e-max').dataset.size || 0) && was > 0 ? size : Math.min(was, size)); drawTickets(size, $('e-tickets').value); $('e-max').dataset.size = size; };
+  $('e-max').dataset.size = sv.max_players;
   $('e-delay').replaceChildren(...[30, 45, 60, 90, 120].map(m => h('option', { value: m, text: m + ' seconds' })));
   if (![30, 45, 60, 90, 120].includes(sv.round_end_delay)) $('e-delay').append(h('option', { value: sv.round_end_delay, text: sv.round_end_delay + ' seconds' }));
   $('e-delay').value = sv.round_end_delay;
@@ -548,15 +737,54 @@ function openEdit(n) {
   $('e-tick').replaceChildren(h('option', { value: 0, text: 'As under Network (' + state.tick + ' Hz)' }),
     ...[[60, 'Recommended'], [30, 'Original'], [75, 'Experimental'], [100, 'Experimental']].map(([hz, word]) => h('option', { value: hz, text: hz + ' Hz - ' + word })));
   $('e-tick').value = String([30, 60, 75, 100].includes(sv.tick) ? sv.tick : 0);
-  $('e-listed').checked = sv.listed; $('e-night').checked = sv.night; $('e-autostart').checked = sv.autostart; $('e-balance').checked = sv.team_balance !== false;
-  $('e-night-box').style.display = state.night_ops ? '' : 'none';
+  $('e-listed').checked = sv.listed; $('e-event').value = sv.night ? 'night' : sv.daybreak ? 'daybreak' : ''; $('e-autostart').checked = sv.autostart; $('e-balance').checked = sv.team_balance !== false;
+  $('e-daynight').checked = sv.day_night === true; $('e-time').value = sv.time ?? 16; $('e-dayminutes').value = sv.day_minutes ?? 0;
+  $('e-cloud').value = sv.cloud_cover ?? 35; $('e-cloudrate').value = sv.cloud_rate ?? 33; $('e-weather').value = sv.weather ?? 0;
+  $('e-fog').value = sv.fog ?? 0; $('e-groundfog').value = sv.ground_fog ?? 0; $('e-wind').value = sv.wind ?? 30;
+  $('e-cloudheight').value = sv.cloud_height ?? 450;
+  $('e-admins').value = sv.admins ?? '';
+  $('e-night-box').style.display = $('e-event-note').style.display = state.night_ops ? '' : 'none';
   $('e-remove').style.display = fresh || state.config.servers.length < 2 ? 'none' : '';
   $('e-save-restart').style.display = fresh ? 'none' : '';
   const order = sv.maps.concat(state.maps.map(m => m.key).filter(k => !sv.maps.includes(k)));
   drawMaps(order.map(k => ({ key: k, on: sv.maps.includes(k) })));
+  botsNote();
   $('e-note').textContent = fresh ? '' : 'A running server takes its new settings when it is restarted.';
   $('edit-modal').classList.add('on'); $('e-name').focus();
 }
+// Tickets (TekRantGaming, 24 Nov 2026: automatic ticket scaling to the server's size, which the owner can still change):
+// Automatic follows the Players choice, as the game works it out (bf/src/match_rules.cpp AutoTickets): the map's own
+// (130, Coral Sea 100) times the size over 24, to the nearest 5, past 24 players. The map's own, or a count, stay put.
+function autoTickets(own, size) { return size <= 24 ? own : Math.round(own * size / 24 / 5) * 5; }
+function drawTickets(size, tickets) {
+  const conquest = autoTickets(130, size), coral = autoTickets(100, size);
+  const counts = [50, 75, 100, 130, 150, 175, 200, 250, 300, 350, 400, 500, 750, 1000];
+  const picked = tickets === 'auto' || tickets === 'map' ? tickets : String(Number(tickets) || 'auto');
+  $('e-tickets').replaceChildren(
+    h('option', { value: 'auto', text: 'Automatic: ' + conquest + ' (Coral Sea ' + coral + ')' }),
+    h('option', { value: 'map', text: "The map's own: 130 (Coral Sea 100)" }),
+    ...counts.map(c => h('option', { value: c, text: c + ' on every map' })));
+  if (picked !== 'auto' && picked !== 'map' && !counts.includes(Number(picked)))
+    $('e-tickets').append(h('option', { value: picked, text: picked + ' on every map' }));
+  $('e-tickets').value = picked;
+  ticketsNote();
+}
+function ticketsNote() {
+  const size = Number($('e-max').value), v = $('e-tickets').value;
+  $('e-tickets-note').textContent = v === 'auto'
+    ? (size <= 24 ? "A team loses a ticket each time one of its soldiers dies. Automatic keeps the map's own count at 24 players and fewer, and raises it on bigger servers (175 at 32, 345 at 64), so rounds last about as long."
+                  : 'A team loses a ticket each time one of its soldiers dies, so a bigger server gets more: ' + autoTickets(130, size) + ' at ' + size + " players instead of the map's 130, for rounds about as long as the original's.")
+    : v === 'map' ? "The game's own count at any size. On a server past 24 players rounds end sooner, as more soldiers die."
+    : 'Each team starts every map, Coral Sea too, with ' + v + ' tickets.';
+}
+$('e-tickets').addEventListener('change', ticketsNote);
+// Said only where it matters: a server with bots and Coral Sea among its maps (bots.cpp SitsOut).
+function botsNote() {
+  const coral = readMaps().some(r => r.key === 'coral' && r.on);
+  $('e-bots-note').style.display = coral && Number($('e-bots').value) ? '' : 'none';
+}
+$('e-bots').addEventListener('change', botsNote);
+$('e-maps').addEventListener('change', botsNote);
 function drawMaps(rows) {
   const box = $('e-maps'); box.replaceChildren();
   rows.forEach((row, i) => {
@@ -580,8 +808,14 @@ async function saveEdit(restart) {
   for (const k of ['balance_gap', 'balance_min_players', 'balance_delay', 'balance_block_stacking'])
     if (servers[editing - 1] && servers[editing - 1][k] !== undefined) kept[k] = servers[editing - 1][k];
   servers[editing - 1] = { ...kept, team_balance: $('e-balance').checked, name: name, description: $('e-description').value.trim(), maps: maps, round_end_delay: Number($('e-delay').value), listed: $('e-listed').checked,
-    night: $('e-night').checked, port: port, max_players: Number($('e-max').value), autostart: $('e-autostart').checked,
-    tick: Number($('e-tick').value) || 0 };
+    night: $('e-event').value === 'night', daybreak: $('e-event').value === 'daybreak', port: port, max_players: Number($('e-max').value), bots: Number($('e-bots').value) || 0,
+    tickets: ['auto', 'map'].includes($('e-tickets').value) ? $('e-tickets').value : Number($('e-tickets').value), autostart: $('e-autostart').checked,
+    tick: Number($('e-tick').value) || 0,
+    day_night: $('e-daynight').checked, time: Number($('e-time').value) || 0, day_minutes: Number($('e-dayminutes').value) || 0,
+    cloud_cover: Number($('e-cloud').value) || 0, cloud_rate: Number($('e-cloudrate').value) || 0, weather: Number($('e-weather').value) || 0,
+    fog: Number($('e-fog').value) || 0, ground_fog: Number($('e-groundfog').value) || 0, wind: Number($('e-wind').value) || 0,
+    cloud_height: Number($('e-cloudheight').value) || 450,
+    admins: $('e-admins').value.trim() };
   const n = editing;
   if (!await saveConfig({ servers: servers }, 'Saved')) return;
   $('edit-modal').classList.remove('on');
@@ -666,7 +900,7 @@ $('log-refresh').onclick = loadLog; $('log-which').onchange = loadLog;
 
 // ---- settings
 $('save-settings').onclick = async () => {
-  if (!await saveConfig({ start_servers: $('start-servers').checked, web_remote: $('web-remote').checked }, 'Saved')) return;
+  if (!await saveConfig({ start_servers: $('start-servers').checked, web_remote: $('web-remote').checked, shared_bot_data: $('shared-bot-data').checked }, 'Saved')) return;
   if (state.platform === 'windows' && $('autostart').checked !== !!state.autostart) act('/api/autostart', { on: $('autostart').checked });
 };
 $('pw-save').onclick = async () => {
@@ -676,6 +910,216 @@ $('pw-save').onclick = async () => {
 $('quit').onclick = async () => {
   if (!confirm('Shut down the manager and stop every server?')) return;
   if (await act('/api/quit', {})) { clearInterval(tick.timer); document.body.replaceChildren(h('div', { style: 'padding:60px 30px;font:600 24px var(--head);letter-spacing:.06em' }, 'THE MANAGER HAS SHUT DOWN. START IT AGAIN TO OPEN THIS PAGE.')); }
+};
+
+// ---- the dashboard (server/dashboard.py, dash.js, docs/DASHBOARD.md)
+let dash = null, dashFilled = false;
+async function loadDashboard() {
+  try { dash = await api('/api/dashboard'); } catch (e) { return; }
+  $('dash-when').textContent = 'Updated ' + new Date(dash.now * 1000).toLocaleTimeString();
+  sync($('dash-alerts'), dash.alerts, () => dash.alerts.map(a => h('div', { class: 'banner' + (a.level === 'info' ? ' info' : ''), text: a.text })));
+  if (!document.querySelector('#dash-root .dtabs button:hover')) Dash.render($('dash-root'), dash, { public: false });
+}
+// ---- the community page (the public stats page with the owner's branding; docs/DASHBOARD.md)
+const CP_SECTIONS = [['connect', 'How to join'], ['cards', 'The headline numbers'], ['servers', 'Each server, live'],
+  ['players', 'Players over time'], ['maps', 'Maps played'], ['hours', 'Busiest hours'], ['leaderboard', 'Veterans leaderboard'],
+  ['activity', 'Recent joins and leaves'], ['network', 'The Reborn server list'], ['rules', 'Server rules']];
+let cpLinks = [], cpFilled = false;
+function cpLinkRows() {
+  $('cp-links').replaceChildren(...cpLinks.map((l, i) => h('div', { class: 'row', style: 'margin-bottom:8px;flex-wrap:nowrap' },
+    h('input', { type: 'text', maxlength: 40, placeholder: 'Our Discord', value: l.label, style: 'max-width:200px', oninput: e => { l.label = e.target.value; } }),
+    h('input', { type: 'text', maxlength: 300, placeholder: 'https://discord.gg/...', value: l.url, oninput: e => { l.url = e.target.value; } }),
+    h('button', { class: 'btn small', onclick: () => { cpLinks.splice(i, 1); cpLinkRows(); } }, 'Remove'))));
+  $('cp-link-add').disabled = cpLinks.length >= 6;
+}
+function fillCommunity() {
+  const p = state.config.public_page;
+  $('cp-on').checked = p.on; $('cp-port').value = p.port; $('cp-title').value = p.title; $('cp-desc').value = p.description;
+  $('cp-rules').value = p.rules; $('cp-theme').value = p.theme; $('cp-accent-on').checked = !!p.accent; $('cp-accent').value = p.accent || '#6e9a3c';
+  $('cp-names').checked = p.names; $('cp-link-download').checked = p.links.download; $('cp-link-discord').checked = p.links.discord;
+  $('cp-addr-on').checked = p.connect.address; $('cp-addr').value = p.connect.custom_address; $('cp-how').value = p.connect.instructions;
+  $('cp-sections').replaceChildren(...CP_SECTIONS.map(([k, label]) => h('label', { class: 'check', style: 'margin:4px 0' },
+    h('input', { type: 'checkbox', 'data-section': k, checked: p.sections[k] !== false }), h('span', { text: label }))));
+  cpLinks = p.links.custom.map(l => ({ label: l.label, url: l.url })); cpLinkRows();
+  $('cp-css').value = p.custom_css || ''; $('cp-own').checked = !!p.own_site;
+  cpCounts();
+}
+function cpCounts() {
+  $('cp-desc-count').textContent = $('cp-desc').value.length + ' / 1000'; $('cp-rules-count').textContent = $('cp-rules').value.length + ' / 1500';
+  $('cp-css-count').textContent = $('cp-css').value.length + ' / 20000';
+}
+function renderCommunity() {
+  if (!state) return;
+  if (!cpFilled) { cpFilled = true; fillCommunity(); }
+  const p = state.config.public_page, where = state.addresses.public || (state.addresses.lan || [])[0] || '127.0.0.1';
+  $('cp-where').replaceChildren(...(p.on ? [h('a', { href: 'http://127.0.0.1:' + p.port + '/', target: '_blank', rel: 'noopener', style: 'color:inherit', text: 'Open it' }),
+    ' · give players http://' + where + ':' + p.port + '/'] : ['Off. Preview shows it anyway.']));
+  const img = $('cp-logo-img');
+  if (p.logo) { img.src = '/preview/logo?v=' + Date.now(); img.style.display = ''; } else img.style.display = 'none';
+  $('cp-logo-remove').disabled = !p.logo;
+  cpSite();
+}
+async function cpSite(r) {
+  try { r = r || await api('/api/public/site', {}); } catch (e) { return; }
+  const s = r.site;
+  $('cp-site').replaceChildren('Folder: ', h('span', { class: 'mono', text: s.folder }), ' · ',
+    s.ready ? s.files.length + ' file' + (s.files.length === 1 ? '' : 's') + ', index.html there' : 'no index.html yet (Make a starter, or copy your site in)',
+    // (replaceChildren writes a null out as "null": with no files nothing is passed.)
+    ...(s.files.length ? [h('div', { class: 'mono', style: 'margin-top:4px;font-size:12px', text: s.files.slice(0, 12).join('   ') + (s.files.length > 12 ? '   ...' : '') })] : []));
+  $('cp-own').disabled = !s.ready && !$('cp-own').checked;
+}
+['cp-desc', 'cp-rules', 'cp-css'].forEach(id => $(id).addEventListener('input', cpCounts));
+$('cp-starter').onclick = async () => { const r = await act('/api/public/starter', {}); if (r) { toast(r.made.length ? 'Made ' + r.made.join(' and ') : 'The folder already has them: kept'); cpSite(r); } };
+$('cp-site-refresh').onclick = () => cpSite();
+$('cp-link-add').onclick = () => { if (cpLinks.length < 6) { cpLinks.push({ label: '', url: '' }); cpLinkRows(); } };
+$('cp-preview').onclick = () => window.open('/preview/', '_blank', 'noopener');
+$('cp-save').onclick = async () => {
+  const port = Number($('cp-port').value);
+  if (!(port >= 1024 && port <= 65535)) return toast('A port is 1024 to 65535.', true);
+  const bad = cpLinks.find(l => l.url.trim() && !/^https?:\/\/[^\s"<>]+$/i.test(l.url.trim()));
+  if (bad) return toast('A link must start with https:// or http:// (' + bad.url + ').', true);
+  const sections = {};
+  document.querySelectorAll('#cp-sections input').forEach(i => { sections[i.dataset.section] = i.checked; });
+  const page = { on: $('cp-on').checked, port: port, title: $('cp-title').value.trim(), description: $('cp-desc').value, rules: $('cp-rules').value,
+    theme: $('cp-theme').value, accent: $('cp-accent-on').checked ? $('cp-accent').value : '', names: $('cp-names').checked, sections: sections,
+    links: { download: $('cp-link-download').checked, discord: $('cp-link-discord').checked, custom: cpLinks.filter(l => l.url.trim()).map(l => ({ label: l.label.trim(), url: l.url.trim() })) },
+    connect: { address: $('cp-addr-on').checked, custom_address: $('cp-addr').value.trim(), instructions: $('cp-how').value },
+    custom_css: $('cp-css').value, own_site: $('cp-own').checked };
+  if (await saveConfig({ public_page: page }, 'Saved')) { cpFilled = false; renderCommunity(); }
+};
+$('cp-logo-file').onchange = () => {
+  const f = $('cp-logo-file').files[0];
+  if (!f) return;
+  if (f.size > 1048576) { $('cp-logo-file').value = ''; return toast('A logo is 1 MB at most.', true); }
+  const reader = new FileReader();
+  reader.onload = async () => { if (await act('/api/public/logo', { data: reader.result }, 'Logo saved')) { $('cp-logo-file').value = ''; renderCommunity(); } };
+  reader.readAsDataURL(f);
+};
+$('cp-logo-remove').onclick = async () => { if (await act('/api/public/logo', { remove: true }, 'Logo removed')) renderCommunity(); };
+
+// ---- moderation (server/bans.py, docs/MODERATION.md)
+let mod = null, modTarget = null, modAction = 'ban';
+const KIND_WORDS = { ban: 'Ban', kick: 'Kick', mute: 'Mute' };
+async function loadModeration() {
+  try { mod = await api('/api/moderation'); renderModeration(); } catch (e) {}
+}
+function when(t) { return new Date(t * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); }
+function playerWords(e) { return (e.names.join(', ') || 'no name') + (e.ids.length ? '  (' + e.ids.join(', ') + ')' : ''); }
+function playerRow(r, extra) {
+  return h('tr', {}, extra, h('td', { text: r.name || '?' }), h('td', { class: 'mono', text: r.id || '-' }),
+    h('td', { class: 'small', text: r.online === false ? 'seen ' + ago(mod.now - r.at) + ' ago' + (r.server ? ' on ' + r.server : '') : r.since ? 'on for ' + ago(mod.now - r.since) : r.server || '' }),
+    h('td', {}, h('div', { class: 'row' },
+      r.online !== false && r.server_name ? h('button', { class: 'btn small', onclick: () => openMod('kick', r) }, 'Kick') : null,
+      h('button', { class: 'btn small stop', onclick: () => openMod('ban', r) }, 'Ban'),
+      h('button', { class: 'btn small', onclick: () => openMod('mute', r) }, 'Mute'))));
+}
+function banTable(rows, network) {
+  if (!rows.length) return 'None.';
+  return h('table', {}, h('tr', {}, ['', 'Player', 'Reason', 'By', 'Since', 'Ends', network ? '' : 'On', ''].map(t => h('th', { text: t }))),
+    rows.map(e => h('tr', {}, h('td', {}, h('span', { class: 'kind ' + (network ? 'network' : e.kind), text: network ? 'Network' : KIND_WORDS[e.kind] })),
+      h('td', {}, playerWords(e), h('div', { class: 'small', text: [e.accounts.length ? 'account' : '', e.ips.length ? 'address' : ''].filter(Boolean).join(' + ') ? 'also by ' + [e.accounts.length ? 'account' : '', e.ips.length ? 'address' : ''].filter(Boolean).join(' and ') : '' })),
+      h('td', { text: e.reason || '-' }), h('td', { class: 'small', text: e.by }), h('td', { class: 'small', text: when(e.at) }),
+      h('td', { class: 'small', text: e.until ? e.ends : 'Permanent' }),
+      network ? h('td', {}) : h('td', { class: 'small', text: e.servers.length ? e.servers.map(n => '#' + n).join(', ') : 'All' }),
+      h('td', {}, h('button', { class: 'btn small', onclick: () => unban(e, network) }, e.kind === 'mute' ? 'Unmute' : e.kind === 'kick' ? 'Let back' : 'Unban')))));
+}
+function renderModeration() {
+  const m = mod;
+  $('mod-network-box').style.display = m.network_admin ? '' : 'none';
+  $('mod-find-net-box').style.display = m.network_admin ? '' : 'none';
+  $('mod-list-choice').style.display = m.network_admin ? '' : 'none';
+  if (m.network_admin) $('mod-lead').textContent = 'Kick, ban and mute players on your servers, and keep the Reborn network\'s ban list: a network ban holds on every official server and every community server registered with this backend.';
+  sync($('mod-players'), [m.players.map(r => [r.server, r.name, r.id])], () => m.players.length ?
+    h('table', {}, h('tr', {}, ['Server', 'Name', 'Player id', '', ''].map(t => h('th', { text: t }))),
+      m.players.map(r => playerRow(r, h('td', { class: 'small', text: '#' + r.server + ' ' + r.server_name })))) : 'Nobody is on your servers now.');
+  sync($('mod-bans'), m.bans.map(e => [e.id, e.until]), () => banTable(m.bans, false));
+  sync($('mod-network'), m.network.map(e => [e.id, e.until]), () => banTable(m.network, true));
+  sync($('mod-log'), m.log.map(l => [l.at, l.action, l.ban]), () => m.log.length ? h('table', {}, h('tr', {}, ['When', 'What', 'Player', 'Reason', 'By'].map(t => h('th', { text: t }))),
+    m.log.slice(0, 120).map(l => h('tr', {}, h('td', { class: 'small', text: when(l.at) }),
+      h('td', {}, logWords(l)), h('td', { text: (l.names || [l.name]).filter(Boolean).join(', ') + (l.ids ? '  (' + l.ids.join(', ') + ')' : l.id ? '  (' + l.id + ')' : '') }),
+      h('td', { text: l.network && (l.action === 'refused' || l.action === 'removed') ? 'Banned on the Reborn network' : l.reason || (l.action === 'refused' && l.ban ? 'Your ' + (l.kind || 'ban') + ' ' + l.ban : '') }), h('td', { class: 'small', text: l.by || (l.action === 'refused' || l.action === 'removed' ? 'server ' + (l.server || '') : '') })))) : 'Nothing yet.');
+}
+function logWords(l) {
+  const net = l.list === 'network' ? ' (network)' : '';
+  const until = l.until ? ', until ' + when(l.until) : l.action === 'ban' || l.action === 'mute' ? ', permanent' : '';
+  return { ban: 'Banned' + net + until, kick: 'Kicked (5 minutes)', mute: 'Muted' + until, unban: 'Removed ' + (l.kind || 'ban') + net,
+           refused: 'Refused a join' + (l.where === 'backend' ? ' (main backend)' : ''), removed: 'Taken off the server' }[l.action] || l.action;
+}
+function reasonText(r) { r = (r || '').trim().replace(/\s+/g, ' ') || 'no reason given'; return /[.!?]$/.test(r) ? r : r + '.'; }
+function endsText(seconds) {
+  if (!seconds) return '';
+  const d = new Date(Date.now() + seconds * 1000), mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
+  return d.getUTCDate() + ' ' + mon + ' ' + d.getUTCFullYear() + ' ' + String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0') + ' UTC';
+}
+const LENGTH_SECONDS = { '1h': 3600, '1d': 86400, '7d': 604800, '30d': 2592000, permanent: 0 };
+function previewMod() {
+  // As server/bans.py refusal() and mute_text() make them.
+  const network = document.querySelector('input[name=mod-list]:checked').value === 'network' && mod && mod.network_admin;
+  const reason = reasonText($('mod-reason').value), secs = LENGTH_SECONDS[$('mod-length').value];
+  const ends = secs ? 'Ends: ' + endsText(secs) + '.' : 'This ban is permanent.';
+  let title, text;
+  if (modAction === 'kick') { title = 'Kicked from this server'; text = 'You were kicked from this server: ' + reason + ' You can join again in 5 minutes.'; }
+  else if (modAction === 'mute') { title = 'In the match, at the top of the screen'; text = 'You are muted on this server: ' + reason + ' Your voice and text chat reach nobody.' + (secs ? ' Ends: ' + endsText(secs) + '.' : ''); }
+  else if (network) { title = 'Banned from the Reborn network'; text = 'You are banned from the Reborn servers and the community servers on the Reborn list. Reason: ' + reason + ' ' + ends + ' Appeal on the Reborn Discord.'; }
+  else { title = 'Banned from this server'; text = 'You are banned from this server. Reason: ' + reason + ' ' + ends + ' To appeal, contact this server\'s admin.'; }
+  const p = $('mod-preview');
+  p.querySelector('small').textContent = modAction === 'mute' ? 'SERVER MESSAGE' : 'MODERATION · COULD NOT JOIN';
+  p.querySelector('b').textContent = modAction === 'mute' ? '' : title; p.querySelector('b').style.display = modAction === 'mute' ? 'none' : '';
+  p.querySelector('p').textContent = text;
+  $('mod-count').textContent = $('mod-reason').value.length + ' / ' + ((mod && mod.reason_max) || 120);
+  $('mod-length-box').style.display = modAction === 'kick' ? 'none' : '';
+  $('mod-servers-box').style.display = network ? 'none' : '';
+  $('mod-ip-box').style.display = target_has_ip() ? '' : 'none';
+  $('mod-go').textContent = modAction === 'kick' ? 'Kick' : modAction === 'mute' ? 'Mute' : network ? 'Ban from the network' : 'Ban';
+  document.querySelectorAll('#mod-list-choice label').forEach(l => l.classList.toggle('on', l.querySelector('input').checked));
+}
+function target_has_ip() { return modTarget && !!modTarget.ip && !modTarget.ip_only; }
+function openMod(action, r) {
+  modAction = action; modTarget = r;
+  $('mod-title').textContent = KIND_WORDS[action] + ' ' + (r.name || r.id || r.ip);
+  $('mod-who').textContent = [r.name && 'Name ' + r.name, r.id && 'player id ' + r.id, r.account && 'an account (Protect your name)', r.ip && 'address ' + r.ip].filter(Boolean).join(', ') + '.';
+  $('mod-list-choice').style.display = mod.network_admin && action === 'ban' ? '' : 'none';
+  document.querySelector('input[name=mod-list][value=server]').checked = true;
+  sync($('mod-servers'), mod.servers.map(x => [x.n, x.name]), () => [h('option', { value: '0', text: 'All my servers' }), ...mod.servers.map(x => h('option', { value: x.n, text: '#' + x.n + ' ' + x.name }))]);
+  $('mod-servers').value = action === 'kick' && r.server ? String(r.server) : '0';
+  $('mod-reason').value = ''; $('mod-ip').checked = true;
+  try { $('mod-by').value = localStorage.getItem('bf-mod-by') || ''; } catch (e) {}
+  previewMod();
+  $('mod-modal').classList.add('on'); $('mod-reason').focus();
+}
+['mod-reason', 'mod-length'].forEach(id => $(id).addEventListener('input', previewMod));
+document.querySelectorAll('input[name=mod-list]').forEach(x => x.addEventListener('change', previewMod));
+$('mod-cancel').onclick = () => $('mod-modal').classList.remove('on');
+$('mod-go').onclick = async () => {
+  const network = document.querySelector('input[name=mod-list]:checked').value === 'network' && mod.network_admin && modAction === 'ban';
+  const by = $('mod-by').value.trim();
+  try { localStorage.setItem('bf-mod-by', by); } catch (e) {}
+  const t = modTarget, servers = Number($('mod-servers').value);
+  const data = { action: modAction, list: network ? 'network' : 'server', reason: $('mod-reason').value, length: $('mod-length').value,
+                 servers: servers && !network ? [servers] : [], by: by, match_ip: $('mod-ip').checked,
+                 player: t.ip_only ? {} : { name: t.name, id: t.id, ip: t.ip, account: t.account }, ips: t.ip_only ? [t.ip] : [] };
+  if (network && !confirm('Ban ' + (t.name || t.id || t.ip) + ' from every Reborn server and every community server on the main backend?')) return;
+  const r = await act('/api/moderation/action', data, KIND_WORDS[modAction] + ': done');
+  if (r) { mod = r.moderation; renderModeration(); $('mod-modal').classList.remove('on'); }
+};
+async function unban(e, network) {
+  if (!confirm((e.kind === 'mute' ? 'Unmute ' : 'Lift the ' + (network ? 'network ' : '') + e.kind + ' of ') + playerWords(e) + '?')) return;
+  let by = ''; try { by = localStorage.getItem('bf-mod-by') || ''; } catch (x) {}
+  const r = await act('/api/moderation/action', { action: 'unban', ban: e.id, list: network ? 'network' : 'server', by: by }, 'Removed');
+  if (r) { mod = r.moderation; renderModeration(); }
+}
+$('mod-find-go').onclick = async () => {
+  const r = await act('/api/moderation/lookup', { text: $('mod-find').value, network: $('mod-find-net').checked });
+  if (!r) return;
+  sync($('mod-found'), [Date.now()], () => r.players.length ? h('table', {}, h('tr', {}, ['Name', 'Player id', '', ''].map(t => h('th', { text: t }))),
+    r.players.map(p => playerRow(p))) : 'Nobody found.');
+};
+$('mod-find').addEventListener('keydown', e => { if (e.key === 'Enter') $('mod-find-go').click(); });
+$('mod-manual-go').onclick = () => {
+  const v = $('mod-manual').value.trim();
+  if (/^[0-9a-fA-F]{8}$/.test(v)) openMod('ban', { id: v.toUpperCase() });
+  else if (/^[0-9a-fA-F:.]{3,45}$/.test(v) && (v.includes('.') || v.includes(':'))) openMod('ban', { ip: v, ip_only: true });
+  else toast('Type a player id (8 characters, 0 to 9 and A to F) or an address.', true);
 };
 
 // ---- signing in (only when a password is set)
@@ -690,6 +1134,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') document.que
 async function tick() {
   try { state = await api('/api/state'); render(); } catch (e) { $('mode').textContent = 'No answer'; $('mode').className = 'pill red'; }
   if ($('logs').classList.contains('on') && $('log-auto').checked) loadLog();
+  if ($('moderation').classList.contains('on') && !$('mod-modal').classList.contains('on')) loadModeration();
+  if ($('dashboard').classList.contains('on') && (tick.n = (tick.n || 0) + 1) % 3 === 0) loadDashboard();
 }
 tick(); tick.timer = setInterval(tick, 2000);
 </script>

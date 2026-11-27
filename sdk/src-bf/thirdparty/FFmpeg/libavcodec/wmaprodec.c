@@ -3,6 +3,9 @@
  * Copyright (c) 2007 Baptiste Coudurier, Benjamin Larsson, Ulion
  * Copyright (c) 2008 - 2011 Sascha Sommer, Benjamin Larsson
  *
+ * Modified 2026-11-18 for Battlefield 1943 Reborn: added xmaframes_flush, the
+ * xmaframes decoder's flush callback (resets it for a new stream without a reopen).
+ *
  * This file is part of FFmpeg.
  *
  * FFmpeg is free software; you can redistribute it and/or
@@ -2025,6 +2028,50 @@ static av_cold int xmaframes_decode_init(AVCodecContext* avctx)
     return decode_init(s, avctx, 0);
 }
 
+/**
+ *@brief Back to the state decode_init leaves, for a new stream on an open context.
+ * A caller that plays many short streams (ReXGlue's XMA contexts: one per sound) would otherwise close and reopen the
+ * decoder for each, rebuilding every MDCT context under the global codec lock (~0.5 ms, serialized across threads).
+ * Clears the overlap-add history (channel[].out), the window length carried between frames and the decode state;
+ * the format-dependent tables from init stay.
+ */
+static void xmaframes_flush(AVCodecContext *avctx)
+{
+    WMAProDecodeCtx *s = avctx->priv_data;
+    int i;
+
+    for (i = 0; i < avctx->channels && i < WMAPRO_MAX_CHANNELS; i++) {
+        memset(&s->channel[i], 0, sizeof(s->channel[i]));
+        s->channel[i].prev_block_len = s->samples_per_frame;
+    }
+    memset(s->chgroup, 0, sizeof(s->chgroup));
+    s->num_chgroups = 0;
+
+    s->next_packet_start = 0;
+    s->packet_offset = 0;
+    s->packet_sequence_number = 0;
+    s->num_saved_bits = 0;
+    s->frame_offset = 0;
+    s->subframe_offset = 0;
+    s->packet_loss = 1;
+    s->packet_done = 0;
+    s->eof_done = 0;
+    s->frame_num = 0;
+    s->buf_bit_size = 0;
+    s->drc_gain = 0;
+    s->skip_frame = 0;
+    s->parsed_all_subframes = 0;
+    s->skip_packets = 0;
+    s->subframe_len = 0;
+    s->channels_for_cur_subframe = 0;
+    memset(s->channel_indexes_for_cur_subframe, 0, sizeof(s->channel_indexes_for_cur_subframe));
+    s->num_bands = 0;
+    s->transmit_num_vec_coeffs = 0;
+    s->cur_sfb_offsets = NULL;
+    s->table_idx = 0;
+    s->esc_len = 0;
+}
+
 static av_cold int xmaframes_decode_end(AVCodecContext* avctx)
 {
     WMAProDecodeCtx *s = avctx->priv_data;
@@ -2152,6 +2199,7 @@ AVCodec ff_xmaframes_decoder = {
     .init           = xmaframes_decode_init,
     .close          = xmaframes_decode_end,
     .decode         = xmaframes_decode_packet,
+    .flush          = xmaframes_flush,
     .capabilities   = AV_CODEC_CAP_DR1,
     .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
     .sample_fmts    = (const enum AVSampleFormat[]) { AV_SAMPLE_FMT_FLTP,

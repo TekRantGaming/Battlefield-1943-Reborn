@@ -26,6 +26,7 @@ endif()
 set(BF1943_SOURCES
     src/main.cpp
     src/cpu_check.cpp
+    src/gpu_lost.cpp
     src/fpe_guard.cpp
     src/live_layers.cpp
     src/online_services.cpp
@@ -62,9 +63,11 @@ set(BF1943_SOURCES
     src/clan_tag_colours.cpp
     src/discord_presence.cpp
     src/game_music.cpp
+    src/weather_audio.cpp
     src/plane_mouse.cpp
     src/vehicle_mouse.cpp
     src/native_input.cpp
+    src/vehicle_binds.cpp
     src/tick_rate.cpp
     src/flash_mouse.cpp
     src/flash_spawn.cpp
@@ -75,11 +78,19 @@ set(BF1943_SOURCES
     src/input_settings.cpp
     src/perf_overlay.cpp
     src/audio_settings.cpp
+    src/ea_voice_cull.cpp
+    src/ea_mixer_ready.cpp
+    src/ea_xma_kicks.cpp
     src/auto_join.cpp
     src/comms.cpp
+    src/audio_devices.cpp
     src/comms_ui.cpp
+    src/storm_patterns.cpp
+    src/world_sync.cpp
+    src/free_cam.cpp
     src/voice_mute.cpp
     src/voice_mute_icon.cpp
+    src/scoreboard_ping.cpp
     src/gpu_preference.cpp
     third_party/miniz/miniz.c
     src/server_mode.cpp
@@ -99,7 +110,9 @@ set(BF1943_SOURCES
     src/start_failure.cpp
     src/changelog.cpp
     src/fov.cpp
+    src/shadow_sun.cpp
     src/vehicle_camera.cpp
+    src/vehicle_views.cpp
     src/tick_blend.cpp
     src/linux_profiler.cpp
     src/effects.cpp
@@ -116,11 +129,18 @@ set(BF1943_SOURCES
     src/game_install.cpp
     src/server_rotation.cpp
     src/team_balance.cpp
+    src/match_rules.cpp
+    src/bots.cpp
+    src/bot_chat.cpp
+    src/squad_colors.cpp
+    src/sharp_text.cpp
     src/server_tick_probe.cpp
     src/gm_host.cpp
     src/private_match.cpp
     src/dev_watch.cpp
     src/dev_renderdoc.cpp
+    src/bench_freecam.cpp
+    src/bench_explode.cpp
     src/dev_profiler.cpp
     src/dev_io_stats.cpp
 )
@@ -211,6 +231,9 @@ target_link_libraries(bf1943 PRIVATE native_x_renderer)
 target_link_libraries(bf1943 PRIVATE rex::libavcodec rex::libavutil)
 set_source_files_properties(src/game_music.cpp PROPERTIES INCLUDE_DIRECTORIES
     "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src-bf/thirdparty/FFmpeg")
+# The weather's sounds (src/weather_audio.cpp): the same FFmpeg's MP3 decoder and parser.
+set_source_files_properties(src/weather_audio.cpp PROPERTIES INCLUDE_DIRECTORIES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src-bf/thirdparty/FFmpeg")
 # The launcher's PNG and JPEG pictures (src/picture_decode.cpp): stb_image from the SDK copy's thirdparty/stb, static.
 set_source_files_properties(src/picture_decode.cpp PROPERTIES INCLUDE_DIRECTORIES
     "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src-bf/thirdparty/stb")
@@ -260,10 +283,14 @@ endforeach()
 # src/dev_stacks.cpp). Never in a release build.
 # Night Ops (src/night_ops.h): not in releases until TekRantGaming says it is ready (12 Nov 2026, for 0.3.0); ON for
 # the private test builds and development.
-option(BF_NIGHT_OPS "Night Ops: a night server's maps drawn at night in players' games" OFF)
+# On since 0.4.8, the release that brings Night Ops and Daybreak to players (TekRantGaming, 27 Nov 2026).
+option(BF_NIGHT_OPS "Night Ops: a night server's maps drawn at night in players' games" ON)
 if(BF_NIGHT_OPS)
     target_compile_definitions(bf1943 PRIVATE BF_NIGHT_OPS=1)
 endif()
+# A developer's own build switches, kept out of the repository (bf/local.cmake, gitignored): for one, the SMG sight
+# alignment's tuning aids (BF_INTERNAL_TOOLS: its settings row, keys and pause menu sliders), never in a release's.
+include(${CMAKE_CURRENT_SOURCE_DIR}/local.cmake OPTIONAL)
 # The picture in picture sniper scope (src/scope_pip.h): taken out of 0.4.1 at TekRantGaming's word (13 Nov 2026); ON
 # for the private test builds and development.
 option(BF_SCOPE_PIP "The picture in picture sniper scope in Settings > Enhancements" OFF)

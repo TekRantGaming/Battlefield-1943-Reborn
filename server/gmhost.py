@@ -16,12 +16,16 @@ Layers, outermost first (see docs/02-dedicated-server-join.md):
 """
 import asyncio
 import json
+import math
 import os
 import random
 import socket
 import struct
 import sys
 import time
+
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:  # -I leaves the script's folder out (bans.py)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 CONTROL, LINK, VOICE = 7, 1, 0
 INIT, CONN, UNREL, DATA = 1, 2, 0x80, 0x100
@@ -35,6 +39,8 @@ NOTE_BUDGET = 200
 # A game's tunnel datagram carries a few sub packets (one to three in every capture we have); one that would need more
 # heads than this is not a game's and is passed over.
 MAX_HEADS = 64
+# Lists of players sent on are cut at this (server sizes: the game's own 24, then 32 and 64; docs/SERVER-SIZES.md).
+MOST_PLAYERS = 128
 
 
 PING, PROBE, PONG = b'BF43PING', b'BF43PRBE', b'BF43PONG'
@@ -56,18 +62,41 @@ def dev_net_delay():
 DEV_DELAY, DEV_JITTER = dev_net_delay()
 
 
-class Held:
-    """One direction's datagrams held DEV_DELAY plus up to DEV_JITTER, sent in the order they came."""
+def dev_net_delay_for():
+    """Tests only: BF_DEV_NET_DELAY_FOR=<ip>=<ms>[;<ip>=<ms>...] holds one client's game datagrams (by its address)
+    that long each way instead of BF_DEV_NET_DELAY's: players at different distances in one test (the scoreboards'
+    ping, 20 Nov 2026)."""
+    out = {}
+    for part in os.environ.get('BF_DEV_NET_DELAY_FOR', '').split(';'):
+        ip, _, ms = part.partition('=')
+        try:
+            out[ip.strip()] = (float(ms) / 1000.0, 0.0)
+        except ValueError:
+            pass
+    return out
 
-    def __init__(self):
+
+DEV_DELAY_FOR = dev_net_delay_for()
+
+
+def dev_delay(ip):
+    """The test delay each way (and jitter) for a client at that address: (0, 0) unless a test sets one."""
+    return DEV_DELAY_FOR.get(ip, (DEV_DELAY, DEV_JITTER))
+
+
+class Held:
+    """One direction's datagrams held a test's delay plus up to its jitter (dev_delay), sent in the order they came."""
+
+    def __init__(self, delay=None):
         self.last = 0.0
+        self.delay, self.jitter = delay if delay is not None else (DEV_DELAY, DEV_JITTER)
 
     def send(self, fn, *args):
-        if not DEV_DELAY and not DEV_JITTER:
+        if not self.delay and not self.jitter:
             fn(*args)
             return
         loop = asyncio.get_running_loop()
-        self.last = max(loop.time() + DEV_DELAY + random.random() * DEV_JITTER, self.last)
+        self.last = max(loop.time() + self.delay + random.random() * self.jitter, self.last)
         loop.call_at(self.last, fn, *args)
 
 
@@ -413,8 +442,12 @@ def player_blob(pid, slot, name, xuid, address, port, stamp):
 
 
 class Player:
-    def __init__(self, pid, name, xuid, address, ticket):
+    def __init__(self, pid, name, xuid, address, ticket, account=''):
         self.pid, self.name, self.xuid, self.address, self.ticket = pid, name, xuid, address, ticket
+        self.account = account  # its Protect your name account's key, when the backend knows one (moderation)
+
+    def player_id(self):
+        return '%08X' % (self.xuid & 0xFFFFFFFF) if self.xuid & 0xFFFFFFFF else ''
 
 
 # ---- voice and text chat (bf/src/comms.cpp is the other end; docs/COMMS-PLAN.md)
@@ -429,6 +462,10 @@ C_HELLO, C_WELCOME, C_STATE, C_CHAT_RELAY, C_CHAT, C_ROSTER, C_VOICE, C_VOICE_RE
 # id (2 bytes), kind (BROADCAST_KINDS), seconds on screen, the text. A game older than v0.4.0 ignores the kind; one
 # older than v0.4.7 shows maintenance (3) as a message.
 C_BROADCAST = 11
+# Moderation (server/bans.py, 20 Nov 2026): the host to a player it removes (a kick, a ban, a network ban): the title and
+# the message (each a length byte and text). A game from v0.4.8 leaves the match and shows them in its notice pop-up;
+# an older one ignores it and gets the same text in the broadcast box (Comms.tell) just before its link is dropped.
+C_KICKED = 12
 BROADCAST_KINDS = {'custom': 0, 'update': 1, 'restart': 2, 'maintenance': 3}
 COMMS_PROTOCOL = 1
 CHAT_ALL, CHAT_TEAM, CHAT_SQUAD = 0, 1, 2
@@ -448,6 +485,8 @@ class CommsClient:
         self.chat_times = []
         self.chat_seen = []  # the last message numbers: each message comes twice (UDP may lose one)
         self.voice_second, self.voice_count = 0, 0
+        self.mute = (None, None)  # (the ban list's stamp, the mute entry then): GameHost.muted
+        self.mute_told = 0.0
 
 
 class Comms:
@@ -592,6 +631,16 @@ class Comms:
             seconds = 10
         self.broadcast(m.get('text', ''), str(m.get('kind', 'custom')), seconds)
 
+    def kicked(self, name, title, message):
+        """A player being removed (GameHost.remove): C_KICKED for a v0.4.8 game (it leaves and shows the pop-up), and the
+        message in the broadcast box for an older one."""
+        body = short_text(title) + short_text(message)
+        for c in self.clients.values():
+            if c.name == name:
+                for _ in range(3):
+                    self.send(C_KICKED, body, c.addr)
+        self.tell(name, message, seconds=15)
+
     def joined_player(self, name, addr):
         return any(p.state == 'joined' and p.player and p.player.name == name and p.addr[0] == addr[0]
                    for p in self.host.peers.values())
@@ -651,6 +700,9 @@ class Comms:
                 return  # empty, more than 5 in 5 s, or no such channel
             if (channel == CHAT_TEAM and not client.team) or (channel == CHAT_SQUAD and not client.squad):
                 return  # its team or squad not known (the client says so itself): never to the other team
+            if self.host.muted(client):
+                self.host.note('comms chat %s (muted, not passed on): %s' % (client.name, text_[:80]))
+                return
             name = client.name.encode('utf-8')[:64]
             raw = text_.encode('utf-8')[:CHAT_MAX]
             relay = struct.pack('>HHBBB', client.id, msg, channel, client.team, len(name)) + name + bytes([len(raw)]) + raw
@@ -672,6 +724,8 @@ class Comms:
                 client.voice_second, client.voice_count = second, 0
             client.voice_count += 1
             if client.voice_count > 60:  # 50 a second is a full 20 ms stream
+                return
+            if self.host.muted(client):
                 return
             relay = struct.pack('>H', client.id) + body[2:19 + n]
             for other in self.clients.values():
@@ -771,7 +825,9 @@ class Peer:
             return  # a host being replaced (GameHost.close): its server sockets may still deliver a packet
         if not self.client_bound:
             subs = [self.control()] + subs
-        transport.sendto(self.datagram(subs), self.addr)
+        data = self.datagram(subs)
+        self.host.bytes_out += len(data) + 28  # (with the IP and UDP headers)
+        transport.sendto(data, self.addr)
 
     def link_packet(self, seq, body):
         return LINK, struct.pack('>II', seq, self.peer_ack if seq >= UNREL else self.connident) + body
@@ -908,6 +964,14 @@ class Peer:
             if not self.player:
                 self.note('hello with unknown ticket %s' % ticket)
                 return
+            # Moderation (server/bans.py): a banned or kicked player is not let in, whatever its game did before.
+            entry, network = self.host.refused(self.player, self.addr)
+            if entry:
+                self.note('%s refused: %s' % (self.player.name, self.host.why_text(entry, network)))
+                self.host.moderation_event('refused', self.player, entry, network)
+                self.host.block(self.addr, 120)
+                self.host.drop(self.addr)
+                return
             self.note('hello from %s (PID %d)' % (self.player.name, self.player.pid))
             self.send_roster()
         elif t == 4:  # roster ack
@@ -940,11 +1004,17 @@ class Peer:
         self.gm(i8(9) + i32(pid) + bytes.fromhex('80000000800000000000000000000400800000000000000000'))
         self.gm(i8(0x15) + b'\x01' + i32(self.host.pid) + b'\x00')
         self.state = 'joined'
+        self.joined_at = time.time()
         self.note('joined: game packets now go to the server')
 
     # ---- game packets
 
     def to_server(self, body):
+        if not self.player:
+            # Only a player the backend announced (its ticket) and this host let in has its game packets passed on: a
+            # client that never showed one (or one refused) gets nothing to the server (moderation, 20 Nov 2026).
+            self.host.unlet += 1
+            return
         if not self.server:
             loop = asyncio.get_running_loop()
             self.server = ServerSide(self)
@@ -963,7 +1033,7 @@ class ServerSide(asyncio.DatagramProtocol):
 
     def __init__(self, peer):
         self.peer, self.transport, self.pending = peer, None, []
-        self.up, self.down = Held(), Held()  # BF_DEV_NET_DELAY (tests)
+        self.up, self.down = Held(dev_delay(peer.addr[0])), Held(dev_delay(peer.addr[0]))  # BF_DEV_NET_DELAY (tests)
 
     def connection_made(self, transport):
         self.transport = transport
@@ -988,6 +1058,464 @@ class ServerSide(asyncio.DatagramProtocol):
         asyncio.get_running_loop().call_soon(read_again, self.transport)
 
 
+class World:
+    """The match's world: its clock and weather, asked for by every player's game (bf/src/world_sync.cpp), which then
+    draws the same hour and the same sky; an admin's game may change them while the server runs. 14 Nov 2026: "cloud
+    coverage, rate, weather percentage, day/night adjustment and time scale settings ... for servers ... giving
+    player IDs admin panel access in-game". The same as gm_host.cpp's World (a match a player's game hosts).
+
+    Asked with BF43WRLD: version 1, flags (1: a change follows), the player's name and a key (a length byte and text
+    each); for a change: day and night (a byte) and eight floats: hour, a day's minutes, cloud cover, cloud rate,
+    weather, distance fog, ground fog, wind. Answered with BF43WRLR: version, flags (1 day and night, 2 the asker is
+    an admin), the same eight floats
+    as they are now, and the clouds' two clocks as doubles (drift seconds, forming). Big endian. Last in both
+    (15 Nov 2026; a game from before it sends and reads none): the cloud base's height, metres, a float."""
+
+    def __init__(self, host):
+        self.host = host
+        self.day_night, self.hour, self.day_minutes = False, 16.0, 0.0
+        self.cover, self.rate, self.weather = 0.35, 0.33, 0.0
+        self.fog = self.ground_fog = 0.0
+        self.wind = 0.3
+        self.cloud_height = 450.0
+        self.seconds = self.evolve = 0.0
+        self.at = time.monotonic()
+        self.admins, self.key = set(), ''
+        self.ground_fog_height, self.ground_fog_sparse = 0.5, 0.7  # the surface fog's depth (m) and sparseness
+        self.night_ops = False
+        self.daybreak = False  # 26 Nov 2026: the second event (DAYBREAK_*); never both, Night Ops first
+        self.round, self.progress, self.stage = None, 0.0, -1  # Night Ops: the round's build (match)
+        self.held = set()  # Night Ops: what an admin set this round (NIGHT_OPS_HELD), which the build leaves alone
+        self.tickets = 0  # each team's tickets at the round's start, from match.txt; 0: the level's own (read_match)
+        self.ramp_from = time.monotonic()
+        self.round_from = time.monotonic()  # Daybreak: when this round's sunrise was (Back to Daybreak's clock)
+        self.paused = False  # Daybreak: its clock waits while nobody is on the server (advance)
+        self.pings = {}  # a joined player's name -> (their ping in ms, when they said it): the scoreboards' ping
+
+    # Night Ops (16 Nov 2026, TekRantGaming: the night maps gone, "we would just start the match to always be at a set
+    # time the full time so could have night ops maps"): a Night Ops server's world is the day and night cycle held at
+    # this hour for the whole match. 20 Nov 2026, his presets: "time of day should be 1900h and is locked at that time";
+    # the weather follows the tickets. 25 Nov 2026, TekRantGaming: 1830h instead ("it looks a lot better at 1830 hours").
+    NIGHT_OPS_HOUR = 18.5
+    # The storm's build over a round (TekRantGaming, 20 Nov 2026: "a nice clear day at the start ... we still want to see
+    # the stars, and then the cloud coverage slowly builds up ... the weather gets stronger up until the point at the end
+    # of the game. Now it's all based on tickets ... I do want a good chunk of the first half of the game to be rain
+    # free"; 100% with 80% of the match gone). The progress is the share of its tickets the team with fewer left has
+    # lost (match.txt, match_rules.cpp). Each row: progress, cloud cover, weather, fog (distance and ground); between two
+    # rows the values go in a straight line, and players' games ease each change over about 25 s. Since pull request 62
+    # the weather is a hurricane that forms at sea from 25%, rains where it is past 75% and covers the whole map at
+    # 100% (85% left the carrier dry, run night048g). The progress never goes back within a round; a new round starts
+    # clear. On a Night Ops server these four are the build's, except what an admin sets this round (NIGHT_OPS_HELD).
+    NIGHT_OPS_STAGES = (
+        (0.00, 0.15, 0.00, 0.00),  # a clear night: stars and the moon
+        (0.40, 0.15, 0.00, 0.00),  # still clear at 40%
+        (0.55, 0.60, 0.30, 0.00),  # the clouds gather, the storm forms out at sea: far lightning, no rain on the map
+        (0.80, 0.90, 1.00, 0.50),  # it rolls in: the rain reaches the map about two thirds in, the fog rises with it
+        (1.00, 0.90, 1.00, 0.50),  # the full storm to the end
+    )
+    NIGHT_OPS_STAGE_NAMES = ('a clear night', 'the clouds gather', 'the storm rolls in', 'the full storm')
+    # An admin's F9 on a Night Ops server (TekRantGaming, 24 Nov 2026: "if an admin chooses to change these mid-game,
+    # they should be able to"; they used to snap back to the build). Per setting: what the admin moves is held at their
+    # value for the rest of the round, and the build keeps driving the rest (the time moved, the storm still builds;
+    # the weather moved, it stays there while the clouds and fog still follow the tickets). The next round starts as
+    # a plain Night Ops round (18:30, clear), and the panel's "Back to Night Ops" (ask flag 8) hands everything back to
+    # the schedule at once. The settings the build drives: the clock (day and night, hour, a day's minutes), cloud
+    # cover, weather, distance fog, ground fog. Cloud rate, wind and cloud height were always the admin's.
+    NIGHT_OPS_HELD = ('clock', 'clouds', 'weather', 'fog', 'ground fog')
+    # The ask's "touched" mask (world_sync.cpp, 24 Nov 2026, a u16 last after the ground fog's sparseness): which
+    # settings the admin moved. A game from before it sends none: a setting then counts as moved when it is not the
+    # server's (TOUCHED_BY_VALUE).
+    TOUCHED = {'day_night': 1, 'hour': 2, 'day_minutes': 4, 'cover': 8, 'rate': 16, 'weather': 32, 'fog': 64,
+               'ground_fog': 128, 'wind': 256, 'cloud_height': 512}
+
+    # Daybreak (TekRantGaming, 26 Nov 2026): "start with the sun just rising on the horizon, and for it to play in real
+    # time, so the sun will continue to rise as the game goes on ... I want a storm, not as strong as ... the nighttime
+    # one, but a storm nonetheless, is to slowly come in throughout the match. Make sure that you're utilizing all
+    # aspects of our new graphics ... a preset a lot like night ops, so that servers can pre-select it." His picks the
+    # same day: every round starts again at sunrise; the storm a thunderstorm to 70%; servers only (no Custom Match).
+    # 26 Nov 2026, after playing it (the real time sun and the 70% storm): "the storm value was too low ... day break
+    # time starts at 06:10 and stays there. follow the same rules as night ops as the storm was too weak and i think
+    # ground fog needs to be pulled back a little too". So: held at 06:10 (the sun just up, NativeXRenderer sky.cpp:
+    # 70 sin(pi (hour - 6) / 12), about 3 degrees; the lamps nearly out, NXR D175), and Night Ops' build. A day's
+    # minutes above 0 would run the clock from there (advance waits while nobody is joined); BF_DEV_DAYBREAK_MINUTES
+    # sets them in tests.
+    DAYBREAK_HOUR = 6.0 + 10 / 60.0
+    DAYBREAK_DAY_MINUTES = 0.0
+    # The build by tickets: Night Ops' rows (clear to 40%, the clouds gathering to 55%, the storm rolling in to 100%
+    # weather by 80%, then the full storm, its 60 m mist from 75%), with Daybreak's own columns: progress, cloud cover,
+    # weather, distance fog, ground fog, wind. A thinner morning mist at first light than the first cut (35%, was 60%)
+    # that burns off by 40%, and less ground fog in the storm than Night Ops' (35%, Night Ops 50%). The wind rises
+    # with the storm. Never backwards within a round; a new round is first light again.
+    DAYBREAK_STAGES = (
+        (0.00, 0.15, 0.00, 0.15, 0.35, 0.15),  # first light: clear, the low sun, a morning haze and a thin mist
+        (0.40, 0.15, 0.00, 0.10, 0.10, 0.20),  # still clear at 40%, the mist gone
+        (0.55, 0.60, 0.30, 0.10, 0.10, 0.35),  # the clouds gather, the storm forms out at sea: far lightning
+        (0.80, 0.90, 1.00, 0.50, 0.35, 0.80),  # it rolls in: rain over the map, lightning, its mist
+        (1.00, 0.90, 1.00, 0.50, 0.35, 0.80),  # the full storm to the end
+    )
+    DAYBREAK_STAGE_NAMES = ('first light', 'the clouds gather', 'the storm rolls in', 'the full storm')
+    # The surface fog for the whole round (eased amounts above; its depth and sparseness are not eased by the games,
+    # so they stay): calf deep in patches (the first cut's 2 m in wide patches was too much; the game's own default
+    # is shin deep and sparse: 0.5 m, 0.7).
+    DAYBREAK_GROUND_FOG_HEIGHT, DAYBREAK_GROUND_FOG_SPARSE = 1.2, 0.6
+    # What its build drives, and so what an admin's F9 holds for the round: Night Ops' and the wind.
+    DAYBREAK_HELD = NIGHT_OPS_HELD + ('wind',)
+
+    @staticmethod
+    def stage_values(rows, names, progress):
+        """A schedule's values at a round's progress (0 to 1): each column after the progress in a straight line
+        between two rows, and the stage's index (the first up to the second row, then one stage for each row after
+        it, the last row's from its start)."""
+        p = max(0.0, min(1.0, progress))
+        i = 0
+        while i < len(rows) - 2 and p > rows[i + 1][0]:
+            i += 1
+        a, b = rows[i], rows[i + 1]
+        t = 0.0 if b[0] <= a[0] else max(0.0, min(1.0, (p - a[0]) / (b[0] - a[0])))
+        values = tuple(a[k] + (b[k] - a[k]) * t for k in range(1, len(a)))
+        stage = 0 if p <= rows[1][0] else min(len(names) - 1, i if p < rows[-2][0] else i + 1)
+        return values, stage
+
+    @classmethod
+    def night_ops_values(cls, progress):
+        """Night Ops' cloud cover, weather and fog at a round's progress (0 to 1), and the stage's index
+        (NIGHT_OPS_STAGE_NAMES)."""
+        (cover, weather, fog), stage = cls.stage_values(cls.NIGHT_OPS_STAGES, cls.NIGHT_OPS_STAGE_NAMES, progress)
+        return cover, weather, fog, stage
+
+    @classmethod
+    def daybreak_values(cls, progress):
+        """Daybreak's cloud cover, weather, distance fog, ground fog and wind at a round's progress, and the stage's
+        index (DAYBREAK_STAGE_NAMES)."""
+        values, stage = cls.stage_values(cls.DAYBREAK_STAGES, cls.DAYBREAK_STAGE_NAMES, progress)
+        return values + (stage,)
+
+    @property
+    def scheduled(self):
+        """An event server (Night Ops or Daybreak): its schedule drives the world, the tickets its storm."""
+        return self.night_ops or self.daybreak
+
+    @property
+    def event_name(self):
+        return 'Night Ops' if self.night_ops else 'Daybreak' if self.daybreak else ''
+
+    @property
+    def event_held(self):
+        return self.DAYBREAK_HELD if self.daybreak else self.NIGHT_OPS_HELD
+
+    def configure(self, args):
+        clamp = lambda v, lo, hi: max(lo, min(hi, float(v)))
+        self.night_ops = bool(getattr(args, 'night', False))
+        self.daybreak = bool(getattr(args, 'daybreak', False)) and not self.night_ops
+        self.day_night = bool(args.day_night)
+        self.hour = clamp(args.time, 0, 24) % 24
+        self.day_minutes = clamp(args.day_minutes, 0, 1440)
+        self.ground_fog_height, self.ground_fog_sparse = 0.5, 0.7
+        if self.daybreak:
+            self.ground_fog_height = self.DAYBREAK_GROUND_FOG_HEIGHT
+            self.ground_fog_sparse = self.DAYBREAK_GROUND_FOG_SPARSE
+        if self.scheduled:
+            self.night_ops_clock()
+        self.cover, self.rate = clamp(args.cloud_cover, 0, 1), clamp(args.cloud_rate, 0, 1)
+        self.weather = clamp(args.weather, 0, 1)
+        self.fog, self.ground_fog = clamp(args.fog, 0, 1), clamp(args.ground_fog, 0, 1)
+        self.wind = clamp(args.wind, 0, 1)
+        self.cloud_height = clamp(args.cloud_height, 100, 1500)
+        self.round, self.progress, self.stage = None, 0.0, -1
+        self.held = set()
+        self.match_file, self.match_read = getattr(args, 'match_file', '') or '', 0.0
+        if self.scheduled:
+            self.set_night_ops(0.0)
+        # Player IDs as the game shows them (eight hex digits, the low half of the XUID).
+        self.admins = {a.strip().upper().rjust(8, '0') for a in args.admins.replace(';', ',').replace(' ', ',').split(',')
+                       if a.strip()}
+        self.key = args.admin_key
+        self.host.note('world: %s' % self.said())
+
+    def said(self):
+        return ('day and night %s, %.1f h, a day in %.0f min, clouds %.0f%% at rate %.0f%%, weather %.0f%%, fog %.0f%%, '
+                'ground fog %.0f%%, wind %.0f%%, cloud height %.0f m') % (
+            'on' if self.day_night else 'off', self.hour, self.day_minutes, self.cover * 100, self.rate * 100,
+            self.weather * 100, self.fog * 100, self.ground_fog * 100, self.wind * 100, self.cloud_height)
+
+    def set_night_ops(self, progress):
+        """An event's build (Night Ops or Daybreak) at a round's progress, on every setting an admin has not set this
+        round (held)."""
+        self.progress = progress
+        if self.daybreak:
+            cover, weather, fog, ground_fog, wind, stage = self.daybreak_values(progress)
+            names = self.DAYBREAK_STAGE_NAMES
+        else:
+            cover, weather, fog, stage = self.night_ops_values(progress)
+            ground_fog, wind, names = fog, None, self.NIGHT_OPS_STAGE_NAMES
+        if 'clouds' not in self.held:
+            self.cover = cover
+        if 'weather' not in self.held:
+            self.weather = weather
+        if 'fog' not in self.held:
+            self.fog = fog
+        if 'ground fog' not in self.held:
+            self.ground_fog = ground_fog
+        if wind is not None and 'wind' not in self.held:  # Night Ops' wind was always the admin's
+            self.wind = wind
+        if stage != self.stage:
+            self.stage = stage
+            self.host.note('world: %s at %.0f%% of the round: %s, %s%s' % (
+                self.event_name, progress * 100, names[stage], self.said(), self.held_said()))
+
+    def held_said(self):
+        held = [h for h in self.event_held if h in self.held]
+        return '; held by an admin this round: %s' % ', '.join(held) if held else ''
+
+    def night_ops_clock(self):
+        """An event's clock at a round's start: Night Ops' held at 18:30, Daybreak's from sunrise in real time."""
+        self.advance()  # the time so far on the old clock (and the clouds' clocks), so it runs from now
+        if self.daybreak:
+            minutes = self.DAYBREAK_DAY_MINUTES
+            test = os.environ.get('BF_DEV_DAYBREAK_MINUTES', '')  # tests: a faster day
+            if test:
+                try:
+                    minutes = max(1.0, min(1440.0, float(test)))
+                except ValueError:
+                    pass
+            self.day_night, self.hour, self.day_minutes = True, self.DAYBREAK_HOUR, minutes
+        else:
+            self.day_night, self.hour, self.day_minutes = True, self.NIGHT_OPS_HOUR, 0.0
+
+    def night_ops_back(self, who):
+        """An event: everything an admin set this round back on the schedule (the panel's "Back to Night Ops" or
+        "Back to Daybreak"). Daybreak's clock goes back to where the round's own would be: sunrise plus the round's
+        time so far."""
+        if not self.scheduled or not self.held:  # on it already (the panel sends it until an answer says so)
+            return
+        had = self.held_said()
+        self.held = set()
+        self.night_ops_clock()
+        if self.daybreak and self.day_minutes > 0:
+            self.hour = (self.hour + (time.monotonic() - self.round_from) / (self.day_minutes * 60) * 24) % 24
+        self.stage = -1  # says the stage again
+        self.host.note('world: %s put %s back on its schedule (%s)' % (who or 'an admin', self.event_name,
+                                                                         had.lstrip('; ')))
+        self.set_night_ops(self.progress)
+
+    def match(self, round_number, left):
+        """An event server: the round's progress from the server (round number, the share of tickets the team with fewer
+        still has): the clouds, weather and fog of NIGHT_OPS_STAGES or DAYBREAK_STAGES. A new round starts clear, and
+        on Daybreak at sunrise again (TekRantGaming, 26 Nov 2026: back at sunrise every round)."""
+        if not self.scheduled:
+            return
+        progress = max(0.0, min(1.0, 1.0 - left))
+        # tests: the whole build in this many seconds, not the tickets
+        test = os.environ.get('BF_DEV_NIGHT_RAMP', '') or os.environ.get('BF_DEV_EVENT_RAMP', '')
+        if test:
+            try:
+                progress = min(1.0, (time.monotonic() - self.ramp_from) / max(1.0, float(test)))
+            except ValueError:
+                test = ''
+        if round_number != self.round:
+            if self.round is not None:
+                self.host.note('world: %s round %s starts %s%s' % (
+                    self.event_name, round_number, 'at sunrise' if self.daybreak else 'clear',
+                    ', the last round\'s admin settings ended' if self.held else ''))
+            if self.held or self.daybreak:  # an admin's settings last the round: the next is a plain event round
+                self.held = set()
+                self.night_ops_clock()
+            self.round, self.stage = round_number, -1
+            self.ramp_from = self.round_from = time.monotonic()
+            self.set_night_ops(0.0 if not test else progress)
+            return
+        if progress > self.progress + 1e-6:
+            self.set_night_ops(progress)
+
+    def read_match(self, every=0.5):
+        """Night Ops: the round and its tickets from the server's match.txt (match_rules.cpp writes it each second it
+        changes), read at most every `every` seconds: on players' asks too, not only the 5 s heartbeat, so a new round's
+        clear night reaches their games within a second of its load (TekRantGaming, 20 Nov 2026: the last round's storm
+        was seen and heard at the next one's start).
+
+        Every server (24 Nov 2026): the third value is each team's tickets at the round's start (automatic tickets
+        scaled to the server's size, or the owner's count; match_rules.cpp), for the players' HUD ticket bars."""
+        now = time.monotonic()
+        if not self.match_file or now - self.match_read < every:
+            return
+        self.match_read = now
+        try:
+            with open(self.match_file, encoding='utf-8') as f:
+                parts = f.read().split()
+            if len(parts) >= 3:
+                tickets = max(0, min(0xFFFF, int(parts[2])))
+                if tickets != self.tickets:
+                    self.host.note('world: each team starts the round with %d tickets' % tickets)
+                    self.tickets = tickets
+            if len(parts) >= 2:
+                self.match(int(parts[0]), float(parts[1]))
+        except (OSError, ValueError):
+            pass
+
+    def advance(self):
+        now = time.monotonic()
+        dt, self.at = now - self.at, now
+        # Daybreak's sun waits for players (26 Nov 2026, US Central: a round on a server nobody is on lasts hours, so
+        # the first to join found mid morning): while no player is joined (bots never are), its clock stands still,
+        # the round's own too (Back to Daybreak), unless an admin set the clock. (Since its clock is held at 06:10,
+        # only when DAYBREAK_DAY_MINUTES or a test's BF_DEV_DAYBREAK_MINUTES runs it.)
+        paused = (self.daybreak and self.day_minutes > 0 and 'clock' not in self.held and
+                  not self.host.player_names())
+        if paused != self.paused:
+            self.paused = paused
+            self.host.note('world: Daybreak: nobody on the server, the sun waits' if paused else
+                           'world: Daybreak: a player is on, the sun rises from %.2f h' % self.hour)
+        if paused:
+            self.round_from += dt
+        elif self.day_night and self.day_minutes > 0:
+            self.hour = (self.hour + dt / (self.day_minutes * 60) * 24) % 24
+        self.seconds += dt
+        self.evolve += dt * self.rate
+
+    def admin(self, name, key, addr):
+        if self.key and key == self.key:
+            return True
+        return any(p.state == 'joined' and p.player and p.player.name == name and p.addr[0] == addr[0] and
+                   '%08X' % (p.player.xuid & 0xFFFFFFFF) in self.admins for p in self.host.peers.values())
+
+    def ping_list(self):
+        """BF43PNGL: version, a count, then each joined player's ping (u16 ms, 0xFFFF not known: a game from before
+        20 Nov 2026) and name (a length byte and text), for the players' scoreboards (bf/src/world_sync.cpp). Version 2:
+        every joined player is on it, so a scoreboard row that is not is a bot (bots wear no tag since 20 Nov 2026);
+        version 1 when they do not all fit (at most 64, the datagram under 1400 bytes): pings only, nobody taken for a
+        bot. Pings heard in the last 10 s."""
+        now = time.monotonic()
+        for name in [n for n, (_, at) in self.pings.items() if now - at > 10]:
+            del self.pings[name]
+        names = self.host.player_names()
+        names += [n for n in self.pings if n not in names]
+        body, count, complete = b'', 0, True
+        for name in names:
+            raw = name.encode('utf-8')[:64]
+            ms = self.pings[name][0] if name in self.pings else 0xFFFF
+            entry = struct.pack('>HB', min(ms, 0xFFFF), len(raw)) + raw
+            if count >= 64 or len(body) + len(entry) > 1380:
+                complete = False
+                break
+            body += entry
+            count += 1
+        return b'BF43PNGL' + bytes([2 if complete else 1, count]) + body
+
+    def night_ops_set(self, name, data, at):
+        """Night Ops: an admin's change (an ask with flag 1 from `at`): each setting they moved takes their value, and
+        those the build drives are held for the rest of the round (NIGHT_OPS_HELD); the rest stay as they are, so the
+        asker's copy of a value the build moved since its last answer never sets it back."""
+        day_night = data[at] != 0
+        values = [v if math.isfinite(v) else 0.0 for v in struct.unpack_from('>8f', data, at + 1)]
+        hour, minutes = max(0.0, values[0]) % 24, max(0.0, min(1440.0, values[1]))
+        cover, rate, weather, fog, ground_fog, wind = (max(0.0, min(1.0, v)) for v in values[2:8])
+        height = None
+        if len(data) >= at + 37:
+            h = struct.unpack_from('>f', data, at + 33)[0]
+            if math.isfinite(h):
+                height = max(100.0, min(1500.0, h))
+        t = self.TOUCHED
+        if len(data) >= at + 49:
+            touched = struct.unpack_from('>H', data, at + 47)[0]
+        else:  # a game from before the mask: what is not the server's (a step of a slider is 1%, of the time 1 s)
+            touched = ((t['day_night'] if day_night != self.day_night else 0) |
+                       (t['hour'] if abs(hour - self.hour) > 0.5 / 3600 else 0) |
+                       (t['day_minutes'] if abs(minutes - self.day_minutes) > 0.5 else 0))
+            for key, v in (('cover', cover), ('rate', rate), ('weather', weather), ('fog', fog),
+                           ('ground_fog', ground_fog), ('wind', wind)):
+                if abs(v - getattr(self, key)) > 0.005:
+                    touched |= t[key]
+            if height is not None and abs(height - self.cloud_height) > 0.5:
+                touched |= t['cloud_height']
+        before, held_before = self.said(), set(self.held)
+        if touched & (t['day_night'] | t['hour'] | t['day_minutes']):
+            self.day_night, self.hour, self.day_minutes = day_night, hour, minutes
+            self.held.add('clock')
+        for key, v, held in (('cover', cover, 'clouds'), ('weather', weather, 'weather'), ('fog', fog, 'fog'),
+                             ('ground_fog', ground_fog, 'ground fog')):
+            if touched & t[key]:
+                setattr(self, key, v)
+                self.held.add(held)
+        if touched & t['rate']:
+            self.rate = rate
+        if touched & t['wind']:
+            self.wind = wind
+            if 'wind' in self.event_held:  # Daybreak's build drives the wind too
+                self.held.add('wind')
+        if touched & t['cloud_height'] and height is not None:
+            self.cloud_height = height
+        if self.said() != before or self.held != held_before:
+            self.host.note('world: %s set %s%s' % (name or 'an admin', self.said(), self.held_said()))
+
+    def receive(self, data, addr):
+        try:
+            version, flags = data[0], data[1]
+            n = data[2]
+            name = data[3:3 + n].decode('utf-8', 'replace')
+            at = 3 + n
+            k = data[at]
+            key = data[at + 1:at + 1 + k].decode('utf-8', 'replace')
+            at += 1 + k
+            if version != 1 or at > len(data):
+                return
+            self.advance()
+            self.read_match()  # Night Ops and Daybreak: a new round's world at once
+            admin = self.admin(name, key, addr)
+            if flags & 8 and admin:  # Night Ops: "Back to Night Ops" (24 Nov 2026); Daybreak's the same
+                self.night_ops_back(name)
+            if flags & 1 and admin and len(data) >= at + 33 and self.scheduled:
+                self.night_ops_set(name, data, at)
+            elif flags & 1 and admin and len(data) >= at + 33:
+                day_night = data[at] != 0
+                values = [v if math.isfinite(v) else 0.0 for v in struct.unpack_from('>8f', data, at + 1)]
+                before = self.said()
+                self.day_night = day_night
+                self.hour = max(0.0, values[0]) % 24
+                self.day_minutes = max(0.0, min(1440.0, values[1]))
+                (self.cover, self.rate, self.weather, self.fog, self.ground_fog,
+                 self.wind) = (max(0.0, min(1.0, v)) for v in values[2:8])
+                if len(data) >= at + 37:
+                    height = struct.unpack_from('>f', data, at + 33)[0]
+                    if math.isfinite(height):
+                        self.cloud_height = max(100.0, min(1500.0, height))
+                if self.said() != before:
+                    self.host.note('world: %s set %s' % (name or 'an admin', self.said()))
+            # The asker's ping (flag 4, an ask without a change; a game from before 20 Nov 2026 sends none): kept for
+            # a joined player, by the name it plays under.
+            if flags & 4 and not flags & 1 and len(data) >= at + 2:
+                ms = struct.unpack_from('>H', data, at)[0]
+                if self.host.comms.joined_player(name, addr):
+                    if ms != 0xFFFF:
+                        if name not in self.pings:
+                            self.host.note('ping: %s at %d ms' % (name, ms))
+                        self.pings[name] = (ms, time.monotonic())
+                    else:
+                        self.pings.pop(name, None)
+            # Flags 4 and 8 (24 Nov 2026; a game from before reads only 1 and 2): an event server (Night Ops, and since
+            # 26 Nov 2026 Daybreak too), and an admin's settings hold some of its build this round (the panel's "Back
+            # to Night Ops"). Flag 16 (26 Nov 2026): the event is Daybreak (the panel's "Back to Daybreak"; a game from
+            # before says Night Ops).
+            reply = b'BF43WRLR' + bytes([1, (1 if self.day_night else 0) | (2 if admin else 0) |
+                                         (4 if self.scheduled else 0) | (8 if self.held else 0) |
+                                         (16 if self.daybreak else 0)]) + struct.pack(
+                '>8f2d', self.hour, self.day_minutes, self.cover, self.rate, self.weather, self.fog, self.ground_fog,
+                self.wind, self.seconds, self.evolve) + struct.pack('>f', self.cloud_height)
+            # Then as the game's own host sends them (gm_host.cpp, 19 Nov 2026; a game from before reads none): the
+            # dynamic storm (off: this host has none), and the match's rules: each team's tickets at the round's start
+            # (0 the level's own; the HUD's ticket bars, 24 Nov 2026), the time limit in minutes (0: not told) and the
+            # round's seconds left (-1: none shown).
+            reply += struct.pack('>BHHf', 0, self.tickets, 0, -1.0)
+            # Then (26 Nov 2026, as gm_host.cpp sends them since D224 and 21 Nov; a game from before reads none): the
+            # storm's type (0 a thunderstorm: what every game drew from this host before, which sent none), and the
+            # surface fog's depth and sparseness (the games' own defaults, 0.5 m and 0.7, but on Daybreak).
+            reply += struct.pack('>Bff', 0, self.ground_fog_height, self.ground_fog_sparse)
+            self.host.transport.sendto(reply, addr)
+            if flags & 4:
+                self.host.transport.sendto(self.ping_list(), addr)
+        except (IndexError, struct.error):
+            pass
+
+
 class GameHost(asyncio.DatagramProtocol):
     """The host side of one listed game: listens where the backend's EGEG points joiners (I, P)."""
 
@@ -1001,11 +1529,26 @@ class GameHost(asyncio.DatagramProtocol):
         self.players = {}  # ticket -> Player, from the backend's EGAM
         self.peers = {}
         self.comms = Comms(self)
+        self.world = World(self)
         self.transport = None
         self.tick_task = None
         self.error_noted = 0  # monotonic time of the last socket error written to the log
         self.note_window, self.notes_in_window, self.notes_dropped = 0.0, 0, 0
         self.bad_packets, self.refused_peers, self.quiet_noted = 0, 0, 0.0
+        self.bytes_in, self.bytes_out, self.traffic_at = 0, 0, time.monotonic()  # players' traffic (tick)
+        # Moderation (server/bans.py; docs/MODERATION.md): this server's ban list (the manager's, --bans-file), the
+        # players the main backend told it to remove (a network ban: player id -> entry), addresses kept out for a
+        # while after a removal, players being removed (address -> when their link is dropped) and the moderation log.
+        self.bans = None
+        self.server_number = 0
+        self.network_out = {}
+        self.blocked = {}
+        self.removing = {}
+        self.modlog = None
+        self.backend_send = None    # the backend link's send (serve), for the ban list's summary
+        self.bans_salt = os.urandom(8).hex()
+        self.unlet, self.unlet_noted = 0, 0.0
+        self.enforce_at = 0.0
 
     def close(self):
         """This host is replaced by another (a registration that gave other ids): its players' links, their sockets to
@@ -1035,7 +1578,7 @@ class GameHost(asyncio.DatagramProtocol):
             self.log.write(line + '\n')
             self.log.flush()
 
-    def expect(self, ticket, pid, name, xuid, address_b64):
+    def expect(self, ticket, pid, name, xuid, address_b64, account=''):
         import base64
         try:
             address = base64.b64decode(address_b64)[:36]
@@ -1043,8 +1586,126 @@ class GameHost(asyncio.DatagramProtocol):
             address = b''
         if len(address) != 36:
             address = xnaddr('0.0.0.0')
-        self.players[ticket] = Player(int(pid), name, int(xuid or 0), address, ticket)
+        self.players[ticket] = Player(int(pid), name, int(xuid or 0), address, ticket, str(account or '')[:64])
         self.players[ticket].expected_at = time.monotonic()
+
+    # ---- moderation
+    def refused(self, player, addr):
+        """(the entry that keeps this player out, network: bool), or (None, False)."""
+        pid = player.player_id()
+        e = self.network_out.get(pid)
+        if e and e['until'] > time.time():
+            return e, True
+        if self.bans:
+            e = self.bans.match(pid, getattr(player, 'account', ''), addr[0], self.server_number)
+            if e:
+                return e, False
+        return None, False
+
+    def why_text(self, e, network):
+        if network:
+            return 'banned on the Reborn network'
+        import bans
+        return '%s %s (%s, %s): %s' % ('kicked' if e['kind'] == 'kick' else 'banned', e['id'],
+                                         'until ' + bans.when_text(e['until']) if e['until'] else 'permanent',
+                                         'by ' + e.get('by', ''), e.get('reason') or 'no reason given')
+
+    def moderation_event(self, action, player, e, network=False):
+        if self.modlog:
+            self.modlog.write(action=action, server=self.server_number or None, name=player.name,
+                              id=player.player_id(), ban=None if network else e.get('id'),
+                              kind='network' if network else e.get('kind'),
+                              reason=None if network else e.get('reason'), network=True if network else None)
+
+    def block(self, addr, seconds):
+        self.blocked[addr] = time.monotonic() + seconds
+
+    def remove(self, peer, e, network):
+        """A joined player taken off the server: told why (the pop-up in a v0.4.8 game, else the message box), then its
+        link dropped two seconds later and its address kept out for two minutes."""
+        if peer.addr in self.removing:
+            return
+        if network:
+            title, message = e['title'], e['message']
+        else:
+            import bans
+            title, message = bans.refusal(e, False)
+        self.note('%s removed: %s' % (peer.player.name, self.why_text(e, network)))
+        self.moderation_event('removed', peer.player, e, network)
+        self.comms.kicked(peer.player.name, title, message)
+        self.removing[peer.addr] = time.monotonic() + 2.0
+
+    def enforce(self):
+        """Every player on the server checked against the ban list as it is now."""
+        for addr, peer in list(self.peers.items()):
+            if peer.player and addr not in self.removing:
+                e, network = self.refused(peer.player, addr)
+                if e:
+                    self.remove(peer, e, network)
+
+    def muted(self, client):
+        """The mute that holds this comms client (its player on this server, by name and address), or None."""
+        if not self.bans:
+            return None
+        stamp, e = client.mute
+        if stamp != (self.bans.stamp, int(time.time()) // 30):
+            e = None
+            for peer in self.peers.values():
+                if peer.state == 'joined' and peer.player and peer.player.name == client.name and \
+                        peer.addr[0] == client.addr[0]:
+                    e = self.bans.match(peer.player.player_id(), getattr(peer.player, 'account', ''), peer.addr[0],
+                                        self.server_number, kinds=('mute',))
+                    break
+            client.mute = ((self.bans.stamp, int(time.time()) // 30), e)
+        if e and time.monotonic() - client.mute_told > 60:
+            import bans
+            client.mute_told = time.monotonic()
+            self.comms.tell(client.name, bans.mute_text(e), seconds=10)
+        return e
+
+    def bans_summary(self):
+        """This server's bans and kicks for the backend (plasma.py server_bans), so it refuses a banned player before
+        the join with the pop-up: every id, account and address salted and hashed, with the player's title and
+        message."""
+        import bans
+        rows = []
+        now = time.time()
+        for e in (self.bans.active() if self.bans else []):
+            if e['kind'] not in ('ban', 'kick') or (e['servers'] and self.server_number not in e['servers']):
+                continue
+            ips = e['ips'] if not e['ip_until'] or e['ip_until'] > now else []
+            title, message = bans.refusal(e, False, now)
+            rows.append({'id': e['id'], 'ids': [bans.hashed(self.bans_salt, x) for x in e['ids']],
+                         'accounts': [bans.hashed(self.bans_salt, x) for x in e['accounts']],
+                         'ips': [bans.hashed(self.bans_salt, x) for x in ips], 'until': e['until'],
+                         'ip_until': e['ip_until'], 'kind': e['kind'], 'title': title, 'message': message})
+        return {'op': 'server_bans', 'salt': self.bans_salt, 'bans': rows[:2000]}
+
+    def send_bans(self):
+        if self.backend_send:
+            try:
+                self.backend_send(self.bans_summary())
+            except Exception as e:  # never the host's loop for it
+                self.note('moderation: the ban list could not be sent to the backend (%s)' % type(e).__name__)
+
+    def moderation_tick(self, now):
+        for addr, at in list(self.removing.items()):
+            if now >= at:
+                del self.removing[addr]
+                self.block(addr, 120)
+                self.drop(addr)
+        for addr in [a for a, until in self.blocked.items() if until <= now]:
+            del self.blocked[addr]
+        changed = bool(self.bans and self.bans.reload())
+        if changed:
+            self.note('moderation: ban list read (%d entries)' % len(self.bans.entries))
+            self.send_bans()
+        if changed or now - self.enforce_at > 5:
+            self.enforce_at = now
+            self.enforce()
+        if self.unlet and now - self.unlet_noted > 30:
+            self.note('%d game packets from clients not let in were passed over' % self.unlet)
+            self.unlet, self.unlet_noted = 0, now
 
     def connection_made(self, transport):
         self.transport = transport
@@ -1052,6 +1713,8 @@ class GameHost(asyncio.DatagramProtocol):
         if DEV_DELAY or DEV_JITTER:
             self.note('test delay: game datagrams held %.0f ms each way, plus up to %.0f ms' % (
                 DEV_DELAY * 1000, DEV_JITTER * 1000))
+        for ip, (delay, _) in DEV_DELAY_FOR.items():
+            self.note('test delay: %s\'s game datagrams held %.0f ms each way' % (ip, delay * 1000))
         self.tick_task = asyncio.get_running_loop().create_task(self.tick())
 
     def datagram_received(self, data, addr):
@@ -1076,7 +1739,21 @@ class GameHost(asyncio.DatagramProtocol):
         # The server browser's ping and the backend's reachability probe (SERVERS-PLAN.md sections 5 and 6): answered
         # at once, never a game packet (those start with a flag byte, 0 or 1).
         if data[:8] in (PING, PROBE):
-            self.transport.sendto(PONG + data[8:40], addr)
+            delay, jitter = dev_delay(addr[0])
+            if delay or jitter:
+                # Tests (BF_DEV_NET_DELAY): the answer waits as a game datagram's round trip does (held each way), so
+                # the browser's ping and the players' pings show the far server the test pretends to be.
+                asyncio.get_running_loop().call_later(2 * delay + random.random() * jitter,
+                                                      self.transport.sendto, PONG + data[8:40], addr)
+            else:
+                self.transport.sendto(PONG + data[8:40], addr)
+            return
+        self.bytes_in += len(data) + 28
+        if addr in self.blocked:
+            return  # removed by moderation a moment ago (GameHost.remove): nothing answered for a while
+        # The match's clock and weather (World): asked for from a socket of the game's own.
+        if data[:8] == b'BF43WRLD' and len(data) > 12:
+            self.world.receive(data[8:], addr)
             return
         # Voice and text chat: from a client's comms socket, never the game's tunnel address.
         if data[:8] == COMMS and addr not in self.peers and len(data) > 8:
@@ -1119,9 +1796,16 @@ class GameHost(asyncio.DatagramProtocol):
     def player_count(self):
         return sum(1 for p in self.peers.values() if p.state == 'joined')
 
+    def roster(self):
+        """The joined players for the server manager's Moderation page (the status file, on this machine only): name,
+        player id, address and account."""
+        return [{'name': p.player.name, 'id': p.player.player_id(), 'ip': p.addr[0],
+                 'account': getattr(p.player, 'account', ''), 'since': int(getattr(p, 'joined_at', 0))}
+                for p in self.peers.values() if p.state == 'joined' and p.player][:MOST_PLAYERS]
+
     def player_names(self):
         """The joined players' names, for the backend's Join Match With Friends (our main menu)."""
-        return [p.player.name for p in self.peers.values() if p.state == 'joined' and p.player][:64]
+        return [p.player.name for p in self.peers.values() if p.state == 'joined' and p.player][:MOST_PLAYERS]
 
     async def tick(self):
         pruned_at = time.monotonic()
@@ -1137,12 +1821,186 @@ class GameHost(asyncio.DatagramProtocol):
                                                             ' (it never linked; its first packet %s)' % (peer.first or b'').hex()))
                     self.drop(addr)
             self.comms.tick(now)
+            # The players' traffic each minute (server sizes, docs/SERVER-SIZES.md: what a bigger server costs).
+            if now - self.traffic_at >= 60:
+                players = self.player_count()
+                seconds = now - self.traffic_at
+                if players and (self.bytes_out or self.bytes_in):
+                    self.note('traffic over %d s: %d players, to them %.1f kB/s each (%.0f kB/s in all), from them '
+                              '%.1f kB/s each' % (seconds, players, self.bytes_out / seconds / 1000 / players,
+                                                  self.bytes_out / seconds / 1000, self.bytes_in / seconds / 1000 / players))
+                self.traffic_at, self.bytes_out, self.bytes_in = now, 0, 0
+            try:
+                self.moderation_tick(now)
+            except Exception as e:  # never the host's own loop for it
+                if now - getattr(self, 'moderation_error_at', 0) > 60:
+                    self.moderation_error_at = now
+                    self.note('moderation: %s: %s' % (type(e).__name__, e))
             # A join the backend announced whose client never linked (its game failed to connect): forgotten after
             # 5 minutes, so a server that runs for weeks keeps no list of them.
             if now - pruned_at > 10:
                 pruned_at = now
                 for ticket in [t for t, p in self.players.items() if now - getattr(p, 'expected_at', now) > 300]:
                     del self.players[ticket]
+
+
+class BotShare:
+    """The shared bot data on an official server (botdata.py; TekRantGaming, 26 Nov 2026: the official servers share
+    live, community servers get the set with each release). The game (bf/src/bots.cpp, --bf_bots_share) writes what its
+    bots learned since the last hand-off into <user>/bots/outbox/; this sends each file to the main backend over the
+    registry link (zlib, base64, in parts of CHUNK characters) and deletes it once the backend has it. A new merged set
+    from the backend is checked (the official machine's signature, every file's checksum) and written to
+    <user>/bots/network/, version.txt last: the bots use it from their next level, no restart."""
+
+    CHUNK = 48000      # base64 characters in a line (plasma.py BotData: a reader takes lines up to 64 KiB)
+    BIGGEST = 64 << 20
+
+    def __init__(self, folder, keys, note):
+        self.folder, self.keys, self.note = folder, keys, note
+        self.acks = {}         # hand-off id -> the future its acknowledgement resolves
+        self.incoming = None   # the set coming in: {'version', 'manifest', 'm', 'got': {name: {i: text}}, 'files'}
+
+    def have(self):
+        try:
+            with open(os.path.join(self.folder, 'network', 'version.txt'), encoding='utf-8') as f:
+                word, v = f.read().split()[:2]
+            return int(v) if word == 'version' else 0
+        except (OSError, ValueError):
+            return 0
+
+    def outbox(self):
+        import botdata
+        d = os.path.join(self.folder, 'outbox')
+        try:
+            names = [n for n in os.listdir(d) if botdata.NAME_RE.match(n)]
+        except OSError:
+            return []
+        return sorted(names, key=lambda n: int(n.split('.')[-2]))  # oldest first
+
+    async def run(self, send, writer):
+        while True:
+            await asyncio.sleep(20)
+            for name in self.outbox():
+                if not await self.upload(name, send, writer):
+                    break  # no answer: the rest waits for the next look
+
+    async def upload(self, name, send, writer):
+        """One hand-off to the backend: True when it has been answered (taken or refused), False when not."""
+        import base64
+        import zlib
+        path = os.path.join(self.folder, 'outbox', name)
+        try:
+            with open(path, 'rb') as f:
+                data = f.read(self.BIGGEST + 1)
+        except OSError:
+            return True
+        if len(data) > self.BIGGEST:
+            self.refused(path, name, 'too big')
+            return True
+        b64 = base64.b64encode(zlib.compress(data, 6)).decode()
+        ident = os.urandom(8).hex()
+        parts = max(1, -(-len(b64) // self.CHUNK))
+        future = asyncio.get_running_loop().create_future()
+        self.acks[ident] = future
+        try:
+            for i in range(parts):
+                send({'op': 'bot_data_put', 'id': ident, 'name': name, 'part': i, 'parts': parts,
+                      'data': b64[i * self.CHUNK:(i + 1) * self.CHUNK]})
+                await writer.drain()
+            m = await asyncio.wait_for(future, 120)
+        except (asyncio.TimeoutError, OSError):
+            return False
+        finally:
+            self.acks.pop(ident, None)
+        if m.get('ok'):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            self.note('bot data: %s handed to the shared set (%d KB)' % (name, len(data) // 1024))
+        else:
+            self.refused(path, name, str(m.get('why', ''))[:200])
+        return True
+
+    def refused(self, path, name, why):
+        """A hand-off the backend will not take: kept aside (the last 50), never sent again."""
+        aside = os.path.join(self.folder, 'outbox', 'refused')
+        os.makedirs(aside, exist_ok=True)
+        try:
+            os.replace(path, os.path.join(aside, name))
+            for old in sorted(os.listdir(aside))[:-50]:
+                os.remove(os.path.join(aside, old))
+        except OSError:
+            pass
+        self.note('bot data: %s refused by the backend (%s)' % (name, why))
+
+    def ack(self, m):
+        future = self.acks.get(str(m.get('id', '')))
+        if future and not future.done():
+            future.set_result(m)
+
+    def receive(self, m):
+        """A part of a new set from the backend: checked, gathered, and written when whole."""
+        import base64
+        import zlib
+        import botdata
+        if m.get('op') == 'bot_data':
+            why, man = botdata.check_manifest(str(m.get('manifest', '')), str(m.get('sig', '')), self.keys)
+            if not why and man['version'] != m.get('version'):
+                why = 'a version that is not its manifest\'s'
+            if why:
+                self.incoming = None
+                self.note('bot data: a set from the backend refused (%s)' % why)
+                return
+            self.incoming = {'version': man['version'], 'manifest': m['manifest'], 'sig': m['sig'], 'm': man,
+                             'got': {}, 'files': {}}
+            return
+        s = self.incoming
+        if not s or m.get('version') != s['version']:
+            return
+        name = str(m.get('name', ''))
+        try:
+            part, parts = int(m.get('part')), int(m.get('parts'))
+        except (TypeError, ValueError):
+            return
+        if name not in s['m']['files'] or not 0 <= part < parts <= 2000 or not isinstance(m.get('data'), str):
+            return
+        got = s['got'].setdefault(name, {})
+        got[part] = m['data']
+        if len(got) < parts:
+            return
+        try:
+            z = zlib.decompressobj()
+            data = z.decompress(base64.b64decode(''.join(got[i] for i in range(parts)), validate=True), self.BIGGEST)
+        except (ValueError, zlib.error, KeyError):
+            data = b''
+        why = botdata.check_file(s['m'], name, data)
+        if why:
+            self.incoming = None
+            self.note('bot data: set %d refused: %s %s' % (s['version'], name, why))
+            return
+        s['files'][name] = data
+        del s['got'][name]
+        if len(s['files']) == len(s['m']['files']):
+            self.install(s)
+            self.incoming = None
+
+    def install(self, s):
+        import botdata
+        d = os.path.join(self.folder, 'network')
+        os.makedirs(d, exist_ok=True)
+        for n in os.listdir(d):  # a map the new set no longer has
+            if n not in s['files'] and n not in ('manifest.json', 'manifest.sig') and not n.endswith('.new'):
+                try:
+                    os.remove(os.path.join(d, n))
+                except OSError:
+                    pass
+        for n in sorted(s['files'], key=lambda n: n == 'version.txt'):  # version.txt last: the game looks at it
+            botdata.write_whole(os.path.join(d, n), s['files'][n])
+        botdata.write_whole(os.path.join(d, 'manifest.json'), s['manifest'])
+        botdata.write_whole(os.path.join(d, 'manifest.sig'), s['sig'])
+        self.note('bot data: set %d installed (%s): the bots use it from their next level' % (
+            s['version'], ', '.join('%s %d KB' % (n, len(b) // 1024) for n, b in sorted(s['files'].items()))))
 
 
 async def start(address, server, user_id, pid, name, log, public=None, sock=None):
@@ -1172,6 +2030,9 @@ async def serve(args):
     official_key = read_key(args.official_key_file) if args.official_key_file else None
     network = None  # NetworkCheck, made at the first registration
     host = None  # the GameHost, kept through a lost backend link (its players stay)
+    # The game's bots folder (bots.cpp: <user data>/bots), beside the rotation's current_map.txt unless given.
+    bot_folder = args.bot_data_dir or (os.path.join(os.path.dirname(args.map_file), 'bots') if args.map_file else '')
+    bot_share = None
     host_seed = None
     if args.host_key_file:
         try:
@@ -1200,7 +2061,7 @@ async def serve(args):
         reg = {'op': 'register', 'name': args.name, 'port': public[1], 'map': args.map,
                'max_players': args.max_players, 'mode': 'classic', 'description': args.description[:200],
                'maps': [m for m in args.maps.split(',') if m], 'listed': not args.unlisted, 'night': args.night,
-               'region': args.region, 'tick': args.tick}
+               'daybreak': args.daybreak and not args.night, 'region': args.region, 'tick': args.tick}
         # A host on one address of its own (tests: 127.0.0.2) says where; one on every address (the packages: 0.0.0.0)
         # is found by the backend.
         if args.public or listen[0] not in ('0.0.0.0', '::'):
@@ -1223,7 +2084,7 @@ async def serve(args):
         # replaced as before.
         if host is not None:
             reg['resume'] = {'uid': host.user_id, 'pid': host.pid,
-                             'pids': sorted({p.player.pid for p in host.peers.values() if p.player})[:64]}
+                             'pids': sorted({p.player.pid for p in host.peers.values() if p.player})[:MOST_PLAYERS]}
         # Listening before the backend is told: its reachability probe comes at once (a kept host listens already).
         sock = None
         try:
@@ -1276,6 +2137,15 @@ async def serve(args):
                 if not network.keys:
                     host.note('network broadcasts: no official broadcast key known, none will be shown')
             host.comms.balance_file = args.balance_file
+            host.world.configure(args)
+            host.server_number = args.server_number
+            if args.bans_file:
+                import bans
+                host.bans = bans.BanList(args.bans_file, host.note)
+                host.note('moderation: %d entries in the ban list' % len(host.bans.entries))
+            if args.moderation_log:
+                import bans
+                host.modlog = bans.ModerationLog(args.moderation_log)
         host.note('registered with the backend as game %s%s%s' % (
             reply['gid'], ' (official)' if reply.get('official') else '', '' if reply.get('listed', True) else
             ' (not listed: Direct connect only)'))
@@ -1286,6 +2156,16 @@ async def serve(args):
                  'listed': reply.get('listed', True), 'address': reply.get('address', ''), 'reachable': None,
                  'hidden': str(reply.get('hidden', ''))}
         write_status(args, state)
+        host.backend_send = send
+        host.send_bans()  # the backend refuses this server's banned players before their join, with the pop-up
+        # The shared bot data (BotShare): an official server only, with its game's bots folder.
+        share_task = None
+        if state['official'] and official_key and bot_folder:
+            if bot_share is None:
+                bot_share = BotShare(bot_folder, network.keys, host.note)
+            bot_share.note = host.note
+            send({'op': 'bot_data_have', 'version': bot_share.have()})
+            share_task = asyncio.get_running_loop().create_task(bot_share.run(send, writer))
 
         reported = [args.map]
 
@@ -1328,7 +2208,7 @@ async def serve(args):
                 except ValueError:
                     continue
                 if isinstance(m, dict) and m.get('op') == 'player_stats' and isinstance(m.get('rows'), list):
-                    out.append({'op': 'player_stats', 'rows': m['rows'][:64]})
+                    out.append({'op': 'player_stats', 'rows': m['rows'][:MOST_PLAYERS]})
             return out
 
         async def beat_loop():
@@ -1346,12 +2226,15 @@ async def serve(args):
                     reported[0] = current
                 rotation = [m for m in args.maps.split(',') if m]
                 upcoming = rotation[(rotation.index(current) + 1) % len(rotation)] if current in rotation else ''
-                send({'op': 'status', 'players': host.player_count(), 'map': current, 'next_map': upcoming,
-                      'names': host.player_names()})
-                write_status(args, dict(state, players=host.player_count(), map=current, next_map=upcoming,
-                                        names=host.player_names()))
+                bots = bots_playing(args)
+                send({'op': 'status', 'players': host.player_count(), 'bots': bots, 'map': current,
+                      'next_map': upcoming, 'names': host.player_names()})
+                write_status(args, dict(state, players=host.player_count(), bots=bots, map=current, next_map=upcoming,
+                                        names=host.player_names(), roster=host.roster(),
+                                        pings={n: v[0] for n, v in host.world.pings.items()}))  # the dashboard
                 for m in stats_lines():  # each player's stats since the last beat (player_stats.py)
                     send(m)
+                host.world.read_match(every=0)  # the round's progress (match_rules.cpp): Night Ops' storm builds with it
                 await writer.drain()
                 await asyncio.sleep(5)
 
@@ -1375,11 +2258,36 @@ async def serve(args):
                         else 'players cannot reach this server', m.get('address', '?')))
                 elif m.get('op') == 'join':
                     try:
-                        host.expect(m['ticket'], m['pid'], m['name'], m['xuid'], m['xnaddr'])
+                        host.expect(m['ticket'], m['pid'], m['name'], m['xuid'], m['xnaddr'], m.get('account', ''))
                     except (KeyError, TypeError, ValueError) as e:  # never the host's end: the message is passed over
                         host.note('backend: a join notice that cannot be read (%s)' % type(e).__name__)
                         continue
                     host.note('backend: %s joins (PID %s)' % (m['name'], m['pid']))
+                elif m.get('op') == 'remove':
+                    # The main backend: a player on this server was banned on the Reborn network (plasma.py
+                    # network bans). Only a player id: no address leaves the backend.
+                    import bans
+                    pid = bans.clean_id(m.get('player_id'))
+                    if pid:
+                        host.network_out[pid] = {'kind': 'network', 'title': str(m.get('title', ''))[:60],
+                                                 'message': str(m.get('message', ''))[:400],
+                                                 'until': time.time() + 600}
+                        host.enforce()
+                elif m.get('op') == 'refused_join':
+                    # The main backend refused a player's join here: said in this server's moderation log (for a
+                    # network ban only that it was the network's).
+                    if host.modlog:
+                        import bans
+                        network = m.get('network') is True
+                        host.modlog.write(action='refused', server=host.server_number or None,
+                                          name=bans.clean_name(m.get('name')), id=bans.clean_id(m.get('player_id')),
+                                          kind='network' if network else str(m.get('kind', ''))[:8],
+                                          ban=None if network else str(m.get('ban', ''))[:16],
+                                          network=True if network else None, where='backend')
+                elif m.get('op') == 'bot_data_ack' and bot_share and share_task:
+                    bot_share.ack(m)
+                elif m.get('op') in ('bot_data', 'bot_data_file') and bot_share and share_task:
+                    bot_share.receive(m)
                 elif m.get('op') == 'network_broadcast':
                     # A broadcast from the official machine, through the main backend (sign_network): checked here
                     # again, whoever passed it on.
@@ -1396,8 +2304,28 @@ async def serve(args):
         else:
             host.note('backend link lost (closed by the backend)')
         beat.cancel()
+        if share_task:
+            share_task.cancel()
+        host.backend_send = None
         writer.close()
         await asyncio.sleep(2)  # the host keeps its players; the next registration asks to keep its ids
+
+
+def bots_playing(args):
+    """The bots on the server now (bots.cpp writes <user data>/bots.txt, "<count>", on a change and every 10 s), for
+    the server browser's PLAYERS column: "(4) 0 / 24" (TekRantGaming, 21 Nov 2026). The file is in the game's user
+    data folder, beside the map rotation's current_map.txt (--map-file), unless --bots-file says where. 0 when there
+    is none, or it is older than 30 s (a server that stopped, or a build from before 21 Nov 2026)."""
+    path = args.bots_file or (os.path.join(os.path.dirname(args.map_file), 'bots.txt') if args.map_file else '')
+    if not path:
+        return 0
+    try:
+        if time.time() - os.path.getmtime(path) > 30:
+            return 0
+        with open(path, encoding='utf-8') as f:
+            return max(0, min(MOST_PLAYERS, int(f.read().strip() or 0)))
+    except (OSError, ValueError):
+        return 0
 
 
 def write_status(args, state):
@@ -1427,15 +2355,22 @@ def main():
     ap.add_argument('--game-server', default='127.0.0.1:1003', help="the dedicated server's game socket (UDP)")
     ap.add_argument('--name', default='BF1943 server')
     ap.add_argument('--map', default='Wake Island')
-    ap.add_argument('--max-players', type=int, default=24)
+    ap.add_argument('--max-players', type=int, default=32, help='the size of the server: 2 to 24 (24: the original), 32 (the default) or 64')
     # Movement and aiming: every server plays the game's own since v0.4.0 (Modern was retired; TekRantGaming, 13 Nov
     # 2026). The option is still accepted, so an older start script does no harm, and is not used: the server is
     # registered as classic, which is what the game plays.
     ap.add_argument('--mode', choices=['classic', 'modern'], default='classic',
                     help='not used since v0.4.0: every server plays the original movement and aiming')
-    # Night Ops (TekRantGaming, 11 Nov 2026): the maps at night, shown in the server list; players' games draw it so
-    # (NativeXRenderer D162) while they play there.
-    ap.add_argument('--night', action='store_true', help='a night server: players see its maps at night')
+    # Night Ops (TekRantGaming, 11 Nov 2026): the maps at night, shown in the server list. Since 16 Nov 2026 the night
+    # is the server's world: the day and night cycle held at one hour for the whole match (World.NIGHT_OPS_HOUR, 18:30
+    # since 25 Nov 2026, 19:00 from 20 Nov), drawn by players' games with the levels' lamps lit (NativeXRenderer D175); --day-night, --time
+    # and --day-minutes are then not used. Its storm builds with each round's tickets (World.match, --match-file).
+    ap.add_argument('--night', action='store_true',
+                    help='a night server (Night Ops): its world held at 18:30, the storm building with the tickets')
+    # Daybreak (TekRantGaming, 26 Nov 2026): the second event, as Night Ops: the world held at 06:10, just after sunrise,
+    # the storm building with the tickets (World.DAYBREAK_*). Listed for the browser's DAYBREAK chip; --night wins if both are given.
+    ap.add_argument('--daybreak', action='store_true',
+                    help='a Daybreak server: its world held at 06:10, the storm building with the tickets')
     # Where the server is (TekRantGaming, 13 Nov 2026: the browser shows the region with its flag): one of the game's
     # region codes (bf/src/regions.h, the manager's drop down). And its tick rate, for the browser: the game's own
     # 30 Hz today.
@@ -1447,15 +2382,43 @@ def main():
     ap.add_argument('--balance-file', default='',
                     help="the dedicated server's team balance events (its --bf_balance_events): players are told of "
                          'moves and refused team changes')
+    # The server's world (World): its clock and weather, the same for every player; admins change it in game (F9).
+    ap.add_argument('--day-night', action='store_true', help='day and night: the light follows the server\'s clock')
+    ap.add_argument('--time', type=float, default=16.0, help='the time of day the server starts at, 0 to 24')
+    ap.add_argument('--day-minutes', type=float, default=0.0,
+                    help='minutes a whole day and night take; 0: the time stands still')
+    ap.add_argument('--cloud-cover', type=float, default=0.35, help='the cloud cover, 0 to 1')
+    ap.add_argument('--cloud-rate', type=float, default=0.33, help='how fast the clouds form and change, 0 to 1')
+    ap.add_argument('--weather', type=float, default=0.0,
+                    help='the weather, 0 fair to 1 a storm (overcast, mist, far rain shafts, lightning)')
+    ap.add_argument('--fog', type=float, default=0.0, help='the distance fog, 0 to 1')
+    ap.add_argument('--ground-fog', type=float, default=0.0, help='the ground fog, 0 to 1')
+    ap.add_argument('--wind', type=float, default=0.3, help='the wind, 0 calm to 1 a gale: how far the rain leans')
+    ap.add_argument('--cloud-height', type=float, default=450.0,
+                    help='the cloud base over the sea, metres (100 to 1500): low, the planes fly through the clouds')
+    ap.add_argument('--admins', default='',
+                    help="player IDs (as the game shows them, separated by commas) who may change the world in game")
+    ap.add_argument('--admin-key', default='', help='a key that makes the game showing it an admin; empty: none')
     ap.add_argument('--region', default='', help="the server's region code, e.g. gb, de, us-east (shown in the browser)")
     ap.add_argument('--tick', type=int, default=60, help="the server's tick rate in Hz (shown in the browser; 60 by default since 14 Nov 2026)")
     ap.add_argument('--map-file', default='', help="the server's current_map.txt (its map rotation)")
+    ap.add_argument('--bot-data-dir', default='',
+                    help="the game's bots folder (bots.cpp: its outbox and the shared set); empty: beside --map-file")
+    ap.add_argument('--bots-file', default='',
+                    help="the server's bots.txt (bots.cpp: its bots now, for the browser); empty: beside --map-file")
+    ap.add_argument('--match-file', default='',
+                    help="the server's match.txt (match_rules.cpp): the round and its tickets left, for Night Ops' storm")
     ap.add_argument('--maps', default='', help='the rotation, map titles separated by commas (for the next map)')
     ap.add_argument('--description', default='', help='shown in the server browser (200 characters)')
     ap.add_argument('--unlisted', action='store_true', help='registered but not listed: Direct connect only')
     ap.add_argument('--official-key-file', default='', help='official.key: the server shows as official')
     ap.add_argument('--host-key-file', default='', help="this host's key (the manager makes it in the data folder)")
     ap.add_argument('--status-file', default='', help="this server's state for the package's window (JSON)")
+    # Moderation (server/bans.py, docs/MODERATION.md): the manager's ban list and moderation log, and which of its
+    # servers this is (a ban can hold on some of them only).
+    ap.add_argument('--bans-file', default='', help="the server manager's ban list (bans.json): read again when it changes")
+    ap.add_argument('--moderation-log', default='', help="the server manager's moderation log (moderation_log.jsonl)")
+    ap.add_argument('--server-number', type=int, default=0, help="this server's number in the manager (1 and on)")
     ap.add_argument('--log', default='')
     asyncio.run(serve(ap.parse_args()))
 

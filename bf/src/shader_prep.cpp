@@ -54,7 +54,6 @@
 #include "../third_party/miniz/miniz.h"
 #include "capture_points.h"
 #include "dbx_tree.h"
-#include "night_ops.h"
 #include "theme_chime.h"
 
 #include <map>
@@ -511,6 +510,21 @@ bool ReadFbrbEntries(const fs::path& archive, const std::vector<std::string>& na
     }
     out.emplace_back(a.data.begin() + it->second.first, a.data.begin() + it->second.first + it->second.second);
   }
+  return true;
+}
+
+// Every entry whose name starts with `prefix` and ends with `suffix`, at one read of the archive (sharp_text.cpp: the
+// game's font atlases). False when the archive could not be read.
+bool ReadFbrbMatching(const fs::path& archive, const std::string& prefix, const std::string& suffix,
+                      std::map<std::string, std::vector<uint8_t>>& out) {
+  out.clear();
+  Archive a;
+  if (!LoadArchive(archive, a)) return false;
+  for (const auto& [name, at] : a.entries)
+    if (name.size() >= prefix.size() + suffix.size() && name.compare(0, prefix.size(), prefix) == 0 &&
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0 &&
+        size_t(at.first) + at.second <= a.data.size())
+      out[name].assign(a.data.begin() + at.first, a.data.begin() + at.first + at.second);
   return true;
 }
 
@@ -1695,8 +1709,9 @@ void NoteGameFile(const char* path) {
   // D163: no lamps until the level's own are read (nor on a server).
   if (grass) native_x_renderer::NightLamps(nullptr, 0);
   std::thread([root, folder, grass] {
-    // D163: the level's lamps for the night, from its main partition (levels/<map>.dbx in reduced-level-00.fbrb).
-    if (grass && kNightOps) {  // night_ops.h
+    // D163: the level's lamps for the night, from its main partition (levels/<map>.dbx in reduced-level-00.fbrb). In
+    // every build since 16 Nov 2026: they light the day and night cycle's nights (NativeXRenderer D175).
+    if (grass) {
       const fs::path level_archive = root / "dist" / "xenon" / "levels" / folder / "reduced-level-00.fbrb";
       Archive l;
       bool found = false;

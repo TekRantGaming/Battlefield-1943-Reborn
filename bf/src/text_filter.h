@@ -226,7 +226,8 @@ inline constexpr int kTagMin = 2, kTagMax = 4;
 enum class TagProblem { kNone, kLength, kChars, kReserved, kProfanity, kWithName };
 namespace detail {
 // The developers' tag and staff lookalikes: found inside any reading ("dev": Devs, D3V, xDevx, DEVZ) or as a whole one.
-inline constexpr std::string_view kTagReservedAnywhere[] = {"dev", "adm"};
+// And the bots' (bots.cpp wears "[BOT]"; TekRantGaming, 20 Nov 2026): "bot" anywhere (BOTS, B0T, XBOT).
+inline constexpr std::string_view kTagReservedAnywhere[] = {"dev", "adm", "bot"};
 inline constexpr std::string_view kTagReservedWhole[] = {"dv",   "dvs",  "dvz", "mod", "mods", "modz",
                                                          "staf", "stff", "ea",  "dice"};
 // Short profanity and slurs a 4 letter tag can hold, on top of the name rules: inside any reading, or a whole one.
@@ -329,7 +330,7 @@ inline const char* TagProblemText(TagProblem p) {
   switch (p) {
     case TagProblem::kLength:
     case TagProblem::kChars: return "A clan tag needs 2 to 4 letters or numbers, or leave it blank.";
-    case TagProblem::kReserved: return "That tag is kept for the game's developers. Choose another one.";
+    case TagProblem::kReserved: return "That tag is kept for the game's developers and bots. Choose another one.";
     case TagProblem::kProfanity: return "That clan tag is not allowed. Choose another one.";
     case TagProblem::kWithName: return "That clan tag and your name together are not allowed.";
     default: return "";

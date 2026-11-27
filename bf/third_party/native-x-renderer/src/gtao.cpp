@@ -56,6 +56,11 @@ REXCVAR_DEFINE_DOUBLE(native_ao_fade, 0.0, "NativeXRenderer",
                       "GTAO's occlusion fades out linearly to this many near-plane distances (0: none)");
 
 namespace native_x_renderer {
+namespace renderer {
+void SkySectionBegin(int part);  // renderer.cpp: GPU sections
+void SkySectionEnd(int part);
+bool AoDiscardOldNow();  // renderer.cpp: BF_AO_DISCARD_AB
+}  // namespace renderer
 
 using namespace Diligent;
 
@@ -379,8 +384,9 @@ bool Gtao::CreateComputePass(Pass& pass, const char* name, const std::string& de
   return pass.srb != nullptr;
 }
 
-Gtao::Pass* Gtao::ApplyPass(TEXTURE_FORMAT format, bool show) {
-  auto key = std::make_pair(format, show);
+Gtao::Pass* Gtao::ApplyPass(TEXTURE_FORMAT format, bool show, uint32_t samples) {
+  // samples: the colour target's (host MSAA, targets.h: the factor goes into every sample of a pixel).
+  auto key = std::make_pair(format, uint32_t(show ? 1 : 0) | std::max(samples, 1u) << 1);
   auto it = apply_passes_.find(key);
   if (it != apply_passes_.end()) {
     Pass& pass = it->second;
@@ -394,6 +400,7 @@ Gtao::Pass* Gtao::ApplyPass(TEXTURE_FORMAT format, bool show) {
   info.PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
   info.GraphicsPipeline.NumRenderTargets = 1;
   info.GraphicsPipeline.RTVFormats[0] = format;
+  info.GraphicsPipeline.SmplDesc.Count = Uint8(std::max(samples, 1u));
   info.GraphicsPipeline.DSVFormat = TEX_FORMAT_UNKNOWN;
   info.GraphicsPipeline.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
   info.GraphicsPipeline.RasterizerDesc.CullMode = CULL_MODE_NONE;
@@ -703,6 +710,8 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
   k.params[2] = sky_sign * (zo + zs * (1.0f - 1e-6f));
   k.params[3] = float(s.mode);
   k.fade[0] = s.fade > 0.0f ? s.fade * near_plane : 0.0f;
+  const bool fade_old = renderer::AoDiscardOldNow();
+  k.fade[1] = fade_old ? 1.0f : 0.0f;  // 1: the apply blends every pixel (BF_AO_DISCARD_AB)
   k.depth_range[0] = zs;
   k.depth_range[1] = zo;
   const Smoothing smoothing = SmoothingFor(s.normal_smoothing);
@@ -769,6 +778,7 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
   ITextureView* output_uav = output_->GetDefaultView(TEXTURE_VIEW_UNORDERED_ACCESS);
   ITextureView* spatial_uav = temporal ? spatial_->GetDefaultView(TEXTURE_VIEW_UNORDERED_ACCESS) : output_uav;
 
+  renderer::SkySectionBegin(4);  // the GPU time of the depth and normals (renderer.cpp's sections)
   bool ok =
       Dispatch(context, prepare_, {{"g_srcSceneDepth", depth_srv}, {"g_outRawDepth", raw_uav}}, pw / 8, ph / 8) &&
       Dispatch(context, prefilter_,
@@ -780,6 +790,7 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
                 {"g_outWorkingDepthMIP4", depth_mip_uav_[4].RawPtr()}},
                pw / 16, ph / 16) &&
       Dispatch(context, normals_, {{"g_srcRawDepth", raw_srv}, {"g_outNormalmap", normals_uav}}, pw / 8, ph / 8);
+  renderer::SkySectionEnd(4);
   if (ok && smoothing.max_pixels_1080 > 0.0f) {
     // In place through term b, free until the first denoise writes it.
     ok = Dispatch(context, smooth_h_,
@@ -794,6 +805,7 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
                   pw / 8, ph / 8);
   }
   Pass& main_pass = s.samples <= 1 ? main_low_ : s.samples == 2 ? main_medium_ : main_high_;
+  renderer::SkySectionBegin(7);
   ok = ok &&
        Dispatch(context, main_pass,
                 {{"g_srcWorkingDepth", depth_mips_srv},
@@ -813,6 +825,8 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
                  {"g_srcViewDepth", depth_mip0_srv},
                  {"g_outOcclusion", spatial_uav}},
                 (in.width + 7) / 8, (in.height + 7) / 8);
+  renderer::SkySectionEnd(7);
+  renderer::SkySectionBegin(10);
   if (ok && temporal) {
     ok = Dispatch(context, temporal_,
                   {{"g_srcSpatialAO", spatial_->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE)},
@@ -837,8 +851,12 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
   if (!ok || !temporal) history_frame_ = UINT64_MAX;
 
   // Into the scene's colour: one triangle over the picture.
-  Pass* apply = ok ? ApplyPass(in.color->GetDesc().Format, s.mode >= 2) : nullptr;
+  Pass* apply = ok ? ApplyPass(in.color->GetDesc().Format, s.mode >= 2, in.color->GetTexture()->GetDesc().SampleCount) : nullptr;
   if (apply) {
+    // BF_AO_DISCARD_CHECK=1 (tests): every 60th apply drawn this way and the old way (every pixel blended) on the
+    // same picture, both read back and compared (the colour kept before its target is bound).
+    ITexture* color_texture = in.color->GetTexture();
+    const bool check = !fade_old && check_.Begin(device_, context, color_texture);
     ITextureView* color = in.color;
     context->SetRenderTargets(1, &color, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     apply->srb->GetVariableByName(SHADER_TYPE_PIXEL, "g_srcOcclusion")->Set(output_srv);
@@ -857,9 +875,25 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
     DrawAttribs draw;
     draw.NumVertices = 3;
     context->Draw(draw);
+    if (check) {
+      check_.TakeFirst(context, color_texture);
+      k.fade[1] = 1.0f;
+      void* data = nullptr;
+      context->MapBuffer(constants_, MAP_WRITE, MAP_FLAG_DISCARD, data);
+      std::memcpy(data, &k, sizeof(k));
+      context->UnmapBuffer(constants_, MAP_WRITE);
+      context->SetRenderTargets(1, &color, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->SetViewports(1, &viewport, 0, 0);
+      context->SetScissorRects(1, &scissor, 0, 0);
+      context->SetPipelineState(apply->pso);
+      context->CommitShaderResources(apply->srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->Draw(draw);
+      check_.Finish(context, color_texture, "ambient occlusion: apply");
+    }
     // The renderer binds its own targets again (DrawPath::TargetsChanged).
     context->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
   }
+  renderer::SkySectionEnd(10);
   TimerEnd(context);
   if (!apply) return refuse("a pass could not be bound or the colour format has no pipeline");
 

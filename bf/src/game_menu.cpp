@@ -11,6 +11,7 @@
 // keyboard (arrows, Enter, Esc) and the mouse.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cctype>
@@ -36,6 +37,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <rex/cvar.h>
+#include <rex/input/mnk/mnk_input_driver.h>  // the controller page: the keyboard's share of the pad (GameMenuPadRaw)
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>  // the achievements (AchievementsPage)
 #include <rex/ui/imgui_dialog.h>
@@ -47,22 +49,27 @@
 #include <native_x_renderer/native_x_renderer.h>
 
 #include "account_key.h"
+#include "audio_devices.h"
 #include "capture_points.h"
 #include "clan_tags.h"
 #include "display_modes.h"
+#include "player_limits.h"
 #include "game_install.h"
 #include "achievement_toast.h"  // the achievement popup, the pictures (game_menu_progress.inc)
 #include "reborn_achievements.h"  // Reborn's own achievements (NoteRebornAchievements)
 #include "launcher_kit.h"
 #include "private_match.h"
 #include "regions.h"
+#include "vehicle_binds.h"  // each vehicle kind's keys (game_menu_controls.inc)
 #include "scope_pip.h"
 #include "server_list.h"
 #include "projects_art.h"
 #include "steam_shortcut.h"
 #include "comms.h"
 #include "voice_mute.h"  // the scoreboard's voice mute
+#include "scoreboard_ping.h"  // the scoreboards' ping (bars and ms), and the far server warning's limit
 #include "discord_presence.h"
+#include "world_sync.h"
 #include "player_name.h"
 #include "text_filter.h"
 #include "changelog.h"
@@ -131,6 +138,7 @@ REXCVAR_DEFINE_STRING(bf_upscaler_mode, "quality", "BF1943",
 REXCVAR_DECLARE(bool, bf_unlock_fps);  // frame_rate.cpp
 REXCVAR_DECLARE(bool, bf_flag_letters);  // capture_points.cpp: letters in the capture point flags (Enhancements)
 REXCVAR_DECLARE(bool, server);         // server_mode.cpp: a dedicated server has no menu
+REXCVAR_DECLARE(bool, bf_scoreboard_ping);  // voice_mute.cpp: the scoreboards show players' pings
 REXCVAR_DECLARE(std::string, cache_root);  // the runtime's: the shader cache's folder (empty: user\cache)
 REXCVAR_DECLARE(double, bf_max_fps);
 REXCVAR_DECLARE(bool, native_x_renderer);  // NativeXRenderer: its own shader storage is made before the first draw
@@ -177,7 +185,7 @@ std::pair<int, int> DrawnSizeFor(int out_w, int out_h, double ratio) {
 // presets for players"): the Graphics page's settings that cost frame time. Low, Medium and High are the auto detect's
 // slow, middle and fast tiers (TierSettings): Medium is the GTX 1060 or RX 580 at 1080p and 60 FPS, High an RTX 2060 or
 // 3060 and up. Potato is below Low for integrated graphics (no antialiasing, no texture filtering), Ultra every setting
-// at its most with the game drawn at the display's resolution (the upscaler Off). A setting a preset leaves out stays
+// at its most (since 0.4.8 with the upscaler on at Quality, as every preset). A setting a preset leaves out stays
 // the player's: the look's own (AO strength, sharpness), AO's and GI's quality where they are off, HD textures above
 // Low (they need a pack imported; Potato and Low turn them off for the graphics memory). Ultra's GI distance is Far:
 // the most the menus offer (TekRantGaming, 13 Nov 2026: Full is the F8 panel's only).
@@ -186,30 +194,42 @@ struct GraphicsPreset {
   std::vector<std::pair<const char*, const char*>> settings;
 };
 const std::vector<GraphicsPreset>& GraphicsPresets() {
+  // 0.4.8 (TekRantGaming, 26 Nov 2026: "graphic settings on by default on all presets"): every preset has the spatial
+  // upscaler on, AMD FSR 1 at Quality (NVIDIA NIS stands in where this GPU is an NVIDIA card that runs it:
+  // PresetValueMatches, ApplyGraphicsPreset, NoteNisSupport), Ultra too; Soft shadows and SSR reflections on High and
+  // Ultra only. Transparent edges, Animation smoothing, HUD scale and Storm shake are the same on every preset, so
+  // they are defaults instead (NewInstallDefaults, install_defaults 7) and a preset leaves the player's choice alone.
+  // Transparent edges is Original on every preset and for everyone since 27 Nov 2026 (install_defaults 8: Smooth left
+  // the palms' fronds out up close).
   static const std::vector<GraphicsPreset> kPresets = {
       {"Potato",
-       {{"bf_post_aa", "off"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "performance"},
+       {{"bf_post_aa", "off"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "0"}, {"native_ao_mode", "0"},
-        {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"}}},
+        {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"},
+        {"native_x_renderer_soft_shadows", "off"}, {"native_x_renderer_reflections", "false"}}},
       {"Low",
-       {{"bf_post_aa", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "performance"},
+       {{"bf_post_aa", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "2"}, {"native_ao_mode", "0"},
-        {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"}}},
+        {"native_gi_mode", "0"}, {"native_grass_radius", "45.000000"}, {"native_x_renderer_hd_textures", "false"},
+        {"native_x_renderer_soft_shadows", "off"}, {"native_x_renderer_reflections", "false"}}},
       {"Medium",
        {{"bf_post_aa", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "0.000000"}, {"anisotropic_override", "4"}, {"native_ao_mode", "1"},
         {"native_ao_samples", "1"}, {"native_gi_mode", "1"}, {"native_gi_quality", "1"}, {"native_gi_distance", "1"},
-        {"native_grass_radius", "180.000000"}}},
+        {"native_grass_radius", "180.000000"}, {"native_x_renderer_soft_shadows", "off"},
+        {"native_x_renderer_reflections", "false"}}},
       {"High",
        {{"bf_post_aa", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "2.000000"}, {"anisotropic_override", "5"}, {"native_ao_mode", "1"},
         {"native_ao_samples", "2"}, {"native_gi_mode", "1"}, {"native_gi_quality", "2"}, {"native_gi_distance", "2"},
-        {"native_grass_radius", "1440.000000"}}},
+        {"native_grass_radius", "1440.000000"}, {"native_x_renderer_soft_shadows", "soft"},
+        {"native_x_renderer_reflections", "true"}}},
       {"Ultra",
-       {{"native_x_renderer_antialiasing", "fxaa"}, {"native_x_renderer_scaling", "bilinear"},
+       {{"native_x_renderer_antialiasing", "fxaa"}, {"native_x_renderer_scaling", "fsr"}, {"bf_upscaler_mode", "quality"},
         {"native_x_renderer_shadow_scale", "4.000000"}, {"anisotropic_override", "5"}, {"native_ao_mode", "1"},
         {"native_ao_samples", "3"}, {"native_gi_mode", "1"}, {"native_gi_quality", "3"}, {"native_gi_distance", "3"},
-        {"native_grass_radius", "1440.000000"}}},
+        {"native_grass_radius", "1440.000000"}, {"native_x_renderer_soft_shadows", "soft"},
+        {"native_x_renderer_reflections", "true"}}},
   };
   return kPresets;
 }
@@ -466,6 +486,12 @@ void PressStartForPlayer();  // auto_join.cpp
 void MarkExitChosen();
 void LeaveMatch();  // auto_join.cpp: Exit Game, the game's own command (doExitLevel)
 void SuicideNow();  // the game's own suicide command
+void ApplyLodDistance();  // frame_rate.cpp: the level of detail's distance written to the game's settings
+std::string SmgSightTuneText();                                 // fov.cpp: the SMG's sight tuning, for the screen
+std::string SmgSightTuneGun(double v[6]);                       // fov.cpp: the SMG held now and its values
+void SmgSightTuneSet(const double v[6], bool reset);            // fov.cpp: its values set
+extern std::atomic<bool> g_smg_tune_hold;                       // fov.cpp: the aim held for the pause menu's sliders
+bool SmgSightTakeSave(std::string& name, std::string& value);  // fov.cpp: a tuned value to save
 void GameCommand(const std::string& name, const std::string& args);  // auto_join.cpp: a command as the game's menu sends it
 std::map<std::string, std::pair<int, double>> TakeScoreEvents();  // auto_join.cpp: the HUD's score events
 bool LevelLoaded();
@@ -578,6 +604,7 @@ enum class Page {
   kIntro,  // the startup cards with the logo music (IntroPage), at every launch
   kStats,  // our Stats & Awards (StatsPage), from the main menu
   kAchievements,  // our Achievements (AchievementsPage), from the main menu
+  kUnlockables,   // our Unlockables (UnlockablesPage), from the main menu: what is unlocked, and worn or not
   kLeaderboards,  // our Leaderboards (LeaderboardsPage), from the main menu and the pause
   kFriends,  // our Join Match With Friends (FriendsPage), from the main menu
   kScoreboard,  // our Scoreboard (ScoreboardPage), from the pause
@@ -685,6 +712,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     settings_.path = std::move(settings_path);
     settings_.Load();
     MigrateInvert041();
+    MigrateAirLook048();
     RefreshGameFlipY();
     BfListShotSetDir(settings_.path.parent_path() / "cache" / "extracted");
     kit::SetMenuArtDir(settings_.path.parent_path() / "cache" / "extracted" / "menu");  // the game's own menu art
@@ -857,6 +885,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
 
   // Player 1's pad, from the game's own pad reads: edges become our input.
+  // The controller's whole state, without what the keyboard and mouse gave it (triggers 0 to 255, sticks lx ly rx ry,
+  // up positive): the controller page takes the next button or stick from it (CapturePad).
+  struct RawPad {
+    uint16_t buttons = 0;
+    uint8_t lt = 0, rt = 0;
+    int16_t axis[4] = {};
+  };
+  void PadRaw(const RawPad& p) {
+    std::lock_guard<std::mutex> lock(pad_mutex_);
+    raw_pad_ = p, raw_pad_at_ = std::chrono::steady_clock::now();
+  }
+
   void Pad(uint16_t buttons, int16_t lx, int16_t ly, bool from_game = false) {
     std::lock_guard<std::mutex> lock(pad_mutex_);
     if (from_game) game_pad_at_ = std::chrono::steady_clock::now();
@@ -888,6 +928,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& io) override {
+    kit::MatchTextToDisplay(io);  // before any of our text this frame (the menus, the chat boxes, the overlays)
     PaceLauncher();
     FollowScreenRefresh();
     // The keyboard's Esc in a match with our menu closed opens the pause, as the controller's Start does (auto_join.cpp
@@ -957,13 +998,28 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 #endif
     if (!open_) PauseTest();
     if (!open_) MenuSteps();  // tests: their bfb and bfa steps act while BF's own screen has the pad
+    ApplyLodDistance();
+    if (!open_ || page_ != Page::kPause) g_smg_tune_hold.store(false, std::memory_order_relaxed);  // the sliders are the pause page's
+    // The SMG's sight tuning (fov.cpp, bf_smg_sight_tune): its values on the screen while aiming, and saved.
+    if (const std::string tune = SmgSightTuneText(); !tune.empty()) {
+      const kit::Fonts& tf = kit::GetFonts();
+      ImDrawList* fd = ImGui::GetForegroundDrawList();
+      const ImVec2 ds = ImGui::GetIO().DisplaySize;
+      const float size = std::max(14.0f, ds.y / 60.0f);
+      const ImVec2 box = tf.ui_bold->CalcTextSizeA(size, FLT_MAX, 0.0f, tune.c_str());
+      const ImVec2 at((ds.x - box.x) * 0.5f, ds.y * 0.14f);
+      fd->AddRectFilled(ImVec2(at.x - 12, at.y - 8), ImVec2(at.x + box.x + 12, at.y + box.y + 8), IM_COL32(10, 12, 8, 190));
+      fd->AddText(tf.ui_bold, size, at, IM_COL32(241, 234, 211, 255), tune.c_str());
+    }
+    {
+      std::string name, value;
+      if (SmgSightTakeSave(name, value)) settings_.values["cvar." + name] = value, smg_tune_dirty_at_ = ImGui::GetTime();
+      if (smg_tune_dirty_at_ > 0 && ImGui::GetTime() - smg_tune_dirty_at_ > 1.0) smg_tune_dirty_at_ = -1, settings_.Save();
+    }
     if (!open_) ReopenPause();
     // A new match: BF's pause list starts on its first row again.
     if (const int stage = MenuDriverStage(); stage != last_stage_) {
       if (stage == 5) bf_cursor_ = 0;
-      // Back at BF's online menu (the match over, or its join failed): no Night Ops server's night here. A map change
-      // on the server never comes back here, so its next map stays at night.
-      if (stage == 2 && last_stage_ > 2) SetJoinedServerNight(false);
       // A join that never reached the level is no match for Reborn's own achievements (the tutorial is none either).
       if (stage == 2 && last_stage_ > 2) ach_join_ = AchJoin::kNone;
       last_stage_ = stage;
@@ -971,15 +1027,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     QueueTick();  // a place in a full server's queue: its answers, its turn
     if (page_ == Page::kJoining && !queue_popup_) {
       const int stage = MenuDriverStage();
-      if (!pending_.empty() && stage == 2) {  // the game is at its menu now
-        // The backend keeps a reservation for five minutes, and with its version gate gives a server only to a game
-        // that has one: a start that took long (the shaders of a first start) asks again.
-        if (ImGui::GetTime() - reserved_at_ > 120 && !joined_gid_.empty()) {
-          const bool again = list_.Reserve(joined_gid_) == ServerList::Reserved::kYes;
-          REXLOG_INFO("BF join: the reservation made again after {:.0f} s: {}", ImGui::GetTime() - reserved_at_, again ? "kept" : "refused");
-          reserved_at_ = ImGui::GetTime();
-        }
-        StartAutoJoin(pending_), pending_.clear();
+      if (!pending_.empty() && stage == 2) {  // the game is at its menu now, signed in
+        if (ReserveSignedIn()) StartAutoJoin(pending_);
+        pending_.clear();
       }
       if (tutorial_pending_ && stage == 2) {  // Help's tutorial picked before the game ran: it is at its menu now
         tutorial_pending_ = false;
@@ -1032,6 +1082,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }
     NotePresence();  // Discord Rich Presence, the menu open or not
     NoteRebornAchievements();  // Reborn's own achievements, once a joined match's level has the soldier
+    TickEventLook();  // an event server's look, when its host says it is one and its listing did not (in a match)
     // Every frame, the menu open or not (Yes closes the pause: the check never ran, run v41team1).
     if (team_suicide_at_ > 0 && ImGui::GetTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
       team_suicide_at_ = -1;
@@ -1043,6 +1094,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       } else {
         REXLOG_INFO("BF pause: no change of team to team {} (now {}): no suicide", team_wanted_, comms::Team());
       }
+    }
+    // Moderation (docs/MODERATION.md): the server took this player off it (comms kKicked: a kick, a ban). Out of the
+    // match at once; its words in the notice pop-up once the menus are back.
+    if (std::string title, message; comms::TakeRemoved(&title, &message)) {
+      removed_notice_ = {"banned", title, message}, removed_pending_ = true;
+      REXLOG_INFO("BF moderation: removed from the server ({}): leaving the match", title);
+      if (InMatch() && page_ != Page::kLeaving) open_ = true, Leave();
+    }
+    if (removed_pending_ && open_ && !InMatch() && !notice_popup_ &&
+        (page_ == Page::kMain || page_ == Page::kHome || page_ == Page::kServers)) {
+      removed_pending_ = false;
+      ShowNotice(removed_notice_, "the match");
     }
     if (!open_) {
       was_open_ = false;
@@ -1164,7 +1227,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (!typing) {
         key.prev_tab |= ImGui::IsKeyPressed(ImGuiKey_Q);
         key.next_tab |= ImGui::IsKeyPressed(ImGuiKey_E);
-        if (LauncherPage(page_) || page_ == Page::kMain || page_ == Page::kServers || page_ == Page::kSettings) {  // the new look's pages too
+        if (LauncherPage(page_) || page_ == Page::kMain || page_ == Page::kServers || page_ == Page::kSettings ||
+            page_ == Page::kPrivateMatch) {  // the new look's pages too (Custom Match's own page: 21 Nov 2026)
           key.x |= ImGui::IsKeyPressed(ImGuiKey_F, false);
           key.y |= ImGui::IsKeyPressed(ImGuiKey_R, false);
           key.start |= ImGui::IsKeyPressed(ImGuiKey_P, false);
@@ -1184,7 +1248,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       ClosePause("Start");
       return;
     }
-    if (!LauncherPage(page_)) in.accept |= in.start;  // BF's own pages: Start is A, as before
+    // BF's own pages: Start is A, as before. Not on Custom Match's page (21 Nov 2026), where Start hosts the match.
+    if (!LauncherPage(page_) && page_ != Page::kPrivateMatch) in.accept |= in.start;
 
     const float s = io.DisplaySize.y / 1080.0f;
     io_scale_ = s;
@@ -1213,7 +1278,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (tutorial_open_ && page_ != Page::kSetup) CloseTutorial("the game files page left");
     const bool over_popup =
         !shader_page && (update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ ||
-                         new_version_popup_ || notice_popup_ || news_open_ || queue_popup_ || tutorial_open_);
+                         ping_popup_ || new_version_popup_ || notice_popup_ || news_open_ || queue_popup_ || tutorial_open_);
     const Input popup_in = in;
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
@@ -1225,6 +1290,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         case Page::kIntro: IntroPage(d, io, in); break;
         case Page::kStats: StatsPage(d, io, in); break;
         case Page::kAchievements: AchievementsPage(d, io, in); break;
+        case Page::kUnlockables: UnlockablesPage(d, io, in); break;
         case Page::kLeaderboards: LeaderboardsPage(d, io, in); break;
         case Page::kFriends: FriendsPage(d, io, in); break;
         case Page::kScoreboard: ScoreboardPage(d, io, in); break;
@@ -1264,17 +1330,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       else if (new_version_popup_) NewVersionPopup(d, io, popup_in);
       else if (own_popup_) OwnBackendPopup(d, io, popup_in);
       else if (exp_popup_) ExperimentalPopup(d, io, popup_in);
+      else if (ping_popup_) FarServerPopup(d, io, popup_in);
       else if (tick_popup_) TickPopup(d, io, popup_in);
       else if (pw_popup_) PasswordPopup(d, io, popup_in);
       else if (whats_new_open_) WhatsNewPopup(d, io, popup_in);
       else if (news_open_) NewsPopup(d, io, popup_in);
       else if (tutorial_open_) TutorialPopup(d, io, popup_in);
       // The news' video is a window of its own over ours: hidden while another pop-up is in front of the news.
-      if (news_open_ && (update_popup_ || notice_popup_ || new_version_popup_ || own_popup_ || exp_popup_ || tick_popup_ ||
-                         pw_popup_ || whats_new_open_))
+      if (news_open_ && (update_popup_ || notice_popup_ || new_version_popup_ || own_popup_ || exp_popup_ || ping_popup_ ||
+                         tick_popup_ || pw_popup_ || whats_new_open_))
         news::VideoHide();
-      if (tutorial_open_ && (update_popup_ || notice_popup_ || new_version_popup_ || own_popup_ || exp_popup_ || tick_popup_ ||
-                             pw_popup_ || whats_new_open_ || news_open_ || queue_popup_))
+      if (tutorial_open_ && (update_popup_ || notice_popup_ || new_version_popup_ || own_popup_ || exp_popup_ || ping_popup_ ||
+                             tick_popup_ || pw_popup_ || whats_new_open_ || news_open_ || queue_popup_))
         news::VideoHide();  // the tutorial's video too
     }
     MenuSounds(sound_before, popup_in, popup_down, popup_delta);
@@ -1327,12 +1394,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     HashIn(h, pause_focus_panel_);
     l.selection = h;
     h = 0xCBF29CE484222325ull;
-    for (bool b : {update_popup_, whats_new_open_, whats_new_all_, own_popup_, tick_popup_, pw_popup_, exp_popup_,
+    for (bool b : {update_popup_, whats_new_open_, whats_new_all_, own_popup_, tick_popup_, pw_popup_, exp_popup_, ping_popup_,
                    new_version_popup_, notice_popup_, news_open_, tutorial_open_, queue_popup_, quit_popup_, skip_popup_, files_help_, browsing_,
-                   browser_typing_, browser_has_players_, browser_not_full_, browser_night_, quick_waiting_ > 0,
+                   browser_typing_, browser_has_players_, browser_not_full_, quick_waiting_ > 0,
                    direct_keys_, direct_letters_, name_keys_})
       HashIn(h, b);
-    for (int v : {pause_confirm_, handing_over_, passing_}) HashIn(h, uint64_t(int64_t(v)));
+    for (int v : {pause_confirm_, handing_over_, passing_, browser_size_, browser_event_}) HashIn(h, uint64_t(int64_t(v)));
     HashIn(h, capture_), HashIn(h, browser_region_);
     // What the on screen keys typed (a key pressed is a press that did something).
     for (const std::string* t : {&direct_text_, &name_text_, &pm_edit_text_, &pw_text_, &browser_search_}) HashIn(h, *t);
@@ -1430,7 +1497,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       size_t n = 1;  // one UTF-8 character
       while (i + n < t.size() && (static_cast<unsigned char>(t[i + n]) & 0xC0) == 0x80) ++n;
       const std::string ch = t.substr(i, n);
-      d->AddText(f, size, ImVec2(x, at.y), col, ch.c_str());
+      kit::PixelText(d, f, size, ImVec2(x, at.y), col, ch.c_str());  // even spacing with display scaling
       x += Width(f, size, ch) + gap;
       i += n;
     }
@@ -1756,7 +1823,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     start_game_ = std::move(start);
     pre_game_ = true, launcher_first_ = true, open_ = true;
     REXLOG_INFO("BF launcher: before the game (it starts at Play)");
-    if (!kNightOps) SetJoinedServerNight(false);  // night_ops.h: no night in this build, whatever a setting says
     // Run the game, the startup videos, our main menu (TekRantGaming, 10 Nov 2026): the game's own startup cards and logo
     // music, extracted from the player's files (shader_prep.cpp ExtractGameArt), played by us before anything else;
     // the setting Startup cards off (bf_startup_cards = false) skips them.
@@ -1897,6 +1963,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   bool host_reads_ = false;
   std::atomic<int> classify_press_{0};  // a press to classify: 1 from the game's read, 2 from XInput (HostPad)
   std::chrono::steady_clock::time_point game_pad_at_{};  // the game's last pad read (pad_mutex_)
+  RawPad raw_pad_;                                         // the controller's whole state (pad_mutex_, PadRaw)
+  std::chrono::steady_clock::time_point raw_pad_at_{};
+  double pad_capture_at_ = 0;                              // when the controller page's slot began to wait
+  bool pad_armed_ = false;                                 // the controller let go since: its next press counts
 
   // The controller, read here while nothing else does (the first start's pages). XInput's buttons are the console's,
   // so Pad() takes them as the game's reads.
@@ -2007,6 +2077,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         {SDL_GAMEPAD_BUTTON_WEST, 0x4000},           {SDL_GAMEPAD_BUTTON_NORTH, 0x8000}};
     uint16_t buttons = 0;
     int16_t lx = 0, ly = 0;
+    RawPad raw;
     for (const auto& [id, pad] : pads) {
       for (const auto& [button, bit] : kButtons)
         if (SDL_GetGamepadButton(pad, button)) buttons |= bit;
@@ -2014,8 +2085,17 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       const int16_t y = int16_t(std::clamp(-int(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY)), -32768, 32767));
       if (std::abs(x) > std::abs(lx)) lx = x;
       if (std::abs(y) > std::abs(ly)) ly = y;
+      // The rest for the controller page (CapturePad): the triggers and the right stick too.
+      const int16_t axes[4] = {x, y, SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX),
+                               int16_t(std::clamp(-int(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY)), -32768, 32767))};
+      for (int a = 0; a < 4; ++a)
+        if (std::abs(axes[a]) > std::abs(raw.axis[a])) raw.axis[a] = axes[a];
+      raw.lt = std::max<uint8_t>(raw.lt, uint8_t(std::clamp(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) / 128, 0, 255)));
+      raw.rt = std::max<uint8_t>(raw.rt, uint8_t(std::clamp(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) / 128, 0, 255)));
     }
     host_last_ = buttons;
+    raw.buttons = buttons;
+    PadRaw(raw);
     Pad(buttons, lx, ly);
 #endif
   }
@@ -2360,8 +2440,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const ServerInfo* best = nullptr;
     for (const auto& sv : servers)
       if (QuickBetter(sv, best)) best = &sv;
-    if (best) Join(*best);
-    return best != nullptr;
+    if (!best) return false;
+    ServerInfo sv = *best;
+    // Its ping, when the list has none (the browser pings only while it is open): the far server warning needs it.
+    // At most a second, usually one round trip.
+    if (sv.ping_ms < 0) sv.ping_ms = ServerList::PingOne(sv.address);
+    Join(sv);
+    return true;
   }
   // Quick Play's choice: never an experimental tick rate (75, 100: TekRantGaming, 0.4.1: "quick play will never put
   // you into one of these experimental" servers); 30 and 60 both, a server at this game's own rate first (60 since 14
@@ -2425,6 +2510,87 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     else if (exp_promo_) REXLOG_INFO("BF join: {} is a promoted community server: introduced before joining", sv.name);
     else REXLOG_INFO("BF join: {} runs at an experimental {} Hz: warned before joining", sv.name, sv.Tick());
     return false;
+  }
+  // A far server (TekRantGaming, 20 Nov 2026: "if you're joining a server that has over 90 milliseconds of latency, you
+  // get a pop-up warning advising you of this and recommending to play on a server closer to a region that you're
+  // located in for a better performance, as you may experience rubber banding or overall poorer network
+  // performance"). The ping is the server browser's (server_list.h; Direct connect pings what it finds). Not for joins
+  // nobody chose on a list: this PC's own Custom Match or a LAN match, a friend's server from the Friends page (the
+  // point is to play with them), the join again after a restart, and test runs' auto join.
+  bool ping_popup_ = false;
+  ServerInfo ping_popup_server_;
+  std::string ping_accepted_address_;  // the far server the player chose to join anyway (not asked again this run)
+  bool FarServerWarned(const ServerInfo& sv) {
+    if (sv.ping_ms <= ping::kFarMs || ping_accepted_address_ == sv.address) return true;
+    if (sv.player_hosted || pm_hosting_ || !own_backend_.empty()) return true;
+#if defined(BF_DEV_TOOLS)
+    // Test joins: nobody to read it (BF_DEV_JOIN_WARNINGS=1: shown anyway, for the pop-up's own tests).
+    if (std::getenv("BF_AUTO_JOIN") && !std::getenv("BF_DEV_JOIN_WARNINGS")) return true;
+#endif
+    ping_popup_ = true, ping_popup_server_ = sv, popup_row_ = 0;  // starts on Back to the list
+    REXLOG_INFO("BF join: {} is far away ({} ms, over {} ms): warned before joining", sv.name, sv.ping_ms, ping::kFarMs);
+    return false;
+  }
+  void FarServerPopup(ImDrawList* d, ImGuiIO& io, Input in) {
+    const Stage st = StageOf(io);
+    const kit::Fonts& f = kit::GetFonts();
+    const ServerInfo& sv = ping_popup_server_;
+    d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 190));
+    const ImVec2 a = st.P(330, 180), b = st.P(950, 450);
+    const std::string region = sv.region.empty() ? std::string() : " \xC2\xB7 " + Upper(sv.region);
+    const char* paragraphs[] = {
+        "This server is far away from you. You may experience rubber-banding or overall poorer network performance.",
+        "For a better game, we recommend playing on a server in a region closer to where you are located."};
+    {
+      kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.3f);
+      kit::Paper(d, a, b, st.u);
+      kit::Tape(d, ImVec2((a.x + b.x) * 0.5f, a.y), st(110), st(26), -3);
+      kit::Heading(d, st(36), ImVec2(a.x + st(30), a.y + st(26)), kit::kInk, "HIGH PING", st(1.5f), st(560));
+      // The server, and its ping as the browser shows it (bars and ms).
+      const float y0 = a.y + st(72);
+      const float tw = kit::Spaced(d, f.typed, st(11), ImVec2(a.x + st(32), y0), kit::kStamp, Upper(sv.name) + region, st(1.5f));
+      const float bx = a.x + st(32) + tw + st(14);
+      const float bw = ping::DrawBars(d, bx, y0 + st(12), st(13), sv.ping_ms, IM_COL32(34, 36, 27, 45));
+      kit::Spaced(d, f.typed, st(11), ImVec2(bx + bw + st(8), y0), ping::Colour(sv.ping_ms), fmt::format("{} MS", sv.ping_ms),
+                  st(1.5f));
+      float y = a.y + st(100);
+      for (const char* para : paragraphs) {
+        kit::Wrapped(d, f.ui, st(17), ImVec2(a.x + st(30), y), kit::kInkSoft, para, st(560));
+        y += kit::WrappedHeight(f.ui, st(17), para, st(560)) + st(12);
+      }
+    }
+    if (in.left || in.right || in.up || in.down) popup_row_ = 1 - popup_row_;
+    int clicked = -1;
+    float x = a.x + st(30);
+    for (int i = 0; i < 2; ++i) {
+      const char* label = i == 0 ? "Back to the list" : "Join anyway";
+      const ImVec2 c0(x, b.y - st(70)), c1(x + st(250), b.y - st(26));
+      const bool hover = ImGui::IsMouseHoveringRect(c0, c1);
+      if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) popup_row_ = i;
+      const bool sel = popup_row_ == i;
+      if (sel) d->AddRectFilled(ImVec2(c0.x, c0.y + st(4)), ImVec2(c1.x, c1.y + st(4)), kit::kGreenShadow);
+      d->AddRectFilled(c0, c1, sel ? kit::kGreen : kit::kPaperCard);
+      if (!sel) d->AddRect(c0, c1, kit::kBorder, 0, 0, st(2));
+      const float lw = kit::TextWidth(f.ui_bold, st(20), label);
+      d->AddText(f.ui_bold, st(20), ImVec2((c0.x + c1.x - lw) * 0.5f, c0.y + st(8)),
+                 sel ? IM_COL32(255, 255, 255, 255) : kit::kInk, label);
+      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
+      x += st(270);
+    }
+    if (in.accept) clicked = popup_row_;
+    if (in.back) clicked = 0;
+    if (clicked < 0) return;
+    ping_popup_ = false;
+    if (clicked == 0) {
+      REXLOG_INFO("BF join: the far server {} not joined (back to the list)", sv.name);
+      // Back to the list to pick a closer one: the browser itself when the join came from elsewhere (Quick Play).
+      if (page_ != Page::kServers && !InMatch()) OpenBrowser();
+      return;
+    }
+    REXLOG_INFO("BF join: {} joined anyway ({} ms, far away)", sv.name, sv.ping_ms);
+    ping_accepted_address_ = sv.address;
+    const ServerInfo join = sv;
+    Join(join);
   }
   void ExperimentalPopup(ImDrawList* d, ImGuiIO& io, Input in) {
     const Stage st = StageOf(io);
@@ -2610,6 +2776,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       return;
     }
     if (!ExperimentalWarned(sv)) return;
+    if (!FarServerWarned(sv)) return;
     pw_passed_.clear();
     if (!own_backend_.empty()) own_match_joined_ = true;
     if (sv.Tick() != TickRate() && !SetTickRate(sv.Tick())) {
@@ -2645,7 +2812,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // The join once the backend keeps the server for this game: at once, or at its turn in the server's queue.
   void JoinReserved(const ServerInfo& sv) {
     reserved_at_ = ImGui::GetTime();
-    SetJoinedServerNight(sv.night);
     joining_ = sv.name;
     joining_map_ = sv.map;
     report::NoteLastMatch(UserDir(), sv.name, sv.Reborn(), sv.map, sv.players, sv.max_players, sv.ping_ms);  // a report's Last match
@@ -2657,6 +2823,16 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     ach_in_world_since_ = -1;
     joined_gid_ = sv.gid;  // the pause's Scoreboard and the match score sent to the backend
     comms::NoteJoined(sv.address);  // voice and text chat go to this server's host (comms.cpp)
+    world::NoteJoined(sv.address);  // and the match's clock and weather come from it (world_sync.cpp)
+    // The server's look (TekRantGaming, 20 Nov 2026): a regular server plays as the released game, with the server's
+    // look settings off; a Night Ops server turns them on (none is one in a build without Night Ops, night_ops.h), and
+    // since 26 Nov 2026 a Daybreak server too (its sunrise, lamps, lens flare, rain and wet hands are the same look). A
+    // match a player's game hosts (Custom Match, LAN) has them on: its host's world (time, weather) decides what shows.
+    const bool player_match = sv.player_hosted || pm_hosting_ || !own_backend_.empty();
+    look_join_at_ = world::Now();  // TickEventLook: answers from this server's host only
+    ApplyServerLook(player_match || sv.night || sv.daybreak, player_match ? "a Custom Match or LAN"
+                                                             : sv.night  ? "a Night Ops"
+                                                             : sv.daybreak ? "a Daybreak" : "a regular");
     joined_from_start_ = MenuDriverStage() < 2;  // its joining page shows the game's start first
     tutorial_ = false;
     NotePlayedLevel(sv.map.empty() ? "Wake Island" : sv.map);
@@ -2671,6 +2847,35 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       REXLOG_INFO("BF launcher: a server picked on Home: the game starts, the join follows its sign in");
       StartGameFromLauncher();
     }
+  }
+  // A join picked before the game had signed in (from Home, or while it started) asks the backend again once it has.
+  // The first "reserve" could name nobody: the backend knows a player's id and account by the game's sign in, so a ban
+  // or kick that held only those passed it, and the join was then refused at Theater's EGAM, which says nothing (the
+  // game stayed on "Joining game"; run banfix_red, 22 Nov 2026). Asked now it answers as for any refusal, and the join
+  // ends with its pop-up. It also renews the reservation a long start would lose (five minutes; the version gate gives
+  // a server only to a game that has one). False: the join is off. No answer leaves the first reservation standing.
+  bool ReserveSignedIn() {
+    if (joined_gid_.empty()) return true;
+    std::string needs;
+    ServerNotice refusal;
+    const ServerList::Reserved answer = list_.Reserve(joined_gid_, &needs, &refusal);
+    const bool refused = answer == ServerList::Reserved::kRefused || answer == ServerList::Reserved::kOutdated;
+    REXLOG_INFO("BF join: asked again signed in, {:.0f} s after the reservation: {}", ImGui::GetTime() - reserved_at_,
+                refused ? "refused" : answer == ServerList::Reserved::kYes ? "kept" : "no answer, going on");
+    if (!refused) {
+      if (answer == ServerList::Reserved::kYes) reserved_at_ = ImGui::GetTime();
+      return true;
+    }
+    const std::string server = joining_;
+    joined_gid_.clear();
+    comms::NoteJoined("");
+    world::NoteJoined("");
+    look_join_at_ = -1;
+    ach_join_ = AchJoin::kNone;
+    page_ = Page::kMain, row_ = 1;  // the game runs now: our main menu, the pop-up over it
+    if (answer == ServerList::Reserved::kOutdated) AskToUpdate(needs, server);
+    else ShowNotice(refusal, server);
+    return false;
   }
   // ---- The join queue (TekRantGaming, 18 Nov 2026: "a server que system with a popup showing you your position in the
   // que that updates there should also be a close button on this to"; server_list.h QueuePlace, server/plasma.py
@@ -2852,16 +3057,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   int browser_tab_ = 0;  // 0 official, 1 community, 2 direct connect
   bool sort_by_ping_ = false;
 
-  // Night Ops (TekRantGaming, 11 Nov 2026): a night server's maps drawn at night (NativeXRenderer D162), only while
-  // playing there: on at the join, off at another server's, at the match's end and in the tutorial.
-  static void SetJoinedServerNight(bool night) {
-    if (!kNightOps) night = false;  // night_ops.h: not in this build
-    const std::string was = rex::cvar::GetFlagByName("native_x_renderer_night");
-    if (was == (night ? "true" : "false")) return;
-    const bool set = rex::cvar::SetFlagByName("native_x_renderer_night", night ? "true" : "false");
-    REXLOG_INFO("BF night: {} (the renderer's setting was \"{}\", set: {}, now \"{}\")",
-                night ? "on, a Night Ops server" : "off", was, set, rex::cvar::GetFlagByName("native_x_renderer_night"));
-  }
   // The prompts in a row along the bottom (mockup 3), BF's discs or the chosen style's pictures.
   void BrowserHints(ImDrawList* d, float s, float x, float y, const std::vector<std::pair<std::string, std::string>>& keys) {
     const float bh = 34 * s, size = 25 * s;
@@ -3040,6 +3235,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (update::RestartSelf() && quit_) quit_();
   }
   // Each frame on Home after such a restart: the join, once the list has the server.
+  // An event server (Night Ops, Daybreak) also says so in its world answer (world_sync.cpp: flags 4 and 16, 26 Nov
+  // 2026). A listing that did not (a backend whose plasma.py does not pass "daybreak" on yet, or Direct connect to a
+  // server it never listed) left the look off at the join: turned on here once this server's host has answered.
+  bool look_on_ = false;
+  double look_join_at_ = -1;  // world::Now() at the join; -1: none to watch
+  void TickEventLook() {
+    if (!kNightOps || look_on_ || look_join_at_ < 0 || !InMatch()) return;
+    const world::Status s = world::Current();
+    if (!s.answered || !s.night_ops || s.answered_at <= look_join_at_) return;
+    look_join_at_ = -1;
+    ApplyServerLook(true, s.daybreak ? "a Daybreak (as its host says)" : "a Night Ops (as its host says)");
+  }
   void TickRejoinTick() {
     if (tick_join_address_.empty() || !pre_game_) return;
     if (tick_join_until_ == 0) tick_join_until_ = ImGui::GetTime() + 25;
@@ -3048,6 +3255,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       REXLOG_INFO("BF join: joining {} as asked before the restart ({} Hz)", sv.name, sv.Tick());
       tick_join_address_.clear();
       exp_accepted_address_ = sv.address;  // warned before the restart
+      ping_accepted_address_ = sv.address;  // and of its distance, if it is far
       Join(sv);
       return;
     }
@@ -3320,6 +3528,14 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // controller or the arrow keys are on, the one waiting for a press (-1: none), and a click on one. `nudge`: left
     // and right on any row that wants them (-1, 1).
     std::vector<std::string> slots;
+    // The controller's page (18 Nov 2026, the user: "mimic the look and layout of the Mouse and Keyboard remap submenu
+    // for the Controller remap submenu so that the controller UI icons/glyphs are used in the box input fields"): its
+    // slot is a controller part ("a", "lt", "up", ... or a stick axis "rx", "-ly"), drawn as the controller's glyph.
+    bool pad_glyphs = false;
+    // Plane flight's rows (game_menu_controls.inc FlightRows): the boxes that clash with another action (bit per box,
+    // drawn red), and the first box's column name in place of CONTROLLER.
+    unsigned slot_clash = 0;
+    std::string slot_header;
     int slot_cursor = 0, slot_capture = -1;
     std::function<void(int)> slot_click;
     std::function<void(int)> nudge;
@@ -3436,6 +3652,42 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
   static bool Truthy(const std::string& v) { return v == "true" || v == "1" || v == "on"; }
 
+  // The server's look (TekRantGaming, 20 Nov 2026: "these settings should turn on when joining a night ops server. But
+  // if the user's joining one of our normal regular servers ... these settings need to be turned off"; "some of these
+  // settings are going to be determined by the server they join and shouldn't be offered to the player"): Day and
+  // night, the Volumetric clouds sky, Rain on the lens, Wet weapon and hands, Lamp glow and Lens flare. None is in
+  // Settings; each join sets them (saved, so the menus keep the last match's), and each applies at once. Lightning
+  // and Storm shake are the player's own (Graphics > Weather). Night Ops' hour and storm are the server's (gmhost.py).
+  void ApplyServerLook(bool on, const char* what) {
+    look_on_ = on;
+#if defined(BF_DEV_TOOLS)
+    // BF_DEV_KEEP_LOOK=1 (tests): the look settings stay as the command line and the profile gave them, so an A/B run
+    // can turn one off (--native_x_renderer_sky=false was set back on by the hosted match's join, 24 Nov 2026).
+    if (const char* keep = std::getenv("BF_DEV_KEEP_LOOK"); keep && *keep == '1') {
+      REXLOG_INFO("BF night ops: {} server: the server's look left as it is (BF_DEV_KEEP_LOOK)", what);
+      return;
+    }
+#endif
+    const bool night = on;
+    static constexpr const char* kNightOpsCvars[] = {
+        "native_x_renderer_day_night", "native_x_renderer_sky",        "native_x_renderer_rain_lens",
+        "native_x_renderer_wetness",   "native_x_renderer_lamp_bloom", "native_x_renderer_lens_flare"};
+    const std::string value = night ? "true" : "false";
+    int changed = 0;
+    for (const char* name : kNightOpsCvars) {
+      if (!rex::cvar::GetFlagInfo(name)) continue;
+      if (Truthy(rex::cvar::GetFlagByName(name)) != night) ++changed;
+      gfx_pending_.erase(name);  // not left waiting for Graphics' Apply
+      settings_.values[std::string("cvar.") + name] = value;
+      rex::cvar::SetFlagByName(name, value);
+    }
+    settings_.Save();
+    std::string now;
+    for (const char* name : kNightOpsCvars) now += fmt::format(" {}={}", name + 18, rex::cvar::GetFlagByName(name));
+    REXLOG_INFO("BF night ops: {} server: the server's look settings {} ({} changed):{}", what, on ? "on" : "off",
+                changed, now);
+  }
+
   // The Upscaler row's choices: Off and TAA always, the others only where this GPU runs them (the renderer's answer,
   // NoteTemporalSupport); before the first answer, Off and TAA alone. The one chosen stays listed until it is changed.
   std::vector<std::pair<std::string, std::string>> TemporalChoices() {
@@ -3463,6 +3715,31 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (cvar == c) r.start_key = "cvar." + cvar;
     return r;
   }
+  // A sound device's row (audio_devices.h): System default first (it follows the system's default device), then the
+  // devices there now by name. A chosen device that is unplugged stays chosen, shown as not connected: its sound plays
+  // on the system default meanwhile and goes back to it when it returns. Listed again at most once a second.
+  SettingRow DeviceChoice(const std::string& section, const std::string& name, const std::string& help,
+                          audio_devices::Role role) {
+    const bool recording = role == audio_devices::Role::kChatIn;
+    const double now = ImGui::GetTime();
+    if (now - devices_listed_at_[recording] > 1.0 || now < devices_listed_at_[recording])
+      device_names_[recording] = audio_devices::Names(recording), devices_listed_at_[recording] = now;
+    SettingRow r{section, name, help};
+    const std::string cvar = audio_devices::CvarOf(role);
+    const std::string cur = Cvar(cvar);
+    std::vector<std::string> values{""};
+    r.options.push_back("System default");
+    for (const std::string& n : device_names_[recording]) r.options.push_back(n), values.push_back(n);
+    if (!cur.empty() && std::find(values.begin(), values.end(), cur) == values.end())
+      r.options.push_back(cur + " (not connected)"), values.push_back(cur);
+    for (size_t i = 0; i < values.size(); ++i)
+      if (values[i] == cur) r.index = int(i);
+    r.choose = [this, cvar, values](int i) { SetCvar(cvar, values[size_t(i)]); };
+    r.help += " Now: " + r.options[size_t(r.index)] + ".";  // whole, where the row may have to cut a long name short
+    return r;
+  }
+  std::vector<std::string> device_names_[2];  // playback, recording
+  double devices_listed_at_[2] = {-10, -10};
   SettingRow Toggle(const std::string& section, const std::string& name, const std::string& help,
                     const std::string& cvar, const std::string& off = "Off", const std::string& on = "On") {
     SettingRow r = Choice(section, name, help, cvar, {{off, "false"}, {on, "true"}});
@@ -3545,6 +3822,22 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     settings_.Save();
     REXLOG_INFO("BF settings: 0.4.1's invert settings from 0.4.0's: the mouse in vehicles {}{}",
                 vehicles ? "inverted" : "normal", fold ? "; the controller's Camera vertical folded into the game's own" : "");
+  }
+  // 0.4.8's own invert for Free-Look in planes (bf_mouse_invert_y_air_look, plane_mouse.cpp; TekRantGaming, 23 Nov
+  // 2026: Invert Air "should never be tied to Invert Vehicle"). Before it, plane Free-Look went by Invert vehicle: a
+  // player who had that Inverted gets the new setting Inverted too, once, so nobody's Free-Look turns round with the
+  // update. From then on the two are separate settings.
+  void MigrateAirLook048() {
+    if (settings_.Get("settings_048_air_look", "") == "1") return;
+    const std::string vehicle = settings_.Get("cvar.bf_mouse_invert_y_vehicle", "");
+    if (Truthy(vehicle) && settings_.Get("cvar.bf_mouse_invert_y_air_look", "").empty()) {
+      settings_.values["cvar.bf_mouse_invert_y_air_look"] = "true";
+      rex::cvar::SetFlagByName("bf_mouse_invert_y_air_look", "true");
+    }
+    settings_.values["settings_048_air_look"] = "1";
+    settings_.Save();
+    REXLOG_INFO("BF settings: Free-Look in planes has its own invert now ({}, from Invert vehicle once)",
+                Truthy(vehicle) ? "inverted" : "normal");
   }
   void RefreshGameFlipY() {
     game_flip_y_.store(GameValue("GstInput", "Scheme2FlipY", "0") == "1", std::memory_order_relaxed);
@@ -3812,41 +4105,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "input lag. Applies at once.",
                           "bf_two_frames_in_flight"));
 
-    // Camera: King Kong's rows; BF's camera and effects first need finding in the game's code.
-    // Field of view (fov.cpp): horizontal at 16:9; the game's own is 86. Aiming down sights still narrows it.
-    rows.push_back(Slider("Camera", "Field of view",
-                          "How wide the camera sees, across the screen at 16:9. The game's own is 86\xC2\xB0. "
-                          "Aiming down sights still zooms in. Applies at once.",
-                          "bf_fov", 60, 120, 1,
-                          [](float v) { return std::to_string(int(std::lround(v))) + "\xC2\xB0"; }, 86));
-    // Vehicles' own (TekRantGaming, 12 Nov 2026: "the current FOV implementation also applies to the vehicle third
-    // person camera, let's make that a separate slider").
-    rows.push_back(Slider("Camera", "Vehicle field of view",
-                          "The camera's width while you sit in a vehicle: the tank, jeep, boat and plane views, their "
-                          "guns and turrets included. The game's own is 86\xC2\xB0. Applies at once.",
-                          "bf_fov_vehicle", 60, 120, 1,
-                          [](float v) { return std::to_string(int(std::lround(v))) + "\xC2\xB0"; }, 86));
-    // 0.4.2: the renderer's own motion blur (NativeXRenderer motion_blur.h) in place of the game's camera blur.
-    rows.push_back(Choice("Camera", "Motion blur",
-                          "Blurs the picture along the camera's movement. Low, Medium and High are its quality "
-                          "(how many samples each pixel takes): higher is smoother and costs more. Applies at once.",
-                          "native_x_renderer_motion_blur", {{"Off", "off"}, {"Low", "low"}, {"Medium", "medium"}, {"High", "high"}}));
-    rows.push_back(Slider("Camera", "Motion blur strength",
-                          "How long the blur's streaks are. It is the same at every frame rate. Applies at once.",
-                          "native_x_renderer_motion_blur_strength", 0, 100, 5, Percent, 50));
-    rows.push_back(Toggle("Camera", "Object motion blur",
-                          "With Motion blur on: soldiers, vehicles and other moving things blur by their own "
-                          "movement too, not only the camera's. Applies at once.",
-                          "native_x_renderer_motion_blur_objects"));
-    rows.push_back(Toggle("Camera", "Hit and explosion blur",
-                          "The game's screen blur from nearby explosions, bullets and low health. Applies at once.",
-                          "bf_motion_blur"));
-    rows.push_back(Toggle("Camera", "Camera shake", "The camera shaking from explosions and gunfire. Applies at once.",
-                                 "bf_camera_shake"));
-    rows.push_back(Slider("Camera", "Camera shake strength",
-                                 "How hard the camera shakes. 100% is the Xbox 360's; lower it if the shaking bothers "
-                                 "you.",
-                                 "bf_camera_shake_strength", 10, 200, 5, Percent, 100));
     return rows;
   }
 
@@ -3917,6 +4175,31 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                            {"CMAA 2 Ultra", "cmaa_ultra"}});
     if (temporal) aa_row.disabled = true, aa_row.note = "The upscaler below antialiases the picture itself.";
     rows.push_back(aa_row);
+    // 13 Nov 2026, "Let's build MSAA 2x and 4x": the renderer's own multisampling of the game's view (NativeXRenderer
+    // targets.h), for what is thinner than a pixel at a distance (the radio mast, power lines), which the antialiasing
+    // above cannot put back. Works together with it.
+    // 14 Nov 2026, stage 1 of the day and night work (NativeXRenderer sky.h): a sky of the renderer's own. Since 20 Nov
+    // 2026 (TekRantGaming: "some of these settings are going to be determined by the server they join and shouldn't be
+    // offered to the player as a customizable option at all") Day and night, the Sky, Rain on the lens and Wet weapon
+    // and hands are not here: the server joined decides them (ApplyServerLook). Lightning and Storm shake stay the
+    // player's (flashes and a shaking view: some players need them off).
+    // (The clock and the weather are not here: "take them out of the graphics settings. Players use what the server
+    // sets", 15 Nov 2026. A match's host sets them: Custom match's Weather and time, the admin's F9, a server's page.)
+    rows.push_back(Toggle("Weather", "Lightning",
+                          "A storm's lightning: flashes in the clouds, on the fog and on the ground. Off, the storm "
+                          "keeps its rain, mist and wind without them. Applies at once.",
+                          "native_x_renderer_lightning"));
+    rows.push_back(Toggle("Weather", "Storm shake",
+                          "In a strong storm's wind the view shakes lightly and its edges blur, while you are on foot "
+                          "and outside (not in a vehicle or under a roof). Off, the view stays still. Applies at once.",
+                          "native_x_renderer_storm_sway"));
+    rows.push_back(Choice("Image", "MSAA",
+                          "Draws the edges of everything in the world with 2 or 4 samples in each pixel, so thin "
+                          "distant things (masts, power lines, railings) stay whole instead of breaking into dots, "
+                          "and edges are smoother. Works together with Antialiasing above. Costs frame rate and "
+                          "video memory, 4x more than 2x; the first minutes after a change can stutter while the "
+                          "game's shaders are prepared again. Applies at once.",
+                          "native_x_renderer_msaa", {{"Off", "1"}, {"2x", "2"}, {"4x", "4"}}));
     // The Upscaling section (13 Nov 2026): the temporal upscalers, their mode and their own sharpness. They work on
     // the 3D view before the game's post-processing, with the picture's motion, so they also steady shimmer that the
     // antialiasing above cannot. Not offered since 0.4.4 (kTemporalUpscalers): FSR 1 and NIS below stay.
@@ -3978,6 +4261,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                                 "Off draws the game at your display's resolution. Applies at the next start.",
                             "native_x_renderer_scaling", choices);
       if (Cvar("native_x_renderer_scaling") == "nis" && !nis_offered) r.index = 1;  // runs as FSR 1 here
+      // The player's own pick: no automatic NVIDIA NIS after it (upscaler_auto, NoteNisSupport).
+      r.choose = [this, pick = r.choose](int i) {
+        settings_.values.erase("upscaler_auto");
+        pick(i);
+      };
       if (temporal) r.disabled = true, r.note = "The upscaler above does this.";
       rows.push_back(r);
     }
@@ -4041,40 +4329,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "anisotropic_override",
                           {{"Game", "-1"}, {"Off", "0"}, {"2\xC3\x97", "2"}, {"4\xC3\x97", "3"}, {"8\xC3\x97", "4"},
                            {"16\xC3\x97", "5"}}));
-    // Ambient occlusion: King Kong's three rows (GTAO, NativeXRenderer D132), all applied at once.
-    rows.push_back(Choice("Lighting", "Ambient occlusion",
-                          "Soft shadows where objects meet the ground and each other, under vehicles and in corners. "
-                          "Applies at once.",
-                          "native_ao_mode", {{"Off", "0"}, {"On", "1"}}));
-    rows.push_back(Choice("Lighting", "AO strength", "How dark the ambient occlusion is. Applies at once.",
-                          "native_ao_strength", {{"Light", "1"}, {"Medium", "2"}, {"Strong", "3"}}));
-    rows.push_back(Choice("Lighting", "AO quality",
-                          "How many samples the ambient occlusion takes. Higher is smoother and costs more. Applies at "
-                          "once.",
-                          "native_ao_samples", {{"Low", "1"}, {"Medium", "2"}, {"High", "3"}}));
-    // Global illumination: King Kong's SSGI (NativeXRenderer D133), one bounce of light from the lit scene, live.
-    rows.push_back(Choice("Lighting", "Global illumination",
-                          "Sunlight bouncing off the ground and walls onto what is next to them. Applies at once.",
-                          "native_gi_mode", {{"Off", "0"}, {"On", "1"}}));
-    rows.push_back(Choice("Lighting", "GI quality", "How many directions the bounce light is gathered from. Applies at once.",
-                          "native_gi_quality", {{"Low", "1"}, {"Medium", "2"}, {"High", "3"}}));
-    // Far is the most this page offers (TekRantGaming, 13 Nov 2026: "the GI option should never expose full on the
-    // settings only the f8 menu the max setting I weant them to be able to ask for in menu is far"). Full stays in the
-    // F8 panel (f8_panel.cpp): one saved there shows here as what is in use, and changing the row leaves it for Near,
-    // Medium or Far.
-    {
-      const bool full = std::atof(Cvar("native_gi_distance").c_str()) >= 4.0;
-      std::vector<std::pair<std::string, std::string>> distances = {{"Near", "1"}, {"Medium", "2"}, {"Far", "3"}};
-      if (full) distances.push_back({"Full (F8 panel)", "4"});
-      SettingRow r = Choice("Lighting", "GI distance", "How far away the bounce light is drawn. Applies at once.",
-                            "native_gi_distance", distances);
-      if (full) {
-        r.index = 3;
-        r.note = "Full was chosen in the F8 panel. This page offers Near, Medium and Far.";
-        r.choose = [this](int i) { SetCvar("native_gi_distance", i <= 0 ? "1" : i == 1 ? "2" : "3"); };
-      }
-      rows.push_back(r);
-    }
     // Grass and shrubs (NativeXRenderer grass.cpp) are always on (TekRantGaming, 10 Nov 2026): no row turns them off, only
     // their distance below is the player's (the F8 panel still switches them, for testing).
     // HD textures (TekRantGaming, 9 Nov 2026: an HD texture pack, imported in the launcher, toggled here; NativeXRenderer D149).
@@ -4139,6 +4393,20 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
   std::vector<SettingRow> AudioRows() {
     std::vector<SettingRow> rows;
+    // Which device each sound uses (TekRantGaming, 23 Nov 2026: "so users can set what device they have to be output or
+    // input devices for both game sound and the game chat"), audio_devices.h.
+    rows.push_back(DeviceChoice("Devices", "Game sound output",
+                                "Where the game's sound plays: the battle, the music, the menus' sounds and the "
+                                "achievement chime. System default follows your system's default device. Applies at once.",
+                                audio_devices::Role::kGame));
+    rows.push_back(DeviceChoice("Devices", "Chat output",
+                                "Where other players' voices play, for example a headset while the game plays on "
+                                "speakers. System default follows your system's default device. Applies at once.",
+                                audio_devices::Role::kChatOut));
+    rows.push_back(DeviceChoice("Devices", "Chat input",
+                                "The microphone the voice chat records you from. System default follows your system's "
+                                "default microphone. Applies at once.",
+                                audio_devices::Role::kChatIn));
     rows.push_back(Slider("Game audio", "Master volume", "How loud all game audio is. Applies during play.",
                           "bf_master_volume", 0, 100, 1, Percent));
     rows.push_back(Slider("Game audio", "Music volume", "How loud the game's music is, in menus, loading and matches. Applies at once.", "bf_music_volume", 0,
@@ -4147,6 +4415,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                                  "bf_effects_volume", 0, 100, 1, Percent, 100));
     rows.push_back(Slider("Game audio", "Voices volume", "How loud the soldiers' voices and radio calls are. Applies at once.",
                                  "bf_voices_volume", 0, 100, 1, Percent, 100));
+    // The weather's sounds (weather_audio.cpp; the user, 17 Nov 2026: their own recordings).
+    rows.push_back(Slider("Game audio", "Weather volume",
+                          "How loud the rain, the wind and the thunder are in a match. Applies at once.",
+                          "bf_weather_volume", 0, 100, 1, Percent, 100));
     rows.push_back(Toggle("Menu", "Menu music",
                           "The game's main menu music in the launcher, made from your game files. Applies at once.",
                           "bf_menu_music"));
@@ -4160,9 +4432,15 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "bf_menu_sounds_volume", 0, 100, 5, Percent, 100));
     // The achievement popup and its chime (achievement_toast.h).
     rows.push_back(Toggle("Achievements", "Achievement popups",
-                          "A note at the top right and a short chime when you unlock an achievement. "
-                          "Your own sounds\\achievement.wav in the game's user folder plays in place of the chime.",
+                          "A note at the top right when you unlock an achievement, with a short chime unless "
+                          "Achievement sound is off.",
                           "bf_achievement_popups"));
+    // (The user, 23 Nov 2026: "Add an option to toggle the Achievement sound".)
+    rows.push_back(Toggle("Achievements", "Achievement sound",
+                          "The chime that plays with an achievement's popup. Off: the popup alone, silent. "
+                          "Your own sounds\\achievement.wav in the game's user folder plays in place of the chime. "
+                          "Applies at once.",
+                          "bf_achievement_sound"));
     rows.push_back(Slider("Achievements", "Achievement sound volume", "How loud the achievement chime is. 0 is silent.",
                           "bf_achievement_volume", 0, 100, 5, Percent, 80));
     // The rest of the game's own Sound page (its master, music and dialogue volumes are the rows above).
@@ -4197,6 +4475,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       SetCvar("bf_voice_mode", "push");
       SetCvar("bf_voice_volume", "100");
       SetCvar("bf_voice_mic_sensitivity", "50");
+      for (auto role : {audio_devices::Role::kGame, audio_devices::Role::kChatOut, audio_devices::Role::kChatIn})
+        SetCvar(audio_devices::CvarOf(role), "");
     };
     rows.push_back(reset);
     return rows;
@@ -4241,8 +4521,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (!mnk) zoom.disabled = true, zoom.note = mnk_note;
       rows.push_back(zoom);
       SettingRow veh = Slider("Keyboard & mouse", "Vehicle sensitivity",
-                              "How fast the mouse turns vehicles, their guns and planes. The mouse's own: the "
-                              "controller's camera sensitivity does not change it.",
+                              "How fast the mouse turns vehicles and their guns (planes have Plane mouse "
+                              "sensitivity). The mouse's own: the controller's camera sensitivity does not change it.",
                               "bf_mouse_vehicle_sensitivity", 0.1f, 5.0f, 0.05f, [](float v) {
                                 char b[32];
                                 std::snprintf(b, sizeof(b), "%.2f×", v);
@@ -4269,7 +4549,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       // Issue #3: vehicles' own, so the soldier and a tank can each be normal or inverted.
       SettingRow vinv = Toggle("Keyboard & mouse", "Invert vehicle",
                                "Inverts the mouse's up and down for a tank's gun, mounted machine guns, AA guns and "
-                               "looking around in a vehicle. Normal: up aims up, as on foot.",
+                               "looking around in a vehicle. Normal: up aims up, as on foot. Not planes: they have "
+                               "their own (Invert flight, Invert Free-Look in planes).",
                                "bf_mouse_invert_y_vehicle", "Normal", "Inverted");
       if (!mnk || !Truthy(Cvar("mnk_mouse"))) vinv.disabled = true, vinv.note = mnk_note;
       rows.push_back(vinv);
@@ -4279,6 +4560,43 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                                "bf_mouse_invert_y_flight", "Normal", "Inverted");
       if (!mnk || !Truthy(Cvar("mnk_mouse"))) finv.disabled = true, finv.note = mnk_note;
       rows.push_back(finv);
+      // 18 Nov 2026 (the user: "For planes, we want to be able to rebind the mouse's axes too, so players who prefer to
+      // control the planes Pitch, Roll and Yaw with either mouse or keyboard inputs can freely remap those"):
+      // plane_mouse.cpp. The keys for what the mouse leaves are in Bindings, the Air vehicles tab.
+      const std::vector<std::pair<std::string, std::string>> flies = {
+          {"Roll", "roll"}, {"Pitch", "pitch"}, {"Yaw (rudder)", "yaw"}, {"Nothing", "none"}};
+      SettingRow fx = Choice("Keyboard & mouse", "Mouse left and right in planes",
+                             "What moving the mouse left and right flies in a plane. Roll as it starts. What the mouse "
+                             "does not fly stays on the keys (Bindings, Air vehicles), and an axis both fly takes the "
+                             "stronger.",
+                             "bf_plane_mouse_x", flies);
+      SettingRow fy = Choice("Keyboard & mouse", "Mouse forward and back in planes",
+                             "What moving the mouse forward and back flies in a plane. Pitch as it starts (Invert "
+                             "flight says which way). What the mouse does not fly stays on the keys (Bindings, Air "
+                             "vehicles).",
+                             "bf_plane_mouse_y", flies);
+      SettingRow fxi = Toggle("Keyboard & mouse", "Invert flight left and right",
+                              "Inverts the mouse's left and right in planes, for whatever it flies.",
+                              "bf_mouse_invert_x_flight", "Normal", "Inverted");
+      // 23 Nov 2026 (Plane flight): the planes' own mouse sensitivity (plane_mouse.cpp), a setting with no row before.
+      SettingRow fs = Slider("Keyboard & mouse", "Plane mouse sensitivity",
+                             "How far a plane's controls go as you move the mouse: at 1, about 50 counts is the stick "
+                             "all the way. The mouse's stick springs back to the centre when the mouse stops.",
+                             "bf_plane_mouse_sensitivity", 0.1f, 5.0f, 0.05f, [](float v) {
+                               char b[32];
+                               std::snprintf(b, sizeof(b), "%.2f\xC3\x97", v);
+                               return std::string(b);
+                             }, 1.0f);
+      // Free-Look's own up and down in a plane (plane_mouse.cpp), never Invert vehicle's (TekRantGaming, 23 Nov 2026).
+      SettingRow fli = Toggle("Keyboard & mouse", "Invert Free-Look in planes",
+                              "Inverts the mouse's up and down while Free-Look is held in a plane (the mouse turns the "
+                              "view). Normal: up looks up. Planes only: Invert vehicle never changes it.",
+                              "bf_mouse_invert_y_air_look", "Normal", "Inverted");
+      for (SettingRow* r : {&fx, &fy, &fxi, &fli, &fs}) {
+        if (!mnk || !Truthy(Cvar("mnk_mouse"))) r->disabled = true, r->note = mnk_note;
+        rows.push_back(*r);
+      }
+      // The flight rows (game_menu_controls.inc FlightRows) are in the bindings' Air vehicles tab since 24 Nov 2026.
     }
     rows.push_back(Slider("Controller", "Camera sensitivity",
                           "How fast the right stick turns the camera and moves your aim.", "bf_camera_sensitivity", 25,
@@ -4389,14 +4707,17 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     for (const auto& [id, label] : kButtonsShown) targets.push_back({label, id});
     targets.push_back({"Nothing", "none"});
     std::vector<SettingRow> rows;
+    rows.push_back(BindSetRow("Button remapping", true));  // 18 Nov 2026: each vehicle kind's own (vehicle_binds.h)
+    const int set = BindSet();
     for (const auto& [id, label] : kButtonsShown)
       rows.push_back(Choice("Button remapping", label, std::string("What ") + label + " does in the game.",
-                            std::string("bf_remap_") + id, targets));
-    SettingRow reset{"Reset", "Reset remapping", "Every button back to its own action."};
-    reset.activate = [this] {
-      for (const auto& [id, label] : kButtonsShown) SetCvar(std::string("bf_remap_") + id, id);
+                            bf1943::RemapCvar(set, id), targets));
+    SettingRow reset{"Reset", "Reset remapping", "Every button of this tab back to its own action."};
+    reset.activate = [this, set] {
+      for (const auto& [id, label] : kButtonsShown) SetCvar(bf1943::RemapCvar(set, id), id);
     };
     rows.push_back(reset);
+    PadStickRows(rows, "Sticks");
     return rows;
   }
 
@@ -4425,23 +4746,27 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         if (cvar == bind) return id;
       return "";
     };
-    auto pad_button = [this](const std::string& action) -> int {  // the button that presses the action, or -1
-      for (int b = 0; b < int(std::size(kPadNames)); ++b)
-        if (Cvar(std::string("bf_remap_") + kPadNames[b].first) == action) return b;
-      return -1;
-    };
+    auto pad_button = [this](const std::string& action) -> int { return PadButtonOf(action); };  // or -1
     auto pad_next = [this, pad_button](const std::string& action) {
-      const int n = int(std::size(kPadNames)), had = pad_button(action), next = (had + 1) % n;
-      const std::string next_cvar = std::string("bf_remap_") + kPadNames[next].first, other = Cvar(next_cvar);
-      SetCvar(next_cvar, action);
-      if (had >= 0) SetCvar(std::string("bf_remap_") + kPadNames[had].first, other);
-      REXLOG_INFO("BF settings: the controller's {} now does {} ({} does {})", kPadNames[next].second, action,
-                  had >= 0 ? kPadNames[had].second : "nothing else", had >= 0 ? other : std::string("-"));
+      const int n = int(std::size(kPadNames)), had = pad_button(action);
+      SwapPadButton(action, (had + 1) % n);
     };
     std::vector<SettingRow> rows;
-    int index = 0;
-    for (const auto& [cvar, label] : kBinds) {
-      SettingRow r{"Bindings", label,
+    // 18 Nov 2026: whose keys and buttons (the infantry's or a vehicle kind's, game_menu_controls.inc BindSetRow).
+    rows.push_back(BindSetRow("Bindings"));
+    const int set = std::clamp(bind_set_, 0, int(bf1943::kBindSetCount) - 1);
+    int index = 1;
+    bool flight_shown = false;
+    for (const auto& [infantry, label] : kBinds) {
+      if (!bf1943::BindInSet(set, infantry)) continue;
+      // The Air vehicles tab: the flight rows in place of its pitch, yaw and roll (their first box the mouse's
+      // movement in place of the controller's stick; game_menu_controls.inc FlightInBindings).
+      if (FlightInBindings(set, infantry, rows, "Bindings", flight_shown)) {
+        index = int(rows.size());
+        continue;
+      }
+      const std::string cvar = bf1943::BindCvar(set, infantry);
+      SettingRow r{"Bindings", bf1943::BindLabel(set, infantry, label),
                    "The controller's button, two keys and two mouse buttons for each action: any of them does it. "
                    "Controller: click the slot (or A on it) for the next button; the two actions swap buttons. "
                    "Keyboard and mouse: click a slot (or A on it), then press the key or the mouse button; the mouse "
@@ -4450,7 +4775,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       const std::string name = cvar;
       const bool chosen = index++ == row_;
       const std::array<std::string, 4> slots = BindSlots(Cvar(cvar));
-      const std::string action = pad_action(name);
+      const std::string action = pad_action(infantry);
       const bool stick = name.find("stick_") != std::string::npos && action.empty();
       const int button = action.empty() ? -1 : pad_button(action);
       r.slots.push_back(stick ? (name.find("lstick") != std::string::npos ? "L stick" : "R stick")
@@ -4482,13 +4807,19 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       }
       rows.push_back(r);
     }
-    SettingRow reset{"Reset", "Reset bindings", "Every key, mouse button and controller button back to its default."};
-    reset.activate = [this] {
-      for (const auto& [cvar, label] : kBinds)
+    SettingRow reset{"Reset", ResetBindsName(),
+                     "Every key, mouse button and controller button of this tab back to its default (the other "
+                     "tabs keep theirs)."};
+    reset.activate = [this, set] {
+      for (const auto& [infantry, label] : kBinds) {
+        if (!bf1943::BindInSet(set, infantry)) continue;
+        const std::string cvar = bf1943::BindCvar(set, infantry);
         if (const auto* info = rex::cvar::GetFlagInfo(cvar)) SetCvar(cvar, info->default_value);
-      for (const auto& [id, shown] : kPadNames) SetCvar(std::string("bf_remap_") + id, id);
+      }
+      ResetPadButtons(set);
     };
     rows.push_back(reset);
+    if (set == bf1943::kBindAir) FlightResetRow(rows, "Reset");
     return rows;
   }
 
@@ -4510,6 +4841,172 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                             "world around it, darkened. The world around the lens is the one you saw as the scope came "
                             "up, turned with your aim. Off: the game's own scope, which fills the screen.",
                             "bf_scope_pip"));
+    // The first person weapon's and the vehicles' own (the user, 18 Nov 2026): off, the gun and the vehicles' views
+    // follow the Field of view (Gameplay > Camera); on, Weapon FOV, ADS FOV and Vehicle FOV set them (fov.cpp). All the
+    // field of view sliders go from 86 to 120 (the user: "change the range from 86-120 for all"). Vehicle FOV was
+    // Gameplay > Camera's own slider (TekRantGaming, 12 Nov 2026), independent of the custom switch.
+    {
+      const bool custom = Truthy(Cvar("bf_weapon_fov_custom"));
+      SettingRow on = Toggle("Field of view", "Custom FOV",
+                             "Off: the gun and hands, and the vehicles' views, follow your Field of view (Gameplay > "
+                             "Camera). On: Weapon FOV, ADS FOV and Vehicle FOV below set them. Applies at once.",
+                             "bf_weapon_fov_custom");
+      // Switched on: a slider still where it starts (86, or the vehicles' 0, the game's own) starts at the Field of view.
+      on.choose = [this](int i) {
+        if (i == 1) {
+          const double fov = std::atof(Cvar("bf_fov").c_str());
+          char b[32];
+          std::snprintf(b, sizeof(b), "%g", std::clamp(std::round(fov > 0.0 ? fov : 86.0), 86.0, 120.0));
+          for (const char* c : {"bf_weapon_fov", "bf_ads_fov", "bf_fov_vehicle", "bf_fov_vehicle_fp"}) {
+            const double v = std::atof(Cvar(c).c_str());
+            if (v <= 0.0 || v == 86.0) SetCvar(c, b);
+          }
+        }
+        SetCvar("bf_weapon_fov_custom", i == 1 ? "true" : "false");
+      };
+      rows.push_back(on);
+      const auto degrees = [](float v) { return std::to_string(int(std::lround(v))) + "\xC2\xB0"; };
+      SettingRow hip = Slider("Field of view", "Weapon FOV",
+                              "How the gun and hands are drawn from the hip: as seen by a camera this wide. 86\xC2\xB0 "
+                              "is the game's own look; wider draws them smaller and further from the eye. Your Field of "
+                              "view is not changed. Applies at once.",
+                              "bf_weapon_fov", 86, 120, 1, degrees, 86);
+      SettingRow ads = Slider("Field of view", "ADS FOV",
+                              "How the gun is drawn while you aim down its sights, on the same scale as Weapon FOV. "
+                              "86\xC2\xB0 is the game's own look. Scopes are not changed. Applies at once.",
+                              "bf_ads_fov", 86, 120, 1, degrees, 86);
+      // (The user, 24 Nov 2026: "We should separate 1st-person and 3rd-person Vehicle FOV into two sliders".) Not set yet,
+      // the first person one starts where the one slider was (0 follows it, but would show the game's own 86).
+      if (std::atof(Cvar("bf_fov_vehicle_fp").c_str()) <= 0.0 && std::atof(Cvar("bf_fov_vehicle").c_str()) > 0.0)
+        SetCvar("bf_fov_vehicle_fp", Cvar("bf_fov_vehicle"));
+      SettingRow veh_fp = Slider("Field of view", "Vehicle FOV (1st person)",
+                                 "The camera's width in a vehicle's first person views: a plane's cockpit, a gun or "
+                                 "turret seat, a tank's periscope. In a gun seat hold the left trigger or the right mouse "
+                                 "button to zoom in. 86\xC2\xB0 is the game's own. Applies at once.",
+                                 "bf_fov_vehicle_fp", 86, 120, 1, degrees, 86);
+      SettingRow veh = Slider("Field of view", "Vehicle FOV (3rd person)",
+                              "The camera's width in a vehicle's outside views: behind the tank, jeep, boat or plane. "
+                              "86\xC2\xB0 is the game's own. Applies at once.",
+                              "bf_fov_vehicle", 86, 120, 1, degrees, 86);
+      if (!custom)
+        hip.disabled = ads.disabled = veh.disabled = veh_fp.disabled = true,
+        hip.note = ads.note = veh.note = veh_fp.note = "Switch Custom FOV on to set it. Off, it follows your Field of view.";
+      rows.push_back(hip);
+      rows.push_back(ads);
+      rows.push_back(veh_fp);
+      rows.push_back(veh);
+    }
+    // The level of detail's distance (frame_rate.cpp: every model's own switch distances times this; D202). Moved here
+    // from Graphics > Image (the user, 19 Nov 2026: "Can we also increase the render distance of LOD too, so that
+    // essentially the full model is rendered farther out?"). Runs lod_w*, lod_g*: 2x costs nothing measurable, 4x up
+    // to 1.7 ms a frame, 8x 2.3 to 2.7 ms (the CPU's: twice the draws), and only 8x draws the far forests' trees as
+    // models instead of flat pictures.
+    rows.push_back(Slider("Distance", "Detail distance",
+                          "How far away buildings, vehicles, soldiers, trees, bushes and rocks keep their full models "
+                          "before they switch to simpler ones, and how far small things are drawn at all. 1x is the "
+                          "original game's. 2x keeps the far islands' buildings and trees at no measurable cost. 8x "
+                          "also draws distant forests as full trees instead of flat pictures, at a cost of about 2 to 3 "
+                          "ms a frame. Applies within a second.",
+                          "bf_lod_distance", 1.0f, 8.0f, 1.0f,
+                          [](float v) {
+                            return v < 1.5f ? std::string("1\xC3\x97 (original)") : fmt::format("{:.0f}\xC3\x97", v);
+                          },
+                          1.0f));
+    // The night's lamps (NativeXRenderer D183): Lamp glow and Lens flare, in Enhancements until 20 Nov 2026, are the
+    // server's since then (ApplyServerLook): on at night on Night Ops, off on the regular servers.
+    // Lighting and HD textures, moved here from Graphics (the user, 17 Nov 2026: "we also need to move Lighting and HD
+    // Textures sections to the Enhancements menu tab").
+    // Soft sun shadows (NativeXRenderer D197; the user, 18 Nov 2026: "Is there a way we can also drastically improve
+    // shadow and lighting quality?").
+    rows.push_back(Choice("Lighting", "Soft shadows",
+                          "Sun shadows with soft edges that widen with the distance to what casts them, as real "
+                          "sunlight does: sharp at a post's foot, blurred under a tree's top. Off keeps the game's hard "
+                          "edges. Applies at once.",
+                          "native_x_renderer_soft_shadows", {{"Off", "off"}, {"Soft", "soft"}, {"Softer", "softer"}}));
+    // Reflections (the user, 19 Nov 2026: "an option for planar reflections. This is be in the enhancements tab as
+    // \"Reflections\" with Off / SSR / Planar"): moved here from Graphics > Sky's Sea reflections. Planar (the world
+    // drawn again from under the water) is not built yet, so not offered.
+    {
+      SettingRow reflections = Choice("Lighting", "Reflections",
+                          "How the sea reflects. SSR: what is around it, the shore, ships and the sky as it is now, day "
+                          "or night, with ripples, from what is on the screen. Off: the game's own reflection of a "
+                          "painted day sky. Needs the volumetric sky. Applies at once.",
+                          "native_x_renderer_reflections", {{"Off", "false"}, {"SSR", "true"}});
+      reflections.index = Truthy(Cvar("native_x_renderer_reflections")) ? 1 : 0;
+      rows.push_back(reflections);
+    }
+    // Ambient occlusion: King Kong's three rows (GTAO, NativeXRenderer D132), all applied at once.
+    rows.push_back(Choice("Lighting", "Ambient occlusion",
+                          "Soft shadows where objects meet the ground and each other, under vehicles and in corners. "
+                          "Applies at once.",
+                          "native_ao_mode", {{"Off", "0"}, {"On", "1"}}));
+    rows.push_back(Choice("Lighting", "AO strength", "How dark the ambient occlusion is. Applies at once.",
+                          "native_ao_strength", {{"Light", "1"}, {"Medium", "2"}, {"Strong", "3"}}));
+    rows.push_back(Choice("Lighting", "AO quality",
+                          "How many samples the ambient occlusion takes. Higher is smoother and costs more. Applies at "
+                          "once.",
+                          "native_ao_samples", {{"Low", "1"}, {"Medium", "2"}, {"High", "3"}}));
+    // Global illumination: King Kong's SSGI (NativeXRenderer D133), one bounce of light from the lit scene, live.
+    rows.push_back(Choice("Lighting", "Global illumination",
+                          "Sunlight bouncing off the ground and walls onto what is next to them. Applies at once.",
+                          "native_gi_mode", {{"Off", "0"}, {"On", "1"}}));
+    rows.push_back(Choice("Lighting", "GI quality", "How many directions the bounce light is gathered from. Applies at once.",
+                          "native_gi_quality", {{"Low", "1"}, {"Medium", "2"}, {"High", "3"}}));
+    // Far is the most this page offers (TekRantGaming, 13 Nov 2026: "the GI option should never expose full on the
+    // settings only the f8 menu the max setting I weant them to be able to ask for in menu is far"). Full stays in the
+    // F8 panel (f8_panel.cpp): one saved there shows here as what is in use, and changing the row leaves it for Near,
+    // Medium or Far.
+    {
+      const bool full = std::atof(Cvar("native_gi_distance").c_str()) >= 4.0;
+      std::vector<std::pair<std::string, std::string>> distances = {{"Near", "1"}, {"Medium", "2"}, {"Far", "3"}};
+      if (full) distances.push_back({"Full (F8 panel)", "4"});
+      SettingRow r = Choice("Lighting", "GI distance", "How far away the bounce light is drawn. Applies at once.",
+                            "native_gi_distance", distances);
+      if (full) {
+        r.index = 3;
+        r.note = "Full was chosen in the F8 panel. This page offers Near, Medium and Far.";
+        r.choose = [this](int i) { SetCvar("native_gi_distance", i <= 0 ? "1" : i == 1 ? "2" : "3"); };
+      }
+      rows.push_back(r);
+    }
+    // HD textures (TekRantGaming, 9 Nov 2026: an HD texture pack, imported in the launcher, toggled here; NativeXRenderer D149).
+    // Not shown (TekRantGaming, 26 Nov 2026: "remove HD textures and import HD texture pack from being shown in the
+    // settings these are not ready to be used yet"), as on the Graphics page since v0.4.7.4; the code stays.
+    constexpr bool kHdTexturesShown = false;
+    if (kHdTexturesShown) {
+      const fs::path pack = HdPackPath(UserDir());
+      std::error_code ec;
+      const bool have = fs::exists(pack, ec);
+      SettingRow hd = Toggle("Textures", "HD textures",
+                             "The game's textures at twice their size, from an HD texture pack you have imported. "
+                             "Uses more graphics memory. Applies at the next start.",
+                             "native_x_renderer_hd_textures");
+      hd.start_key = "cvar.native_x_renderer_hd_textures";
+      if (!have) hd.disabled = true, hd.note = "Import an HD texture pack first";
+      rows.push_back(hd);
+      SettingRow import{"Textures", "Import HD texture pack",
+                        "Choose an HD texture pack file (.bfhd) to copy into the game. It replaces one imported "
+                        "before."};
+      const int percent = hd_import_->percent.load();
+      std::string result;
+      {
+        std::lock_guard lock(hd_import_->mutex);
+        result = hd_import_->result;
+      }
+      import.value = percent >= 0 ? "Copying " + std::to_string(percent) + "%"
+                     : !result.empty() ? result
+                     : have ? std::to_string(fs::file_size(pack, ec) >> 20) + " MB imported" : "None";
+      import.activate = [this] { ImportHdPack(); };
+      rows.push_back(import);
+    }
+    // HUD scale (the user, 19 Nov 2026; sharp_text.cpp, NativeXRenderer D200): the game's text and HUD pictures, made
+    // for 720p, drawn from sharper copies the game builds from its own files at the start of each level. Nothing is
+    // downloaded or shipped; an HD pack's picture of the HUD comes first where it has one.
+    rows.push_back(Choice("Textures", "HUD scale",
+                          "The game's text, crosshairs, minimap compass and HUD icons. Original: as the game draws them, "
+                          "made for 720p. High-Res: sharp copies your game builds from its own files, at your screen's "
+                          "resolution. Applies at once.",
+                          "bf_hud_scale", {{"Original (Xbox 360)", "original"}, {"High-Res", "high"}}));
     return rows;
   }
 
@@ -4540,19 +5037,71 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "Messages top left in a match: T to everyone, Y to your team, U to your squad (Keyboard "
                           "bindings). Off hides them and the chat box.",
                           "bf_text_chat"));
+    // Camera: King Kong's rows, moved here from Display (the user, 18 Nov 2026: "move the Camera settings from Display
+    // to the Gameplay tab").
+    // Field of view (fov.cpp): horizontal at 16:9; the game's own is 86. Aiming down sights still narrows it.
+    rows.push_back(Slider("Camera", "Field of view",
+                          "How wide the camera sees, across the screen at 16:9. The game's own is 86\xC2\xB0. "
+                          "Aiming down sights still zooms in. Applies at once.",
+                          "bf_fov", 86, 120, 1,
+                          [](float v) { return std::to_string(int(std::lround(v))) + "\xC2\xB0"; }, 86));
+    // 0.4.2: the renderer's own motion blur (NativeXRenderer motion_blur.h) in place of the game's camera blur.
+    rows.push_back(Choice("Camera", "Motion blur",
+                          "Blurs the picture along the camera's movement. Low, Medium and High are its quality "
+                          "(how many samples each pixel takes): higher is smoother and costs more. Applies at once.",
+                          "native_x_renderer_motion_blur", {{"Off", "off"}, {"Low", "low"}, {"Medium", "medium"}, {"High", "high"}}));
+    rows.push_back(Slider("Camera", "Motion blur strength",
+                          "How long the blur's streaks are. It is the same at every frame rate. Applies at once.",
+                          "native_x_renderer_motion_blur_strength", 0, 100, 5, Percent, 50));
+    rows.push_back(Toggle("Camera", "Object motion blur",
+                          "With Motion blur on: soldiers, vehicles and other moving things blur by their own "
+                          "movement too, not only the camera's. Applies at once.",
+                          "native_x_renderer_motion_blur_objects"));
+    // After 0.4.5: the renderer's own depth of field while aiming (NativeXRenderer dof.h); the game's zoom blur is gone.
+    rows.push_back(Toggle("Camera", "ADS depth of field",
+                          "While you aim down the sights, the back of the gun near your eye goes softly out of focus, "
+                          "less toward its front; the sights and what you aim at stay sharp. Off: everything stays "
+                          "sharp. Applies at once.",
+                          "native_x_renderer_ads_dof"));
+    rows.push_back(Choice("Camera", "ADS depth of field strength",
+                          "How soft the gun goes while you aim: Low a little, Strong more. The sights stay sharp. "
+                          "Applies at once.",
+                          "native_x_renderer_ads_dof_strength", {{"Low", "low"}, {"Default", "default"}, {"Strong", "strong"}}));
+    rows.push_back(Choice("Camera", "Depth of field quality",
+                          "How smooth the out of focus blur is: higher takes more samples for each pixel and costs "
+                          "more. Applies at once.",
+                          "native_x_renderer_dof_quality", {{"Low", "low"}, {"Medium", "medium"}, {"High", "high"}}));
+    rows.push_back(Toggle("Camera", "Hit and explosion blur",
+                          "The game's screen blur from nearby explosions, bullets and low health. Applies at once.",
+                          "bf_motion_blur"));
+    rows.push_back(Toggle("Camera", "Camera shake", "The camera shaking from explosions and gunfire. Applies at once.",
+                                 "bf_camera_shake"));
+    rows.push_back(Slider("Camera", "Camera shake strength",
+                                 "How hard the camera shakes. 100% is the Xbox 360's; lower it if the shaking bothers "
+                                 "you.",
+                                 "bf_camera_shake_strength", 10, 200, 5, Percent, 100));
     // 13 Nov 2026: the HUD's size (the soldier's and the vehicles' HUD and the crosshair; NativeXRenderer scales each
     // part about the screen's corner, edge or centre it hangs on) and, apart from it, the minimap's.
     // 0.4.2 ("a toggle-able option above HUD scale for SMG ADS being either Zoom In or Iron Sight"): fov.cpp.
     rows.push_back(Toggle("HUD", "SMG aiming",
                           "What aiming does with a submachine gun. Zoom In is the game's own: the gun is pulled in "
                           "and you aim with the crosshair. Iron Sight brings the gun's own sights to your eye, as "
-                          "the rifles and pistols do, without the zoom's blur. Only your view changes: where the "
+                          "the rifles and pistols do. Only your view changes: where the "
                           "shots go is the same. Applies at once.",
                           "bf_smg_sights", "Zoom In", "Iron Sight"));
     rows.push_back(Toggle("HUD", "Iron Sight crosshair",
                           "With SMG aiming at Iron Sight: whether the crosshair shows while you aim down the "
                           "sights. Hidden is how the rifles and pistols aim. Applies at once.",
                           "bf_smg_sights_no_crosshair", "Shown", "Hidden"));
+#if defined(BF_INTERNAL_TOOLS)  // an internal build's only
+    rows.push_back(Toggle("HUD", "Sight alignment",
+                          "For lining the SMG's sights up yourself. On, with SMG aiming at Iron Sight: aim with an "
+                          "SMG in a match and nudge the gun with the keyboard. Arrow keys move it left, right, up "
+                          "and down; Page Up and Page Down forward and back; number pad 4 and 6 turn it, 8 and 2 "
+                          "tilt it, 7 and 9 roll it, 0 resets. Shift makes steps larger, Ctrl smaller. The values "
+                          "show on screen and are saved for that gun. Switch it off when you are done.",
+                          "bf_smg_sight_tune"));
+#endif
     rows.push_back(Slider("HUD", "HUD scale",
                           "The size of the HUD and the crosshair on foot and in vehicles. 100% is the game's own; the "
                           "three crosshairs over the slider show the size you pick. The minimap has its own size "
@@ -4662,6 +5211,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // no input meanwhile).
   bool CaptureBind() {
     if (capture_.empty()) return false;
+    if (capture_.rfind("pad:", 0) == 0 || capture_.rfind("axis:", 0) == 0) return CapturePad();
+    if (capture_.rfind("flight:", 0) == 0) return CaptureFlightAxis();  // a Plane flight row's mouse movement
     const bool mouse = capture_slot_ >= 2;
     // A wheel notch only for the bindings that are a button (the wheel cannot hold a trigger or a direction).
     const bool wheel = capture_.find("trigger") == std::string::npos && capture_.find("stick_up") == std::string::npos &&
@@ -4681,6 +5232,77 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       capture_.clear();
     } else if (const std::string key = CapturedKey(mouse, wheel); !key.empty()) {
       StoreBindSlot(capture_, capture_slot_, key);
+      capture_.clear();
+    }
+    return true;
+  }
+
+  // The controller page's slot waiting (capture_ "pad:<action>" or "axis:<setting>", game_menu_controls.inc): once the
+  // controller is let go, its next button (or trigger) goes to the action, the action that had it taking this one's
+  // button; or the next stick pushed most of the way goes to the stick axis, pushed left or down meaning inverted. Esc
+  // let go at once keeps what it has, Esc held clears it (no button, no axis), as the keys' slots; 8 s with nothing
+  // keeps it too. True while it waits (the page gets no input meanwhile).
+  bool CapturePad() {
+    const bool axis = capture_.rfind("axis:", 0) == 0;
+    const std::string what = capture_.substr(axis ? 5 : 4);
+    auto clear_slot = [&] {
+      if (axis) {
+        SetCvar(what, "none");
+      } else if (const int b = PadButtonOf(what); b >= 0) {
+        SetCvar(bf1943::RemapCvar(BindSet(), kPadButtonNames[b].first), "none");
+      }
+      REXLOG_INFO("BF settings: {} cleared (the controller)", what);
+    };
+    if (ImGui::IsKeyDown(ImGuiKey_Escape)) {
+      if (esc_held_since_ < 0) esc_held_since_ = ImGui::GetTime();
+      if (ImGui::GetTime() - esc_held_since_ >= 0.6) {
+        clear_slot();
+        capture_.clear();
+        esc_held_since_ = -1;
+        esc_swallow_ = true;
+      }
+      return true;
+    }
+    if (esc_held_since_ >= 0) {
+      esc_held_since_ = -1;
+      capture_.clear();
+      return true;
+    }
+    if (ImGui::GetTime() - pad_capture_at_ > 8.0) {
+      REXLOG_INFO("BF settings: {} kept (no press from the controller)", what);
+      capture_.clear();
+      return true;
+    }
+    RawPad p;
+    {
+      std::lock_guard<std::mutex> lock(pad_mutex_);
+      if (std::chrono::steady_clock::now() - raw_pad_at_ < std::chrono::milliseconds(500)) p = raw_pad_;
+    }
+    int strongest = 0;
+    for (int a = 0; a < 4; ++a)
+      if (std::abs(p.axis[a]) > std::abs(p.axis[strongest])) strongest = a;
+    const int push = std::abs(int(p.axis[strongest]));
+    const bool any = p.buttons || p.lt > 30 || p.rt > 30 || push > 10000;
+    if (!pad_armed_) {
+      pad_armed_ = !any;
+      return true;
+    }
+    if (axis) {
+      if (push > 23000) {
+        const std::string v = std::string(p.axis[strongest] < 0 ? "-" : "") + bf1943::kStickAxes[strongest];
+        SetCvar(what, v);
+        REXLOG_INFO("BF settings: {} now gets the controller's {}", what, v);
+        capture_.clear();
+      }
+      return true;
+    }
+    static constexpr uint16_t kBits[] = {0x1000, 0x2000, 0x4000, 0x8000, 0x0100, 0x0200, 0, 0,
+                                         0x0040, 0x0080, 0x0020, 0x0010, 0x0001, 0x0002, 0x0004, 0x0008};
+    int pressed = p.lt > 128 ? 6 : p.rt > 128 ? 7 : -1;  // kPadButtonNames' order
+    for (int b = 0; b < 16 && pressed < 0; ++b)
+      if (kBits[b] && (p.buttons & kBits[b])) pressed = b;
+    if (pressed >= 0) {
+      if (pressed != PadButtonOf(what)) SwapPadButton(what, pressed);
       capture_.clear();
     }
     return true;
@@ -4996,6 +5618,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       else if (w == "bfleft") PressBf({0x0004}), Passing(0x0004);
       else if (w == "bfrb") PressBf({0x0200}), Passing(0x0200);
       else if (w == "bflb") PressBf({0x0100}), Passing(0x0100);
+      else if (w == "bfy") PressBf({0x8000}), Passing(0x8000);  // in play: the next weapon (the wetness's tests)
+      // (The left stick right or left on BF's spawn screen: its kit choice, as BF_SPAWN_PRESSES' lsr and lsl.)
+      else if (w == "bflsr") PressBf({0x0400}), Passing(0x0400);
+      else if (w == "bflsl") PressBf({0x0800}), Passing(0x0800);
+#if defined(BF_DEV_TOOLS)
+      else if (w == "changeteam") ChangeTeamNow();  // the other team's hands and weapons (the wetness's tests)
+#endif
     }
   }
 
@@ -5125,6 +5754,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   static constexpr int kPauseResume = 0, kPauseSquad = 1, kPauseTeam = 2, kPauseScoreboard = 3, kPauseSettingsRow = 4,
                        kPauseControls = 5, kPauseLeaderboards = 6, kPauseAchievements = 7, kPauseExit = 8,
                        kPauseSuicide = 9;
+  double smg_tune_dirty_at_ = -1;  // the SMG's sight tuning changed a value: saved a second after the last change
   double team_suicide_at_ = -1;  // after a change of team: the suicide that sends the soldier to its new base
   void ChangeTeamNow() {
     const int mine = comms::Team();
@@ -5564,6 +6194,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
 #include "game_menu_launcher.inc"
 #include "game_menu_clan.inc"
+#include "game_menu_account.inc"  // the soldier name page (P2: one page and a briefing)
 #include "game_menu_home.inc"
 #include "game_menu_news.inc"
 #include "game_menu_tutorial.inc"  // the first start's video tutorial (the news' video player)
@@ -5981,6 +6612,17 @@ std::string StartupGpuPlugin(const fs::path&) {
 // exclusive Fullscreen left the game minimised behind the setup's file picker). Not in test runs (a
 // window kept in the background or hidden, as tools\run_game.ps1 starts it) unless BF_DEV_NEW_INSTALL=1, and their
 // window is never made fullscreen.
+// 0.4.8's graphics defaults (TekRantGaming, 26 Nov 2026), the same on every preset, and Soft shadows and SSR as the
+// High and Ultra presets have them (`high`) or the others. The settings file's keys.
+std::vector<std::pair<std::string, std::string>> GraphicsDefaults048(bool high) {
+  return {{"cvar.bf_upscaler_mode", "quality"},
+          {"cvar.native_x_renderer_alpha_to_coverage", "auto"},   // Transparent edges: Original (install_defaults 8)
+          {"cvar.bf_smooth_bones", "true"},                        // Animation smoothing: on
+          {"cvar.bf_hud_scale", "high"},                           // HUD scale: High-Res
+          {"cvar.native_x_renderer_storm_sway", "false"},          // Storm shake: off
+          {"cvar.native_x_renderer_soft_shadows", high ? "soft" : "off"},
+          {"cvar.native_x_renderer_reflections", high ? "true" : "false"}};
+}
 void NewInstallDefaults(Settings& settings) {
   // 0.4.0 (TekRantGaming, 13 Nov 2026): the GI distance Full is the F8 panel's only; Far is the most the Settings
   // page and the Ultra preset offer. Both offered Full before, so a saved Full becomes Far once (gi_full_capped);
@@ -6030,6 +6672,57 @@ void NewInstallDefaults(Settings& settings) {
     REXLOG_INFO("BF settings: no render resolution since v0.2.1 (it was {}){}", scale.empty() ? "Auto" : scale,
                 to_fsr ? ": 720p with the upscaler Off is AMD FSR 1 at Performance now" : "");
   }
+  // 0.4.8 (TekRantGaming, 20 Nov 2026: "I need the following enhancements to be turned off by default for all players
+  // ... soft shadows and reflections"; FSR 1 and NVIDIA NIS "set to quality, by default, for all players ... the
+  // default should be FSR1. And if we detect that they have a compatible GPU, we then make it NVIDIA NIS"): once, for
+  // every settings file from before, Soft shadows and Reflections go back to their default (Off) and the spatial
+  // upscaler is AMD FSR 1 at Quality (NVIDIA NIS kept where it was chosen), with upscaler_auto 1 so the first answer
+  // of this GPU (NoteNisSupport) makes it NVIDIA NIS on an NVIDIA card that runs it. The player's own choices after
+  // this stay.
+  if (settings.Get("install_defaults", "") == "5") {
+    const std::string was = settings.Get("cvar.native_x_renderer_scaling", "bilinear") + " at " +
+                             settings.Get("cvar.bf_upscaler_mode", "quality");
+    settings.values.erase("cvar.native_x_renderer_soft_shadows");
+    settings.values.erase("cvar.native_x_renderer_reflections");
+    if (settings.Get("cvar.native_x_renderer_scaling", "") != "nis") settings.values["cvar.native_x_renderer_scaling"] = "fsr";
+    settings.values["cvar.bf_upscaler_mode"] = "quality";
+    settings.values["upscaler_auto"] = "1";
+    settings.values["install_defaults"] = "6";
+    settings.Save();
+    REXLOG_INFO("BF settings: v0.4.8's defaults: Soft shadows and Reflections Off, the spatial upscaler at Quality "
+                "(it was {}; NVIDIA NIS where this GPU is an NVIDIA card that runs it)", was);
+  }
+  // 0.4.8's graphics defaults (TekRantGaming, 26 Nov 2026: "graphic settings on by default on all presets"): once, for
+  // every settings file from before, the spatial upscaler is AMD FSR 1 at Quality (NVIDIA NIS kept where it was chosen,
+  // and made from this GPU's first answer on an NVIDIA card that runs it: upscaler_auto, NoteNisSupport), Transparent
+  // edges Smooth, Animation smoothing on, HUD scale High-Res and Storm shake off; Soft shadows and SSR reflections on
+  // for a player on the High or Ultra preset (the last one chosen; with none chosen, shadows at High or more), off
+  // for the others. The player's own choices after this stay.
+  if (settings.Get("install_defaults", "") == "6") {
+    const std::string preset = settings.Get("graphics_preset", "");
+    const bool high = preset == "High" || preset == "Ultra" ||
+                      (preset.empty() && std::atof(settings.Get("cvar.native_x_renderer_shadow_scale", "0").c_str()) >= 2.0);
+    for (const auto& [key, value] : GraphicsDefaults048(high)) settings.values[key] = value;
+    if (settings.Get("cvar.native_x_renderer_scaling", "") != "nis") settings.values["cvar.native_x_renderer_scaling"] = "fsr";
+    settings.values["upscaler_auto"] = "1";
+    settings.values["install_defaults"] = "7";
+    settings.Save();
+    REXLOG_INFO("BF settings: v0.4.8's graphics defaults: the spatial upscaler at Quality, Transparent edges Original, "
+                "Animation smoothing on, HUD scale High-Res, Storm shake off, Soft shadows and SSR {} (preset {})",
+                high ? "on" : "off", preset.empty() ? "none chosen" : preset);
+  }
+  // Transparent edges back to Original for everyone (TekRantGaming, 27 Nov 2026: "the leves of the pam trees dont show
+  // up unless i break the tree or get far away" ... "it was transparent edges turn this off by default on all presets
+  // and by default for everyone"). Smooth (NativeXRenderer D69's blend) left the palms' fronds out up close; 0.4.8's
+  // defaults (install_defaults 7) had set it for every player. Once, for every settings file, it is Original (auto)
+  // again; the player can still choose Smooth in Settings, Graphics, and that choice then stays.
+  if (settings.Get("install_defaults", "") == "7") {
+    const std::string was = settings.Get("cvar.native_x_renderer_alpha_to_coverage", "auto");
+    settings.values["cvar.native_x_renderer_alpha_to_coverage"] = "auto";
+    settings.values["install_defaults"] = "8";
+    settings.Save();
+    REXLOG_INFO("BF settings: Transparent edges Original for everyone (it was {})", was == "blend" ? "Smooth" : "Original");
+  }
   if (REXCVAR_GET(server) || !settings.Get("launcher_setup", "").empty() || !settings.Get("install_defaults", "").empty())
     return;
   const std::string start = rex::cvar::GetFlagByName("window_start");
@@ -6049,15 +6742,19 @@ void NewInstallDefaults(Settings& settings) {
       {"cvar.native_ao_mode", "1"}, {"cvar.native_ao_strength", "3"}, {"cvar.native_ao_samples", "3"},
       {"cvar.native_gi_mode", "1"}, {"cvar.native_gi_quality", "3"}, {"cvar.native_gi_distance", "2"},
       {"cvar.native_grass", "true"}, {"cvar.native_grass_radius", "1440.000000"},
-      // Upscaler AMD FSR 1 at Quality, King Kong's default (TekRantGaming, 11 Nov 2026, v0.2.1). Only new installs: a settings
-      // file from before has no upscaler, so its picture stays as it was (King Kong's settings version 2 did the same).
+      // Upscaler AMD FSR 1 at Quality, King Kong's default (TekRantGaming, 11 Nov 2026, v0.2.1); NVIDIA NIS from the first
+      // answer of an NVIDIA GPU that runs it (upscaler_auto, NoteNisSupport; 20 Nov 2026).
       {"cvar.native_x_renderer_scaling", "fsr"}, {"cvar.bf_upscaler_mode", "quality"},
       // Controls: camera response Modern. Gameplay: performance metrics off (the setting's own default).
       {"cvar.bf_camera_modern", "true"}, {"cvar.bf_performance_metrics", "off"}};
   for (const auto& [key, value] : kDefaults) settings.values[key] = value;
+  // 0.4.8's graphics defaults (above); Soft shadows and SSR on, as these defaults are the High preset's kind. The first
+  // start's auto detect then applies its preset (TierSettings), which sets both for a slower PC.
+  for (const auto& [key, value] : GraphicsDefaults048(true)) settings.values[key] = value;
   settings.values["fullscreen_mode"] = "desktop";  // Borderless (a test window stays a window)
   if (!test_window) settings.values["fullscreen"] = "on";
-  settings.values["install_defaults"] = "5";  // 0.2.1's: no render resolution to move (above)
+  settings.values["install_defaults"] = "8";  // 0.4.8's: nothing to move (above)
+  settings.values["upscaler_auto"] = "1";     // NVIDIA NIS on a GPU that runs it (NoteNisSupport)
   settings.values["gi_full_capped"] = "1";    // a new install never had the menus' Full (above)
   std::error_code ec;
   fs::create_directories(settings.path.parent_path(), ec);
@@ -6070,6 +6767,27 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   settings.path = user_dir / "bf1943-settings.txt";
   settings.Load();
   NewInstallDefaults(settings);
+#if defined(BF_DEV_TOOLS)
+  // BF_BENCH_PRESET=<Potato|Low|Medium|High|Ultra> (benchmarks, tools/bench): that graphics preset, as choosing it on
+  // the Graphics page does (GraphicsPresets), saved in this user folder's settings before they are applied below.
+  if (const char* want = std::getenv("BF_BENCH_PRESET"); want && *want && !REXCVAR_GET(server)) {
+    auto same = [](std::string a, std::string b) {
+      for (auto* s : {&a, &b})
+        for (char& c : *s) c = char(std::tolower(static_cast<unsigned char>(c)));
+      return a == b;
+    };
+    bool found = false;
+    for (const GraphicsPreset& p : GraphicsPresets()) {
+      if (!same(p.name, want)) continue;
+      for (const auto& [name, value] : p.settings) settings.values[std::string("cvar.") + name] = value;
+      settings.values["graphics_preset"] = p.name;
+      settings.Save();
+      REXLOG_INFO("BF settings: graphics preset {} (BF_BENCH_PRESET)", p.name);
+      found = true;
+    }
+    if (!found) REXLOG_WARN("BF settings: no graphics preset {} (BF_BENCH_PRESET)", want);
+  }
+#endif
   auto set = [&](const char* key, const char* cvar) {
     if (auto it = settings.values.find(key); it != settings.values.end()) rex::cvar::SetFlagByName(cvar, it->second);
   };
@@ -6080,6 +6798,8 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   // Grass and shrubs are always on (TekRantGaming, 10 Nov 2026: no longer a setting; only their distance is): a saved Off
   // from an older version is not taken. The F8 panel still switches them for the session.
   if (!REXCVAR_GET(server)) rex::cvar::SetFlagByName("native_grass", "true");
+  // 18 Nov 2026: each vehicle kind's keys (vehicle_binds.cpp) start as the infantry's are now, once.
+  if (!REXCVAR_GET(server) && bf1943::SeedVehicleBinds(settings.values)) settings.Save();
   // Antialiasing is Off or FXAA (TekRantGaming, 9 Nov 2026): FXAA by default and in place of a mode no longer offered
   // (SMAA, DLAA, DLSS, FSR 3.1); no frame generation (it needed those).
   if (!REXCVAR_GET(server)) {
@@ -6348,8 +7068,8 @@ void FinishNameCheck() {
 
 bool GraphicsPanelOpen();               // f8_panel.cpp
 void GraphicsPanelPad(uint16_t buttons);  // f8_panel.cpp
-// Our menus or the graphics panel (F8) have the controller and the mouse.
-bool GameMenuOpen() { return (g_menu && g_menu->open()) || GraphicsPanelOpen(); }
+// Our menus, the graphics panel (F8) or the match admin's panel (F9) have the controller and the mouse.
+bool GameMenuOpen() { return (g_menu && g_menu->open()) || GraphicsPanelOpen() || world::AdminPanelOpen(); }
 bool LauncherShowing() { return g_menu && g_menu->ShowingLauncher(); }
 bool ShaderScreenShowing() { return g_menu && g_menu->ShowingShaders(); }
 bool LauncherKeyboardLast() { return g_menu && g_menu->KeyboardLast(); }
@@ -6442,6 +7162,21 @@ fs::path SavedGameDir(const fs::path& user_dir) {
 bool GameMenuEnabled() { return REXCVAR_GET(bf_launcher) && !REXCVAR_GET(server); }
 // For perf_overlay.cpp: 0 bold, 1 semibold.
 ImFont* MenuFont(int which) { return which == 0 ? g_fonts.bold : g_fonts.item; }
+uint16_t PulsedButtons();  // input_settings.cpp
+// From the pad hook (auto_join.cpp) at each read: the controller's whole state, for the controller page's slots
+// (CapturePad), without what the keyboard and mouse or our own presses gave it.
+void GameMenuPadRaw(const uint8_t* gamepad) {
+  if (!g_menu) return;
+  GameMenu::RawPad p;
+  p.buttons = uint16_t(uint16_t(gamepad[0] << 8 | gamepad[1]) & ~rex::input::mnk::LastKeyButtons() & ~PulsedButtons());
+  p.lt = rex::input::mnk::LastKeyTrigger(false) ? 0 : gamepad[2];
+  p.rt = rex::input::mnk::LastKeyTrigger(true) ? 0 : gamepad[3];
+  const int keys[4] = {rex::input::mnk::LastKeyLeftStick(false), rex::input::mnk::LastKeyLeftStick(true),
+                       rex::input::mnk::LastKeyRightStick(false), rex::input::mnk::LastKeyRightStick(true)};
+  for (int a = 0; a < 4; ++a)
+    p.axis[a] = int16_t(std::clamp(int(int16_t(gamepad[4 + 2 * a] << 8 | gamepad[5 + 2 * a])) - keys[a], -32767, 32767));
+  g_menu->PadRaw(p);
+}
 void GameMenuPad(uint16_t buttons, int16_t lx, int16_t ly) {
   GraphicsPanelPad(buttons);  // L3 with R3 toggles it; open, the controller is its own
   if (GraphicsPanelOpen()) return;

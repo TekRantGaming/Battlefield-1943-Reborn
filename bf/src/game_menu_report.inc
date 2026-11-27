@@ -557,9 +557,10 @@
         }
       }
       if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) RpDelete();
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false))
-        if (const char* clip = ImGui::GetClipboardText())
-          for (const char* c = clip; *c; ++c)
+      // Ctrl+V or Shift+Insert (paste_keys.h: io.KeyCtrl, waited for here before, is never set in our menus).
+      if (paste::Pressed())
+        if (const std::string clip = paste::Text(); !clip.empty())
+          for (const char* c = clip.c_str(); *c; ++c)
             if (*c != '\r' && (static_cast<unsigned char>(*c) >= 32 || *c == '\n')) {
               std::string* t = RpText(rp_field_);
               if (t->size() >= RpMax(rp_field_)) break;

@@ -1,0 +1,38 @@
+name: "Suggestion"
+description: "An idea to make the game better."
+title: "[Suggestion] "
+labels: ["suggestion", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The quickest way is the game's own **Report an issue** page on the main menu: it fills
+        this form in with your system details and the end of your log, private details removed.
+  - type: textarea
+    id: what
+    attributes:
+      label: "The idea"
+      description: "What you would like the game to do."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Why it helps"
+      description: "Who it helps and how."
+    validations:
+      required: false
+  - type: textarea
+    id: system
+    attributes:
+      label: "System"
+      description: "Filled in by the game (optional for a suggestion)."
+    validations:
+      required: false
+  - type: input
+    id: contact
+    attributes:
+      label: "Contact"
+      description: "A Discord name if you want a reply there. Optional."
+    validations:
+      required: false

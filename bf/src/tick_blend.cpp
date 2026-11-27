@@ -81,7 +81,10 @@ REXCVAR_DEFINE_BOOL(bf_smooth_motion_predict, false, "BF1943",
                     "vehicle's steps change it overshoots and comes back (it jumps forward and back seen from outside)");
 REXCVAR_DEFINE_BOOL(bf_smooth_bones, false, "BF1943",
                     "Experimental, with bf_smooth_motion: each bone's own movement blended between the game's ticks "
-                    "too (does not smooth the first person weapon yet)");
+                    "too, the first person arms and gun included");
+REXCVAR_DEFINE_BOOL(bf_smooth_bones_aim, true, "BF1943",
+                    "With bf_smooth_bones: a bone the game also moves on every frame (the first person arms and gun "
+                    "follow the aim) has its change at each tick eased in over the tick, the rest left as it is");
 
 namespace bf1943 {
 bool InMatch();             // auto_join.cpp
@@ -289,6 +292,7 @@ struct Track {
   bool drifted = false;  // the last Follow saw a change between ticks
   double step_move = 0, step_turn = 0;  // the last tick's step: its largest position and row change
   bool jump = false;     // the last tick's step was far beyond the one before (a teleport, a camera switch)
+  float tick_jump[4][3] = {};  // a matrix bone's change at the last tick alone (EaseTickJump)
   // Ours (the local player's vehicle and whoever rides it): its last ticks' steps were the camera's. Scored once a tick.
   int own_score = 0;
   uint64_t scored_tick = 0;
@@ -491,6 +495,8 @@ struct Pose {
 };
 struct BoneTrack {
   Pose cur{}, prev{};
+  Pose jump{};  // the change at the last tick alone: the first value after it less the last before (EaseTickJump)
+  uint64_t jump_ticks = 0;  // the ticks that change spans (more than one below the tick rate's frame rate)
   uint64_t seen_tick = 0, every_frame_until = 0, frame = 0;  // every_frame_until: a tick count
   bool have = false, step = false;
 };
@@ -553,12 +559,73 @@ bool BlendPose(const Pose& a, const Pose& b, double t, Pose& out) {
   for (int i = 0; i < 4; ++i) out.v[4 + i] = float(q[i] / n);
   return true;
 }
+
+// The first person arms and gun while the view turns or the soldier walks (19 Nov 2026, the user: "Player hand model
+// and weapons also banded around ... Let's also do the Animation smoothing on player hand model and weapons"). Their
+// bones change between ticks too (the aim follows the mouse every frame, look.cpp), so the blends above left them as
+// the game had them, and the animation's own step came at each tick: 60 times a second against 240 frames (run
+// gbones2: the bone nearest the eye left unblended, "moves between ticks", for as long as the view turned or the
+// soldier walked, and blended while standing). Here only the change at the tick is eased in: shown = now - (1 - f) *
+// jump, jump the first value after the tick less the last before it. What changes between ticks passes at once; the
+// tick's step is spread over the tick, one tick behind as the blends are. With no change between ticks it is the blend.
+bool EaseTickJump(const Pose& now, const Pose& jump, double f, Pose& out) {
+  const double left = std::clamp(1.0 - f, -1.0, 1.0);
+  double move = 0, turn = 0;
+  for (int i = 0; i < 3; ++i) move = std::max(move, double(std::abs(jump.v[i])));
+  for (int i = 4; i < 8; ++i) turn = std::max(turn, double(std::abs(jump.v[i])));
+  if (move > 0.5 || turn > 0.5 || (move == 0 && turn == 0)) return false;  // a new animation, not a step
+  double q[4], n = 0;
+  for (int i = 0; i < 4; ++i) q[i] = now.v[4 + i] - left * jump.v[4 + i], n += q[i] * q[i];
+  n = std::sqrt(n);
+  if (!(n > 1e-6)) return false;
+  for (int i = 0; i < 3; ++i) out.v[i] = float(now.v[i] - left * jump.v[i]);
+  out.v[3] = now.v[3];
+  for (int i = 0; i < 4; ++i) out.v[4 + i] = float(q[i] / n);
+  return true;
+}
+// The same for a bone with a whole local matrix: the rows eased, then made square again at the game's lengths.
+bool EaseTickJump(const Xf& now, const float (&jump)[4][3], double f, Xf& out) {
+  const double left = std::clamp(1.0 - f, -1.0, 1.0);
+  double move = 0, turn = 0;
+  for (int c = 0; c < 3; ++c) {
+    move = std::max(move, double(std::abs(jump[3][c])));
+    for (int r = 0; r < 3; ++r) turn = std::max(turn, double(std::abs(jump[r][c])));
+  }
+  if (move > 0.5 || turn > 0.5 || (move == 0 && turn == 0)) return false;
+  out = now;
+  double row[3][3], len[3];
+  for (int r = 0; r < 3; ++r) {
+    len[r] = std::sqrt(double(now.m[r][0]) * now.m[r][0] + double(now.m[r][1]) * now.m[r][1] +
+                       double(now.m[r][2]) * now.m[r][2]);
+    for (int c = 0; c < 3; ++c) row[r][c] = now.m[r][c] - left * jump[r][c];
+  }
+  if (!(len[0] > 1e-6 && len[1] > 1e-6 && len[2] > 1e-6)) return false;
+  auto unit = [](double (&v)[3]) {
+    const double n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (!(n > 1e-9)) return false;
+    for (double& x : v) x /= n;
+    return true;
+  };
+  if (!unit(row[0])) return false;
+  const double d = row[1][0] * row[0][0] + row[1][1] * row[0][1] + row[1][2] * row[0][2];
+  for (int c = 0; c < 3; ++c) row[1][c] -= d * row[0][c];
+  if (!unit(row[1])) return false;
+  double z[3] = {row[0][1] * row[1][2] - row[0][2] * row[1][1], row[0][2] * row[1][0] - row[0][0] * row[1][2],
+                 row[0][0] * row[1][1] - row[0][1] * row[1][0]};
+  if (z[0] * row[2][0] + z[1] * row[2][1] + z[2] * row[2][2] < 0) z[0] = -z[0], z[1] = -z[1], z[2] = -z[2];
+  for (int c = 0; c < 3; ++c) row[2][c] = z[c];
+  for (int r = 0; r < 3; ++r)
+    for (int c = 0; c < 3; ++c) out.m[r][c] = float(row[r][c] * len[r]);
+  for (int c = 0; c < 3; ++c) out.m[3][c] = float(now.m[3][c] - left * jump[3][c]);
+  return true;
+}
 #if defined(BF_DEV_TOOLS)
 // BF_DEV_MOTION=1: one moving root within 25 m of the rendered camera followed (another taken when it goes): each of its
 // skeleton updates logged with the frame, the phase, the game's last two positions, ours and the camera's; 600 lines.
 }  // namespace
 namespace bf1943 {
 extern std::atomic<float> g_dev_view_pos[3];  // dev_matscan.cpp: the rendered camera's position
+extern std::atomic<float> g_dev_view_rot[9];  // dev_matscan.cpp: its rows
 }  // namespace bf1943
 namespace {
 void DevMotion(uint32_t root, const Xf& prev, const Xf& cur, const Xf& shown, double f, uint64_t frame) {
@@ -1048,6 +1115,63 @@ void TickBlendBeforeTick(uint8_t* base) {
   g_trees_updated.clear();
 }
 
+// The ground fog's movers (NativeXRenderer's D231: "ground fog that can be pushed around by any dynamic object ...
+// vehicles, characters", the user, 21 Nov 2026): what moved in this tick within 110 m of the camera, from what is kept
+// here anyway: the part trees' bases (vehicles, planes; 8 parts or more taken for a vehicle's body) and the skinned
+// roots (soldiers), each with its place and its motion over the tick. The 32 nearest. (g.mutex held.)
+void PublishFogMoversLocked(uint64_t tick) {
+  float eye[3], right[3], forward[3];
+  double age = 0.0;
+  if (!native_x_renderer::ListenerView(eye, right, forward, &age) || age > 1.0) return;
+  struct Found {
+    native_x_renderer::FogMover mover;
+    float away = 0.0f;
+  };
+  std::vector<Found> found;
+  const float per_second = float(1.0 / kTick());
+  auto add = [&](const Xf& prev, const Xf& cur, float radius) {
+    Found f;
+    float speed2 = 0.0f;
+    for (int c = 0; c < 3; ++c) {
+      f.mover.position[c] = cur.m[3][c];
+      f.mover.velocity[c] = (cur.m[3][c] - prev.m[3][c]) * per_second;
+      speed2 += f.mover.velocity[c] * f.mover.velocity[c];
+    }
+    const float dx = cur.m[3][0] - eye[0], dz = cur.m[3][2] - eye[2];
+    f.away = dx * dx + dz * dz;
+    const float most = float(kMaxStep) * per_second;
+    if (!(f.away < 110.0f * 110.0f) || !(speed2 > 0.25f) || speed2 > most * most) return;
+    f.mover.radius = radius;
+    for (Found& other : found) {  // one for what is in one place (a vehicle's body and its riders): the widest
+      const float ox = other.mover.position[0] - f.mover.position[0], oz = other.mover.position[2] - f.mover.position[2];
+      if (ox * ox + oz * oz < 2.25f) {
+        if (radius > other.mover.radius) other = f;
+        return;
+      }
+    }
+    found.push_back(f);
+  };
+  for (const auto& [tree, t] : g_trees)
+    if (t.have && t.step && t.seen_tick == tick && t.count >= 2 && !t.cur.empty() && t.prev.size() == t.cur.size())
+      add(t.prev[0], t.cur[0], t.count >= 9 ? 2.8f : 1.2f);
+  for (const auto& [key, t] : g.tracks)
+    if (t.have && t.step && !t.jump && tick - t.seen_tick <= 1) add(t.prev, t.cur, 0.7f);
+  std::sort(found.begin(), found.end(), [](const Found& l, const Found& r) { return l.away < r.away; });
+  if (found.size() > 32) found.resize(32);
+  std::vector<native_x_renderer::FogMover> movers;
+  for (const Found& f : found) movers.push_back(f.mover);
+  native_x_renderer::SetFogMovers(movers.data(), uint32_t(movers.size()));
+  static uint64_t said = 0;
+  if (!movers.empty() && (said == 0 || tick - said > 1800)) {  // (now and then, for the log: a minute apart)
+    said = tick;
+    REXLOG_INFO("BF fog movers: {} within 110 m; the nearest at {:.1f} {:.1f} {:.1f}, {:.1f} m/s, radius {:.1f}",
+                movers.size(), movers[0].position[0], movers[0].position[1], movers[0].position[2],
+                std::sqrt(movers[0].velocity[0] * movers[0].velocity[0] + movers[0].velocity[1] * movers[0].velocity[1] +
+                          movers[0].velocity[2] * movers[0].velocity[2]),
+                movers[0].radius);
+  }
+}
+
 // After each client tick: the trees it updated take its values as their newest; the others stood still.
 void TickBlendAfterTick(uint8_t* base) {
 #if defined(BF_DEV_TOOLS)
@@ -1091,6 +1215,7 @@ void TickBlendAfterTick(uint8_t* base) {
     }
   g_trees_updated.clear();
   PublishOwnVehicleLocked(tick);
+  PublishFogMoversLocked(tick);
 #if defined(BF_DEV_TOOLS)
   {  // BF_DEV_VIEWREL=<parts>: every 15 ticks, the view against parts 0 and 21 of the nearest tree of that many parts
     static const int want = [] {
@@ -2120,8 +2245,20 @@ void DevBone(const uint8_t* base, uint32_t bone, const Pose& game, bool blended,
     return v && !std::strcmp(v, "identity");
   }();
   if (identity && t_root != 0x82CA7410 && t_root != 0) return;
+  // BF_DEV_BONELOG_AFTER=<seconds>[:<lines>]: start that long after the first bone seen, and log that many lines (900).
+  static const double after = [] {
+    const char* v = std::getenv("BF_DEV_BONELOG_AFTER");
+    return v && *v ? std::atof(v) : 0.0;
+  }();
+  static const int max_lines = [] {
+    const char* v = std::getenv("BF_DEV_BONELOG_AFTER");
+    const char* colon = v ? std::strchr(v, ':') : nullptr;
+    return colon ? std::max(1, std::atoi(colon + 1)) : 900;
+  }();
+  static const auto first_seen = Clock::now();
+  if (after > 0 && std::chrono::duration<double>(Clock::now() - first_seen).count() < after) return;
   std::lock_guard lock(m);
-  if (lines >= 900) return;
+  if (lines >= max_lines) return;
   const uint64_t frame = g_frame.load(std::memory_order_relaxed);
   float cam[3] = {bf1943::g_dev_view_pos[0].load(), bf1943::g_dev_view_pos[1].load(),
                   bf1943::g_dev_view_pos[2].load()};
@@ -2155,10 +2292,13 @@ void DevBone(const uint8_t* base, uint32_t bone, const Pose& game, bool blended,
   if (frame == logged_frame) return;
   logged_frame = frame;
   ++lines;
+  double view[3] = {};  // the bone in the rendered camera's frame (right, up, forward)
+  for (int r = 0; r < 3; ++r)
+    for (int c = 0; c < 3; ++c) view[r] += (pos[c] - cam[c]) * bf1943::g_dev_view_rot[r * 3 + c].load();
   REXLOG_INFO("BF bones: frame {} f {:.3f} blended {} world {:.4f} {:.4f} {:.4f} camera {:.4f} {:.4f} {:.4f} local {:.4f} "
-              "{:.4f} {:.4f} ({})",
+              "{:.4f} {:.4f} view {:.5f} {:.5f} {:.5f} ({})",
               frame, f, blended, pos[0], pos[1], pos[2], cam[0], cam[1], cam[2], game.v[0], game.v[1], game.v[2],
-              t_bone_why);
+              view[0], view[1], view[2], t_bone_why);
 }
 #endif
 
@@ -2173,11 +2313,22 @@ uint32_t BlendMatrixBone(uint8_t* base, uint32_t local, uint32_t bone) {
     MatrixStripe& st = g_matrix_stripes[(bone >> 6) % kStripes];
     std::lock_guard lock(st.mutex);
     Track& t = st.bones[bone];
+    // The tick's own jump: the change from the last value seen before this tick to the first after it (D-bones below).
+    if (t.have && t.seen_tick != tick) {
+      for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 3; ++c) t.tick_jump[r][c] = now_xf.m[r][c] - t.cur.m[r][c];
+    }
     const Plan plan = Follow(t, now_xf, tick, frame, kBoneTolerance);
-    if (plan.any()) use = Blend(t.prev, t.cur, bf1943::FramePhase() + (t_own ? 1.0 : 0.0), out, plan.move, plan.turn);
+    const double f = bf1943::FramePhase() + (t_own ? 1.0 : 0.0);
+    if (plan.any()) use = Blend(t.prev, t.cur, f, out, plan.move, plan.turn);
     const auto now = Clock::now();
+    const bool every_frame = now < t.moves_until || now < t.turns_until;
     t_bone_why = use ? "blended" : !t.step ? "no tick step" : t.jump ? "a jump" :
-                 now < t.moves_until || now < t.turns_until ? "moves between ticks" : plan.any() ? "refused" : "still";
+                 every_frame ? "moves between ticks" : plan.any() ? "refused" : "still";
+    if (!use && every_frame && t.step && !t.jump && REXCVAR_GET(bf_smooth_bones_aim)) {
+      use = EaseTickJump(now_xf, t.tick_jump, f, out);
+      if (use) t_bone_why = "tick jump eased";
+    }
   }
   if (!use) return 0;
   uint32_t scratch = g_matrix_scratch.load(std::memory_order_acquire);
@@ -2266,6 +2417,11 @@ REX_HOOK_RAW(sub_826E2220) {
     if (!t.have) {
       t.cur = now_pose, t.have = true, t.seen_tick = tick;
     } else if (t.seen_tick != tick) {
+      double dot = 0;
+      for (int i = 4; i < 8; ++i) dot += double(now_pose.v[i]) * t.cur.v[i];
+      for (int i = 0; i < 8; ++i)
+        t.jump.v[i] = now_pose.v[i] - (i >= 4 && dot < 0 ? -t.cur.v[i] : t.cur.v[i]);  // the rotation's same side
+      t.jump_ticks = tick - t.seen_tick;
       t.prev = t.cur, t.cur = now_pose;
       t.step = tick - t.seen_tick == 1;
       t.seen_tick = tick;
@@ -2286,6 +2442,18 @@ REX_HOOK_RAW(sub_826E2220) {
       use = BlendPose(t.prev, t.cur, bf1943::FramePhase() + (t_own ? 1.0 : 0.0), out);
     t_bone_why = use ? "blended" : !t.step ? "no tick step" : tick < t.every_frame_until ? "moves between ticks" :
                  t.prev == t.cur ? "still" : "refused";
+    // Also a frame two to four ticks after the last (below the tick rate's frame rate), which the blend leaves.
+    if (!use && t.jump_ticks >= 1 && t.jump_ticks <= 4 && (tick < t.every_frame_until || !t.step) &&
+        REXCVAR_GET(bf_smooth_bones_aim)) {
+      // the rotation on the side the jump was taken on
+      Pose now_side = now_pose;
+      double dot = 0;
+      for (int i = 4; i < 8; ++i) dot += double(now_pose.v[i]) * (now_pose.v[i] - t.jump.v[i]);
+      if (dot < 0)
+        for (int i = 4; i < 8; ++i) now_side.v[i] = -now_side.v[i];
+      use = EaseTickJump(now_side, t.jump, bf1943::FramePhase() + (t_own ? 1.0 : 0.0), out);
+      if (use) t_bone_why = "tick jump eased";
+    }
   }
   if (use) {
     uint32_t scratch = g_pose_scratch.load(std::memory_order_acquire);
@@ -2319,6 +2487,7 @@ namespace bf1943 {
 bool VehicleFreeLook(double& yaw, double& pitch);   // look.cpp
 int FirstPersonView();  // fov.cpp: 1 first person, 0 an outside view, -1 not known
 bool TurretViewOffset(double& yaw, double& pitch);  // vehicle_mouse.cpp
+bool TankFreeLook();    // vehicle_views.cpp: free look is held in a tank's outside view
 }  // namespace bf1943
 
 namespace {
@@ -2359,17 +2528,26 @@ Xf FreeLookTurn(const Xf& in, double yaw, double pitch) {
       // driver sits well over 3 m from the boat's root, and the first person view went round the boat too, 13 Nov);
       // else the camera over 3 m from the root.
       const int first = bf1943::FirstPersonView();
+      // A tank's outside view held in free look (vehicle_views.cpp): the game calls it first person too (run vw_tank2).
+      const bool tank = bf1943::TankFreeLook();
+      const bool outside = first == 0 || (first < 0 && v2 > 3.0 * 3.0) || tank;
       static int logged = -2;
-      if (first != logged) {
-        logged = first;
-        REXLOG_INFO("BF free look: the view is {} (camera {:.1f} m from the vehicle's root)",
-                    first == 1 ? "first person: turns in place" : first == 0 ? "an outside one: goes round the vehicle"
-                                                                              : "not told by the game: by distance",
+      const int kind = tank ? 3 : first;
+      if (kind != logged) {
+        logged = kind;
+        REXLOG_INFO("BF free look: the view {} (camera {:.1f} m from the vehicle's root)",
+                    tank          ? "is a tank's outside one: goes round the tank"
+                    : first == 1  ? "is first person: turns in place"
+                    : first == 0  ? "is an outside one: goes round the vehicle"
+                    : outside     ? "is not told by the game: outside by its distance, goes round the vehicle"
+                                  : "is not told by the game: inside by its distance, turns in place",
                     std::sqrt(v2));
       }
-      const bool outside = first == 0 || (first < 0 && v2 > 3.0 * 3.0);
       if (outside && v2 < 40.0 * 40.0)
         for (int c = 0; c < 3; ++c) pivot[c] = own.rows[3][c];
+      // The view going round the vehicle: no object motion blur meanwhile (the user, 19 Nov 2026: "keep Object motion
+      // blur from being applied to the vehicles when 3p free-look is being used"); the camera's blur stays.
+      if (outside) native_x_renderer::SetObjectMotionBlurPaused();
     }
   }
   double rel[3] = {rows[3][0] - pivot[0], rows[3][1] - pivot[1], rows[3][2] - pivot[2]};
@@ -2407,7 +2585,40 @@ Xf FreeLookTurn(const Xf& in, double yaw, double pitch) {
   for (int c = 0; c < 3; ++c) out.m[3][c] = float(pivot[c] + rel[c]);
   return out;
 }
+
+// How far the game's vehicle view is from the vehicle's root, in metres (vehicle_views.cpp's free look in a tank: the
+// game's own first person answer is yes in the Sherman's chase view too, run vw_tank2), -1 not known; and when (steady
+// clock nanoseconds).
+std::atomic<float> g_view_reach{-1.0f};
+std::atomic<int64_t> g_view_reach_at{0};
+
+// Under g.mutex: how far the game's view `view` is from the vehicle's root, published for vehicle_views.cpp.
+void NoteViewReach(const Xf& view) {
+  float reach = -1.0f;
+  {
+    std::lock_guard lock(bf1943::g_own_mutex);
+    const auto& own = bf1943::g_own;
+    if (own.valid && bf1943::ClientTicks() - own.tick <= 4) {
+      double v2 = 0;
+      for (int c = 0; c < 3; ++c) v2 += (double(own.rows[3][c]) - view.m[3][c]) * (double(own.rows[3][c]) - view.m[3][c]);
+      reach = float(std::sqrt(v2));
+    }
+  }
+  g_view_reach.store(reach, std::memory_order_relaxed);
+  g_view_reach_at.store(Clock::now().time_since_epoch().count(), std::memory_order_release);
+}
 }  // namespace
+
+namespace bf1943 {
+// For vehicle_views.cpp: the vehicle's view's distance from the vehicle's root (metres), -1 when not known.
+float VehicleViewReach() {
+  const int64_t at = g_view_reach_at.load(std::memory_order_acquire);
+  if (!at || Clock::now().time_since_epoch().count() - at >
+                 std::chrono::nanoseconds(std::chrono::milliseconds(250)).count())
+    return -1.0f;
+  return g_view_reach.load(std::memory_order_relaxed);
+}
+}  // namespace bf1943
 
 // The view's camera transform (sub_82583348(view, transform): copied in when it changed, the view marked for a new
 // view matrix). (See also TickBlendViewWithoutManager below.) From the camera manager's frame (sub_82294A58, the call returning to 0x82294C28, the main view) while
@@ -2464,6 +2675,7 @@ REX_HOOK_RAW(sub_82583348) {
       g.camera_shown = out, g.camera_shown_valid = blend;
       // Vehicle free look (look.cpp): only the view handed to the renderer is turned; the manager's own camera (sound,
       // effects, the parts placed around it) stays the game's.
+      NoteViewReach(now_xf);
       if (free_look) {
         const Xf turned = FreeLookTurn(blend ? out : now_xf, free_yaw, free_pitch);
         if (const uint32_t c = Copy(base, turned)) copy = c;

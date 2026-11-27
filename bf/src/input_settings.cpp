@@ -11,7 +11,10 @@
 //                       lowers it; opening our menus lowers it
 //   Vibration           on or off, and its strength 10 to 200% (above 100% stronger than the console, up to the
 //                       controller's full strength)
-//   Button remapping    which game button each controller button presses (bf_remap_<button>)
+//   Button remapping    which game button each controller button presses (bf_remap_<button>); each vehicle kind
+//                       has its own (bf_remap_ground_<button> ..., vehicle_binds.h), used while driving or flying one
+//   Stick remapping     which of the controller's stick axes the game gets on each of its own (bf_axis_<axis>, and
+//                       each vehicle kind's), so a plane's pitch, roll and yaw can each be on any stick (18 Nov 2026)
 // The mouse turns the soldier itself (look.cpp: bf_mouse_sensitivity, bf_mouse_invert_y). Keyboard & mouse and the
 // key bindings are the SDK's own settings (mnk_mode, mnk_mouse, keybind_*), set by the menu.
 
@@ -21,11 +24,15 @@
 #include <mutex>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "seat_info.h"
+#include "vehicle_binds.h"
 #include <rex/cvar.h>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/ppc/context.h>
@@ -144,30 +151,49 @@ uint32_t BitOf(const std::string& name) {
   return 0;  // "none"
 }
 
-// What each button in kButtons presses, from the bf_remap_* settings as they are now.
-std::array<uint32_t, 16> ReadRemap() {
-  const std::string values[16] = {
-      REXCVAR_GET(bf_remap_a),  REXCVAR_GET(bf_remap_b),     REXCVAR_GET(bf_remap_x),     REXCVAR_GET(bf_remap_y),
-      REXCVAR_GET(bf_remap_lb), REXCVAR_GET(bf_remap_rb),    REXCVAR_GET(bf_remap_lt),    REXCVAR_GET(bf_remap_rt),
-      REXCVAR_GET(bf_remap_ls), REXCVAR_GET(bf_remap_rs),    REXCVAR_GET(bf_remap_back),  REXCVAR_GET(bf_remap_start),
-      REXCVAR_GET(bf_remap_up), REXCVAR_GET(bf_remap_down),  REXCVAR_GET(bf_remap_left),  REXCVAR_GET(bf_remap_right)};
+// What each button in kButtons presses in a binding set (vehicle_binds.h: the infantry's bf_remap_* or a vehicle
+// kind's), from the settings as they are now.
+std::array<uint32_t, 16> ReadRemap(int set) {
   std::array<uint32_t, 16> table{};
-  for (size_t i = 0; i < 16; ++i) table[i] = values[i].empty() ? kButtons[i].bit : BitOf(values[i]);
+  for (size_t i = 0; i < 16; ++i) {
+    const std::string v = rex::cvar::GetFlagByName(RemapCvar(set, kButtons[i].name));
+    table[i] = v.empty() ? kButtons[i].bit : BitOf(v);
+  }
   return table;
 }
 
-// The same, read twice a second, not on every pad read (the game reads the pad many times a frame; looking 16
-// settings up by name each time cost frames, run vkf_base).
-const std::array<uint32_t, 16>& RemapTable() {
+// Each set's stick remapping (bf_axis_*): for the game's lx, ly, rx, ry, the controller's axis it gets (0 to 3) with
+// 4 added when inverted, or -1 for nothing.
+std::array<int, 4> ReadAxes(int set) {
+  std::array<int, 4> out{};
+  for (int a = 0; a < 4; ++a) {
+    std::string v = rex::cvar::GetFlagByName(AxisCvar(set, kStickAxes[a]));
+    const bool inverted = !v.empty() && v[0] == '-';
+    if (inverted) v.erase(0, 1);
+    out[a] = v.empty() ? a : -1;
+    for (int s = 0; s < 4; ++s)
+      if (v == kStickAxes[s]) out[a] = s + (inverted ? 4 : 0);
+  }
+  return out;
+}
+
+// The same for every set, read twice a second, not on every pad read (the game reads the pad many times a frame;
+// looking 16 settings up by name each time cost frames, run vkf_base).
+struct PadTables {
+  std::array<std::array<uint32_t, 16>, kBindSetCount> remap{};
+  std::array<std::array<int, 4>, kBindSetCount> axes{};
+};
+const PadTables& Tables() {
   using Clock = std::chrono::steady_clock;
-  static std::array<uint32_t, 16> table{};
+  static PadTables tables;
   static Clock::time_point read{};
   const auto now = Clock::now();
-  if (read.time_since_epoch().count() && now - read < std::chrono::milliseconds(500)) return table;
+  if (read.time_since_epoch().count() && now - read < std::chrono::milliseconds(500)) return tables;
   read = now;
-  table = ReadRemap();
-  return table;
+  for (int s = 0; s < kBindSetCount; ++s) tables.remap[size_t(s)] = ReadRemap(s), tables.axes[size_t(s)] = ReadAxes(s);
+  return tables;
 }
+const std::array<uint32_t, 16>& RemapTable() { return Tables().remap[size_t(ActiveBindSet())]; }
 
 int16_t Load16(const uint8_t* p) { return int16_t(uint16_t(p[0]) << 8 | p[1]); }
 void Store16(uint8_t* p, int v) {
@@ -244,6 +270,58 @@ bool g_aim_from_key = false;  // the aim's last press came from the keyboard or 
 // The keys that walk on foot (the left stick's up and down: W and S) are the throttle and the brake there, and the key
 // that zooms on foot (the left trigger: the right mouse button) is the second weapon. Only what the keys gave is moved
 // (SDK LastKey*); a controller's own sticks and triggers stay as they are.
+// The stick remapping of the seat's set (bf_axis_*): each of the game's stick axes gets the controller's axis it is set
+// to. Only the controller's own: what the keyboard and mouse gave the sticks (SDK LastKey*) is taken out first and put
+// back where it was, so the keys keep their own binds.
+void AxisRemap(uint8_t* gamepad) {
+  const std::array<int, 4>& axes = Tables().axes[size_t(ActiveBindSet())];
+  if (axes[0] == 0 && axes[1] == 1 && axes[2] == 2 && axes[3] == 3) return;
+  const int mnk[4] = {rex::input::mnk::LastKeyLeftStick(false), rex::input::mnk::LastKeyLeftStick(true),
+                      rex::input::mnk::LastKeyRightStick(false), rex::input::mnk::LastKeyRightStick(true)};
+  int pad[4];
+  for (int a = 0; a < 4; ++a) pad[a] = std::clamp(Load16(gamepad + 4 + 2 * a) - mnk[a], -32767, 32767);
+  for (int a = 0; a < 4; ++a) {
+    const int src = axes[size_t(a)];
+    const int v = src < 0 ? 0 : src >= 4 ? -pad[src - 4] : pad[src];
+    Store16(gamepad + 4 + 2 * a, v + mnk[a]);
+  }
+}
+
+#if defined(BF_DEV_TOOLS)
+// BF_DEV_PAD_STICKS="<s>:<lx|ly|rx|ry>=<value>/<hold s>,...": a controller's stick pushed, s from when the player was
+// last seated (tests: the vehicle script's sticks are written after these settings, so they never meet the remapping).
+void DevPadSticks(uint8_t* gamepad, bool seated) {
+  struct Push {
+    double at, hold;
+    int axis, value;
+  };
+  static const std::vector<Push> pushes = [] {
+    std::vector<Push> out;
+    const char* v = std::getenv("BF_DEV_PAD_STICKS");
+    for (const char* c = v; c && *c;) {
+      Push p{};
+      char axis[3] = {};
+      if (std::sscanf(c, "%lf:%2[a-z]=%d/%lf", &p.at, axis, &p.value, &p.hold) == 4)
+        for (int a = 0; a < 4; ++a)
+          if (std::string(axis) == kStickAxes[a]) p.axis = a, out.push_back(p);
+      c = std::strchr(c, ',');
+      if (c) ++c;
+    }
+    return out;
+  }();
+  static std::chrono::steady_clock::time_point since{};
+  if (pushes.empty() || !seated) {
+    since = {};
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (!since.time_since_epoch().count()) since = now;
+  const double t = std::chrono::duration<double>(now - since).count();
+  for (const Push& p : pushes)
+    if (t >= p.at && t < p.at + p.hold) Store16(gamepad + 4 + 2 * p.axis, p.value);
+}
+#endif
+
 void KeyboardInVehicle(uint8_t* gamepad) {
   const int key_ly = rex::input::mnk::LastKeyLeftStick(true);
   const bool key_lt = rex::input::mnk::LastKeyTrigger(false) != 0;
@@ -266,7 +344,7 @@ std::vector<std::string> ButtonsPressing(const std::string& game_button) {
   const uint32_t bit = BitOf(game_button);
   std::vector<std::string> out;
   if (!bit) return out;
-  const std::array<uint32_t, 16> remap = ReadRemap();
+  const std::array<uint32_t, 16> remap = ReadRemap(ActiveBindSet());
   for (size_t i = 0; i < std::size(kButtons); ++i) {
     if (remap[i] != bit) continue;
     if (kButtons[i].bit == bit) out.insert(out.begin(), kButtons[i].name);
@@ -318,6 +396,10 @@ void ApplyControllerSettings(uint8_t* gamepad, bool menu_open, bool seated) {
     g_aim_raised = g_aim_was_down = false;
     return;
   }
+#if defined(BF_DEV_TOOLS)
+  DevPadSticks(gamepad, seated);
+#endif
+  AxisRemap(gamepad);
   if (seated) KeyboardInVehicle(gamepad);
   uint32_t in = uint32_t(gamepad[0]) << 8 | gamepad[1];
   if (gamepad[2] > 30) in |= 0x10000;

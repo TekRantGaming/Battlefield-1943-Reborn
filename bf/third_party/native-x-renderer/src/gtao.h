@@ -45,6 +45,7 @@
 #include "TextureView.h"
 
 #include "camera_vote.h"
+#include "colour_check.h"
 #include "scale.h"
 
 namespace native_x_renderer {
@@ -168,6 +169,7 @@ class Gtao {
   static Smoothing SmoothingFor(int level);
 
  private:
+  ColourCheck check_;  // BF_AO_DISCARD_CHECK (tests)
   struct Pass {
     Diligent::RefCntAutoPtr<Diligent::IPipelineState> pso;
     Diligent::RefCntAutoPtr<Diligent::IShaderResourceBinding> srb;
@@ -181,7 +183,7 @@ class Gtao {
   bool CreateComputePass(Pass& pass, const char* name, const std::string& defines, const char* body,
                          std::initializer_list<const char*> textures, std::initializer_list<const char*> images);
   // The apply pass for a colour format (mode 2: no blend).
-  Pass* ApplyPass(Diligent::TEXTURE_FORMAT format, bool show);
+  Pass* ApplyPass(Diligent::TEXTURE_FORMAT format, bool show, uint32_t samples);
   bool EnsureImages(uint32_t padded_w, uint32_t padded_h, uint32_t out_w, uint32_t out_h, bool temporal);
   // Binds `bindings` to the pass's SRB (made again after ForgetTargets) and dispatches groups_x x groups_y groups.
   bool Dispatch(Diligent::IDeviceContext* context, Pass& pass, std::initializer_list<Binding> bindings,
@@ -196,7 +198,7 @@ class Gtao {
   Pass prepare_, prefilter_, normals_, smooth_h_, smooth_v_, main_low_, main_medium_, main_high_, denoise_,
       denoise_last_, output_pass_, temporal_;
   Diligent::RefCntAutoPtr<Diligent::IShader> apply_vs_, apply_ps_;
-  std::map<std::pair<Diligent::TEXTURE_FORMAT, bool>, Pass> apply_passes_;
+  std::map<std::pair<Diligent::TEXTURE_FORMAT, uint32_t>, Pass> apply_passes_;  // (format, show | samples << 1)
 
   // The working images (padded_w_ x padded_h_) and the result (out_w_ x out_h_), with the views the passes bind.
   uint32_t padded_w_ = 0, padded_h_ = 0, out_w_ = 0, out_h_ = 0, step_ = 1;

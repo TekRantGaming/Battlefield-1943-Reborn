@@ -31,6 +31,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I leaves the script's folder out
+import bans  # noqa: E402
 import gmhost  # noqa: E402
 import player_stats  # noqa: E402
 import stats  # noqa: E402
@@ -45,18 +46,24 @@ MULTI = (0xB0000000, 0xF0000000)  # multi part response, request
 MAX_PACKET = 65536
 MAX_MULTI = 262144
 MAX_STAT_KEYS = 1024
-RESERVATIONS = {}  # player IP -> (GID, time): the server picked in our menu, for the next Quick Match
+# One address can be several players (a household, a LAN party), so a join's state goes by who: (address, the player id
+# the game says with "reserve"; '' for a game that says none, which shares that one). An address keeps its newest
+# ADDRESS_RESERVATIONS picks, ADDRESS_PICKS of them counted as on their way, and ADDRESS_QUEUED places waiting in queues.
+ADDRESS_RESERVATIONS = 64
+ADDRESS_PICKS = 4
+ADDRESS_QUEUED = 8
+RESERVATIONS = {}  # who -> (GID, time): the server picked in our menu, for the next Quick Match
 # A full server refuses new joins (TekRantGaming, 15 Nov 2026: players joining a full server; the game itself lets in up
 # to 64, and a join over the game's own cap crashed a test server). A server is full when the players its host last
 # reported (every 5 s) and the players who picked it in the last JOIN_WINDOW seconds and are still on their way reach
-# its MAX-PLAYERS. PICKS keeps each address's first pick of a server (a renewal of the same pick keeps its place).
-PICKS = {}  # player IP -> (GID, time of the first pick, the server's players then, seconds it counts as on the way)
+# its MAX-PLAYERS. PICKS keeps each player's first pick of a server (a renewal of the same pick keeps its place).
+PICKS = {}  # who -> (GID, time of the first pick, the server's players then, seconds it counts as on the way)
 JOIN_WINDOW = 30
 # A pick whose game got the server's address (Theater EGAM) is in the host's player count from the host's next status
 # on (its link is up within 2 s of the address: 424 joins on Hetzner, 17 Nov 2026). Until 0.4.7.4 it was counted as on
 # its way for the whole JOIN_WINDOW: when another player left meanwhile, the count did not rise and the slot stayed
 # held for nobody (99 of the 144 picks counted on their way in a "full" refusal there had their address already).
-ARRIVED = {}  # player IP -> (GID, time its game got the server's address)
+ARRIVED = {}  # who -> (GID, time its game got the server's address)
 ARRIVED_COUNTED = 3  # a host's status this long after the address counts the player
 # The join queue (TekRantGaming, 18 Nov 2026: "a server que system with a popup showing you your position in the que
 # that updates there should also be a close button"). A game that says "queue": 1 in its "reserve" gets a place in the
@@ -67,9 +74,11 @@ ARRIVED_COUNTED = 3  # a host's status this long after the address counts the pl
 # A place whose game stops asking for QUEUE_TIMEOUT seconds is given up, "queue_leave" gives it up at once (the pop-up's
 # Close), and a pick of another server leaves it. A queue outlives its server's lost link for SERVER_GONE_GRACE
 # seconds (the host registers again, as a new game: the queue follows it by the server's address).
-QUEUE = []  # the waiting players, oldest first: {'token', 'gid', 'address', 'server', 'since', 'seen'}
+QUEUE = []  # the waiting players, oldest first: {'token', 'gid', 'address', 'id', 'server', 'since', 'seen'}
 QUEUE_TIMEOUT = 15
 QUEUE_MOST = 64        # a server's queue holds at most this many
+MOST_PLAYERS = 128     # lists of a server's players are cut at this
+BIGGEST_SERVER = 64    # server sizes: 24 (the game's own) and less, 32, 64 (docs/SERVER-SIZES.md)
 ADMIT_WINDOW = 90      # a player let in from the queue counts as on the way this long (from Home, the game starts first)
 SERVER_GONE_GRACE = 30
 GONE = {}  # GID -> when its server's link ended
@@ -419,7 +428,26 @@ def leaderboard_top(count=50):
     return rows[:count], len(rows)
 
 
-def server_full(gid, address, ahead=None):
+def who_asks(m, address):
+    """The key of the player asking with "reserve" or "queue" (RESERVATIONS and the rest)."""
+    return (address, bans.clean_id(m.get('id')))
+
+
+def who_signed_in(table, address, xuid):
+    """The key a signed in game's state is under: its player id's, else the one of a game that said no id."""
+    who = (address, player_id_of(xuid))
+    return who if who in table else (address, '')
+
+
+def keep(table, who, value, most):
+    """table[who] = value, with the newest `most` of that address kept."""
+    table.pop(who, None)
+    table[who] = value
+    for old in [w for w in table if w[0] == who[0]][:-most]:
+        del table[old]
+
+
+def server_full(gid, who, ahead=None):
     """(full, players, arriving, most): whether one more player would go over the server's MAX-PLAYERS. The players
     waiting in its queue take their places first: `ahead` is how many wait before this one (None: every one of them,
     as for a player not in the queue)."""
@@ -436,14 +464,14 @@ def server_full(gid, address, ahead=None):
     status_at = g.get('status_at', 0)
     pending = []
     for a, (pg, at, ap, window) in PICKS.items():
-        if pg != gid or a == address or now - at >= window:
+        if pg != gid or a == who or now - at >= window:
             continue
         got = ARRIVED.get(a)
         if got and got[0] == gid and got[1] >= at and status_at >= got[1] + ARRIVED_COUNTED:
             continue
         pending.append(ap)
     arriving = max(0, len(pending) - max(0, players - min(pending))) if pending else 0
-    waiting = len([e for e in queue_line(gid) if e['address'] != address]) if ahead is None else ahead
+    waiting = len([e for e in queue_line(gid) if (e['address'], e['id']) != who]) if ahead is None else ahead
     return players + arriving + waiting >= most, players, arriving, most
 
 
@@ -468,8 +496,8 @@ def queue_sweep(now=None):
     return out
 
 
-def queue_entry(address):
-    return next((e for e in QUEUE if e['address'] == address), None)
+def queue_entry(who):
+    return next((e for e in QUEUE if (e['address'], e['id']) == who), None)
 
 
 def queue_reply(e):
@@ -477,12 +505,20 @@ def queue_reply(e):
     return {'op': 'queued', 'gid': e['gid'], 'token': e['token'], 'position': line.index(e) + 1, 'total': len(line)}
 
 
-def let_in(gid, address, players, window=JOIN_WINDOW, renewal=False):
+def let_in(gid, who, players, window=JOIN_WINDOW, renewal=False):
     """A player's reservation of a server: its next Quick Match joins it (and counts on its way meanwhile)."""
     now = time.time()
     if not renewal:
-        PICKS[address] = (gid, now, players, window)
-    RESERVATIONS[address] = (gid, now)
+        keep(PICKS, who, (gid, now, players, window), ADDRESS_PICKS)
+    keep(RESERVATIONS, who, (gid, now), ADDRESS_RESERVATIONS)
+
+
+def give_up_own(who):
+    """A refused player's reservation and place in a queue. Only their own: others may share the address."""
+    RESERVATIONS.pop(who, None)
+    mine = queue_entry(who)
+    if mine:
+        QUEUE.remove(mine)
 
 
 def forget_old():
@@ -491,15 +527,15 @@ def forget_old():
     now = time.time()
     for name in [n for n, held in NAMES.items() if held[1] is not None and held[1] <= now]:
         del NAMES[name]
-    for address in [a for a, (_, at) in RESERVATIONS.items() if now - at > 300]:
-        del RESERVATIONS[address]
-    for address in [a for a, (_, at, _, _) in PICKS.items() if now - at > 300]:
-        del PICKS[address]
-    for address in [a for a, (_, at) in ARRIVED.items() if now - at > 300]:
-        del ARRIVED[address]
+    for who in [w for w, (_, at) in RESERVATIONS.items() if now - at > 300]:
+        del RESERVATIONS[who]
+    for who in [w for w, (_, at, _, _) in PICKS.items() if now - at > 300]:
+        del PICKS[who]
+    for who in [w for w, (_, at) in ARRIVED.items() if now - at > 300]:
+        del ARRIVED[who]
     # A login's key: kept 10 minutes after its FESL connection closed (Theater reads it when the game links).
     for lkey in [k for k, at in Client.closed.items() if now - at > 600]:
-        for table in (Client.sessions, Client.user_ids, Client.xuids, Client.closed):
+        for table in (Client.sessions, Client.user_ids, Client.xuids, Client.addresses, Client.closed):
             table.pop(lkey, None)
 
 
@@ -949,6 +985,7 @@ class Client:
     sessions = {}  # lkey -> persona name, for Theater's USER
     user_ids = {}  # lkey -> user id
     xuids = {}  # lkey -> the console's XUID (decimal, from NuXBL360Login)
+    addresses = {}  # lkey -> the address it logged in from (moderation: asker checks a "reserve"'s id against it)
     closed = {}  # lkey -> when its FESL connection closed (forget_old drops its entries 10 minutes later)
     online = set()  # the personas of the FESL connections open now (a name is free again when its player leaves)
     name_grace = 60  # seconds a player's name stays theirs after their connection closes (a reconnect keeps it)
@@ -1109,6 +1146,9 @@ class Client:
             Client.sessions[lkey] = self.persona
             Client.user_ids[lkey] = self.user_id
             Client.xuids[lkey] = f.get('xuid', '0')
+            Client.addresses[lkey] = address
+            seen(self.persona, player_id_of(f.get('xuid', '0')), address,
+                 account_of(player_id_of(f.get('xuid', '0')), address))
             await self.send(kind, RESPONSE, packet_id, {
                 'TXN': txn, 'lkey': lkey, 'userId': self.user_id, 'personaName': self.persona,
             })
@@ -1148,10 +1188,12 @@ class Client:
             # pick in our menu (its reservation below still joins it).
             games = [g for g in GAMES.values()
                      if (g.get('TYPE') != 'P' or self.args.list_private) and g.get('listed', True)]
-            # A server picked in our menu's server browser (Registry "reserve", by the player's address).
-            reserved = RESERVATIONS.get(self.peer.split(':')[0])
+            # A server picked in our menu's server browser (Registry "reserve"): this player's own, by its sign in.
+            address = self.peer.split(':')[0]
+            xuid = Client.xuids.get(self.lkey, '0')
+            reserved = RESERVATIONS.get(who_signed_in(RESERVATIONS, address, xuid))
             gated = False
-            if maintenance_now(self.peer.split(':')[0]):
+            if maintenance_now(address):
                 # Maintenance mode: no server for a new connection, and no hosting either.
                 games, gated = [], True
                 self.note('Quick Match during maintenance: no server')
@@ -1165,13 +1207,14 @@ class Client:
                 self.note('Quick Match without a reservation: no server (players need v%s)' % VERSION_GATE['required'])
             else:
                 # No reservation and no gate (a LAN or community backend): the full servers are left out (see PICKS).
-                address = self.peer.split(':')[0]
-                full = [g for g in games if server_full(g['GID'], address)[0]]
+                who = (address, player_id_of(xuid))
+                full = [g for g in games if server_full(g['GID'], who)[0]]
                 if full:
                     games = [g for g in games if g not in full]
                     self.note('Quick Match: %d full server(s) left out' % len(full))
                 if games:
-                    PICKS[address] = (games[0]['GID'], time.time(), int(games[0].get('AP') or 0), JOIN_WINDOW)
+                    keep(PICKS, who, (games[0]['GID'], time.time(), int(games[0].get('AP') or 0), JOIN_WINDOW),
+                         ADDRESS_PICKS)
             if games:
                 status.update({'props.{}': 3, 'props.{resultType}': 'JOIN', 'props.{avgFit}': '1.0',
                                'props.{games}.[]': len(games)})
@@ -1260,8 +1303,24 @@ class TheaterClient(Client):
             await self.send('EGAM', 0, 0, {'TID': tid, 'LID': f.get('LID', ''), 'GID': f.get('GID', '')})
             if not g:
                 return
+            # Moderation (join_refusal): a banned player gets no address. Our menus asked at "reserve" first and showed
+            # the pop-up; this is for a game that did not.
+            address = self.peer.split(':')[0]
+            pid = player_id_of(self.xuid)
+            account = account_of(pid, address) if pid else ''
+            refused = join_refusal(g, [(self.name, pid, account)], address)
+            if refused:
+                self.note('EGAM refused: %s (%s) is %s' % (self.name, pid or 'no id', 'banned on the Reborn network' if
+                                                          refused[3] else 'in game %s\'s ban list (%s)' % (
+                                                              g['GID'], refused[4].get('id', ''))))
+                tell_refused(g, refused[2], refused[3], refused[4])
+                return
+            if pid:
+                JOINS.setdefault(g['GID'], {})[pid] = (self.name, address, account, time.time())
+                seen(self.name, pid, address, account, g.get('N', ''))
             STATS.joined(self.xuid)  # the website's player counts (server/stats.py)
-            ARRIVED[self.peer.split(':')[0]] = (g['GID'], time.time())  # in the host's count soon (server_full)
+            # in the host's count soon (server_full)
+            keep(ARRIVED, who_signed_in(PICKS, address, self.xuid), (g['GID'], time.time()), ADDRESS_RESERVATIONS)
             self.xnaddr = f.get('R-XNADDR', '')
             pid = next(TheaterClient.pids)
             # One ticket per join: the joiner shows the one from EGEG to the host, which compares it with the one
@@ -1288,7 +1347,7 @@ class TheaterClient(Client):
                 # GameManager host for a --dedicated server learns the player first; the client's hello names
                 # the ticket.
                 if g.get('gmhost'):
-                    g['gmhost'].expect(ticket, pid, self.name, self.xuid, self.xnaddr)
+                    g['gmhost'].expect(ticket, pid, self.name, self.xuid, self.xnaddr, account)
                 await self.send_egeg(g, pid, ticket)
         elif kind in ('PENT', 'PLVT'):
             # Player entered (or left) the host's game; the host looks the player up by the PID in the reply
@@ -1328,9 +1387,11 @@ class RemoteHost:
     def __init__(self, writer):
         self.writer = writer
 
-    def expect(self, ticket, pid, name, xuid, xnaddr_b64):
-        self.writer.write((json.dumps({'op': 'join', 'ticket': ticket, 'pid': int(pid), 'name': name,
-                                       'xuid': str(xuid), 'xnaddr': xnaddr_b64}) + '\n').encode())
+    def expect(self, ticket, pid, name, xuid, xnaddr_b64, account=''):
+        m = {'op': 'join', 'ticket': ticket, 'pid': int(pid), 'name': name, 'xuid': str(xuid), 'xnaddr': xnaddr_b64}
+        if account:
+            m['account'] = account  # the player's Protect your name key (public): its host's ban list matches it too
+        self.writer.write((json.dumps(m) + '\n').encode())
 
 
 def signed_host_key(m, name, digest):
@@ -1522,15 +1583,162 @@ class Promoted:
         return bool(key) and key in self.keys
 
 
+class BotData:
+    """The shared bot data (botdata.py; TekRantGaming, 26 Nov 2026: the official servers only, live; community servers
+    get it with each release). The official servers' hand-offs come in over their registry links in parts
+    (gmhost.py BotShare: a file zlib-compressed, base64, at most CHUNK characters a line) and are kept for the merge;
+    the merge runs in its own process every --bot-data-every seconds when something came in (so this loop never waits
+    on it), and a new set goes to every official server over the same links (they check its signature)."""
+
+    CHUNK = 48000         # base64 characters in a line: well under a reader's 64 KiB line limit
+    MOST_PARTS = 900      # a hand-off's parts: about 32 MB of base64
+    MOST_OPEN = 64        # hand-offs coming in at a time
+    BIGGEST = 64 << 20    # a hand-off, uncompressed
+
+    def __init__(self, root, key_file, every, note):
+        self.root, self.key_file, self.every, self.note = root, key_file, every, note
+        os.makedirs(root, exist_ok=True)
+        self.parts = {}       # (gid, id) -> {'name', 'parts', 'got': {i: text}, 'at'}
+        self.version = self.latest()
+        self.lines = None     # (version, the encoded lines of its set), made once a version
+        self.sending = set()  # gids a set is going to now
+        note('bot data: %s, set %d' % (root, self.version))
+
+    def latest(self):
+        try:
+            with open(os.path.join(self.root, 'out', 'latest.txt'), encoding='utf-8') as f:
+                return int(f.read().strip() or 0)
+        except (OSError, ValueError):
+            return 0
+
+    def put(self, gid, server, m):
+        """One part of a hand-off; the acknowledgement when it is whole (or refused), else None."""
+        import zlib
+        import botdata
+        ident = str(m.get('id', ''))[:32]
+
+        def refuse(why):
+            return {'op': 'bot_data_ack', 'id': ident, 'ok': False, 'why': why}
+        try:
+            name, part, parts, data = str(m.get('name', ''))[:80], int(m.get('part')), int(m.get('parts')), m.get('data')
+        except (TypeError, ValueError):
+            return refuse('a part that cannot be read')
+        if len(ident) < 8 or any(c not in '0123456789abcdef' for c in ident) or not 0 <= part < parts <= self.MOST_PARTS \
+                or not isinstance(data, str) or len(data) > self.CHUNK + 16:
+            return refuse('a part that cannot be read')
+        now = time.time()
+        for k in [k for k, e in self.parts.items() if now - e['at'] > 600]:
+            del self.parts[k]
+        key = (gid, ident)
+        e = self.parts.get(key)
+        if e is None:
+            if len(self.parts) >= self.MOST_OPEN:
+                return refuse('too many hand-offs coming in')
+            e = self.parts[key] = {'name': name, 'parts': parts, 'got': {}, 'at': now}
+        if e['name'] != name or e['parts'] != parts:
+            del self.parts[key]
+            return refuse('parts of two hand-offs')
+        e['got'][part] = data
+        e['at'] = now
+        if len(e['got']) < parts:
+            return None
+        del self.parts[key]
+        try:
+            packed = base64.b64decode(''.join(e['got'][i] for i in range(parts)), validate=True)
+            z = zlib.decompressobj()
+            raw = z.decompress(packed, self.BIGGEST)
+            if z.unconsumed_tail or not z.eof:
+                return refuse('a hand-off that is too big or cut short')
+        except (ValueError, zlib.error):
+            return refuse('a hand-off that cannot be unpacked')
+        why = botdata.ingest(self.root, server, name, raw)
+        self.note('bot data: game %s handed in %s (%d KB)%s' % (gid, name, len(raw) // 1024,
+                                                                ': refused, %s' % why if why else ''))
+        return {'op': 'bot_data_ack', 'id': ident, 'ok': not why, 'why': why}
+
+    async def run(self):
+        while True:
+            await asyncio.sleep(self.every)
+            try:
+                await self.merge()
+            except Exception as e:  # never the backend's end
+                self.note('bot data: the merge failed (%r)' % e)
+
+    async def merge(self):
+        if not os.path.exists(os.path.join(self.root, 'in', '.changed')):
+            return
+        args = [sys.executable, '-I', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'botdata.py'), 'merge',
+                '--root', self.root, '--key-file', self.key_file,
+                # the package's shipped set (bin/data/bots): totals that start empty start from it (botdata.py _seed)
+                '--seed', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bin', 'data', 'bots')]
+        proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+        for line in out.decode('utf-8', 'replace').splitlines()[-12:]:
+            self.note('bot data: %s' % line)
+        v = self.latest()
+        if v > self.version:
+            self.version, self.lines = v, None
+            for g in list(GAMES.values()):
+                if g.get('official'):
+                    self.offer(g)
+
+    def encoded(self):
+        """The newest set as the lines that send it: its manifest and signature, then each file in parts."""
+        import zlib
+        if self.lines and self.lines[0] == self.version:
+            return self.lines[1]
+        d = os.path.join(self.root, 'out', str(self.version))
+        with open(os.path.join(d, 'manifest.json'), encoding='utf-8') as f:
+            manifest = f.read()
+        with open(os.path.join(d, 'manifest.sig'), encoding='utf-8') as f:
+            sig = f.read().strip()
+        lines = [{'op': 'bot_data', 'version': self.version, 'manifest': manifest, 'sig': sig}]
+        for name in sorted(json.loads(manifest)['files']):
+            with open(os.path.join(d, name), 'rb') as f:
+                b64 = base64.b64encode(zlib.compress(f.read(), 6)).decode()
+            parts = max(1, -(-len(b64) // self.CHUNK))
+            for i in range(parts):
+                lines.append({'op': 'bot_data_file', 'version': self.version, 'name': name, 'part': i, 'parts': parts,
+                              'data': b64[i * self.CHUNK:(i + 1) * self.CHUNK]})
+        lines = [(json.dumps(x) + '\n').encode() for x in lines]
+        self.lines = (self.version, lines)
+        return lines
+
+    def offer(self, g):
+        if self.version <= 0 or self.version <= int(g.get('bot_data_have') or 0) or g['GID'] in self.sending:
+            return
+        if not isinstance(g.get('gmhost'), RemoteHost):
+            return
+        asyncio.get_running_loop().create_task(self.send(g))
+
+    async def send(self, g):
+        gid, version = g['GID'], self.version
+        self.sending.add(gid)
+        try:
+            lines = self.encoded()
+            writer = g['gmhost'].writer
+            for line in lines:
+                writer.write(line)
+                await writer.drain()
+            g['bot_data_have'] = version
+            self.note('bot data: set %d sent to game %s (%d KB)' % (version, gid, sum(len(x) for x in lines) // 1024))
+        except (OSError, ValueError, RuntimeError, KeyError) as e:
+            self.note('bot data: set %d not sent to game %s (%r)' % (version, gid, e))
+        finally:
+            self.sending.discard(gid)
+
+
 class Registry:
     """Dedicated servers register here (server/gmhost.py run by the server package) and stay listed while their
     connection lasts. One JSON object per line:
       server:  {"op": "register", "name", "port", "map", "max_players", "mode", "description", "maps", "listed",
-                "official"?, "address"?, "night"?, "region"?, "tick"?, "version"?}
+                "official"?, "address"?, "night"?, "daybreak"?, "region"?, "tick"?, "version"?}
                region: where the server is, one of the game's region codes (bf/src/regions.h: "gb", "us-east"...);
                the browser shows its name and flag. tick: the server's simulation rate in Hz (30 today)
                mode: "classic" or "modern", the movement and aiming the server plays (default classic)
                night: true for a Night Ops server (its maps drawn at night in players' games; default false)
+               daybreak: true for a Daybreak server (each round from sunrise, a storm building; default false)
                the address: the one the registration came from (a loopback one: this backend's --theater-host);
                "address" [host, port] only from older packages and tests (SERVERS-PLAN.md section 6)
                listed false: not in the list, joined by Direct connect ("find") only
@@ -1543,7 +1751,7 @@ class Registry:
                this backend's own machine ("local"), ok is null when it answers: a probe from here never passes
                the machine's incoming firewall, so whether players outside reach it cannot be told from here
       backend: {"op": "refused", "why"}                     an official code that does not check
-      server:  {"op": "status", "players", "map", "next_map"}   every few seconds
+      server:  {"op": "status", "players", "bots", "map", "next_map"}   every few seconds (bots: 21 Nov 2026)
       backend: {"op": "join", "ticket", "pid", "name", "xuid", "xnaddr"}   before the joiner gets EGEG
       anyone:  {"op": "list"} -> {"op": "servers", "servers": [...]}   for a server browser (listed servers only)
                with the version gate (VERSION_GATE): "required_version" too, and for a game that says no "version"
@@ -1551,14 +1759,15 @@ class Registry:
       anyone:  {"op": "find", "address", "port"} -> {"op": "found", "server"|null}   Direct connect
       anyone:  {"op": "stats"} -> {"op": "stats", "players", "players_month", "month", "hours", "since"}   the
                website's totals (server/stats.py; its feed asks): counts only
-      player:  {"op": "reserve", "gid", "version"?, "platform"?} -> {"op": "reserved"}  the player's next Quick Match
-               joins that game; with the version gate a game older than the newest release (or one that says no
-               version) gets {"op": "outdated", "required", "yours"} and no reservation
+      player:  {"op": "reserve", "gid", "id"?, "version"?, "platform"?} -> {"op": "reserved"}  the player's next
+               Quick Match joins that game ("id": the player id, believed only where it signed in: asker)
+               with the version gate a game older than the newest release (or one that says no version) gets
+               {"op": "outdated", "required", "yours"} and no reservation
                a v0.4.0 or newer game says its "version" and "platform" ("windows", "linux") in list, find and reserve
                a full server (or one with players waiting): {"op": "full", "title", "message"}; with "queue": 1
                (v0.4.7.4) a place in its queue instead (QUEUE): {"op": "queued", "gid", "token", "position", "total"}
-      player:  {"op": "queue", "gid", "token"} -> {"op": "queued", ...} | {"op": "reserved", "gid"} (its turn: as after
-               reserve) | {"op": "queue_lost"} (no such place: reserve again) | {"op": "gone"|"closed", "title",
+      player:  {"op": "queue", "gid", "token", "id"?} -> {"op": "queued", ...} | {"op": "reserved", "gid"} (its turn:
+               as after reserve) | {"op": "queue_lost"} (no such place: reserve again) | {"op": "gone"|"closed", "title",
                "message"}   every few seconds while it waits; a place not asked for in QUEUE_TIMEOUT is given up
       player:  {"op": "queue_leave", "token"} -> {"op": "queue_left"}   the queue pop-up's Close
       player:  {"op": "tag", "name", "id", "tag"} -> {"op": "tag", "ok", "tag", "why"?, "text"?, "dev"?}  the
@@ -1606,7 +1815,7 @@ class Registry:
             return None
         try:
             uid, pid = int(asked.get('uid')), int(asked.get('pid'))
-            pids = [int(x) for x in asked.get('pids') or []][:64]
+            pids = [int(x) for x in asked.get('pids') or []][:MOST_PLAYERS]
         except (TypeError, ValueError):
             return None
         top = 10 ** 7
@@ -1647,6 +1856,10 @@ class Registry:
         trusted = gmhost.trusted_broadcast_keys(self.key) if self.key else []
         self.network = gmhost.NetworkCheck(trusted)
         self.admin = gmhost.NetworkCheck(trusted, per_minute=30)
+        # The shared bot data (botdata.py, --bot-data): only with official.key, which signs the merged set.
+        self.bot_data = None
+        if args and getattr(args, 'bot_data', '') and self.key:
+            self.bot_data = BotData(args.bot_data, args.official_key_file, max(30.0, args.bot_data_every), self.note)
 
     def refresh_promoted(self):
         """Each listed community server's promotion, from the promoted list as it is now (said in the log when it
@@ -1698,8 +1911,8 @@ class Registry:
                 continue
             rows.append({'gid': g['GID'], 'name': g.get('N', ''), 'host_key': g.get('host_key', ''),
                          'from': g.get('from', ''), 'port': g.get('P', 0), 'version': g.get('server_version', ''),
-                         'players': g.get('AP', 0), 'max_players': g.get('MAX-PLAYERS', 0),
-                         'listed': bool(g.get('listed', True)), 'hidden': g.get('hidden', ''),
+                         'players': g.get('AP', 0), 'bots': g.get('bots', 0),
+                         'max_players': g.get('MAX-PLAYERS', 0), 'listed': bool(g.get('listed', True)), 'hidden': g.get('hidden', ''),
                          'promoted': bool(g.get('promoted')),
                          'promoted_key': bool(self.promoted and self.promoted.has(g.get('host_key', ''))),
                          'region': g.get('region', '')})
@@ -1952,12 +2165,14 @@ class Registry:
                             host, local = self.public, True
                     GAMES[gid] = {'GID': gid, 'LID': '1', 'I': host, 'P': int(port), 'HU': uid,
                                   'HN': name, 'N': name, 'TYPE': 'G',
-                                  'JOIN': 'O', 'MAX-PLAYERS': int(m.get('max_players', 24)), 'AP': 0,
+                                  'JOIN': 'O', 'MAX-PLAYERS': max(2, min(BIGGEST_SERVER, int(m.get('max_players', 24)))), 'AP': 0,
                                   'UGID': 'NOGUID', 'B-version': 'RETAIL429432', 'B-U-type': 'RANKED',
                                   'gmhost': RemoteHost(writer), 'map': m.get('map', ''),
                                   'local': local,  # on this backend's own machine (for_player)
                                   'mode': 'modern' if m.get('mode') == 'modern' else 'classic',
                                   'night': m.get('night') is True,  # Night Ops: its maps at night
+                                  # Daybreak (26 Nov 2026): from sunrise, a storm building; never both
+                                  'daybreak': m.get('daybreak') is True and m.get('night') is not True,
                                   'region': ''.join(c for c in str(m.get('region', '')).lower()
                                                     if c.isalnum() or c == '-')[:16],
                                   'tick': tick_of(m.get('tick')),
@@ -1996,14 +2211,44 @@ class Registry:
                         self.note('%s game %s: its server\'s %d waiting players wait on for it' % (peer, gid, len(moved)))
                     asyncio.get_running_loop().create_task(self.probe(writer, host, int(port), local))
                     self.refresh_promoted()
+                elif op == 'bot_data_put' and gid in GAMES:
+                    # The shared bot data (botdata.py): an official server's hand-off, in parts. Never a community
+                    # server's: theirs is not asked for and is refused.
+                    if self.bot_data and GAMES[gid].get('official'):
+                        reply = self.bot_data.put(gid, GAMES[gid].get('N', ''), m)
+                    else:
+                        reply = {'op': 'bot_data_ack', 'id': str(m.get('id', ''))[:32], 'ok': False,
+                                 'why': 'only the official servers hand bot data in'}
+                    if reply:
+                        writer.write((json.dumps(reply) + '\n').encode())
+                elif op == 'bot_data_have' and gid in GAMES and GAMES[gid].get('official'):
+                    # The set an official server has: a newer one goes to it at once.
+                    try:
+                        GAMES[gid]['bot_data_have'] = max(0, int(m.get('version') or 0))
+                    except (TypeError, ValueError):
+                        GAMES[gid]['bot_data_have'] = 0
+                    if self.bot_data:
+                        self.bot_data.offer(GAMES[gid])
+                elif op == 'server_bans' and gid in GAMES:
+                    # Moderation: this server's own ban list (gmhost.py bans_summary), for this server only.
+                    GAMES[gid]['bans'] = clean_server_bans(m)
+                    self.note('game %s: its ban list has %d entr%s' % (
+                        gid, len((GAMES[gid]['bans'] or {}).get('rows', [])),
+                        'y' if len((GAMES[gid]['bans'] or {}).get('rows', [])) == 1 else 'ies'))
                 elif op == 'status' and gid in GAMES:
                     GAMES[gid]['AP'] = int(m.get('players', 0))
+                    # Its bots (a host from 21 Nov 2026; none from an older one): the browser shows "(4) 0 / 24".
+                    # They are not players: AP, the full check and the website's hours count the people only.
+                    try:
+                        GAMES[gid]['bots'] = max(0, min(BIGGEST_SERVER, int(m.get('bots') or 0)))
+                    except (TypeError, ValueError):
+                        GAMES[gid]['bots'] = 0
                     GAMES[gid]['status_at'] = time.time()  # the players whose game got its address since are in it
                     STATS.status(gid, GAMES[gid]['AP'])  # the website's hours played (server/stats.py)
                     GAMES[gid]['map'] = m.get('map', GAMES[gid]['map'])
                     GAMES[gid]['next_map'] = str(m.get('next_map', ''))[:32]
                     names = m.get('names', [])
-                    GAMES[gid]['names'] = [str(n)[:15] for n in names][:64] if isinstance(names, list) else []
+                    GAMES[gid]['names'] = [str(n)[:15] for n in names][:MOST_PLAYERS] if isinstance(names, list) else []
                 elif op == 'players':
                     # Join Match With Friends (our main menu): the players signed in now and the listed server each
                     # plays on (no address), the servers' own names left out. A player in a private match (a server
@@ -2035,7 +2280,7 @@ class Registry:
                         score = None
                     if name and score is not None:
                         table = MATCH_SCORES.setdefault(str(m['gid']), {})
-                        if len(table) < 64 or name.lower() in table:
+                        if len(table) < MOST_PLAYERS or name.lower() in table:
                             table[name.lower()] = {'name': name, 'score': score, 'at': int(time.time())}
                     writer.write((json.dumps({'op': 'match_score', 'ok': bool(name)}) + '\n').encode())
                 elif op == 'scoreboard':
@@ -2047,7 +2292,7 @@ class Registry:
                         if n.lower() not in table:
                             rows.append({'name': n, 'score': 0, 'at': 0})
                     rows.sort(key=lambda e: (-e['score'], e['name'].lower()))
-                    writer.write((json.dumps({'op': 'scoreboard', 'rows': with_tags(rows[:64])}) + '\n').encode())
+                    writer.write((json.dumps({'op': 'scoreboard', 'rows': with_tags(rows[:MOST_PLAYERS])}) + '\n').encode())
                 elif op == 'tag':  # clan tags (tag_for, above)
                     reply = put_tag(m, address)
                     self.note('%s %s the clan tag "%s" for %s%s' % (
@@ -2103,7 +2348,12 @@ class Registry:
                     # The official manager's questions (gmhost.sign_admin): the community servers' host keys, so
                     # TekRantGaming can pick one to promote. Signed: the rows hold the hosts' addresses.
                     why, what = self.admin.admin(m)
-                    if why or what != 'hosts':
+                    if not why and (what == 'players' or str(what).startswith('lookup:')):
+                        # Moderation: the official manager's player lookup (who is online, names seen this week).
+                        rows = admin_players(what)
+                        self.note('%s admin question: %s (%d rows)' % (peer, what[:40], len(rows)))
+                        writer.write((json.dumps({'op': 'admin', 'ok': True, 'players': rows}) + '\n').encode())
+                    elif why or what != 'hosts':
                         self.note('%s admin question refused: %s' % (peer, why or 'unknown'))
                         writer.write((json.dumps({'op': 'admin', 'ok': False, 'why': why or 'unknown'}) +
                                       '\n').encode())
@@ -2150,50 +2400,65 @@ class Registry:
                 elif op == 'reserve' and maintenance_now(address):
                     # Maintenance mode (maintenance_now): every join refused with its text, whatever server was picked.
                     notice = maintenance_now(address)
-                    RESERVATIONS.pop(address, None)
+                    RESERVATIONS.pop(who_asks(m, address), None)
                     writer.write((json.dumps({'op': 'closed', 'kind': notice['kind'], 'title': notice['title'],
                                               'message': notice['text']}) + '\n').encode())
                     self.note('%s refused game %s: maintenance (%s)' % (peer, str(m.get('gid', ''))[:16], notice['kind']))
+                elif op == 'reserve' and m.get('gid') in GAMES and \
+                        join_refusal(GAMES[m['gid']], asker(m, address), address):
+                    # Moderation (join_refusal): the pop-up, with the reason and when it ends. (Never the word
+                    # "reserved" in it: bans.reason_problem.)
+                    title, message, who, network, entry = join_refusal(GAMES[m['gid']], asker(m, address), address)
+                    give_up_own(who_asks(m, address))
+                    writer.write((json.dumps({'op': 'banned', 'gid': m['gid'], 'network': network, 'title': title,
+                                              'message': message}) + '\n').encode())
+                    self.note('%s refused game %s: %s%s' % (peer, m['gid'], who[0] or 'a player', ' is banned on the '
+                                                            'Reborn network (%s)' % entry.get('id') if network else
+                                                            ' is in the server\'s ban list (%s %s)' % (
+                                                                entry.get('kind'), entry.get('id'))))
+                    tell_refused(GAMES[m['gid']], who, network, entry)
                 elif op == 'reserve' and m.get('gid') in GAMES:
                     yours, platform = str(m.get('version', ''))[:24], str(m.get('platform', ''))[:16]
                     if outdated(yours, platform):
                         # (No word of the reply may hold "reserved": a game from before the gate looks for it.)
                         need = required_version(platform)
-                        RESERVATIONS.pop(peer.split(':')[0], None)
+                        RESERVATIONS.pop(who_asks(m, address), None)
                         writer.write((json.dumps({'op': 'outdated', 'required': need, 'yours': yours}) + '\n').encode())
                         self.note('%s refused game %s: its version %s, players need v%s' %
                                   (peer, m['gid'], 'v' + yours if yours else 'not said (before the gate)', need))
                     else:
-                        address = peer.split(':')[0]
+                        who = who_asks(m, address)
                         self.note_given_up(queue_sweep())
-                        renewal = RESERVATIONS.get(address, (None, 0))[0] == m['gid']
+                        renewal = RESERVATIONS.get(who, (None, 0))[0] == m['gid']
                         # A player waiting for another server who picks this one leaves that queue; one waiting for
                         # this one keeps its place.
-                        mine = queue_entry(address)
+                        mine = queue_entry(who)
                         if mine and mine['gid'] != m['gid']:
                             QUEUE.remove(mine)
                             self.note('%s left the queue of game %s: picked game %s' % (peer, mine['gid'], m['gid']))
                             mine = None
                         line = queue_line(m['gid'])
-                        full, players, arriving, most = server_full(m['gid'], address,
-                                                                    line.index(mine) if mine else None)
+                        full, players, arriving, most = server_full(m['gid'], who, line.index(mine) if mine else None)
                         waiting = len(line) - (1 if mine else 0)
-                        if full and not renewal and m.get('queue') == 1 and (mine or len(line) < QUEUE_MOST):
+                        may_wait = mine or (len(line) < QUEUE_MOST and
+                                            sum(e['address'] == address for e in QUEUE) < ADDRESS_QUEUED)
+                        if full and not renewal and m.get('queue') == 1 and may_wait:
                             # A game with the queue: a place in it (the same one when it asks again).
                             if not mine:
                                 mine = {'token': os.urandom(8).hex(), 'gid': m['gid'], 'address': address,
+                                        'id': who[1],
                                         'server': (GAMES[m['gid']]['I'], int(GAMES[m['gid']]['P'])),
                                         'since': time.time()}
                                 QUEUE.append(mine)
                             mine['seen'] = time.time()
-                            RESERVATIONS.pop(address, None)
+                            RESERVATIONS.pop(who, None)
                             reply = queue_reply(mine)
                             writer.write((json.dumps(reply) + '\n').encode())
                             self.note('%s queued for game %s: %d of %d (%d players, %d on their way, %d at most)' %
                                       (peer, m['gid'], reply['position'], reply['total'], players, arriving, most))
                         elif full and not renewal:
                             # (A game that does not know "full" says the list did not answer, and joins nothing.)
-                            RESERVATIONS.pop(address, None)
+                            RESERVATIONS.pop(who, None)
                             # (Never the server's name in "message": a name holding "reserved" would read as a yes.)
                             text = 'This server has %d of %d players. Pick another server, or try again in a moment.' % (
                                 min(players + arriving, most), most)
@@ -2210,7 +2475,7 @@ class Registry:
                         else:
                             if mine:
                                 QUEUE.remove(mine)
-                            let_in(m['gid'], address, players, renewal=renewal)
+                            let_in(m['gid'], who, players, renewal=renewal)
                             writer.write((json.dumps({'op': 'reserved', 'gid': m['gid']}) + '\n').encode())
                             self.note('%s picked game %s%s' % (peer, m['gid'], ' (v%s)' % yours if yours else ''))
                 elif op == 'queue':
@@ -2240,11 +2505,20 @@ class Registry:
                     else:
                         mine['seen'] = time.time()
                         line = queue_line(mine['gid'])
-                        full, players, arriving, most = server_full(mine['gid'], address, line.index(mine)) \
+                        waiter = (address, mine['id'])
+                        full, players, arriving, most = server_full(mine['gid'], waiter, line.index(mine)) \
                             if mine['gid'] in GAMES else (True, 0, 0, 0)
-                        if not full:
+                        refused = join_refusal(GAMES.get(mine['gid']), asker(m, address), address) \
+                            if mine['gid'] in GAMES else None
+                        if refused:
+                            if mine['id'] in ('', bans.clean_id(m.get('id'))):  # (as give_up_own: their own place)
+                                QUEUE.remove(mine)
+                            writer.write((json.dumps({'op': 'banned', 'gid': mine['gid'], 'network': refused[3],
+                                                      'title': refused[0], 'message': refused[1]}) + '\n').encode())
+                            self.note('%s left the queue of game %s: banned' % (peer, mine['gid']))
+                        elif not full:
                             QUEUE.remove(mine)
-                            let_in(mine['gid'], address, players, ADMIT_WINDOW)
+                            let_in(mine['gid'], waiter, players, ADMIT_WINDOW)
                             writer.write((json.dumps({'op': 'reserved', 'gid': mine['gid']}) + '\n').encode())
                             self.note('%s let in to game %s from its queue after %.0f s (%d players, %d on their way, '
                                       '%d at most; %d still waiting)' % (
@@ -2315,6 +2589,211 @@ class Registry:
                 MATCH_SCORES.pop(gid, None)
                 self.note('game %s gone (server disconnected)' % gid)
             writer.close()
+
+
+# ---- Moderation (TekRantGaming, 20 Nov 2026; server/bans.py, docs/MODERATION.md). Two kinds of list, enforced here
+# before a join and again by each host (gmhost.py), so a modified game cannot walk past either:
+#   - the Reborn network's list (--network-bans: the official manager's network_bans.json on this machine only): a player
+#     in it joins no server registered here, official or community, Direct connect to their addresses included. A server
+#     on its own backend (LAN only) never asks here, so it stays open to them.
+#   - each server's own list (its manager's bans.json): its host tells this backend a salted, hashed copy over its own
+#     registry link ("server_bans"), so the player gets the pop-up before joining, and it holds on that server only.
+# A refusal is checked at "reserve" (every join from our menus: the pop-up, {"op": "banned", "title", "message"}), at a
+# queued player's turn, and at Theater's EGAM (the step that gives the server's address: a game that skipped "reserve"
+# gets no address). A player is matched by its player id (the XUID's low word), its account (Protect your name) and its
+# address. A player on a server when a network ban is made is removed: its host gets {"op": "remove", "player_id"}.
+NETWORK_BANS = [None]   # the BanList, with --network-bans
+JOINS = {}   # GID -> {player id: (name, address, account, when)}: who joined each server (EGAM), for "remove"
+SEEN = {}    # a name, lower case -> {'name', 'id', 'ip', 'account', 'at', 'server'}: the official manager's lookup;
+             # in memory only, a week at most
+SEEN_DAYS = 7
+
+
+def player_id_of(xuid):
+    return bans.id_of_xuid(xuid)
+
+
+def account_of(pid_hex, address):
+    """The account key a player signed in for (Protect your name), by its player id and address, or ''."""
+    now = time.time()
+    for key, (pid, at, until) in list(VERIFIED.items()):
+        if until > now and '%08X' % (int(pid) & 0xFFFFFFFF) == pid_hex and at == address:
+            return key
+    return ''
+
+
+def asker(m, address):
+    """Who asks with a "reserve" or "queue": [(name, player id, account)], or [] when only the address is known. One
+    address can be a household's or a LAN party's, so a join is never checked as the others signed in from it. The
+    game says its id, matched with that id's own sign in from the same address. Without one (an older game, or before
+    the sign in) the address is what is known here; EGAM and the host check the player as signed in."""
+    said = bans.clean_id(m.get('id'))
+    if not said:
+        return []
+    for lkey, name in reversed(list(Client.sessions.items())):  # the newest sign in, for its name
+        if Client.addresses.get(lkey) == address and player_id_of(Client.xuids.get(lkey, '0')) == said:
+            return [(name, said, account_of(said, address))]
+    return []
+
+
+def seen(name, pid, address, account, server=''):
+    if not name:
+        return
+    now = int(time.time())
+    SEEN[name.lower()] = {'name': name, 'id': pid, 'ip': address, 'account': account, 'at': now,
+                          'server': server or SEEN.get(name.lower(), {}).get('server', '')}
+    if len(SEEN) > 20000:
+        for k in sorted(SEEN, key=lambda k: SEEN[k]['at'])[:2000]:
+            del SEEN[k]
+
+
+def network_bans():
+    nb = NETWORK_BANS[0]
+    if nb:
+        nb.reload()
+    return nb
+
+
+def server_ban(g, pid, account, address, now=None):
+    """The entry of the server's own list (its host's server_bans) that holds against this player, or None."""
+    now = time.time() if now is None else now
+    table = g.get('bans') if g else None
+    if not table:
+        return None
+    salt = table['salt']
+    hp, ha, hi = bans.hashed(salt, pid), bans.hashed(salt, account), bans.hashed(salt, bans.clean_ip(address))
+    for row in table['rows']:
+        if row['until'] and row['until'] <= now:
+            continue
+        if (hp and hp in row['ids']) or (ha and ha in row['accounts']) or \
+                (hi and hi in row['ips'] and (not row['ip_until'] or row['ip_until'] > now)):
+            return row
+    return None
+
+
+def join_refusal(g, players, address):
+    """Why this join is refused, or None: (title, message, the player (name, id), network: bool, the entry). players:
+    [(name, player id, account)], the one player joining (asker, or EGAM's own sign in), or [] for the address alone."""
+    nb = network_bans()
+    for name, pid, account in (players or [('', '', '')]):
+        e = nb.match(pid, account, address) if nb else None
+        if e:
+            title, message = bans.refusal(e, True)
+            return title, message, (name, pid), True, e
+        row = server_ban(g, pid, account, address)
+        if row:
+            if row.get('kind') == 'kick':  # its minutes counted from now (the host made the text when it sent it)
+                minutes = max(1, int(round((row['until'] - time.time()) / 60.0)))
+                message = row['message'].split(' You can join again in ')[0] + ' You can join again in %d minute%s.' % (
+                    minutes, '' if minutes == 1 else 's')
+                return row['title'], message, (name, pid), False, row
+            return row['title'], row['message'], (name, pid), False, row
+    return None
+
+
+def tell_refused(g, who, network, entry):
+    """The server's host is told a join was refused (its moderation log: only "the network's" for a network ban)."""
+    host = g.get('gmhost') if g else None
+    if not isinstance(host, RemoteHost):
+        return
+    m = {'op': 'refused_join', 'name': who[0], 'player_id': who[1], 'network': bool(network)}
+    if not network:
+        m.update(kind=entry.get('kind', ''), ban=entry.get('id', ''))
+    try:
+        host.writer.write((json.dumps(m) + '\n').encode())
+    except (ConnectionError, RuntimeError, OSError):
+        pass
+
+
+def clean_server_bans(m):
+    """A host's server_bans, as kept: hex digests only, a reason's text as the host made it (checked as a notice)."""
+    salt = str(m.get('salt', ''))[:32]
+    rows = []
+    for r in (m.get('bans') or [])[:2000]:
+        if not isinstance(r, dict) or r.get('kind') not in ('ban', 'kick'):
+            continue
+        hexes = lambda k: [str(x)[:32] for x in (r.get(k) or [])[:16] if all(c in '0123456789abcdef' for c in str(x))]
+        try:
+            until, ip_until = int(r.get('until') or 0), int(r.get('ip_until') or 0)
+        except (TypeError, ValueError):
+            continue
+        title = ' '.join(str(r.get('title', '')).split())[:60]
+        message = ' '.join(str(r.get('message', '')).split())[:400]
+        if not title or not message or 'reserved' in (title + message).lower() or any(c in title + message for c in '"\\{}'):
+            continue
+        rows.append({'id': str(r.get('id', ''))[:16], 'kind': r['kind'], 'ids': hexes('ids'),
+                     'accounts': hexes('accounts'), 'ips': hexes('ips'), 'until': until, 'ip_until': ip_until,
+                     'title': title, 'message': message})
+    return {'salt': salt, 'rows': rows} if salt else None
+
+
+async def watch_network_bans(note):
+    """A new network ban takes its player off the server they are on: every host whose joins (JOINS) match is told
+    to remove them, by player id only."""
+    told = {}  # (gid, player id) -> the ban's id it was told for
+    while True:
+        await asyncio.sleep(2)
+        try:
+            nb = network_bans()
+            if not nb:
+                continue
+            now = time.time()
+            for gid, joined in list(JOINS.items()):
+                g = GAMES.get(gid)
+                if not g:
+                    JOINS.pop(gid, None)
+                    continue
+                names = {n.lower() for n in g.get('names', [])}
+                for pid, (name, address, account, at) in list(joined.items()):
+                    if now - at > 6 * 3600 and name.lower() not in names:
+                        del joined[pid]
+                        continue
+                    e = nb.match(pid, account, address)
+                    if not e or told.get((gid, pid)) == e['id'] or name.lower() not in names:
+                        continue
+                    told[(gid, pid)] = e['id']
+                    title, message = bans.refusal(e, True)
+                    host = g.get('gmhost')
+                    if isinstance(host, RemoteHost):
+                        host.writer.write((json.dumps({'op': 'remove', 'player_id': pid, 'title': title,
+                                                       'message': message}) + '\n').encode())
+                    elif host is not None and hasattr(host, 'network_out'):  # a --dedicated host in this process
+                        host.network_out[pid] = {'kind': 'network', 'title': title, 'message': message,
+                                                 'until': now + 600}
+                        host.enforce()
+                    note('network ban %s: %s (%s) taken off game %s "%s"' % (e['id'], name, pid, gid, g.get('N', '')))
+            for k in [k for k in told if k[0] not in GAMES]:
+                del told[k]
+            for k in [k for k, v in SEEN.items() if now - v['at'] > SEEN_DAYS * 86400]:
+                del SEEN[k]
+        except Exception as e:  # never stop watching for one bad turn
+            note('network bans: %s: %s' % (type(e).__name__, e))
+
+
+def admin_players(what):
+    """The official manager's moderation questions (signed, Registry admin): "players" (everyone logged in now and
+    where they play) or "lookup:<text>" (names seen in the last week holding the text, or that player id)."""
+    where = {}
+    for g in GAMES.values():
+        for n in g.get('names', []):
+            where[n.lower()] = g
+    if what == 'players':
+        rows = []
+        for lkey, name in list(Client.sessions.items()):
+            if lkey in Client.closed:
+                continue
+            address = Client.addresses.get(lkey, '')
+            pid = player_id_of(Client.xuids.get(lkey, '0'))
+            g = where.get(name.lower())
+            rows.append({'name': name, 'id': pid, 'ip': address, 'account': account_of(pid, address),
+                         'server': g.get('N', '') if g else '', 'gid': g['GID'] if g else '',
+                         'official': bool(g.get('official')) if g else False})
+        return sorted(rows, key=lambda r: r['name'].lower())[:500]
+    text = what.split(':', 1)[1].strip().lower()[:32] if ':' in what else ''
+    if not text:
+        return []
+    rows = [dict(v, online=k in where) for k, v in SEEN.items() if text in k or text.upper() == v.get('id')]
+    return sorted(rows, key=lambda r: -r['at'])[:100]
 
 
 def own_address(writer, public):
@@ -2396,6 +2875,9 @@ def tag_for(name):
     if name_holder(name) != held[1]:  # the name's hold ended, or another player has it now
         TAGS.pop(name.lower(), None)
         return ''
+    if text_filter.tag_problem(held[0], name) == 'reserved':  # taken before it was reserved (BOT, 20 Nov 2026)
+        TAGS.pop(name.lower(), None)
+        return ''
     return held[0]
 
 
@@ -2469,10 +2951,12 @@ def tick_of(value):
 def listing(g):
     """A game as the server browser gets it."""
     return {'gid': g['GID'], 'name': g['N'], 'address': [g['I'], g['P']], 'map': g.get('map', ''),
-            'players': g['AP'], 'max_players': g['MAX-PLAYERS'], 'mode': g.get('mode', 'classic'),
+            'players': g['AP'], 'bots': g.get('bots', 0), 'max_players': g['MAX-PLAYERS'],
+            'mode': g.get('mode', 'classic'),
             'description': g.get('description', ''), 'official': bool(g.get('official') or g.get('promoted')),
             'promoted': bool(g.get('promoted') and not g.get('official')),  # Promoted: on the Reborn tab, marked
             'next_map': g.get('next_map', ''), 'maps': g.get('maps', []), 'night': bool(g.get('night')),
+            'daybreak': bool(g.get('daybreak')),
             'region': g.get('region', ''), 'tick': g.get('tick', 0),
             'queue': len(queue_line(g['GID']))}  # players waiting for a place (0.4.7.4)
 
@@ -2480,9 +2964,9 @@ def listing(g):
 def public(g):
     """A game's fields without our own bookkeeping."""
     return {k: v for k, v in g.items()
-            if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night', 'region', 'tick',
+            if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night', 'daybreak', 'region', 'tick',
                          'server_version', 'local', 'hidden', 'from', 'host_key', 'build_digest', 'promoted',
-                         'status_at')}
+                         'status_at', 'bots')}
 
 
 async def http_client(reader, writer, log):
@@ -2562,6 +3046,14 @@ async def main():
     ap.add_argument('--maintenance-file', default='',
                     help='maintenance mode: a file the server manager writes (manager.py maintenance); while it is on, '
                          'new joins are refused with its text (maintenance_now)')
+    ap.add_argument('--network-bans', default='',
+                    help="the Reborn network's ban list (the official manager's network_bans.json; server/bans.py): "
+                         'read again when it changes')
+    ap.add_argument('--bot-data', default='',
+                    help="the shared bot data's folder (botdata.py): the official servers' hand-offs and the merged "
+                         "set; needs --official-key-file (empty: off)")
+    ap.add_argument('--bot-data-every', type=float, default=600.0,
+                    help='seconds between two merges of the bot data (only when something came in)')
     ap.add_argument('--log', default='runs/plasma.log')
     ap.add_argument('--leaderboard', default='', help="a file keeping the players' totals (our Leaderboards)")
     ap.add_argument('--player-stats', default='',
@@ -2644,6 +3136,8 @@ async def main():
             if registry.check:
                 registry.check.reload()
                 asyncio.get_running_loop().create_task(registry.check.watch())
+            if registry.bot_data:
+                asyncio.get_running_loop().create_task(registry.bot_data.run())
         if args.http_port:
             servers.append(await asyncio.start_server(lambda r, w: http_client(r, w, log), args.host, args.http_port))
             log.write('%s HTTP on %s:%d\n' % (time.strftime('%H:%M:%S'), args.host, args.http_port))
@@ -2654,6 +3148,11 @@ async def main():
         if args.maintenance_file:
             MAINTENANCE.update(file=args.maintenance_file, note={'said': None, 'say': gate_note})
             maintenance_now()
+        bans_task = None
+        if args.network_bans:
+            NETWORK_BANS[0] = bans.BanList(args.network_bans, gate_note, network=True)
+            gate_note('network bans: %d entries (%s)' % (len(NETWORK_BANS[0].entries), args.network_bans))
+            bans_task = asyncio.ensure_future(watch_network_bans(gate_note))
         accounts_task = asyncio.ensure_future(keep_accounts_saved(max(0.5, args.accounts_save_every)))
         stats_task = asyncio.ensure_future(keep_stats_saved(max(0.5, args.stats_save_every)))
         async def keep_player_stats_saved():  # each player's stats (player_stats.py), when something changed
@@ -2684,6 +3183,8 @@ async def main():
             await asyncio.gather(*(srv.serve_forever() for srv in servers))
         if feed_task:
             feed_task.cancel()
+        if bans_task:
+            bans_task.cancel()
         accounts_task.cancel()
         stats_task.cancel()
         player_stats_task.cancel()

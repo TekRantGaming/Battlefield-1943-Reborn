@@ -59,6 +59,15 @@ class Recorder {
   uint8_t* Bytes(size_t size) { return static_cast<uint8_t*>(Allocate(size, nullptr)); }
   void UpdateBuffer(Diligent::IBuffer* buffer, uint64_t offset, uint64_t size, const void* data);
 
+  // D229: the race check's view (NXR_RACE_CHECK, device.cpp): the thread has run all it was handed and runs nothing
+  // now; the caller is the thread; the context without draining (the check's self-test only).
+  bool Idle() const {
+    return !running_.load(std::memory_order_acquire) &&
+           executed_.load(std::memory_order_acquire) >= published_.load(std::memory_order_acquire);
+  }
+  bool OnThread() const { return threaded() && std::this_thread::get_id() == thread_id_; }
+  Diligent::IDeviceContext* raw_context() { return context_; }
+
   // Hands what was recorded to the thread.
   void Publish();
   // Publishes and waits until it is done.
@@ -97,6 +106,8 @@ class Recorder {
   uint32_t write_pos_ = 0;
   uint64_t recorded_ = 0;
   std::atomic<uint64_t> published_{0};
+  // D250: set while the recorder's thread sleeps on published_: only then does Publish wake it.
+  std::atomic<bool> consumer_sleeping_{false};
 
   Block* read_block_ = nullptr;
   Block* retired_ = nullptr;
@@ -104,6 +115,7 @@ class Recorder {
   uint64_t run_ = 0;
   std::atomic<uint64_t> executed_{0};
   std::atomic<bool> drain_waiting_{false};
+  std::atomic<bool> running_{false};  // D229: a call is running on the thread
 
   std::mutex free_mutex_;
   std::vector<Block*> free_;

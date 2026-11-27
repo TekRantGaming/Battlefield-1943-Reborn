@@ -1,0 +1,25 @@
+# Reports filed by the game through our report service come from the bot account, which has no access to the repository, so GitHub
+# drops the labels it asks for. This sets them from the title's [Type] instead. The bot's login is the repository
+# variable REPORT_BOT_LOGIN (Settings, Secrets and variables, Actions, Variables), so nothing else is labelled.
+name: Label reports from the game
+on:
+  issues:
+    types: [opened]
+permissions:
+  issues: write
+jobs:
+  label:
+    if: ${{ vars.REPORT_BOT_LOGIN != '' && github.event.issue.user.login == vars.REPORT_BOT_LOGIN }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const types = { '[Crash]': 'crash', '[Bug]': 'bug', '[Performance]': 'performance',
+                            '[Server or connection]': 'server', '[Suggestion]': 'suggestion' };
+            const title = context.payload.issue.title || '';
+            const type = Object.keys(types).find(prefix => title.startsWith(prefix));
+            const labels = ['from-game', 'needs-triage'];
+            if (type) labels.unshift(types[type]);
+            await github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo,
+                                                 issue_number: context.issue.number, labels });

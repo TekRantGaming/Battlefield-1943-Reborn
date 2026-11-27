@@ -58,9 +58,13 @@ std::string StartupGpuPlugin(const std::filesystem::path& user_dir);      // gam
 void HideServerWindows();                                                // server_mode.cpp
 void CreatePerfOverlay(rex::ui::ImGuiDrawer* drawer);                    // perf_overlay.cpp
 void CreateCommsOverlay(rex::ui::ImGuiDrawer* drawer);                  // comms_ui.cpp
+void CreateWorldAdminPanel(rex::ui::ImGuiDrawer* drawer);               // world_sync.cpp: the match admin's panel (F9)
+void CreateUiHider(rex::ui::ImGuiDrawer* drawer);  // free_cam.cpp: the hidden HUD and UI (made last: drawn last)
 void CreateSpawnMouseOverlay(rex::ui::ImGuiDrawer* drawer);             // flash_mouse.cpp
 void CreateGraphicsPanel(rex::ui::ImGuiDrawer* drawer, rex::ui::Window* window);  // f8_panel.cpp
 void InstallHudGlyphs();                                                     // hud_glyphs.cpp
+void InstallSharpText(const std::filesystem::path& game_dir);                // sharp_text.cpp
+void InstallVehicleBinds();  // vehicle_binds.cpp: the keyboard's keys from the seat's binding set
 void InstallLook(rex::ui::Window* window);                               // look.cpp
 void InstallPlaytestMark(rex::ui::Window* window);                       // playtest_mark.cpp: BF_MARK_FILE
 void InstallCrashReports(const std::filesystem::path& user_root);        // crash_report.cpp
@@ -76,6 +80,7 @@ void CreateGameMenu(rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& u
                     std::function<void(bool)> fullscreen, std::function<void()> quit,
                     std::function<rex::ui::Window*()> window,
                     std::function<std::filesystem::path()> game_dir);  // game_menu.cpp
+void WatchGpuDeviceLoss(std::function<void(std::function<void()>)> in_ui, std::function<void()> close);  // gpu_lost.cpp
 #if defined(BF_DEV_TOOLS)
 std::unique_ptr<rex::system::IInputSystem> CreateInputSystem(bool tool_mode);  // dev_pad.cpp
 void StartStackSampler();  // dev_stacks.cpp
@@ -95,6 +100,7 @@ inline std::unique_ptr<rex::system::IInputSystem> CreateSharedInputSystem(bool t
 
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp
 REXCVAR_DECLARE(std::string, install_game);  // game_install.cpp
+REXCVAR_DECLARE(bool, install_progress);  // game_install.cpp
 
 // Developer A/B switch (speed comparisons): BF_AB_OFF lists pieces to leave out (overlay, input, audio).
 inline bool AbOff(const char* piece) {
@@ -249,9 +255,11 @@ class Bf1943App : public rex::ReXApp {
     paths_ = paths;
   }
 
-  // --install_game (the server package's setup): the game unpacked into its folder, then the process ends.
+  // --install_game (the server package's setup) or --install_progress (RecompLauncher's, which leaves the package out
+  // once the game is installed): the game unpacked into its folder, then the process ends.
   void OnPostInitLogging() override {
-    if (!REXCVAR_GET(install_game).empty()) std::exit(bf1943::install::InstallFromCommandLine(GameDir(paths_)));
+    if (!REXCVAR_GET(install_game).empty() || REXCVAR_GET(install_progress))
+      std::exit(bf1943::install::InstallFromCommandLine(GameDir(paths_)));
   }
 
   // The game folder: --game_data_root, else the folder chosen at setup (an unpacked game used where it is), else
@@ -360,11 +368,24 @@ class Bf1943App : public rex::ReXApp {
           });
         },
         [this] { return window(); }, [this] { return paths_.game_data_root; });
+    // A graphics driver reset (gpu_lost.cpp): the player told, and the game closed as the close button does, instead of
+    // a frozen picture.
+    if (!REXCVAR_GET(server))
+      bf1943::WatchGpuDeviceLoss(
+          [this](std::function<void()> job) { app_context().CallInUIThreadDeferred(std::move(job)); },
+          [this] {
+            if (window()) window()->RequestClose();
+            else app_context().QuitFromUIThread();
+          });
     if (!AbOff("overlay")) bf1943::CreatePerfOverlay(drawer);  // Settings > Gameplay > Performance metrics, F2
     if (!REXCVAR_GET(server)) bf1943::CreateCommsOverlay(drawer);  // text chat top left, voice chat (comms_ui.cpp)
+    if (!REXCVAR_GET(server)) bf1943::CreateWorldAdminPanel(drawer);  // F9, a match's admin (world_sync.cpp)
     if (!REXCVAR_GET(server)) bf1943::CreateSpawnMouseOverlay(drawer);  // the deploy screen's pointer
     if (!REXCVAR_GET(server)) bf1943::CreateGraphicsPanel(drawer, window());  // F8 (f8_panel.cpp)
+    if (!REXCVAR_GET(server)) bf1943::CreateUiHider(drawer);  // last of our overlays: it hides them (free_cam.cpp)
     if (!REXCVAR_GET(server)) bf1943::InstallHudGlyphs();  // the game's prompts in the chosen style (hud_glyphs.cpp)
+    if (!REXCVAR_GET(server)) bf1943::InstallSharpText(paths_.game_data_root);  // the game's text sharper (sharp_text.cpp)
+    if (!REXCVAR_GET(server)) bf1943::InstallVehicleBinds();  // each vehicle kind's keys (vehicle_binds.cpp)
     bf1943::InstallLook(window());  // the camera and look system (look.cpp)
     bf1943::InstallPlaytestMark(window());  // R marks a moment in a watched play test (playtest_mark.cpp)
     // The SDK's own overlays stay shut (TekRantGaming, 10 Nov 2026): F3 its debug overlay, F4 its settings and the backtick

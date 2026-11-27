@@ -98,6 +98,17 @@ void SpirvShaderTranslator::ProcessAluInstruction(const ParsedAluInstruction& in
   StoreResult(instr.vector_and_constant_result, vector_result,
               instr.GetMemExportStreamConstant() != UINT32_MAX);
   StoreResult(instr.scalar_result, scalar_result);
+  // Soft shadows: the shadow map's taps are gone once their register is written again.
+  if (soft_shadow_register_ != UINT32_MAX) {
+    for (const InstructionResult* written : {&instr.vector_and_constant_result, &instr.scalar_result}) {
+      if (written->storage_target == InstructionStorageTarget::kRegister &&
+          written->GetUsedWriteMask() &&
+          (written->storage_addressing_mode != InstructionStorageAddressingMode::kAbsolute ||
+           written->storage_index == soft_shadow_register_)) {
+        soft_shadow_register_ = UINT32_MAX;
+      }
+    }
+  }
 
   if (predicate_written_vector || predicate_written_scalar) {
     cf_exec_predicate_written_ = true;
@@ -399,8 +410,8 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
     case ucode::AluVectorOpcode::kSeq:
     case ucode::AluVectorOpcode::kSgt:
     case ucode::AluVectorOpcode::kSge:
-    case ucode::AluVectorOpcode::kSne:
-      return builder_->createTriOp(
+    case ucode::AluVectorOpcode::kSne: {
+      spv::Id compare_result = builder_->createTriOp(
           spv::OpSelect, result_type,
           builder_->createBinOp(spv::Op(kOps[size_t(instr.vector_opcode)]),
                                 type_bool_vectors_[used_result_component_count - 1],
@@ -410,7 +421,22 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
                                                      used_result_components)),
           const_float_vectors_1_[used_result_component_count - 1],
           const_float_vectors_0_[used_result_component_count - 1]);
-
+      // Soft shadows (SetSoftShadowFetchConstant): the receiver's depth compared with the shadow map's taps.
+      if (soft_shadow_register_ != UINT32_MAX &&
+          (instr.vector_opcode == ucode::AluVectorOpcode::kSgt ||
+           instr.vector_opcode == ucode::AluVectorOpcode::kSge)) {
+        bool taps_0 = IsSoftShadowTapOperand(instr.vector_operands[0]);
+        bool taps_1 = IsSoftShadowTapOperand(instr.vector_operands[1]);
+        if (taps_0 != taps_1) {
+          uint32_t depth_operand = taps_0 ? 1 : 0;
+          spv::Id receiver_depth = GetOperandComponents(
+              operand_storage[depth_operand], instr.vector_operands[depth_operand], 0b0001);
+          return SoftShadowCompare(receiver_depth, taps_0, compare_result,
+                                   used_result_component_count);
+        }
+      }
+      return compare_result;
+    }
     case ucode::AluVectorOpcode::kFrc:
     case ucode::AluVectorOpcode::kTrunc:
     case ucode::AluVectorOpcode::kFloor:

@@ -6,8 +6,12 @@
 // (game_menu.cpp), and friends join it by Direct connect with the address its page copies. The server ends with the
 // player's game (bf_gm_parent_pid) or when the player leaves the match.
 
-#include "private_match.h"
+#include <random>
 
+#include "private_match.h"
+#include "world_sync.h"
+
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <fstream>
@@ -122,7 +126,17 @@ std::wstring ServerEnvironment() {
   if (wchar_t* env = GetEnvironmentStringsW()) {
     for (const wchar_t* at = env; *at; at += wcslen(at) + 1) {
       const std::wstring entry = at;
-      if (_wcsnicmp(entry.c_str(), L"BF_", 3) == 0 || _wcsnicmp(entry.c_str(), L"SDL_WINDOW_ACTIVATE_WHEN_SHOWN=", 31) == 0)
+      const bool test_setting = _wcsnicmp(entry.c_str(), L"BF_", 3) == 0;
+#if defined(BF_DEV_TOOLS)
+      // A server's own test aid (BF_DEV_MOVE_SPAWNS: the vehicles' night lamps test hosts a LAN match whose US carrier
+      // spawns are moved to the airfield's flag; BF_BOTS and BF_BOT_*: the bots' tests) goes to the server too.
+      const bool for_server = _wcsnicmp(entry.c_str(), L"BF_DEV_MOVE_SPAWNS", 18) == 0 ||
+                              _wcsnicmp(entry.c_str(), L"BF_BOTS=", 8) == 0 ||
+                              _wcsnicmp(entry.c_str(), L"BF_BOT_", 7) == 0;
+#else
+      const bool for_server = false;
+#endif
+      if ((test_setting && !for_server) || _wcsnicmp(entry.c_str(), L"SDL_WINDOW_ACTIVATE_WHEN_SHOWN=", 31) == 0)
         continue;
       block += entry;
       block += L'\0';
@@ -254,6 +268,13 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
   g.port = o.port ? o.port : FreePort();
   const std::string first = o.maps.empty() ? "wake" : o.maps.front();
   const fs::path dir = MatchDir();
+  // A key of this match's own: the server takes this game, which shows it, for an admin of its world.
+  std::string admin_key;
+  {
+    std::random_device rd;
+    for (int i = 0; i < 4; ++i) admin_key += fmt::format("{:08x}", uint32_t(rd()));
+  }
+  world::SetAdminKey(admin_key);
   std::vector<Arg> args = {
       {"--game_data_root", g.game.string(), true},
       {"--user_data_root", (dir / "user").string(), true},
@@ -266,6 +287,7 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
       {"--bf_round_end_delay", "45"},
       // At the rate this game runs at: its own game joins it without starting again.
       {"--bf_tick_rate", std::to_string(o.tick ? o.tick : TickRate())},
+      {"--bf_bots", std::to_string(std::clamp(o.bots, 0, 24))},
       {"--bf_gm_backend", registry},
       {"--bf_gm_listen", (LoopbackOnly() ? "127.0.0.1:" : "0.0.0.0:") + std::to_string(g.port)},
       {"--bf_gm_name", Clean(o.name.empty() ? std::string("Private match") : o.name), true},
@@ -277,9 +299,32 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
   };
   if (o.lan) args.push_back({"--bf_lan_backend", "true"});
   if (!o.password.empty()) args.push_back({"--bf_gm_password", Clean(o.password), true});
-  // (In-dev also passes the day and night cycle's world settings here: pull request 32, not in the 0.4.7.x line.)
-  args.push_back({"--bf_gm_status_file", (dir / "status.json").string(), true});
-  args.push_back({"--bf_gm_parent_pid", std::to_string(own_pid)});
+  const auto number = [](float v) {  // as a stream writes it (the command line before Linux hosting)
+    std::ostringstream out;
+    out << v;
+    return out.str();
+  };
+  for (Arg a : std::initializer_list<Arg>{
+           {"--bf_world_day_night", o.day_night ? "true" : "false"},
+           {"--bf_world_time", number(o.time)},
+           {"--bf_world_day_minutes", number(o.day_minutes)},
+           {"--bf_world_cloud_cover", number(o.cloud_cover)},
+           {"--bf_world_cloud_rate", number(o.cloud_rate)},
+           {"--bf_world_weather", number(o.weather)},
+           {"--bf_world_fog", number(o.fog)},
+           {"--bf_world_ground_fog", number(o.ground_fog)},
+           {"--bf_world_wind", number(o.wind)},
+           {"--bf_world_cloud_height", number(o.cloud_height)},
+           {"--bf_world_dynamic_storm", o.dynamic_storm ? "true" : "false"},
+           {"--bf_world_storm_type", std::to_string(std::clamp(o.storm_type, 0, 1))},  // D224
+           // The page's "map's own" (0) is the level's own count, never scaled (-1; match_rules.cpp).
+           {"--bf_match_tickets", o.tickets > 0 ? std::to_string(std::min(o.tickets, 9999)) : std::string("-1")},
+           {"--bf_match_time_limit", std::to_string(std::clamp(o.time_limit, 0, 600))},
+           {"--bf_world_admin_key", admin_key},
+           {"--bf_gm_status_file", (dir / "status.json").string(), true},
+           {"--bf_gm_parent_pid", std::to_string(own_pid)},
+       })
+    args.push_back(std::move(a));
 #if defined(_WIN32)
   std::wstring command = CommandLine(exe, args);
   std::wstring environment = ServerEnvironment();

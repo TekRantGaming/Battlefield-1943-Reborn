@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <mutex>
 
@@ -21,6 +22,10 @@ REXCVAR_DEFINE_BOOL(clock_no_scaling, false, "Clock",
                     "Disable clock scaling (inverted: false = scaling enabled)");
 
 REXCVAR_DEFINE_BOOL(clock_source_raw, false, "Clock", "Use raw clock source without scaling");
+
+REXCVAR_DEFINE_BOOL(clock_lock_free, true, "Clock",
+                    "At the normal time scale (1.0), read the guest tick count straight from the host clock "
+                    "without the shared lock (false: the locked, accumulating path)");
 
 namespace rex::chrono {
 
@@ -42,6 +47,26 @@ uint64_t last_host_tick_count_ = Clock::QueryHostTickCount();
 // Mutex to ensure last_host_tick_count_ and last_guest_tick_count_ are in sync
 std::mutex tick_mutex_;
 
+// Lock-free path (clock_lock_free, time scale 1.0): guest ticks = guest_base_ + (host - host_base_) * num / den.
+// Every mftb goes through UpdateGuestClock, from every guest thread, so the shared lock was contended (a game's audio
+// thread reads it around each voice), and each locked update dropped the remainder of its delta * num / den, so a
+// clock read very often ran slow.
+std::atomic<bool> unit_scale_{true};
+std::atomic<uint64_t> ratio_num_{1}, ratio_den_{1};
+std::atomic<uint64_t> host_base_{last_host_tick_count_}, guest_base_{0};
+
+uint64_t ScaleTicks(uint64_t host_delta, uint64_t num, uint64_t den) {
+  // host_delta * num / den without overflowing 64 bits for long runs.
+  return host_delta / den * num + host_delta % den * num / den;
+}
+
+uint64_t LockFreeGuestTicks(uint64_t host_tick_count) {
+  const uint64_t base = host_base_.load(std::memory_order_relaxed);
+  return guest_base_.load(std::memory_order_relaxed) +
+         ScaleTicks(host_tick_count > base ? host_tick_count - base : 0, ratio_num_.load(std::memory_order_relaxed),
+                    ratio_den_.load(std::memory_order_relaxed));
+}
+
 void RecomputeGuestTickScalar() {
   // Create a rational number with numerator (first) and denominator (second)
   auto frac = std::make_pair(guest_tick_frequency_, Clock::QueryHostTickFrequency());
@@ -58,7 +83,24 @@ void RecomputeGuestTickScalar() {
   reduce_fraction(frac);
 
   std::lock_guard<std::mutex> lock(tick_mutex_);
+  const auto old_ratio = guest_tick_ratio_;
   guest_tick_ratio_ = frac;
+  const bool unit = guest_time_scalar_ == 1.0;
+  if (unit) {
+    // Carry on from the count so far (the tick frequency is set after start-up; a new ratio must not rescale the
+    // ticks already counted): from the lock-free count, or from the locked path's when coming back to scale 1.0.
+    const uint64_t host_now = Clock::QueryHostTickCount();
+    uint64_t guest_now = last_guest_tick_count_;
+    if (unit_scale_.load()) {
+      guest_now = LockFreeGuestTicks(host_now);
+    } else if (host_now > last_host_tick_count_) {
+      guest_now += ScaleTicks(host_now - last_host_tick_count_, old_ratio.first, old_ratio.second);
+    }
+    host_base_.store(host_now);
+    guest_base_.store(guest_now);
+  }
+  ratio_num_.store(frac.first), ratio_den_.store(frac.second);
+  unit_scale_.store(unit);
 }
 
 // Update the guest timer for all threads.
@@ -69,6 +111,10 @@ uint64_t UpdateGuestClock() {
   if (REXCVAR_GET(clock_no_scaling)) {
     // Nothing to update, calculate on the fly
     return host_tick_count * guest_tick_ratio_.first / guest_tick_ratio_.second;
+  }
+
+  if (REXCVAR_GET(clock_lock_free) && unit_scale_.load(std::memory_order_acquire)) {
+    return LockFreeGuestTicks(host_tick_count);
   }
 
   std::unique_lock<std::mutex> lock(tick_mutex_, std::defer_lock);
@@ -129,6 +175,12 @@ void Clock::set_guest_time_scalar(double scalar) {
     return;
   }
 
+  if (unit_scale_.load() && scalar != 1.0) {
+    const uint64_t guest_now = UpdateGuestClock();
+    std::lock_guard<std::mutex> lock(tick_mutex_);
+    last_host_tick_count_ = Clock::QueryHostTickCount();
+    last_guest_tick_count_ = guest_now;
+  }
   guest_time_scalar_ = scalar;
   RecomputeGuestTickScalar();
 }

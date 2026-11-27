@@ -349,6 +349,32 @@ void DevWatchPose(uint8_t* base, const std::vector<Change>& changes) {
     return;
   }
 }
+// BF_DEV_WATCH_WATER=1: who reads the soldier's WaterDepthLimit and MaxAscendAngle (its CharacterPhysicsData, radius
+// 0.35) for 60 s after the scan: the swimming code (18 Nov 2026, swimmers who cannot get out of the sea).
+// BF_DEV_WATCH_WATER=2: the swimming state's BodyUnderWater instead (SwimmingStateData +0x20, 1.4).
+void DevWatchWater(uint8_t* base) {
+  const char* v = std::getenv("BF_DEV_WATCH_WATER");
+  if (!v) return;
+  const bool swim = *v == '2';
+  ForEachGuestRange(base, [&](uint64_t start, uint64_t end) {
+    static bool found = false;
+    for (uint64_t a64 = start; !found && a64 + 0x90 <= end; a64 += 4) {
+      const uint32_t a = uint32_t(a64);
+      if (swim) {
+        if (Load32(base, a) != 0x82034CF0 || std::fabs(LoadFloat(base, a + 0x20) - 1.4f) > 1e-4f) continue;
+        found = true;
+        dev::WatchHostAccess({base + a + 0x20}, 60.0, "swim");
+        REXLOG_INFO("BF modern mode: watching the swimming state data at {:08X}", a);
+        continue;
+      }
+      if (Load32(base, a) != 0x82034D2C || std::fabs(LoadFloat(base, a + 0x84) - 0.35f) > 1e-3f) continue;
+      found = true;
+      dev::WatchHostAccess({base + a + 0x44, base + a + 0x80}, 60.0, "water");
+      REXLOG_INFO("BF modern mode: watching the soldier physics at {:08X} (water depth limit {}, max ascend {})", a,
+                  LoadFloat(base, a + 0x44), LoadFloat(base, a + 0x80));
+    }
+  });
+}
 #endif
 
 // Writes each change's modern or original value, where its object is still the one scanned.
@@ -404,6 +430,7 @@ namespace {
       ap.modern = false;
 #if defined(BF_DEV_TOOLS)
       DevWatchPose(base, ap.changes);
+      DevWatchWater(base);
 #endif
       retry_at = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     }

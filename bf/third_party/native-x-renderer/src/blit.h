@@ -53,6 +53,8 @@ struct BlitOptions {
   // D24FS8) rather than unorm24; kPackedToDepth: whether the words' depth is.
   Diligent::ITextureView* stencil = nullptr;
   bool depth_float24 = false;
+  // kColorDelta: what the source is compared with.
+  Diligent::ITextureView* before = nullptr;
   // kPackedToDepth: the source's host pixels per guest pixel across. In the EDRAM a depth surface's tiles (80
   // samples wide) have their 40-sample halves swapped from a color surface's: each source pixel is taken from the
   // other half of its tile (D113).
@@ -73,6 +75,10 @@ class Blitter {
     kColorGamma,    // sampler2D, read texel by texel through the guest's gamma ramp
     kDepthScaled,   // a depth texture to another size, nearest, written as the red channel
     kDepthToDepth,  // a depth texture to another size, nearest, into a depth target (its view): D49
+    // sampler2D twice: the source less `before`, texel by texel, added to the target (host MSAA: a change made to a
+    // target's one-sample texture, into every sample of its twin).
+    kColorDelta,
+    kDepthMsaaToDepth,  // sampler2DMS: one sample of a multisampled depth texture into a depth target, texel by texel
     // A depth texture and its stencil, texel by texel, as the 32-bit words a resolve into a k_24_8 texture
     // writes to memory, in an RGBA8 target: R the stencil, G, B, A the depth's 24 bits, low first (D64).
     kDepthStencilPacked,
@@ -121,8 +127,9 @@ class Blitter {
     Diligent::RefCntAutoPtr<Diligent::IPipelineState> pso;
     Diligent::RefCntAutoPtr<Diligent::IShaderResourceBinding> srb;
   };
-  // variant: kFillDepthStencil's writes, bit 0 the depth, bit 1 the stencil.
-  Pipeline* GetPipeline(Source kind, Diligent::TEXTURE_FORMAT target_format, uint8_t variant = 0);
+  // variant: kFillDepthStencil's writes, bit 0 the depth, bit 1 the stencil. samples: the target's (a multisampled
+  // target has every sample of a pixel written alike).
+  Pipeline* GetPipeline(Source kind, Diligent::TEXTURE_FORMAT target_format, uint8_t variant = 0, uint8_t samples = 1);
   void Draw(Diligent::IDeviceContext* context, Pipeline* pipeline, Diligent::ITextureView* target, bool depth_target,
             const Rect& to);
 

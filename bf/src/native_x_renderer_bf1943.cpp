@@ -35,6 +35,9 @@ const native_x_renderer::Profile& NativeXRendererProfile() {
     // after the scene's opaque draws, before its water, particles and the first person weapon (drawn after a depth
     // clear), so those are never darkened (run gcrd2: opaque draws to 1645, the depth copy, blended draws from 1647).
     p.ao_resolve_caller = 0x825868A4;
+    // D197: the sun's shadow map is the lit pixel shaders' fetch constant 0 (outdoorLightShadowmapTexture, in 725 of
+    // them): a 1024 x 1024 x 3 stacked depth texture, a cascade a layer, filtered with four point taps.
+    p.soft_shadow_fetch_constant = 0;
     // D165: the game's own undergrowth (TekRantGaming, 13 Nov 2026: "the extra vegetation starts to behave strangely
     // and starts appearing on roads and places it should not be", from a second map on). The game draws a 64 x 64
     // mask for each undergrowth cell, resolves it, and its jobs read the texture's memory to place plants. The

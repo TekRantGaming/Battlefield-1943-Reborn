@@ -60,6 +60,7 @@
           sv.gid = JsonField(line, "gid"), sv.name = JsonField(line, "name"), sv.map = JsonField(line, "map");
           sv.players = std::atoi(JsonField(line, "players").c_str());
           sv.max_players = std::atoi(JsonField(line, "max_players").c_str());
+          sv.bots = std::max(0, std::atoi(JsonField(line, "bots").c_str()));
           sv.tick_hz = std::atoi(JsonField(line, "tick").c_str());
           sv.next_map = JsonField(line, "next_map");
           sv.description = JsonField(line, "description"), sv.player_hosted = true;
@@ -107,8 +108,15 @@
     }
     return w + st(7);
   }
-  bool browser_has_players_ = false, browser_not_full_ = false, browser_night_ = false;  // the filter chips
+  bool browser_has_players_ = false, browser_not_full_ = false;  // the filter chips
+  // The events chip (26 Nov 2026, Daybreak beside Night Ops): 0 every server, 1 Night Ops only, 2 Daybreak only; a
+  // click goes on to the next (it was the NIGHT OPS chip, on or off).
+  int browser_event_ = 0;
   std::string browser_region_;       // the region chip: only this region's servers (a code of regions.h); empty: all
+  // The size chip (server sizes, docs/SERVER-SIZES.md; TekRantGaming, 20 Nov 2026: the size shown, no pop-up): only
+  // servers of this size (24: the game's own and smaller, 32, 64); 0: all.
+  int browser_size_ = 0;
+  static int SizeOf(const ServerInfo& sv) { return sv.max_players <= 24 ? 24 : sv.max_players <= 32 ? 32 : 64; }
   std::string browser_search_;       // the search box: a part of a server's name or map
   bool browser_typing_ = false;      // the search box has the keyboard (its letters are letters, not the prompts' keys)
   bool servers_from_pause_ = false;  // opened from the pause (a match running): Back goes there
@@ -167,8 +175,10 @@
       if (browser_tab_ == kTabFavourites ? !fav : sv.official != (browser_tab_ == kTabOfficial)) continue;
       if (browser_has_players_ && sv.players <= 0) continue;
       if (browser_not_full_ && sv.max_players > 0 && sv.players >= sv.max_players) continue;
-      if (browser_night_ && !sv.night) continue;
+      if (browser_event_ == 1 && !sv.night) continue;
+      if (browser_event_ == 2 && !sv.daybreak) continue;
       if (!browser_region_.empty() && sv.region != browser_region_) continue;
+      if (browser_size_ && SizeOf(sv) != browser_size_) continue;
       if (!search.empty() && Lower(sv.name + " " + sv.map).find(search) == std::string::npos) continue;
       out.push_back(sv);
     }
@@ -177,7 +187,9 @@
         const int a = p.ping_ms < 0 ? 1 << 20 : p.ping_ms, b = q.ping_ms < 0 ? 1 << 20 : q.ping_ms;
         if (a != b) return a < b;
       }
-      return p.players > q.players;
+      // People first; among servers with as many, the one with more bots (a match going on beats an empty map).
+      if (p.players != q.players) return p.players > q.players;
+      return p.bots > q.bots;
     });
     return out;
   }
@@ -359,9 +371,10 @@
         Chip(d, st, ImVec2(cx, cy), ch, t, on ? kit::kStrip : kit::kPaper, on ? kit::kStripText : kit::kInk, !on, clicked);
         cx -= st(8);
       };
-      bool c_sort = false, c_night = false, c_full = false, c_players = false, c_region = false;
+      bool c_sort = false, c_night = false, c_full = false, c_players = false, c_region = false, c_size = false;
       chip_right(sort_by_ping_ ? "SORT: PING" : "SORT: PLAYERS", false, &c_sort);
-      if (kNightOps) chip_right("NIGHT OPS", browser_night_, &c_night);  // night_ops.h: not in every build
+      if (kNightOps)  // night_ops.h: not in every build
+        chip_right(browser_event_ == 1 ? "NIGHT OPS" : browser_event_ == 2 ? "DAYBREAK" : "EVENTS", browser_event_ != 0, &c_night);
       chip_right("NOT FULL", browser_not_full_, &c_full);
       chip_right("HAS PLAYERS", browser_has_players_, &c_players);
       // The region chip (TekRantGaming, 13 Nov 2026: servers say their region): a click goes through the regions
@@ -376,15 +389,29 @@
         chip_right("REGION: " + (browser_region_.empty() ? std::string("ALL") : Upper(r ? r->name : browser_region_)), !browser_region_.empty(),
                    &c_region);
       }
+      // The size chip, once any server listed is bigger than the game's own 24: a click goes through the sizes listed.
+      std::vector<int> sizes;
+      for (const ServerInfo& sv : all)
+        if (std::find(sizes.begin(), sizes.end(), SizeOf(sv)) == sizes.end()) sizes.push_back(SizeOf(sv));
+      std::sort(sizes.begin(), sizes.end());
+      if (browser_size_ && std::find(sizes.begin(), sizes.end(), browser_size_) == sizes.end()) browser_size_ = 0;
+      if (!sizes.empty() && sizes.back() > 24)
+        chip_right(browser_size_ ? fmt::format("SIZE: {}", browser_size_ == 24 ? std::string("24 OR LESS") : std::to_string(browser_size_))
+                                 : std::string("SIZE: ALL"),
+                   browser_size_ != 0, &c_size);
+      if (c_size) {
+        const auto at = std::find(sizes.begin(), sizes.end(), browser_size_);
+        browser_size_ = !browser_size_ ? sizes.front() : at == sizes.end() || at + 1 == sizes.end() ? 0 : *(at + 1);
+      }
       if (c_region) {
         const auto at = std::find(regions.begin(), regions.end(), browser_region_);
         browser_region_ = browser_region_.empty() ? regions.front() : at + 1 == regions.end() ? std::string() : *(at + 1);
       }
       if (c_sort) sort_by_ping_ = !sort_by_ping_;
-      if (c_night) browser_night_ = !browser_night_;
+      if (c_night) browser_event_ = (browser_event_ + 1) % 3;
       if (c_full) browser_not_full_ = !browser_not_full_;
       if (c_players) browser_has_players_ = !browser_has_players_;
-      if (c_sort || c_night || c_full || c_players || c_region) row_ = 0, scroll_ = 0;
+      if (c_sort || c_night || c_full || c_players || c_region || c_size) row_ = 0, scroll_ = 0;
       const ImVec2 s0 = st.P(679, 159), s1(cx - st(2), st.P(0, 193).y);
       const bool typing = browser_typing_;
       d->AddRectFilled(s0, s1, typing ? kit::kPaperLight : kit::kPaper);
@@ -417,7 +444,8 @@
     const float head = st(30), rh = banners ? st(44) : st(36);
     kit::PaperArt(d, ta, tb);
     // (The region with its flag and the tick rate: TekRantGaming, 13 Nov 2026.)
-    const float colx[6] = {st(14), st(296), st(432), st(566), st(676), st(736)};
+    // (TICK at 686 since the bots' bracket before the players, 21 Nov 2026: "(24) 64 / 64" fits the PLAYERS column.)
+    const float colx[6] = {st(14), st(296), st(432), st(566), st(686), st(736)};
     static const char* kHeads[6] = {"SERVER", "MAP", "REGION", "PLAYERS", "TICK", "PING"};
     for (int c = 0; c < 6; ++c)
       kit::GameText(d, kit::GameFont::kListHeader, st(10), ImVec2(ta.x + colx[c], ta.y + (head - st(10)) * 0.5f), kit::kInkFaint,
@@ -484,6 +512,9 @@
         if (sv.night && kNightOps)
           Chip(d, st, ImVec2(ta.x + colx[0] + nw + st(12), y + (rh - st(16)) * 0.5f), st(16), "NIGHT", IM_COL32(40, 46, 88, 255),
                kit::kStripText, false);
+        else if (sv.daybreak && kNightOps)  // a dawn's amber beside Night Ops' navy
+          Chip(d, st, ImVec2(ta.x + colx[0] + nw + st(12), y + (rh - st(16)) * 0.5f), st(16), "DAYBREAK", IM_COL32(150, 84, 36, 255),
+               kit::kStripText, false);
         d->PopClipRect();
       }
       {  // the map: its picture and its name
@@ -505,16 +536,24 @@
         }
         d->PopClipRect();
       }
-      {  // the players: a bar and the count
-        const float x = ta.x + colx[3], bw = st(42);
+      {  // the players: a bar and the count, the bots in brackets before it in a fainter ink, "(4) 0 / 24"
+        // (TekRantGaming, 21 Nov 2026). The bar is the people only: bots give their slots up to joining players.
+        const float x = ta.x + colx[3], bw = st(36);
         const ImVec2 b0(x, y + rh * 0.5f - st(2)), b1(x + bw, y + rh * 0.5f + st(2));
         d->AddRectFilled(b0, b1, sel ? IM_COL32(255, 255, 255, 70) : IM_COL32(34, 36, 27, 30));
         const float fill = sv.max_players > 0 ? std::clamp(float(sv.players) / float(sv.max_players), 0.0f, 1.0f) : 0.0f;
         if (fill > 0) d->AddRectFilled(b0, ImVec2(b0.x + bw * fill, b1.y), sel ? kit::kCream : kit::kGreen);
         const std::string count = fmt::format("{} / {}", sv.players, sv.max_players);
-        kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(x + bw + st(10), y + (rh - st(11)) * 0.5f), ink, count);
+        float cx = x + bw + st(8);
+        if (sv.bots > 0) {
+          const std::string bots = fmt::format("({})", sv.bots);
+          kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(cx, y + (rh - st(11)) * 0.5f),
+                        sel ? IM_COL32(241, 234, 211, 150) : IM_COL32(90, 84, 64, 170), bots);
+          cx += kit::GameTextWidth(kit::GameFont::kText, st(11), bots) + st(4);
+        }
+        kit::GameText(d, kit::GameFont::kText, st(11), ImVec2(cx, y + (rh - st(11)) * 0.5f), ink, count);
         if (sv.queue > 0) {  // the players waiting in its queue (the join queue, 0.4.7.4): "+3", in the stamp's red
-          const float qx = x + bw + st(10) + kit::GameTextWidth(kit::GameFont::kText, st(11), count) + st(5);
+          const float qx = cx + kit::GameTextWidth(kit::GameFont::kText, st(11), count) + st(5);
           d->PushClipRect(ImVec2(qx, std::max(y, top)), ImVec2(ta.x + colx[4] - st(4), std::min(y + rh, tb.y)), true);
           kit::GameText(d, kit::GameFont::kText, st(10), ImVec2(qx, y + (rh - st(10)) * 0.5f), sel ? kit::kCream : kit::kStamp,
                         fmt::format("+{}", sv.queue));
@@ -548,7 +587,7 @@
       else if (browser_tab_ == kTabFavourites)
         why = fmt::format("No favourites yet. {} on a server keeps it here.",
                           device_ == Device::kKeyboard ? KeyFor(kit::Button::kY) : "Y");
-      else if (browser_has_players_ || browser_not_full_ || browser_night_) why = "No server passes the filters. Switch one off.";
+      else if (browser_has_players_ || browser_not_full_ || browser_event_ || browser_size_) why = "No server passes the filters. Switch one off.";
       else
         why = fmt::format("No {} server right now. The list refreshes every 5 seconds.",
                           browser_tab_ == kTabOfficial ? "Reborn" : "community");
@@ -597,11 +636,14 @@
         x += Chip(d, st, ImVec2(x, y), st(18), "COMMUNITY", kit::kStrip, kit::kStripText, false) + st(6);
       if (sv->night && kNightOps)
         x += Chip(d, st, ImVec2(x, cy), st(18), "NIGHT OPS", IM_COL32(40, 46, 88, 255), kit::kStripText, false) + st(6);
+      else if (sv->daybreak && kNightOps)
+        x += Chip(d, st, ImVec2(x, cy), st(18), "DAYBREAK", IM_COL32(150, 84, 36, 255), kit::kStripText, false) + st(6);
       if (fav) Chip(d, st, ImVec2(x, cy), st(18), "FAVOURITE", kit::kGold, kit::kInk, false);
       y += kh + st(14);
       kit::GameText(d, kit::GameFont::kText, st(13), ImVec2(pa.x + st(18), y), kit::kInk, sv->name);
       y += st(13) + st(10);
       std::string line = fmt::format("{} / {} PLAYERS", sv->players, sv->max_players);
+      if (sv->bots > 0) line += fmt::format(" \xC2\xB7 {} BOT{}", sv->bots, sv->bots == 1 ? "" : "S");
       if (sv->queue > 0) line += fmt::format(" \xC2\xB7 {} IN QUEUE", sv->queue);
       if (sv->ping_ms >= 0) line += fmt::format(" \xC2\xB7 {} MS", sv->ping_ms);
       if (full) line += " \xC2\xB7 FULL";
@@ -676,6 +718,20 @@
     if (in.back) BackFromBrowser();
   }
 
+  // The clipboard's text as Direct connect's address (the letters, numbers and . : - an address or name may have; the
+  // rest, spaces and line ends, left out). It replaces what the box holds: an address pasted after one typed or filled
+  // in from the recent ones made neither (test dpaste1: "207.244.236.140:1830010.0.0.7").
+  void DirectPaste(const std::string& text, const char* how) {
+    int n = 0;
+    std::string pasted;
+    for (char c : text) {
+      const unsigned u = static_cast<unsigned char>(c);
+      if (pasted.size() >= 64) break;
+      if (u < 128 && (std::isalnum(int(u)) || c == '.' || c == ':' || c == '-')) pasted += c, ++n;
+    }
+    if (n) direct_text_ = pasted, direct_error_.clear(), direct_keys_ = false;
+    REXLOG_INFO("BF browser: {} characters pasted into Direct connect ({})", n, how);
+  }
   // ---- Direct connect in the new look: the address typed (the keyboard, or the on screen keys with a controller) on
   // the left paper with the recent servers under it; the keys on the right card.
   void DirectPanel(ImDrawList* d, ImGuiIO& io, const Stage& st, Input& in, ImVec2 ta, ImVec2 tb, ImVec2 pa, ImVec2 pb) {
@@ -692,10 +748,11 @@
       if (c < 128 && allowed(c) && direct_text_.size() < 64) direct_text_ += char(c), direct_keys_ = false;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !direct_text_.empty()) direct_text_.pop_back();
-    if (ImGui::IsKeyPressed(ImGuiKey_V) && io.KeyCtrl)
-      if (const char* clip = ImGui::GetClipboardText())
-        for (const char* c = clip; *c && direct_text_.size() < 64; ++c)
-          if (allowed(static_cast<unsigned char>(*c))) direct_text_ += *c;
+    // Ctrl+V or Shift+Insert (paste_keys.h), and a right click on the box for PASTE and CLEAR (TekRantGaming, 20 Nov
+    // 2026: "unable to paste text or numbers into the direct connect forcing you to manually type it every time": this
+    // waited for io.KeyCtrl, which our menus never see set, the name page's bug of 16 Nov).
+    const bool menu_click = BoxMenu(st);  // game_menu_clan.inc: a click the menu took is not the page's
+    if (paste::Pressed()) DirectPaste(paste::Text(), "keys");
     // The finished lookup: the server found joins (and is kept among the recent ones), or the reason shows.
     if (direct_job_ && direct_job_->load() != 0) {
       if (direct_job_->load() == 1) {
@@ -739,6 +796,10 @@
     const ImVec2 f0(x, y), f1(x + st(430), y + st(42));
     d->AddRectFilled(f0, f1, kit::kPaperLight);
     d->AddRect(f0, f1, kit::kGreen, 0, 0, st(2));
+    if (!menu_click && ImGui::IsMouseHoveringRect(f0, f1) && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+      box_menu_ = true, box_menu_at_ = io.MousePos, box_menu_direct_ = true;
+      REXLOG_INFO("BF browser: Direct connect's right click menu opened");
+    }
     const float size = st(17);
     d->AddText(f.ui_bold, size, ImVec2(f0.x + st(12), f0.y + (st(42) - size * 1.45f) * 0.5f), kit::kInk, direct_text_.c_str());
     if (std::fmod(ImGui::GetTime(), 1.0) < 0.6) {
@@ -768,7 +829,7 @@
         d->AddText(f.ui_bold, st(13.75f), ImVec2(x + st(8), y + (st(34) - st(12) * 1.45f) * 0.5f), kit::kInk, name.c_str());
         const float aw = kit::SpacedWidth(f.typed, st(10), address, st(1.5f));
         kit::Spaced(d, f.typed, st(10), ImVec2(r1.x - st(8) - aw, y + st(12)), kit::kInkSection, address, st(1.5f));
-        if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) direct_text_ = address, direct_error_.clear();
+        if (hover && !menu_click && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) direct_text_ = address, direct_error_.clear();
         y += st(34);
       }
       if (in.y) direct_text_ = recent[0].substr(recent[0].find('|') + 1), direct_error_.clear();

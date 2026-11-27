@@ -38,6 +38,9 @@ void DrawIcon(ImDrawList* d, const ImVec2& c, float h, Voice v, unsigned ink, un
 void NoteGameText(const uint8_t* base, uint32_t renderer, uint32_t lines);
 // The same run's first glyph (where its pen starts, in the run's own units).
 void NoteGameGlyph(int32_t pen_x, int32_t pen_y);
+// The ping column's room (voice_mute.cpp): called for every glyph of the run, before it is added, with its pen (the
+// word at `pen_at` is its x, which this may move). False: the glyph is not drawn (a row's dot leaders past the cut).
+bool LayoutGlyph(uint8_t* base, uint32_t pen_at, int32_t pen_y);
 // Ends the run started by NoteGameText.
 void EndGameText();
 // A run of the game's text this hook may rewrite in place before it is drawn (the "SEE GAMER CARD" prompt's words):

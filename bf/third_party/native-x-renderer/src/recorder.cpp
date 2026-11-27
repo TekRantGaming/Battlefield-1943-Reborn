@@ -5,6 +5,7 @@
 #include <rex/thread.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 #if defined(_M_X64) || defined(__x86_64__)
@@ -89,8 +90,10 @@ void Recorder::UpdateBuffer(Diligent::IBuffer* buffer, uint64_t offset, uint64_t
 void Recorder::Publish() {
   write_block_->published.store(write_pos_, std::memory_order_release);
   if (!threaded()) return Consume();
-  published_.store(recorded_, std::memory_order_release);
-  published_.notify_one();
+  // D250: woken only while it sleeps (a wake is a call into the system, at every publish it was 1 % of the renderer's
+  // thread). Sequentially consistent with Run's sleep: one of the two sees the other.
+  published_.store(recorded_, std::memory_order_seq_cst);
+  if (consumer_sleeping_.load(std::memory_order_seq_cst)) published_.notify_one();
 }
 
 void Recorder::Drain() {
@@ -112,7 +115,9 @@ void Recorder::Consume() {
       auto* header = reinterpret_cast<Header*>(read_block_->data + read_pos_);
       read_pos_ += header->size;
       if (!header->run) continue;
+      running_.store(true, std::memory_order_release);
       header->run(header + 1, context_);
+      running_.store(false, std::memory_order_release);
       executed_.store(++run_, std::memory_order_seq_cst);
       if (drain_waiting_.load(std::memory_order_seq_cst)) executed_.notify_all();
     }
@@ -132,9 +137,16 @@ void Recorder::Run() {
     Consume();
     if (run_ < seen) continue;
     if (stop_.load(std::memory_order_acquire)) break;
-    const uint32_t spins = SpinWaitsAllowed() ? 2048 : 0;  // cpu_cores.h
+    // NXR_RECORDER_SPINS=<n> (a diagnosis aid, D250): the spin's length (2048 pauses).
+    static const uint32_t spin_length = [] {
+      const char* v = std::getenv("NXR_RECORDER_SPINS");
+      return v && *v ? uint32_t(std::atoi(v)) : 2048u;
+    }();
+    const uint32_t spins = SpinWaitsAllowed() ? spin_length : 0;  // cpu_cores.h
     for (uint32_t i = 0; i < spins && published_.load(std::memory_order_acquire) == seen; ++i) Pause();
-    published_.wait(seen, std::memory_order_acquire);
+    consumer_sleeping_.store(true, std::memory_order_seq_cst);
+    if (published_.load(std::memory_order_seq_cst) == seen) published_.wait(seen, std::memory_order_acquire);
+    consumer_sleeping_.store(false, std::memory_order_relaxed);
   }
 }
 

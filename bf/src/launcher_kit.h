@@ -56,9 +56,15 @@ struct Fonts {
 };
 const Fonts& GetFonts();
 void LoadFonts(ImFontAtlas* atlas, const std::filesystem::path& exe_dir, ImFont* ui, ImFont* ui_bold);
+// Every font in the atlas rasterized at the display's own pixel density (Windows display scaling), once a frame
+// before any of our text is drawn. Without it, text drawn straight into a draw list (all of our menus) was made at
+// the window's logical size and stretched by the scaling: at 250% a caption was a 10 pixel glyph drawn 25 high.
+void MatchTextToDisplay(ImGuiIO& io);
 
 // ---- drawing helpers
 float TextWidth(ImFont* f, float size, const std::string& t);
+// ImDrawList::AddText placed exactly at `at` on the display's own pixel (not at a whole pixel of the scaled size).
+void PixelText(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const char* t);
 // Text with letter spacing `track` (CSS letter-spacing), optionally squeezed for the stencil stand in.
 float Spaced(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const std::string& t, float track);
 float SpacedWidth(ImFont* f, float size, const std::string& t, float track);
@@ -106,6 +112,9 @@ const char* StyleName(Style s);
 // One button, `h` tall, its left middle at `at`; `key` is the keyboard's key for it (a key name as the glyph files
 // have them: Enter, Esc, E, F8...). Returns the width; draws nothing with draw false.
 float Glyph(ImDrawList* d, Style style, Button b, const std::string& key, ImVec2 at, float h, bool draw = true);
+// A controller picture of the style's set by its file name (stick_lr, stick_r_ud, ...), `h` tall, its left middle at
+// `at`; the Xbox 360 style (which has no pictures of its own) the Xbox Series'. Returns the width, 0 when not there.
+float GlyphPicture(ImDrawList* d, Style style, const std::string& name, ImVec2 at, float h, bool draw = true);
 void SetGlyphDir(const std::filesystem::path& dir);  // <exe>\glyphs
 // A PNG file (made from the player's game files: the map pictures) drawn to fill a..b, cropped to its shape, or with
 // stretch its whole picture squeezed to a..b (the game's square startup cards, drawn 16:9 as the console showed them).

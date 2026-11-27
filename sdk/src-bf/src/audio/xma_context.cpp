@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
+#include <vector>
 
 #include <rex/audio/xma/context.h>
 #include <rex/audio/xma/decoder.h>
@@ -201,13 +203,13 @@ void XmaContext::ClearLocked(XMA_CONTEXT_DATA* data) {
 void XmaContext::ResetDecoderState() {
   // A freed or re-initialized context is a new logical stream, so the previous
   // wave's MDCT overlap-add tail must not survive into frame 0 of the next one.
-  // avcodec_flush_buffers() cannot drop it: ff_xmaframes_decoder declares no
-  // flush callback, so the call never reaches the code clearing channel[].out.
-  // Invalidating the cached format makes PrepareDecoder reopen the codec on the
-  // next decode, which does discard the history.
-  if (av_context_) {
-    av_context_->sample_rate = 0;
-    av_context_->channels = 0;
+  // ff_xmaframes_decoder's flush callback (xmaframes_flush, our FFmpeg) puts it
+  // back in its just-opened state, history included. Reopening the codec instead
+  // (as before) rebuilt its MDCT tables for every new sound, ~0.5 ms under
+  // FFmpeg's global codec lock: a burst of sound starts stalled the guest's audio
+  // thread. PrepareDecoder still changes decoders when the format changes.
+  if (av_context_ && avcodec_is_open(av_context_)) {
+    avcodec_flush_buffers(av_context_);
   }
   raw_frame_.fill(0);
   decoded_frame_.fill(0);
@@ -232,6 +234,7 @@ void XmaContext::Release() {
 
   set_is_allocated(false);
   ResetDecoderState();
+  ReturnDecoder();
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   std::memset(context_ptr, 0, sizeof(XMA_CONTEXT_DATA));
 }
@@ -539,6 +542,74 @@ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* 
   current_frame_remaining_subframes_ -= subframes_to_write;
 }
 
+namespace {
+// Open xmaframes decoders no context is using, by format (mono or stereo, one of
+// four rates). Released contexts return theirs, and a context whose next stream
+// has another format trades its decoder in, instead of closing it and opening
+// another: avcodec_open2 rebuilds the MDCT tables (~0.6 ms) under FFmpeg's global
+// codec lock, so in a busy match over half the new sounds queued on that lock.
+// Decoders go in flushed (xmaframes_flush), so one taken out starts like a
+// freshly opened one.
+class XmaDecoderPool {
+ public:
+  ~XmaDecoderPool() {
+    for (auto& by_rate : free_)
+      for (auto& list : by_rate)
+        for (AVCodecContext* c : list) avcodec_free_context(&c);
+  }
+
+  AVCodecContext* Take(int sample_rate, int channels) {
+    const int rate = RateIndex(sample_rate);
+    if (rate < 0 || channels < 1 || channels > 2) return nullptr;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& list = free_[channels - 1][rate];
+    if (list.empty()) return nullptr;
+    AVCodecContext* c = list.back();
+    list.pop_back();
+    return c;
+  }
+
+  // Takes ownership of an open decoder.
+  void Give(AVCodecContext* c) {
+    avcodec_flush_buffers(c);
+    const int rate = RateIndex(c->sample_rate);
+    if (rate >= 0 && c->channels >= 1 && c->channels <= 2) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      auto& list = free_[c->channels - 1][rate];
+      if (list.size() < kMaxPerFormat) {
+        list.push_back(c);
+        return;
+      }
+    }
+    avcodec_free_context(&c);
+  }
+
+ private:
+  // Spares per format; a decoder holds about half a megabyte (eight channels'
+  // overlap buffers, MDCT tables). Before the pool, every context that had ever
+  // played kept one: up to 320.
+  static constexpr size_t kMaxPerFormat = 32;
+
+  static int RateIndex(int sample_rate) {
+    for (int i = 0; i < 4; ++i)
+      if (kIdToSampleRate[i] == sample_rate) return i;
+    return -1;
+  }
+
+  std::mutex mutex_;
+  std::vector<AVCodecContext*> free_[2][4];
+};
+XmaDecoderPool g_decoder_pool;
+}  // namespace
+
+void XmaContext::ReturnDecoder() {
+  if (!avcodec_is_open(av_context_)) return;
+  g_decoder_pool.Give(av_context_);
+  av_context_ = avcodec_alloc_context3(av_codec_);  // unopened, no format: the next stream takes or opens one
+  av_context_->channels = 0;
+  av_context_->sample_rate = 0;
+}
+
 int XmaContext::PrepareDecoder(int sample_rate, bool is_two_channel) {
   sample_rate = GetSampleRate(sample_rate);
 
@@ -547,7 +618,15 @@ int XmaContext::PrepareDecoder(int sample_rate, bool is_two_channel) {
       av_context_->channels != static_cast<int>(channels)) {
     REXAPU_NOISY_DEBUG("XmaContext {}: Codec reinit: rate {} -> {}, channels {} -> {}", id(),
                        av_context_->sample_rate, sample_rate, av_context_->channels, channels);
-    avcodec_free_context(&av_context_);
+    if (avcodec_is_open(av_context_)) {
+      g_decoder_pool.Give(av_context_);
+      av_context_ = nullptr;
+    } else {
+      avcodec_free_context(&av_context_);
+    }
+    if ((av_context_ = g_decoder_pool.Take(sample_rate, static_cast<int>(channels)))) {
+      return 2;
+    }
     av_context_ = avcodec_alloc_context3(av_codec_);
 
     av_context_->sample_rate = sample_rate;
@@ -735,9 +814,9 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
 
   decoded_frame_.fill(0);
 
-  if (PrepareDecoder(data->sample_rate, bool(data->is_stereo)) == 1) {
-    // Reopening the codec restarts its output; the carried tail belongs to the
-    // old stream.
+  if (PrepareDecoder(data->sample_rate, bool(data->is_stereo)) > 0) {
+    // Another decoder (opened, or from the pool) restarts the output; the
+    // carried tail belongs to the old stream.
     carry_valid_ = false;
   }
   PreparePacket(packet_info.current_frame_size_, padding_start);

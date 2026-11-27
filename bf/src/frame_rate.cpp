@@ -21,9 +21,12 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -35,6 +38,7 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
+#include "player_limits.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -59,6 +63,7 @@ REXCVAR_DEFINE_BOOL(bf_unlock_fps, true, "BF1943", "Run above the original 30 fr
 namespace bf1943 {
 int TickRate();  // tick_rate.cpp
 }
+REXCVAR_DECLARE(int32_t, bf_gm_max_players);  // gm_host.cpp: the server's size (server.json max_players)
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp: a dedicated server keeps the game's own timing
 REXCVAR_DEFINE_DOUBLE(bf_max_fps, 60.0, "BF1943", "Frame rate limit with bf_unlock_fps (0: none)");
 
@@ -107,11 +112,23 @@ bool LogSetting(const std::string& name) {
 // above 30 needs the frames between ticks drawn from interpolated positions.
 
 // Our menu's frame rate setting, live: 30 locks to the original timing, 0 is no limit.
+//
+// The original timing (Game.VsyncEnable on: the timer's mode 2) runs one game tick a frame. That is the Xbox's 30 ticks
+// a second only while the tick rate is 30: at 60 (tick_rate.cpp) a 30 FPS player's game ran 30 ticks of a sixtieth a
+// second, half time, and its own server (60 a second, in real time) pulled the soldier back every few frames (19 Nov
+// 2026, the user: "a smooth and playable experience no matter the framerate"; runs fps30 and fr_30r: 29.8 ticks a
+// second, 0.2 to 0.8 m a second walked against 4.5). So 30 locks only at 30 ticks a second; at any other rate it is our
+// own limit at 30 with the game's timer free (mode 0, its ticks from the elapsed time: two a frame at 30 FPS).
+namespace {
+double g_requested_fps = -1;  // the menu's choice (SetFrameRate), for LimitFrame to apply again when the rate changes
+}  // namespace
 void SetFrameRate(double fps) {
-  rex::cvar::SetFlagByName("bf_unlock_fps", fps == 30 ? "false" : "true");
+  g_requested_fps = fps;
+  const bool locked = fps == 30 && bf1943::TickRate() == 30;
+  rex::cvar::SetFlagByName("bf_unlock_fps", locked ? "false" : "true");
   rex::cvar::SetFlagByName("bf_max_fps", std::to_string(fps));
   if (REXCVAR_GET(server)) return;
-  if (g_vsync) *REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(g_vsync) = fps == 30 ? 1 : 0;
+  if (g_vsync) *REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(g_vsync) = locked ? 1 : 0;
   if (g_max_fps) StoreFloat(REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(g_max_fps), 0, 0.0f);
 }
 
@@ -211,6 +228,13 @@ void LimitFrame() {
     REXLOG_INFO("BF timer probe: frame {}: Sleep(1) took up to {:.1f} ms", probe_frames, longest);
   }
 #endif
+  // 30 FPS chosen and the tick rate settled after the choice (a server joined at another rate): locked or not again.
+  if (g_requested_fps == 30 && !REXCVAR_GET(server) &&
+      REXCVAR_GET(bf_unlock_fps) == (bf1943::TickRate() == 30)) {
+    REXLOG_INFO("BF frame rate: 30 at {} ticks a second: {}", bf1943::TickRate(),
+                bf1943::TickRate() == 30 ? "the original timing" : "our limit, the game's timer free");
+    SetFrameRate(30);
+  }
   if (!Unlocked()) return;
 #if defined(BF_DEV_TOOLS)
   // BF_DEV_NO_LIMIT=1 (tests): our limit never waits (does a load go faster without it?).
@@ -487,6 +511,66 @@ std::string Stats() {
 #endif
 }  // namespace jobwake
 
+// The job scheduler's slots (from the map editor branch, bca78cb of 18 Nov 2026). sub_82380B18 makes its pool with 256
+// (sub_82608F00(owner, 256): li r4,256 before the call returning to 82380BD4; each slot 656 bytes, the count kept at the
+// pool's +16, which its allocator sub_82608AF8 and reclaimer sub_82608050 read). The job graph walk sub_82607CA8 takes
+// one slot a node and frees none until it ends; in play it holds 163 to 169 of the 256 and at a level change up to 223.
+// A walk that needs more never ends: the client spins in sub_82608AF8 for good (a hang report, the server plays on).
+// It froze a custom level rebuilt three times in a match (editor fuzz run me134), and a player joining a 64 player
+// match on Wake (server sizes, docs/SERVER-SIZES.md: run size64h, its hang dump read 21 Nov 2026). bf_job_slots: the
+// pool's size (256: the game's own; 512 by default, 168 KB more of the game's heap). At the 60 FPS limit on Wake the
+// frame's own work was 3.0 ms with 256, 3.1 with 512, 3.5 with 1024 (the reclaim pass reads every slot).
+REXCVAR_DEFINE_INT32(bf_job_slots, 512, "BF1943",
+                     "Job slots in the game's scheduler (256 the game's own; a full pool froze a busy level change)");
+REX_EXTERN(__imp__sub_82608F00);
+REX_HOOK_RAW(sub_82608F00) {
+  if (uint32_t(ctx.lr) == 0x82380BD4u && ctx.r4.u32 == 256) {
+    const int32_t n = std::clamp(REXCVAR_GET(bf_job_slots), 256, 4096);
+    if (n != 256) REXLOG_INFO("BF jobs: the scheduler's pool made with {} job slots (the game's own 256)", n);
+    ctx.r4.u64 = uint32_t(n);
+  }
+  __imp__sub_82608F00(ctx, base);
+}
+
+#if defined(BF_DEV_TOOLS)
+// Developer aid (BF_DEV_JOBGRAPH=1): each job graph walk's slot count; the largest every 10 s, and any walk over 200.
+namespace bf1943::jobgraph {
+thread_local int t_in_walk = 0, t_count = 0;
+std::atomic<int> g_most{0};
+bool On() {
+  static const bool on = [] {
+    const char* e = std::getenv("BF_DEV_JOBGRAPH");
+    return e && *e == '1';
+  }();
+  return on;
+}
+}  // namespace bf1943::jobgraph
+REX_EXTERN(__imp__sub_82607CA8);
+REX_HOOK_RAW(sub_82607CA8) {
+  namespace jg = bf1943::jobgraph;
+  if (!jg::On()) return __imp__sub_82607CA8(ctx, base);
+  const int outer = jg::t_count;
+  ++jg::t_in_walk, jg::t_count = 0;
+  __imp__sub_82607CA8(ctx, base);
+  const int n = jg::t_count;
+  --jg::t_in_walk, jg::t_count = outer;
+  int most = jg::g_most.load();
+  while (n > most && !jg::g_most.compare_exchange_weak(most, n)) {
+  }
+  static std::atomic<int64_t> last{0};
+  const int64_t now =
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (int64_t l = last.load(); now - l >= 10 && last.compare_exchange_strong(l, now))
+    REXLOG_INFO("BF job graph: the largest walk took {} job slots (last 10 s)", jg::g_most.exchange(0));
+}
+REX_EXTERN(__imp__sub_82608AF8);
+REX_HOOK_RAW(sub_82608AF8) {
+  namespace jg = bf1943::jobgraph;
+  if (jg::t_in_walk && ++jg::t_count == 200) REXLOG_WARN("BF job graph: a walk holds 200 job slots");
+  __imp__sub_82608AF8(ctx, base);
+}
+#endif
+
 REX_EXTERN(__imp__sub_82609000);
 REX_HOOK_RAW(sub_82609000) {
   const uint32_t caller = uint32_t(ctx.lr);
@@ -599,10 +683,308 @@ REX_HOOK_RAW(sub_821F3248) {
   }
 }
 
+// The level of detail's distance ("double the LOD distance, and provide a graphics slider from 1.00x to 2.00x with
+// 0.25 steps"; "I meant for all objects, terrain, and vegetation at distance"). The game's mesh settings object (class
+// 0x82040568, found by its layout: run names6) has GlobalLodScale at +0x10, 1 as the game runs: every mesh's distance
+// to the camera is multiplied by it before its level of detail is chosen, so 0.5 keeps each model's detailed mesh,
+// and the model itself, twice as far (run glod1: at 30 the island's trees and buildings are gone from the carrier, at
+// 0.03 more of them show). It covers everything drawn as a mesh: objects, buildings, vehicles, trees, bushes, rocks.
+// A worker finds the object once a level is loaded and writes 1 / bf_lod_distance; the setting can change at any
+// time. Not on a dedicated server (it draws nothing).
+// (Tried before: Render.EdgeModelLodScale is the PlayStation 3's and does nothing here, runs lod1 to lod5; each
+// model's own Render.MeshLodSettingsAsset distances worked too, run lod9, but took a search of the heap every few
+// seconds for what this does in one place.)
+// "continue with 8x instead of 10x": 1x to 8x in whole steps (the 1.5 steps asked for with 10x do not land on 8).
+// The game's own cut-offs are 1000 m for soldiers, vehicles and the carriers, 500 to 643 m for larger objects, 250 to
+// 350 m for buildings, palm trees and boulders (their lodsettings files); the map is 2048 m across, so 2x carries the
+// first across it, 4x the second, and 8x the buildings and trees. 2 by default (the doubling first asked for).
+REXCVAR_DEFINE_DOUBLE(bf_lod_distance, 1.0, "BF1943", "How far models keep their detail, 1.0 (the game's own) to 8.0 times as far");
+REXCVAR_DEFINE_DOUBLE(bf_dev_lod_scale, 0.0, "BF1943", "Developer: the level of detail's distance times this instead (0: not)");
+// (19 Nov 2026, D202: as the game runs, MaxBillboardCount 8192, BillboardScale 1, ShadowMaxLod 0, LodBlendOverlap 1.
+// BillboardScale is the size of the flat pictures far trees are drawn as, not where they switch: at 4 the far forests
+// stood four times as tall, at 0.25 a quarter, runs lod_bb4, lod_bb025. Only GlobalLodScale moves the switch: at 8x the
+// far forests of Guadalcanal are drawn as models, at 4x and less still as pictures, runs lod_g*.)
+namespace bf1943 {
+bool LevelLoaded();  // auto_join.cpp
+}
+namespace {
+std::atomic<uint8_t*> g_guest_base{nullptr};
+#if defined(_WIN32)
+constexpr uint32_t kMeshSettingsClass = 0x82040568;
+uint32_t Load32Host(const uint8_t* p) { return uint32_t(p[0]) << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
+float LoadFloatHost(const uint8_t* p) {
+  const uint32_t bits = Load32Host(p);
+  float v;
+  std::memcpy(&v, &bits, 4);
+  return v;
+}
+void StoreFloatHost(uint8_t* p, float v) {
+  uint32_t bits;
+  std::memcpy(&bits, &v, 4);
+  p[0] = uint8_t(bits >> 24), p[1] = uint8_t(bits >> 16), p[2] = uint8_t(bits >> 8), p[3] = uint8_t(bits);
+}
+// The mesh settings object: its class at +0, and its members within reason (GlobalLodScale +0x10, MaxBillboardCount
+// +0x18, BillboardScale +0x1C, ShadowMaxLod +0x4C, LodBlendOverlap +0x5C, eight flags from +0x69).
+bool IsMeshSettings(const uint8_t* p) {
+  if (Load32Host(p) != kMeshSettingsClass) return false;
+  const float lod = LoadFloatHost(p + 0x10), billboard = LoadFloatHost(p + 0x1C), overlap = LoadFloatHost(p + 0x5C);
+  if (!(lod >= 0.01f && lod <= 100.0f) || !(billboard >= 0.01f && billboard <= 100.0f) || !(overlap >= 0.0f && overlap <= 1000.0f)) return false;
+  const uint32_t billboards = Load32Host(p + 0x18);
+  if (billboards == 0 || billboards > 100000 || Load32Host(p + 0x4C) > 8) return false;
+  for (int i = 0x69; i <= 0x70; ++i)
+    if (p[i] > 1) return false;
+  return true;
+}
+uint8_t* FindMeshSettings(uint8_t* base) {
+  for (uint64_t at = 0x10000; at < 0xFFFF0000ull;) {
+    MEMORY_BASIC_INFORMATION info{};
+    if (!VirtualQuery(base + at, &info, sizeof(info))) break;
+    const uint64_t region = uint64_t(static_cast<uint8_t*>(info.BaseAddress) - base);
+    const uint64_t end = std::min<uint64_t>(region + info.RegionSize, 0xFFFF0000ull);
+    if (info.State == MEM_COMMIT && info.Protect == PAGE_READWRITE)
+      for (uint64_t a = (std::max(at, region) + 3) & ~3ull; a + 0x80 <= end; a += 4)
+        if (base[a] == 0x82 && IsMeshSettings(base + a)) return base + a;
+    if (end <= at) break;
+    at = end;
+  }
+  return nullptr;
+}
+void LodWorker() {
+  uint8_t* settings = nullptr;
+  double applied = -1;
+  int misses = 0;
+  for (;;) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    uint8_t* base = g_guest_base.load(std::memory_order_relaxed);
+    if (!base || !bf1943::LevelLoaded()) continue;
+    if (settings && !IsMeshSettings(settings)) settings = nullptr, applied = -1;
+    if (!settings) {
+      if (misses > 0 && misses++ % 10) continue;  // not found before: looked for again every 5 s
+      const auto t0 = std::chrono::steady_clock::now();
+      settings = FindMeshSettings(base);
+      const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      if (!settings) {
+        if (!misses++) REXLOG_WARN("BF level of detail: the game's mesh settings were not found ({:.0f} ms); looked for again", ms);
+        continue;
+      }
+      misses = 0;
+      REXLOG_INFO("BF level of detail: the game's mesh settings at {:08X} (GlobalLodScale {}, MaxBillboardCount {}, "
+                  "BillboardScale {}, ShadowMaxLod {}, LodBlendOverlap {}; found in {:.0f} ms)",
+                  uint32_t(settings - base), LoadFloatHost(settings + 0x10), Load32Host(settings + 0x18),
+                  LoadFloatHost(settings + 0x1C), Load32Host(settings + 0x4C), LoadFloatHost(settings + 0x5C), ms);
+    }
+    const double dev = REXCVAR_GET(bf_dev_lod_scale);
+    const double factor = dev > 0 ? dev : std::clamp(REXCVAR_GET(bf_lod_distance), 1.0, 8.0);
+    StoreFloatHost(settings + 0x10, float(1.0 / factor));  // each half second: the game may put its own back
+    if (factor != applied) {
+      applied = factor;
+      REXLOG_INFO("BF level of detail: distance {:.2f} times the game's (GlobalLodScale {:.3f})", factor, 1.0 / factor);
+    }
+  }
+}
+#endif
+}  // namespace
+// The terrain's own level of detail and the game's undergrowth are not covered yet. Their settings are known by name
+// and layout from the program's member tables (the terrain settings: GeometryLodScale a float at +0x80,
+// UndergrowthDensityScale +0x3C, UndergrowthPoplessDistanceRatio +0x18, its flags from +0x90 to +0xCA; the view
+// distances: NormalViewDistance +0x20, TerrainViewDistance +0x24), but the live terrain settings object was not found
+// by that layout in three searches of the game's memory (runs names6, glod1, glod2).
+#if defined(BF_DEV_TOOLS) && defined(_WIN32)
+namespace {
+// BF_DEV_LIGHTS (research, 14 Nov 2026: "find the lights"): the game's weather system holds its lighting as data
+// (Weather.DynamicOutdoorLightData: KeyColor, TopColor, BottomColor and their intensities, Direction;
+// Weather.DynamicSunData; Weather.DynamicFogData: the level's weather state files). 25 s into a level the game's
+// memory is searched for a run of big endian words, and each place found is logged with the words around it.
+//   BF_DEV_LIGHTS=<hex words>            the words looked for, e.g. Wake Island's KeyColor 3F800000,3F789375,3F69FBE7
+//   BF_DEV_LIGHTS_SET=<offset>:<hex words>  then written at every place found, <offset> bytes from it, four times a
+//                                        second (which copy the game draws with shows on the screen)
+}  // namespace
+namespace bf1943::dev {
+void WatchHostAccess(std::vector<const void*> addresses, double seconds, const char* label);  // dev_watch.cpp
+}
+namespace {
+std::vector<uint32_t> HexWords(const char* v) {
+  std::vector<uint32_t> out;
+  for (const char* q = v; q && *q;) {
+    char* e = nullptr;
+    const unsigned long w = std::strtoul(q, &e, 16);
+    if (e == q) break;
+    out.push_back(uint32_t(w));
+    q = *e == ',' ? e + 1 : e;
+  }
+  return out;
+}
+void DevLightsWorker() {
+  const char* v = std::getenv("BF_DEV_LIGHTS");
+  if (!v || !*v) return;
+  const std::vector<uint32_t> want = HexWords(v);
+  if (want.empty()) return;
+  int set_offset = 0;
+  std::vector<uint32_t> set;
+  if (const char* s = std::getenv("BF_DEV_LIGHTS_SET"); s && *s) {
+    char* e = nullptr;
+    set_offset = int(std::strtol(s, &e, 0));
+    if (e && *e == ':') set = HexWords(e + 1);
+  }
+  // BF_DEV_LIGHTS_EARLY=<seconds>: from the start, the game's writable memory is searched over and over for the words;
+  // the moment they are there (the level's data just loaded) the place is watched for that long: who takes the data.
+  if (const char* early = std::getenv("BF_DEV_LIGHTS_EARLY"); early && *early) {
+    const double seconds = std::atof(early);
+    for (;;) {
+      uint8_t* b = g_guest_base.load(std::memory_order_relaxed);
+      if (!b) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        continue;
+      }
+      for (uint64_t at = 0x10000; at < 0x40000000ull;) {  // the game's heaps are low (the data was at 1FEE7800)
+        MEMORY_BASIC_INFORMATION info{};
+        if (!VirtualQuery(b + at, &info, sizeof(info))) break;
+        const uint64_t region = uint64_t(static_cast<uint8_t*>(info.BaseAddress) - b);
+        const uint64_t end = std::min<uint64_t>(region + info.RegionSize, 0x40000000ull);
+        if (info.State == MEM_COMMIT && info.Protect == PAGE_READWRITE) {
+          for (uint64_t a = (std::max(at, region) + 3) & ~3ull; a + want.size() * 4 <= end; a += 4) {
+            if (b[a] != uint8_t(want[0] >> 24) || Load32Host(b + a) != want[0]) continue;
+            bool same = true;
+            for (size_t i = 1; same && i < want.size(); ++i) same = Load32Host(b + a + i * 4) == want[i];
+            if (!same) continue;
+            REXLOG_INFO("BF dev lights: early: the words at {:08X}; watched for {:.0f} s", uint32_t(a), seconds);
+            bf1943::dev::WatchHostAccess({b + a, b + a - 16, b + a - 32, b + a + 16}, seconds, "the outdoor light's data, from its load");
+            return;
+          }
+        }
+        if (end <= at) break;
+        at = end;
+      }
+    }
+  }
+  uint8_t* base = nullptr;
+  for (int waited = 0;; ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    base = g_guest_base.load(std::memory_order_relaxed);
+    if (!base || !bf1943::LevelLoaded()) {
+      waited = 0;
+      continue;
+    }
+    static const int wait_ticks = [] {
+      const char* s = std::getenv("BF_DEV_LIGHTS_WAIT");
+      return s && *s ? std::max(1, int(std::atof(s) * 2.0)) : 50;
+    }();
+    if (waited >= wait_ticks) break;
+  }
+  // BF_DEV_LIGHTS_RATIO=<g/r>,<b/r>[;<g/r>,<b/r>...]: every three floats together in writable memory whose
+  // proportions are one of those within 0.4% (a colour the game keeps scaled or converted), logged, 300 at the most.
+  if (const char* r = std::getenv("BF_DEV_LIGHTS_RATIO"); r && *r) {
+    std::vector<std::pair<float, float>> ratios;
+    for (const char* q = r; *q;) {
+      char* e = nullptr;
+      const float a = std::strtof(q, &e);
+      if (e == q || *e != ',') break;
+      const float b = std::strtof(e + 1, &e);
+      ratios.emplace_back(a, b);
+      q = *e == ';' ? e + 1 : e;
+      if (*e != ';') break;
+    }
+    int logged = 0;
+    for (uint64_t at = 0x10000; at < 0xFFFF0000ull && logged < 300;) {
+      MEMORY_BASIC_INFORMATION info{};
+      if (!VirtualQuery(base + at, &info, sizeof(info))) break;
+      const uint64_t region = uint64_t(static_cast<uint8_t*>(info.BaseAddress) - base);
+      const uint64_t end = std::min<uint64_t>(region + info.RegionSize, 0xFFFF0000ull);
+      if (info.State == MEM_COMMIT && info.Protect == PAGE_READWRITE) {
+        for (uint64_t a = (std::max(at, region) + 3) & ~3ull; a + 12 <= end && logged < 300; a += 4) {
+          const uint8_t top = base[a];
+          if (top < 0x3A || top > 0x44) continue;  // a float from about 0.0005 to 1000
+          const float x = LoadFloatHost(base + a), y = LoadFloatHost(base + a + 4), z = LoadFloatHost(base + a + 8);
+          if (!(x > 0.0f) || !(y > 0.0f) || !(z > 0.0f)) continue;
+          for (size_t i = 0; i < ratios.size(); ++i) {
+            if (std::abs(y / x - ratios[i].first) > ratios[i].first * 0.004f ||
+                std::abs(z / x - ratios[i].second) > ratios[i].second * 0.004f) {
+              continue;
+            }
+            ++logged;
+            std::string words;
+            for (int o = -0x10; o < 0x30; o += 4)
+              if (a + o >= region && a + o + 4 <= end) words += fmt::format("{}{:08X}", o == 0 ? " | " : " ", Load32Host(base + a + o));
+            REXLOG_INFO("BF dev lights: proportion {} at {:08X}: {:.5f} {:.5f} {:.5f}; from -10:{}", i, uint32_t(a), x, y, z, words);
+          }
+        }
+      }
+      if (end <= at) break;
+      at = end;
+    }
+    REXLOG_INFO("BF dev lights: {} places with those proportions", logged);
+  }
+  std::vector<uint32_t> found;
+  for (uint64_t at = 0x10000; at < 0xFFFF0000ull;) {
+    MEMORY_BASIC_INFORMATION info{};
+    if (!VirtualQuery(base + at, &info, sizeof(info))) break;
+    const uint64_t region = uint64_t(static_cast<uint8_t*>(info.BaseAddress) - base);
+    const uint64_t end = std::min<uint64_t>(region + info.RegionSize, 0xFFFF0000ull);
+    if (info.State == MEM_COMMIT && !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && info.Protect != 0) {
+      for (uint64_t a = (std::max(at, region) + 3) & ~3ull; a + want.size() * 4 <= end; a += 4) {
+        bool same = true;
+        for (size_t i = 0; same && i < want.size(); ++i) same = Load32Host(base + a + i * 4) == want[i];
+        if (!same) continue;
+        if (found.size() < 64) found.push_back(uint32_t(a));
+        std::string words;
+        for (int o = -0x20; o < 0x80; o += 4)
+          if (a + o >= region && a + o + 4 <= end) words += fmt::format("{}{:08X}", o == 0 ? " | " : " ", Load32Host(base + a + o));
+        REXLOG_INFO("BF dev lights: found at {:08X} ({}): from -20:{}", uint32_t(a),
+                    info.Protect == PAGE_READWRITE ? "writable" : "read only", words);
+      }
+    }
+    if (end <= at) break;
+    at = end;
+  }
+  REXLOG_INFO("BF dev lights: {} places hold the words", found.size());
+  // BF_DEV_LIGHTS_WATCH=<seconds>[:<offset>,<offset>...]: who reads or writes the first place found (and up to three
+  // offsets from it) for that long: the code that takes the light's data, by function (dev_watch.cpp).
+  if (const char* w = std::getenv("BF_DEV_LIGHTS_WATCH"); w && *w && !found.empty()) {
+    char* e = nullptr;
+    const double seconds = std::strtod(w, &e);
+    std::vector<const void*> at{base + found[0]};
+    while (e && (*e == ':' || *e == ',') && at.size() < 4) at.push_back(base + found[0] + std::strtol(e + 1, &e, 0));
+    REXLOG_INFO("BF dev lights: watching {} addresses from {:08X} for {:.0f} s", at.size(), found[0], seconds);
+    bf1943::dev::WatchHostAccess(at, seconds, "the outdoor light's data");
+  }
+  if (set.empty() || found.empty()) return;
+  REXLOG_INFO("BF dev lights: writing {} words at +{} of each, four times a second", set.size(), set_offset);
+  for (;;) {
+    for (uint32_t a : found) {
+      MEMORY_BASIC_INFORMATION info{};
+      uint8_t* p = base + a + set_offset;
+      if (!VirtualQuery(p, &info, sizeof(info)) || info.State != MEM_COMMIT || info.Protect != PAGE_READWRITE) continue;
+      for (size_t i = 0; i < set.size(); ++i) {
+        const uint32_t w = set[i];
+        p[i * 4] = uint8_t(w >> 24), p[i * 4 + 1] = uint8_t(w >> 16), p[i * 4 + 2] = uint8_t(w >> 8), p[i * 4 + 3] = uint8_t(w);
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  }
+}
+}  // namespace
+#endif
+
+namespace bf1943 {
+// From the menu's frame: the worker started once the game's memory is known.
+void ApplyLodDistance() {
+#if defined(_WIN32)
+  static bool started = false;
+  if (!started && g_guest_base.load(std::memory_order_relaxed) && !REXCVAR_GET(server)) {
+    started = true;
+    std::thread(LodWorker).detach();
+#if defined(BF_DEV_TOOLS)
+    std::thread(DevLightsWorker).detach();
+#endif
+  }
+#endif
+}
+}  // namespace bf1943
 REX_EXTERN(__imp__sub_82616750);
 REX_HOOK_RAW(sub_82616750) {
   const std::string name = GuestString(base, ctx.r4.u32);
   __imp__sub_82616750(ctx, base);
+  g_guest_base.store(base, std::memory_order_relaxed);
   // Every setting the game asks for by name, once each with its value (13 Nov 2026: which of them are the level of
   // detail's and the view distance's is not known yet; the log's list says). Dev builds only (600 lines).
 #if defined(BF_DEV_TOOLS)
@@ -640,6 +1022,23 @@ REX_HOOK_RAW(sub_82616750) {
     }
   }
 #endif
+  // A server's size (player_limits.h, docs/SERVER-SIZES.md): Network.MaxClientCount (24, the players' connections;
+  // bots take none) is raised on a bigger server to its size and a few more, the room a player joining while a backfill
+  // bot is still on its way out takes. Game.MaxPlayerCount (64) is never raised: each machine sends and reads a
+  // player's id in as many bits as its own count needs (6 for 64), so a server at 68 sent 7 bit ids to games reading 6
+  // and the first game to join its 63 player match died (run size64a).
+  if (REXCVAR_GET(server) && ctx.r3.u32 && name == "Network.MaxClientCount") {
+    const uint32_t was = uint32_t(base[ctx.r3.u32]) << 24 | base[ctx.r3.u32 + 1] << 16 | base[ctx.r3.u32 + 2] << 8 |
+                         base[ctx.r3.u32 + 3];
+    const int size = std::clamp(int(REXCVAR_GET(bf_gm_max_players)), 2, bf1943::kMaxServerSize);
+    const uint32_t want = uint32_t(size) + 4;
+    if (size > bf1943::kDefaultServerSize && want > was && was <= 256) {
+      base[ctx.r3.u32] = uint8_t(want >> 24), base[ctx.r3.u32 + 1] = uint8_t(want >> 16),
+      base[ctx.r3.u32 + 2] = uint8_t(want >> 8), base[ctx.r3.u32 + 3] = uint8_t(want);
+      static std::atomic<bool> told{false};
+      if (!told.exchange(true)) REXLOG_INFO("BF server size: Network.MaxClientCount {} -> {}", was, want);
+    }
+  }
   if (ctx.r3.u32 && name == "Game.MaxFps") g_max_fps = ctx.r3.u32;
   // A dedicated server's main timer ticks once a frame, paced by Game.MaxFps (60 Hz research, tick_rate.cpp): at
   // another rate than 30 it is paced at that rate, so its ticks a second match its players'.

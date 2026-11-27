@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.4.8 (27 November 2026): Night Ops, Daybreak, weather, bots and bigger servers
+
+Earlier versions update to it by themselves, and the servers only let the newest version in. Every update builds your
+shaders again from scratch at the first start.
+
+**Night Ops and Daybreak**
+- **Night Ops:** a new kind of server for night battles. The round is held at dusk, and a storm builds as the tickets
+  fall: a clear, starry night at first, then the clouds gather, the rain rolls in and the final push is fought in the
+  full storm.
+- **Daybreak:** a new server type. The round starts as the sun rises, and the weather can bring rain or a storm as the
+  battle goes on.
+- **Lights at night:** lit building interiors, street and work lamps, control towers, red lights on masts, buoys at the
+  map's edge, vehicle headlights, and Iwo Jima's lighthouse. Muzzle flashes, tracers, fire and explosions light what is
+  round them.
+- **In the Server Browser:** Night Ops servers carry a NIGHT mark, with a filter of their own.
+
+**Weather and sky**
+- **Where:** on Night Ops and Daybreak servers and in Custom Match; regular servers keep the original look.
+- **A day and night cycle:** the sun moves, with its light and shadows on everything; at night, the moon and the stars.
+- **A sky of its own** with clouds you can fly through, thunderstorms that roll in from the sea with lightning and
+  thunder, and **the hurricane**, with a calm eye and spiral rain bands.
+- **Fog, rain and wet surfaces:** ground fog that drifts over the shore, rain where the storm is, and guns, hands,
+  jeeps and tanks that get wet and dry again.
+- **Your own settings:** Lightning and Storm shake (Settings, Graphics, Weather) and Weather volume (Settings, Audio).
+
+**Bigger servers and bots**
+- **Servers of 24, 32 or 64 players:** 24 stays as the original, 32 is the new default for new servers. Tickets scale
+  with the size, and the pause Scoreboard scrolls.
+- **Bots fill the empty seats** where the server's owner turns them on, and give way when a player joins. They play
+  the flags, use their kit, ride and drive vehicles, take the landing craft to the beach, and show as BOT on the
+  scoreboard. They sit out Coral Sea. Kills of bots are not counted in your stats.
+
+**Custom Match, rebuilt**
+- **A page of its own** with Match and Weather tabs: game mode, tickets, match time, bots, an ordered map rotation,
+  the time of day and the storm. Host online or on LAN, with a controller, mouse or keyboard. The host gets F9 for the
+  time and the weather while the match runs.
+
+**Unlockables**
+- **The electric weapon skin** for the Thompson and the Type 100: dark metal, gold wood, smoke and lightning, and a
+  charge that runs over the gun on a reload. Unlock it by playing one full Night Ops match, then equip it from the main
+  menu's Unlockables. For now only your own game shows it.
+
+**Controls**
+- **Planes on keyboard and mouse:** yaw, pitch and roll can each go on two keys, two mouse buttons or a mouse movement
+  (Settings, Controls, Keyboard & Mouse, Bindings, Air vehicles), with a plane mouse sensitivity and invert options of
+  their own.
+- **Bindings for each kind of vehicle:** Infantry, Ground vehicles, Air vehicles and Boats each have their own keys.
+
+**Graphics, moved once for everyone when you update**
+- **The spatial upscaler is on in every preset** at Quality: NVIDIA NIS on an NVIDIA card that runs it, AMD FSR 1 on
+  any other card.
+- **Soft shadows and SSR reflections** on the High and Ultra presets; **Animation smoothing** on and **HUD scale
+  High-Res** for everyone; **Transparent edges Original** and **Storm shake off** for everyone.
+- **Sharp menu text** with Windows display scaling, a **Vehicle FOV**, and a message instead of a frozen picture if
+  your graphics driver resets.
+- **HD textures** stay out of Settings: they are not ready yet.
+
+**Smoother play**
+- **60 ticks that feel like 30:** movement, jumping, swimming, the gun's sway and recoil behave as they did at the
+  original 30, so your sights stay lined up while you move.
+
+**Sound**
+- **Choose your devices** for game sound, chat output and chat input in Settings, Audio.
+
+**Menus**
+- **Every player's ping** on the scoreboards, and a warning before you join a server far away.
+- **A new name page** at the first start, which now works fully with a controller.
+- **A stormy news window.**
+
+**For server hosts**
+- **In the server manager,** Windows and Linux:
+- **Players, bots and tickets** on each server's page, **Night Ops and Daybreak** switches, your own **ban list,
+  kicks and mutes**, a **Dashboard**, an optional **public community page**, and **F9 for admins** in the match.
+- **General bug fixes.**
+
+**The project**
+- The port's own code is now under the **GNU GPL version 3**; copies of 0.4.7.5 and earlier stay under MIT.
+- Thanks to ThatZaliaSGuy for the sky, the weather and the hurricane, bots and Custom Match rules, vehicle bindings,
+  wetness and night lights; to Xarishark for RecompLauncher support; and to everyone who tested and reported.
+
 ## 0.4.7.5 (25 November 2026): a hotfix
 
 Earlier versions update to it by themselves, and the servers only let the newest version in.

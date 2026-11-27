@@ -45,6 +45,8 @@ REXCVAR_DEFINE_STRING(bf_stats_file, "", "BF1943/Server",
 
 namespace bf1943 {
 std::string CurrentMapTitle();  // server_rotation.cpp
+bool BotIsPlayer(uint32_t player);  // bots.cpp: one of the server's bots
+void BotsNoteKill(PPCContext& ctx, uint8_t* base, uint32_t killer, uint32_t victim);  // bots.cpp: what bots learn
 }  // namespace bf1943
 
 namespace {
@@ -154,9 +156,9 @@ std::string Eastl(const uint8_t* base, uint32_t obj, uint32_t max = 96) {
   if (const size_t z = s.find('\0'); z != std::string::npos) s.resize(z);
   return s;
 }
-// A real player (not one the game marks at +532) and its name.
+// A real player (not one the game marks at +532, not one of our bots: bots.cpp) and its name.
 std::string PlayerName(const uint8_t* base, uint32_t player) {
-  if (!Plausible(player) || !Readable(player, 0x220) || base[player + 532]) return {};
+  if (!Plausible(player) || !Readable(player, 0x220) || base[player + 532] || bf1943::BotIsPlayer(player)) return {};
   return Eastl(base, player + 0x18, 64);
 }
 // "CQ_StringForFlagCapture" -> "flagcapture", "melee kill" -> "meleekill"
@@ -256,8 +258,14 @@ void ServerStatsTick() {
 
 // ---- the hooks
 
+// Set while the game handles a kill whose victim is a bot (the server thread's, as the awards it gives meanwhile).
+bool g_bot_victim = false;
+
 REX_EXTERN(__imp__sub_823F8960);
 REX_HOOK_RAW(sub_823F8960) {
+  // A bot gets no award: the game would look up its score record, which a bot has none of (bots.cpp; run bots_s1d,
+  // a null read after a bot's "flagcapture").
+  if (REXCVAR_GET(server) && bf1943::BotIsPlayer(ctx.r4.u32)) return;
   if (REXCVAR_GET(server)) {
     const std::string name = PlayerName(base, ctx.r4.u32);
     if (!name.empty()) {
@@ -271,7 +279,8 @@ REX_HOOK_RAW(sub_823F8960) {
       else if (label.find("repair") != std::string::npos) what = "repairs";
       else if (label.find("healing") != std::string::npos) what = "heals";
       std::lock_guard lock(g_mutex);
-      if (std::isfinite(points) && std::abs(points) < 10000) g_players[name].score += points;
+      if (g_bot_victim) what = nullptr;  // a bot's death: no score, no counts (the kill counts as a bot kill)
+      if (!g_bot_victim && std::isfinite(points) && std::abs(points) < 10000) g_players[name].score += points;
       if (what) AddLocked(name, what, 1);
       static std::set<std::string> logged;
       if (logged.size() < 64 && logged.insert(label).second)
@@ -290,7 +299,11 @@ REX_HOOK_RAW(sub_82409708) {
     const std::string vname = PlayerName(base, victim);
     const auto now = Clock::now();
     std::lock_guard lock(g_mutex);
-    if (!kname.empty() && killer != victim) {
+    // A bot killed is no kill for the stats and no score (the user, 18 Nov 2026: "We also don't want bot kills to
+    // count toward player's overall service record score. There should be a dedicated Bots counter"): it counts as
+    // a bot kill, and the awards the game gives for it while handling this kill add no score (g_bot_victim).
+    if (!kname.empty() && killer != victim && bf1943::BotIsPlayer(victim)) AddLocked(kname, "botkills", 1);
+    if (!kname.empty() && killer != victim && !bf1943::BotIsPlayer(victim)) {
       if (!vname.empty() && L32(base, killer + 48) == L32(base, victim + 48)) {
         AddLocked(kname, "teamkills", 1);
       } else {
@@ -300,7 +313,8 @@ REX_HOOK_RAW(sub_82409708) {
           AddLocked(kname, std::string("vk_") + it->second.vehicle, 1);
       }
     }
-    if (!vname.empty()) {
+    // A death to a bot is no death for the stats either (a player's K/D stays the players' own).
+    if (!vname.empty() && !(killer && bf1943::BotIsPlayer(killer))) {
       AddLocked(vname, "deaths", 1);
       if (killer == victim) AddLocked(vname, "suicides", 1);
       CloseLife(vname, g_lives[vname], now);
@@ -312,7 +326,10 @@ REX_HOOK_RAW(sub_82409708) {
                   headshot ? " (headshot)" : "");
     }
   }
+  bf1943::BotsNoteKill(ctx, base, ctx.r4.u32, ctx.r5.u32);  // where it happened: what the bots learn
+  g_bot_victim = REXCVAR_GET(server) && bf1943::BotIsPlayer(ctx.r5.u32);
   __imp__sub_82409708(ctx, base);
+  g_bot_victim = false;
 }
 
 REX_EXTERN(__imp__sub_823F7518);

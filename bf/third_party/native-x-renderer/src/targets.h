@@ -95,7 +95,29 @@ struct HostTarget {
   // Color targets: whether the last draw into it blended (D163: Battlefield 1943's half size layer of its emissive
   // particles is told from its sky's, drawn without blending).
   bool last_draw_blended = false;
+  // Host MSAA (13 Nov 2026, "Let's build MSAA 2x and 4x"; renderer.cpp): a target of the output's size has a
+  // multisampled twin the draws go into, while everything else (resolves, the effects on the view, clears of a part)
+  // keeps reading and writing the one-sample texture above, `samples` still 1. Each is brought up to date from the
+  // other only when it is needed and stale: the twin's colour averaged into the texture, one sample of its depth
+  // taken; the texture copied into every sample of the twin. The stencil is not carried either way.
+  Diligent::RefCntAutoPtr<Diligent::ITexture> msaa_texture;
+  Diligent::ITextureView* msaa_view = nullptr;  // render target or depth-stencil view
+  Diligent::ITextureView* msaa_srv = nullptr;
+  uint32_t msaa_samples = 0;   // what the twin was last made for: 0 never, 1 none wanted, else its samples
+  bool msaa_stale = false;     // the one-sample texture was written since the twin was
+  bool single_stale = false;   // the twin was drawn into since the one-sample texture was
+  // A colour target of a float format: the one-sample texture as it was when it was last made from the twin, kept
+  // while something writes it (an effect on the view). The twin then takes the change, added to each of its samples,
+  // not the texture: the samples of an edge's pixel stay apart for what the game draws after the effect, and their
+  // average is what the effect wrote.
+  Diligent::RefCntAutoPtr<Diligent::ITexture> msaa_before;
+  bool msaa_delta = false;
 };
+
+// A draw's view of a target (renderer.cpp): its multisampled twin, brought up to date, when `multisampled` (every
+// target the draw binds has a twin of the same sample count), else its one-sample view, brought up to date.
+// `writes`: the draw writes it (a depth target only tested is not made stale).
+Diligent::ITextureView* HostMsaaDrawView(HostTarget* target, bool multisampled, bool writes);
 
 // The memory of a texture: its mips, slices and samples, compressed blocks included.
 uint64_t TextureBytes(const Diligent::TextureDesc& desc);

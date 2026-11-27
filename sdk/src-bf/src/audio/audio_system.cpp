@@ -9,6 +9,9 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
+#include <chrono>
+
 #include <rex/assert.h>
 #include <rex/audio/audio_driver.h>
 #include <rex/audio/audio_system.h>
@@ -23,6 +26,10 @@
 #include <rex/system/thread_state.h>
 #include <rex/thread.h>
 #include <rex/cvar.h>
+
+REXCVAR_DEFINE_INT32(audio_render_wait_ms, 12, "Audio",
+                     "Before each render callback, wait up to this long while the game says its mixer is not ready "
+                     "(0: never wait). Turns a late mixer's silent frame into a slightly later full one.");
 
 REXCVAR_DEFINE_INT32(
     audio_maxqframes, 8, "Audio",
@@ -46,7 +53,10 @@ namespace {
 constexpr std::chrono::milliseconds kWorkerShutdownTimeout{500};
 constexpr auto kFramePeriod = std::chrono::microseconds(256 * 1000000 / 48000);
 constexpr auto kMinCallbackSpacing = kFramePeriod * 3 / 4;
+std::atomic<RenderReadyCheck> g_render_ready{nullptr};
 }  // namespace
+
+void SetRenderReadyCheck(RenderReadyCheck check) { g_render_ready.store(check); }
 
 AudioSystem::AudioSystem(runtime::FunctionDispatcher* function_dispatcher)
     : memory_(function_dispatcher->memory()),
@@ -156,6 +166,7 @@ void AudioSystem::WorkerThreadMain() {
         next_callback[index] = now + kMinCallbackSpacing;
         SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
         uint64_t args[] = {client_callback_arg};
+        WaitForGameMixer();
         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
                                       rex::countof(args));
         if (diag_pump_count < 10) {
@@ -181,6 +192,35 @@ void AudioSystem::WorkerThreadMain() {
   worker_running_ = false;
 
   // TODO(benvanik): call module API to kill?
+}
+
+// Before a render callback: while the game's check (SetRenderReadyCheck) says its mixer has no packet ready, wait for
+// it, up to audio_render_wait_ms. After a wait that ran out, do not wait again until the check has said yes once, so a
+// mixer that stopped (or a check that is wrong) can never slow every callback.
+void AudioSystem::WaitForGameMixer() {
+  const int wait_ms = REXCVAR_GET(audio_render_wait_ms);
+  const auto ready = g_render_ready.load();
+  if (wait_ms <= 0 || !ready) {
+    return;
+  }
+  if (ready()) {
+    wait_armed_ = true;
+    return;
+  }
+  if (!wait_armed_) {
+    return;
+  }
+  const auto start = std::chrono::steady_clock::now();
+  const auto deadline = start + std::chrono::milliseconds(wait_ms);
+  bool ok = false;
+  while (!ok && std::chrono::steady_clock::now() < deadline) {
+    rex::thread::Sleep(std::chrono::microseconds(100));
+    ok = ready();
+  }
+  if (!ok) {
+    wait_armed_ = false;
+    REXAPU_DEBUG("AudioWorker: the game's mixer was not ready after {} ms; rendering anyway", wait_ms);
+  }
 }
 
 int AudioSystem::FindFreeClient() {

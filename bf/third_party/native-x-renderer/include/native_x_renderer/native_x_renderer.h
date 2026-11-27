@@ -178,6 +178,11 @@ struct Profile {
   // out from the depth and multiplied into the scene's colour just before it. Needs the view found from the draws
   // (upscale_resolve_caller). 0: no ambient occlusion.
   uint32_t ao_resolve_caller = 0;
+  // D197: the pixel shaders' texture fetch constant of the game's sun shadow map, a stacked depth texture with a
+  // cascade a layer, which they filter themselves with point taps at half texel offsets (Battlefield 1943: 0, its
+  // outdoorLightShadowmapTexture). The translator then gives their compares a softer filter whose penumbra widens
+  // with the blocker's distance (native_x_renderer_soft_shadows). UINT32_MAX: none.
+  uint32_t soft_shadow_fetch_constant = UINT32_MAX;
   // Resolves whose destination the game then reads on the CPU (D165). A resolve stays on the host (D70): its texels
   // reach guest memory only where a draw reads them as vertices (D140). A CPU reader would get what that memory held
   // before: zeros in a fresh process, another level's leftovers once the heap has been used again. For a resolve
@@ -243,6 +248,10 @@ void Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
 // EDRAM tiles).
 bool Renders();
 
+// Whether the GPU device was lost (the graphics driver reset the GPU): nothing more can be drawn, though the game runs
+// on. Checked every 30 frames (renderer.cpp WatchDeviceLoss); once true, it stays true.
+bool DeviceLost();
+
 // The pipelines stored by earlier runs (or a game's setup, D134), made before play: how many, how many are compiled,
 // whether the storage was read (at the first draw), and whether all are done (also when there is nothing to make or
 // NativeXRenderer does not draw). For a setup screen over the game's first frames; callable from any thread.
@@ -264,6 +273,33 @@ void StorageProgress(uint32_t* queued, uint32_t* done, uint32_t* loading, uint32
 using TexturePatchFn = bool (*)(uint32_t width, uint32_t height, const uint8_t* guest_data, std::vector<uint8_t>& rgba,
                                 bool again, uint32_t scale, const uint8_t* hd_base);
 void SetTexturePatcher(TexturePatchFn fn);
+// D200: sharper copies of a game's 8 bit textures (Battlefield 1943's text: its glyph atlases are made for 720p, and
+// drawn larger at higher resolutions). After each load of the base level of a guest k_8 2D texture with a single mip,
+// `fn` gets its size and its guest data (as the game holds it: tiled, width * height bytes) and may fill `out` with a
+// picture `scale` (2 to 8) times as wide and as high, one byte a texel, top row first, and return true: draws then
+// sample that in place of the game's texture (made once for that data and kept for the session, as an HD pack's, with
+// or without native_x_renderer_hd_textures, while SetUpscaledTextures is on). False: the game's own. Null: none. Called on the renderer's thread.
+using TextureUpscaleFn = bool (*)(uint32_t width, uint32_t height, const uint8_t* guest_data, std::vector<uint8_t>& out,
+                                  uint32_t& scale);
+void SetTextureUpscaler(TextureUpscaleFn fn);
+// D200: the same for the k_8_8_8_8 textures the patcher (D142) takes: where the HD pack has no picture for one, `fn`
+// gets its size and guest data (tiled, big endian, width * height * 4 bytes) and may fill `rgba` with a picture `scale`
+// (2 to 8) times as wide and as high (R, G, B, A rows, as an HD pack's), which then serves as `hd_base` for the
+// patcher's call at that scale (the patcher's pictures drawn into it). Also for a texture the patcher took and left
+// as it is (an empty `rgba` at scale 1). Null: none.
+using TextureUpscaleRgbaFn = bool (*)(uint32_t width, uint32_t height, const uint8_t* guest_data,
+                                      std::vector<uint8_t>& rgba, uint32_t& scale);
+void SetTextureUpscalerRgba(TextureUpscaleRgbaFn fn);
+// D200: and for any other k_8_8_8_8 (6) or DXT4_5 (20) 2D texture with a single mip (one the patcher did not take):
+// `fn` gets its size, guest format, whether it is tiled, and its guest data (width * height * 4 bytes, or the DXT
+// blocks, as the game holds them) and may fill `rgba` (R, G, B, A rows, `scale` times as wide and as high, 2 to 8); it
+// is then drawn in place of the game's texture, as the k_8 one is. Null: none.
+using TextureUpscaleImageFn = bool (*)(uint32_t width, uint32_t height, uint32_t format, bool tiled,
+                                       const uint8_t* guest_data, std::vector<uint8_t>& rgba, uint32_t& scale);
+void SetTextureUpscalerImage(TextureUpscaleImageFn fn);
+// D200: whether the upscalers' copies are drawn (true at the start): false draws the game's own textures again, at once
+// (the copies are kept, so true shows them again at once too).
+void SetUpscaledTextures(bool on);
 // Compiles the antialiasing passes' compute shaders (CMAA 2) without a device and logs the result: how many of them
 // failed (a developer's check that needs no window; NXR_SHADER_TEST=1 in Battlefield 1943 Reborn).
 int TestUtilityShaders();
@@ -298,6 +334,16 @@ bool NearHudMarker(double x, double y, double radius, double* marker_x = nullptr
 void NoteScopeView(bool on, const float right[3], const float up[3], const float back[3], float tan_half_v_own, float zoom);
 // For the renderer: the last noted, if it is on and was noted in the last 0.25 s.
 bool ScopeView(float right[3], float up[3], float back[3], float& tan_half_v_own, float& zoom);
+// The camera the world was last drawn from (the sky's and the fog's view, each frame they run; the game's weather
+// sounds put the thunder where the sky flashed): the eye (world metres, y up), the view's right and forward (unit, in
+// the world), and how many seconds ago it was noted. False before the first. Any thread.
+void NoteListenerView(const float eye[3], const float right[3], const float forward[3]);
+bool ListenerView(float eye[3], float right[3], float forward[3], double* age);
+// Whether the camera is under cover (the sky's look about twice a second while the fog pass runs with the rain's cover
+// map: most of five places round it under something), and how many seconds ago it was looked at. False before the
+// first. Any thread.
+void NoteEyeCovered(bool covered);
+bool EyeCovered(double* age);
 // One of the game's own menu screens is up now (its UI says so about once a second): the 2D layer is a menu, kept
 // together in the middle, not anchored to the edges. Any thread.
 void NoteGameMenu();
@@ -322,6 +368,12 @@ bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss);
 // number and answered a few frames later (GrassProbeResult true once it is, with that number). Grass must be on.
 void GrassProbe(float x, float z, uint32_t id);
 bool GrassProbeResult(uint32_t* id, float* ground);
+// D205: the ground's height under (x, z) for the renderer's own use (the turned shadows' pivot): asked through the
+// probe whenever it is free, the last answer within 40 m returned (false before one, or with grass off).
+bool GrassCameraGround(float x, float z, float* ground);
+// D239: the shadow ray (from the sun to the ground) the game's own shadow setup should build its cascades from, given
+// the one it was about to use: the sky's sun's while the day and night cycle moves it; false to leave the game's.
+bool ShadowSourceDirection(const float game_ray[3], float out_ray[3]);
 
 // D151: where grass may grow on the level, from the game's own map of its ground (TekRantGaming, 9 Nov 2026: grass decided
 // from the screen flickered at the edges of the ground's grass, moved about, and faded in as he turned): each cell's
@@ -330,7 +382,7 @@ bool GrassProbeResult(uint32_t* id, float* ground);
 // map is being read (no grass until it comes); width 0 with cell < 0: none known (grass decides from the screen).
 void GrassMap(const uint8_t* distance, uint32_t width, uint32_t height, float x0, float z0, float cell);
 
-// D163: a lamp of the level, for the night (native_x_renderer_night; Battlefield 1943 Reborn's Night Ops servers: the
+// D163: a lamp of the level, for the night (Battlefield 1943 Reborn: lit while its day and night cycle is dark: the
 // level's lampposts, from its own files): where its light comes from, where it points, how far it reaches, its colour.
 struct NightLamp {
   float position[3] = {};                // the bulb in the world (the game's units, metres, y up)
@@ -347,6 +399,61 @@ struct NightLamp {
 // The level's lamps, copied (count 0: none). Lit only at night.
 void NightLamps(const NightLamp* lamps, uint32_t count);
 
+// The world's clock and weather as a match's server keeps them (14 Nov 2026: "cloud coverage, rate, weather
+// percentage, day/night adjustment and time scale settings ... for servers"): while `valid`, these are drawn
+// instead of the player's own sky settings, so every player of a match sees the same hour and the same clouds.
+// The renderer runs the clocks on by itself from the moment this is set; a server's game sets it again every few
+// seconds.
+struct WorldState {
+  bool valid = false;         // false: the player's own settings (no match, or its server keeps none)
+  bool day_night = false;     // the light, the shadows and the sky follow the hour
+  double hour = 16.0;         // the time of day now, 0 to 24
+  double day_minutes = 0.0;   // minutes a whole day takes; 0: the hour stands still
+  float cloud_cover = 0.35f;  // 0 to 1
+  float cloud_rate = 0.33f;   // how fast the clouds form and change, 1: Beachhead's full speed
+  float weather = 0.0f;       // 0 fair to 1 heavy overcast (CurrentWorldState: the weather where the camera is, D208)
+  float storm = 0.0f;         // D208: the match's own weather, the hurricane's stage (CurrentWorldState's; 0 elsewhere)
+  float fog = 0.0f;           // the distance fog, 0 to 1
+  float ground_fog = 0.0f;    // the ground fog, 0 to 1
+  float ground_fog_height = 0.5f;   // D231: the ground fog's depth, metres (the surface fog: shin high)
+  float ground_fog_sparse = 0.7f;   // D231: how sparse its patches are, 0 everywhere to 1 a few
+  float wind = 0.3f;          // the wind, 0 calm to 1 a gale: how far the rain leans
+  float cloud_height = 450.0f;  // the cloud base over the sea, metres: low enough, the planes fly through the clouds
+  int storm_type = 0;           // D224: the storm's type (storm.h StormType): 0 a thunderstorm, 1 a hurricane
+  double cloud_seconds = 0.0; // the clouds' drift clock now, seconds
+  double cloud_evolve = 0.0;  // the clouds' forming clock now (seconds times the rate, summed)
+};
+void SetWorldState(const WorldState& state);
+// D228: a storm's radar pattern, baked by tools/storm_bake.py from real radar (Hurricane Michael's, 10 Oct 2018):
+// `count` frames of width x height bytes (the rain's intensity, 0 to 255; row 0 the north, eye-centred), the eye's
+// radius in pixels, kilometres a pixel and minutes between frames. Copied. The storm's clouds are built on it (the
+// fluid weather plan's step 3).
+struct StormPattern {
+  const uint8_t* frames = nullptr;
+  uint32_t width = 0, height = 0, count = 0;
+  float eye_px = 0.0f, km_per_px = 0.0f, minutes = 0.0f;
+};
+void SetStormPattern(const StormPattern& pattern);
+// The storm's lightning strikes that start after `from` and by `to` on the world's clock (WorldState::cloud_seconds),
+// for their thunder (the game's weather sounds): when each starts, where it is from the middle of the 4 km square the
+// eye is in (metres; the sky's flash is lit there), its strokes and its strength (0 to 1). None while the player has
+// lightning off or the weather is under a storm. Returns how many were written (at most `max`).
+struct LightningStrike {
+  double at = 0.0;
+  float x = 0.0f, z = 0.0f;
+  int strokes = 1;
+  float strength = 1.0f;
+  bool bolt = false;  // D225: a bolt to the ground (else a flash inside the clouds)
+};
+uint32_t LightningStrikes(double from, double to, float weather, LightningStrike* out, uint32_t max);
+// What is drawn now: the server's (run on to this moment) or the player's own settings.
+WorldState CurrentWorldState();
+// D221: a new round or level is coming in (the game's round end, its next level's load): for `seconds` from now the
+// world is drawn as SetWorldState last set it, at once, not eased over the usual 25 s, so the last round's storm does
+// not clear on screen in the next; and what its rain left (the wet lens and what is held, the storm's sway, the clouds'
+// frames) is dried at once. Each such jump in that time dries them again.
+void SnapWorld(double seconds);
+
 // D163: lamps that move with a model (a jeep's headlights): a draw of the main view with this many indices (one of the
 // model's levels of detail) is that model; its lamps are in its own space (x right, y up, z forward), placed each frame
 // by its world matrix, three rigid rows (the position in their fourth floats) in its vertex shader's float constants
@@ -359,24 +466,52 @@ struct NightModelLamps {
   uint32_t lamp_count = 0;
 };
 void NightModels(const NightModelLamps* models, uint32_t count);
-
-// D169: the night sky's look for the level (native_x_renderer_night_sky scales it all): where the moon is and how big,
-// how many stars and how bright the Milky Way, the haze low on the sky (its colour and how high it reaches: damp air,
-// volcanic dust), and how dim the sky is behind the day sky's clouds. Kept until set again.
-struct NightSkyStyle {
-  float moon_direction[3] = {-0.55f, 0.38f, 0.74f};  // toward the moon (any length; y up)
-  float moon_radius = 0.0105f;                          // radians
-  float moon_color[3] = {0.62f, 0.66f, 0.72f};          // linear, the disc's
-  float stars = 1.0f;                                   // the stars' brightness and number: 1 a clear night
-  float milky_way = 1.0f;                               // the band's brightness: 0 none
-  float horizon_color[3] = {0.004f, 0.006f, 0.012f};  // linear, the haze at the horizon (added)
-  float horizon_height = 0.18f;  // how high the haze reaches (the direction's y) and the stars start to show
-  float cloud_dim = 0.12f;       // the sky's share left where the day sky had clouds
-  float seed = 0.0f;             // a different sky of stars
-  bool moon_at_sun = true;       // the moon where the game's sun is (its shadows and glints agree), when the game's sky gives
-                                 // it; moon_direction otherwise
+// D222: the rooms of the level's buildings (TekRantGaming, 23 Nov 2026: at night "the insides of buildings are far too
+// dark"). The game lights a room by the sky's light alone (its baked occlusion takes most of it), and at night that
+// is nearly nothing. What lies inside a room is drawn `lift` times as bright at full night, before the game's bloom
+// and exposure, so the room keeps its own colours and shading. A room is a box in its own space: the world to it by
+// three rows (x, y, z; the fourth float of each the offset), its middle at 0, its half size `half`: the inside faces
+// of its walls, floor and ceiling. Copied (count 0: none).
+struct NightRoom {
+  float to_local[3][4] = {};
+  float half[3] = {};
+  float lift = 3.0f;
+  float centre[3] = {};  // its middle in the world (to choose the nearest)
+  // A pitched roof's underside: the top falls this much a metre from the middle along the room's x and z (0: flat).
+  float slope[2] = {};
+  // A part the game draws only while the building stands (its roof), by its draws' index counts (two levels of
+  // detail; 0 none): the room is lit unless that part has been missing from the building's place `building` (its
+  // placed position) for a few seconds while that place was in view, so a destroyed house's rubble is not lit. All 0:
+  // always.
+  uint32_t intact[2] = {};
+  float building[3] = {};
 };
-void NightSky(const NightSkyStyle& style);
+void NightRooms(const NightRoom* rooms, uint32_t count);
+// D178: the models' lamps are lit only on a model someone is in: the player's own while the game says the player sits
+// in a vehicle (the model nearest the camera), any other while it drives.
+void NightVehicleSeated(bool seated);
+// D208: the level's play area (its capture points' middle, world metres): where the hurricane comes to; D213: its
+// reach (metres from the middle), the hurricane's size.
+void SetMapArea(float x, float z, float reach);
+// D208: where the players are gathered (x, z pairs, at most 8): a share of the storm's strikes fall near them.
+void SetPlayerGroups(const float* xz, uint32_t count);
+// D231: what pushes the ground fog about (ground_fog.h). The game tells what moves near the camera after each of its
+// ticks (soldiers, vehicles, planes passing low: world metres and metres a second; at most 32 are kept, a list not
+// renewed for half a second is dropped), and a blast or a shot when one happens (`strength`: the air's speed there,
+// m/s). From any thread.
+struct FogMover {
+  float position[3] = {};
+  float velocity[3] = {};
+  float radius = 1.0f;  // metres
+};
+void SetFogMovers(const FogMover* movers, uint32_t count);
+void FogBlast(const float position[3], float radius, float strength);
+void FogShot(const float from[3], const float to[3], float strength);
+// D193: the player is on foot, not in a vehicle: a strong storm shakes the view only then (and only in the open).
+void SetEyeOnFoot(bool on_foot);
+// The view is the player's own, alive in the world (on foot or in a seat), not the camera of a death, the deploy
+// screen or a menu: only then can the sea splash on it (true until told otherwise).
+void SetEyeInWorld(bool in_world);
 
 // The game starts drawing a view: a camera's image (its 3D scene, a reflection, a shadow map, a 2D layer).
 // `scene_view_projection`: for a view of the 3D world, its view-projection matrix (16 floats, rows, as the
@@ -405,6 +540,25 @@ void SetWeaponLayerMove(const float* move, float fov_degrees);
 // its rifles and pistols hide it): HUD draws (no depth test) from the crosshair sheet (256 x 256, 8_8_8_8) are left
 // out. From the game's thread, each frame it applies.
 void HideCrosshair();
+// How far the player's aim down the sights is in, 0 to 1 (the game's own zoom blend), for the renderer's depth of field
+// (dof.h, native_x_renderer_ads_dof). From the game's thread, each frame a first person weapon is held.
+void SetAdsBlend(float blend);
+// The skin the player's own held weapon wears (weapon_skin.h): 0 none, 1 electric. Only this game's first person
+// weapon is drawn with it; nothing is sent. Held for a quarter second: from the game's thread, each frame it applies.
+void SetWeaponSkin(int skin);
+// Where the skinned weapon's magazine is, for the skin's lightning strike down it: 0 under the gun (the Thompson), 1
+// out to its left (the Type 100).
+void SetWeaponSkinMagazine(int where);
+// The name of the first person weapon the player holds now (the game's own, in lower case; when it changes). Only a
+// developer's build with the weapon export uses it (weapon_export.h); nothing otherwise.
+void NoteHeldWeapon(const char* name);
+// The player fired a shot of their own: a reactive skin answers it (the electric skin's storm is stirred up for a
+// few seconds: more lightning, sooner).
+void WeaponSkinShot();
+// The motion blur leaves out the objects' own motion (native_x_renderer_motion_blur_objects) for the next quarter second
+// (Battlefield 1943: while the player's free look turns a vehicle's outside view round it, the vehicle is not blurred).
+// The upscalers' motion vectors keep it. From the game's thread, each frame it applies.
+void SetObjectMotionBlurPaused();
 
 // The view's 3D drawing is done and its post-processing starts. For the main 3D view, DLAA runs here on its
 // color and depth, and the game's post-processing then reads the antialiased image.

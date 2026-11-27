@@ -269,9 +269,10 @@
     settings_.Save();
     ApplyFrameRate();
     for (const auto& [name, value] : TierSettings(tier)) SetCvar(name, value);
-    static const char* kTiers[] = {"slow: the Low preset (FSR 1 Performance, AO and GI off, grass to 45 m)",
+    static const char* kTiers[] = {"slow: the Low preset (FSR 1 Quality, AO and GI off, grass to 45 m)",
                                    "middle: the Medium preset (FSR 1 Quality, shadows Original, AO and GI Low, grass to 180 m)",
-                                   "fast: the High preset (FSR 1 Quality, shadows High, AO and GI at Medium, grass to the whole map)"};
+                                   "fast: the High preset (FSR 1 Quality, shadows High, soft shadows and SSR, AO and GI at "
+                                   "Medium, grass to the whole map)"};
     REXLOG_INFO("BF launcher: auto detect{}: {} FPS for a {} Hz screen, FXAA; the GPU {} ({:.1f} times an RTX 4070 Ti's "
                 "time), so {}",
                 when, fps, refresh, slowness > 0 ? "timed" : "not timed yet", slowness, kTiers[tier]);
@@ -323,6 +324,27 @@
     if (!native_x_renderer::NisSupport(&runs, &gpu)) return;
     nis_noted_ = true;
     const std::string value = runs ? "1" : "0";
+    // The default spatial upscaler (TekRantGaming, 20 Nov 2026: FSR 1 by default, "if we detect that they have a
+    // compatible GPU, we then make it NVIDIA NIS"): while the player has not picked one (upscaler_auto) and the
+    // upscaler is still the default AMD FSR 1, an NVIDIA card that runs NIS (this start's check, D158: its shaders and
+    // pipelines made on this GPU) gets NVIDIA NIS, from the next start (the renderer reads it when it starts). Any
+    // other GPU keeps AMD FSR 1, which runs everywhere.
+    if (settings_.Get("upscaler_auto", "") == "1") {
+      std::string lower = gpu;
+      for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+      const bool nvidia = lower.find("nvidia") != std::string::npos;
+      settings_.values.erase("upscaler_auto");
+      if (runs && nvidia && settings_.Get("cvar.native_x_renderer_scaling", "") == "fsr") {
+        settings_.values["nis_support"] = value, settings_.values["nis_support_gpu"] = gpu;
+        SetCvar("native_x_renderer_scaling", "nis");  // saves
+        REXLOG_INFO("BF upscaler: {} is an NVIDIA card that runs NVIDIA NIS: the default upscaler is NVIDIA NIS from the "
+                    "next start", gpu);
+      } else {
+        settings_.Save();
+        REXLOG_INFO("BF upscaler: {}: the default upscaler stays AMD FSR 1 ({})", gpu,
+                    !nvidia ? "not an NVIDIA card" : !runs ? "NVIDIA NIS does not run on it" : "another upscaler is chosen");
+      }
+    }
     if (settings_.Get("nis_support", "") == value && settings_.Get("nis_support_gpu", "") == gpu) return;
     settings_.values["nis_support"] = value;
     settings_.values["nis_support_gpu"] = gpu;
@@ -955,6 +977,7 @@
     name_error_.clear();
     TagBegin();  // the clan tag box (game_menu_clan.inc)
     code_mode_ = false, acct_show_code_ = false;
+    NpBegin();  // the page's own state (game_menu_account.inc)
     if (!acct_busy_.load()) acct_message_.clear();
     if (settings_.Get("player_name_refused", "") == "1") name_error_ = "Your soldier name is not allowed. Choose a new one.";
     if (page_ != Page::kName) name_from_ = page_;
@@ -1108,6 +1131,11 @@
     if (!NameCommit()) return;  // the name line says why
     std::string code = settings_.Get("account_code", "");
     if (account::NormalizeCode(code).empty()) code = account::NewCode();
+#if defined(BF_DEV_TOOLS)
+    // BF_DEV_EXAMPLE_CODE=1 (tests on a test backend only): the example code the page's pictures may show, never a real one.
+    if (const char* v = std::getenv("BF_DEV_EXAMPLE_CODE"); v && *v == '1' && settings_.Get("account_code", "").empty())
+      code = "ABCDEFGHJKMNPQRSTVWX";
+#endif
     if (code.empty()) return AccountMessage("This PC gave no random numbers for a code. Try again.", true);
     char id[9];
     std::snprintf(id, sizeof(id), "%08X", OnlinePlayerId());
@@ -1164,15 +1192,24 @@
     }
     acct_busy_ = false;
     if (!r.answered) {
+      // The name is saved; the switch goes off, so Save goes on without protection (the page says so).
+      np_pending_save_ = false;
+      if (!r.recover) np_protect_ = false;
       REXLOG_WARN("BF account: no answer from the backend ({}){}", r.recover ? "recovery" : "protect",
                   r.why.empty() ? std::string() : ": " + r.why);
-      return AccountMessage(r.why == "lan" ? "Names are protected by the online service of the Reborn servers, not by a "
-                                             "LAN server."
-                                           : "No answer from the online service. Try again in a moment.",
+      if (r.recover)
+        return AccountMessage(r.why == "lan" ? "A recovery code needs the Reborn servers, not a LAN server."
+                                             : "No answer from the Reborn servers. Nothing is lost: try again in a moment.",
+                              true);
+      return AccountMessage(r.why == "lan" ? "Names are protected by the Reborn servers, not by a LAN server. Your name is saved: "
+                                             "Save again goes on without protection."
+                                           : "No answer from the Reborn servers. Your name is saved: Save again goes on without "
+                                             "protection (protect it later from EDIT on Home), or switch it on and try again.",
                             true);
     }
     if (!r.recover) {
       if (!r.ok) {
+        np_pending_save_ = false;
         REXLOG_INFO("BF account: protecting {} refused: {}", r.name, r.why);
         return AccountMessage(r.why == "taken"    ? "That name is protected by another player. Choose another one."
                               : r.why == "team_name" ? "That name is kept for the Battlefield 1943 Reborn team. Choose "
@@ -1194,6 +1231,17 @@
       acct_show_code_ = first;
       REXLOG_INFO("BF account: {} is protected{}", r.name, first ? " (a new account)" : " (the account moved to it)");
       SendLeaderboard("the name protected");  // the totals so far go to the account
+      // A new code: its card in the rail, shown once, with the tick before Continue (game_menu_account.inc). A protection
+      // moved to the new name keeps its code: Save goes on at once.
+      if (first) {
+        np_card_ = 1, np_ticked_ = false;
+        REXLOG_INFO("BF name page: the recovery code's card (shown once)");
+        return AccountMessage("", false);
+      }
+      if (np_pending_save_ && page_ == Page::kName) {
+        NpFinish();
+        return AccountMessage("", false);
+      }
       return AccountMessage(first ? "Your name is protected. Keep the recovery code above: it is also saved in your "
                                     "game's user folder as \"BF1943 Reborn recovery code.txt\"."
                                   : "Your protected name is now " + r.name + ". Your recovery code stays the same.",
@@ -1286,56 +1334,6 @@
     name_error_.clear();
     acct_show_code_ = false;
     if (on) AccountMessage("", false);
-  }
-  // The name protection box on the name page, `w` wide from `at`; its height.
-  float AccountBox(ImDrawList* d, const Stage& st, ImVec2 at, float w) {
-    const kit::Fonts& f = kit::GetFonts();
-    const float x = at.x;
-    float y = at.y;
-    const bool prot = NameProtected();
-    const bool same = name_text_ == settings_.Get("player_name", "");
-    const char* chip = code_mode_ ? "RECOVERY"
-                       : prot     ? "PROTECTED"
-                       : acct_online_ == 3 && same ? "TEAM NAME"
-                       : acct_online_ == 2 && same ? "ANOTHER PLAYER'S"
-                                                   : "NOT PROTECTED";
-    kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, "NAME PROTECTION", st(2));
-    const float cw = kit::TextWidth(f.typed, st(13), chip) + st(16);
-    d->AddRectFilled(ImVec2(x + w - cw, y - st(3)), ImVec2(x + w, y + st(17)),
-                     prot && !code_mode_ ? kit::kGreen : chip[0] == 'A' || chip[0] == 'T' ? kit::kRed : kit::kInkFaint);
-    d->AddText(f.typed, st(13), ImVec2(x + w - cw + st(8), y), IM_COL32(255, 255, 255, 255), chip);
-    y += st(26);
-    std::string body;
-    if (code_mode_)
-      body = "Type the recovery code of your protected name (20 letters and numbers). Your name and your progress come "
-             "back to this PC.";
-    else if (!AccountOnline())
-      body = "Protecting a name needs the online service.";
-    else if (prot)
-      body = "Only you can use " + settings_.Get("player_name", "") +
-             " online, and your rank and stats are kept on our server. Your recovery code brings them to another PC.";
-    else if (!settings_.Get("account_code", "").empty() && !settings_.Get("account_name", "").empty())
-      body = "Your protected name is " + settings_.Get("account_name", "") + ". Protect this name instead to move it here.";
-    else if (acct_online_ == 3 && same)
-      body = "This name is kept for the Battlefield 1943 Reborn team: nobody else can play under it or a name like it. "
-             "Online you play as Soldier for now. Choose a name of your own.";
-    else if (acct_online_ == 2 && same)
-      body = "Another player protected this name: online you play as it with a number. Choose another name.";
-    else
-      body = "Protect your name so nobody else can use it online, and keep your rank and stats on our server. No email "
-             "and no password: you get a recovery code.";
-    y += kit::Wrapped(d, f.ui, st(16), ImVec2(x, y), kit::kInkSoft, body.c_str(), w) + st(6);
-    if (acct_show_code_ && prot && !code_mode_) {
-      const std::string code = "RECOVERY CODE   " + account::FormatCode(settings_.Get("account_code", ""));
-      d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(34)), kit::kPaperLight);
-      d->AddText(f.typed, st(20), ImVec2(x + st(10), y + st(7)), kit::kInk, code.c_str());
-      y += st(40);
-    }
-    if (!acct_message_.empty()) {
-      y += kit::Wrapped(d, f.typed, st(13), ImVec2(x, y), acct_message_bad_ ? kit::kRed : kit::kGreenDark,
-                        acct_message_.c_str(), w);
-    }
-    return y - at.y;
   }
 #if defined(BF_DEV_TOOLS)
   // Tests (a background window gets no typing): whether the game window's text input is on (the SDK starts SDL's text
@@ -1444,194 +1442,6 @@
     if (in.accept) clicked = key;
     return clicked;
   }
-  void AccountPage(ImDrawList* d, ImGuiIO& io, Input in) {
-    NotePage("account");
-    const Stage st = StageOf(io);
-    const kit::Fonts& f = kit::GetFonts();
-    Chrome(d, io, st, name_setup_ ? 2 : 0, SceneBehind() ? 0.82f : 0);
-    // The keyboard's own typing (always, as typed), and the pad on the keys after A. The window gets typed characters
-    // only while ImGui asks for text input (the SDK starts SDL's text input from ImGui's IME data, which only ImGui's
-    // own text fields set): this page asks for it every frame, or no key typed anything (TekRantGaming, 8 Nov).
-    {
-      ImGuiContext& g = *ImGui::GetCurrentContext();
-      g.PlatformImeData.WantTextInput = true;
-      g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
-    }
-    if (io.InputQueueCharacters.Size > 0 && !typed_logged_) {
-      typed_logged_ = true;
-      REXLOG_INFO("BF launcher: the keyboard typed on the name page");
-    }
-    for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
-      const ImWchar ch = io.InputQueueCharacters[i];
-      if (code_mode_) {
-        if (ch < 128) CodeType(char(ch)), name_keys_ = false;
-        continue;
-      }
-      if (tag_mode_) {  // the clan tag box has the typing (game_menu_clan.inc)
-        if (ch < 128) TagType(char(ch), true), name_keys_ = false;
-        continue;
-      }
-      if (ch == player_name::kTmCodePoint) {  // Alt+0153, or a keyboard layout's own TM
-        NameTypeTm();
-        name_keys_ = false;
-      } else if (ch < 128 && NameChar(char(ch)) && player_name::CanType(name_text_)) {
-        name_text_ += char(ch);
-        name_error_.clear(), name_caps_ = false;
-        name_keys_ = false;  // a real keyboard types: the on screen keys close, so its Enter saves
-      }
-    }
-    // Ctrl+V or Shift+Insert (paste_keys.h): the clipboard into the box with the typing; a right click on a box offers
-    // PASTE and CLEAR (game_menu_clan.inc BoxMenu).
-    if (paste::Pressed()) NamePaste(paste::Text(), "keys");
-    if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) NameDelete();
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab) && !code_mode_) NameRandom();
-    // Protect your name: X (F2) protects the saved name or shows its recovery code; LB (F3) types a recovery code.
-    const bool protect_key = ImGui::IsKeyPressed(ImGuiKey_F2, false), code_key = ImGui::IsKeyPressed(ImGuiKey_F3, false);
-    const char* x_label = code_mode_ ? nullptr
-                          : NameProtected() && name_text_ == settings_.Get("player_name", "")
-                              ? (acct_show_code_ ? "Hide code" : "Show code")
-                              : "Protect name";
-    std::vector<Cue> prompts;
-    if (name_keys_) {
-      prompts = {{kit::Button::kA, "Type"}, {kit::Button::kX, "Delete", "Backspace"},
-                 {kit::Button::kStart, name_setup_ ? "Save and continue" : "Save", "Enter", true},
-                 {kit::Button::kB, "Done typing", "Esc"}};
-    } else if (device_ == Device::kKeyboard) {
-      // The keyboard types straight into the name: no Edit (its Enter saves).
-      prompts = {{kit::Button::kY, "Random name", "Tab"},
-                 {kit::Button::kStart, name_setup_ ? "Save and continue" : "Save", "Enter", true}};
-      if (!name_setup_ && !name_required_) prompts.push_back({kit::Button::kB, "Back", "Esc"});
-    } else {
-      prompts = {{kit::Button::kA, "Edit name", "Enter"}, {kit::Button::kY, "Random name", "Tab"},
-                 {kit::Button::kStart, name_setup_ ? "Save and continue" : "Save", "Enter", true}};
-      if (!name_setup_ && !name_required_) prompts.push_back({kit::Button::kB, "Back", "Esc"});
-    }
-    if (code_mode_ && !name_keys_) {
-      prompts = {{kit::Button::kStart, "Use code", "Enter", true}, {kit::Button::kB, "Cancel", "Esc"}};
-      if (device_ != Device::kKeyboard) prompts.insert(prompts.begin(), {kit::Button::kA, "Type code", "Enter"});
-    } else if (code_mode_) {
-      prompts[2].label = "Use code";
-    }
-    if (!name_keys_ && x_label && AccountOnline()) {
-      prompts.push_back({kit::Button::kX, x_label, "F2"});
-      if (!NameProtected()) prompts.push_back({kit::Button::kLB, "Recovery code", "F3"});
-    }
-    if (!code_mode_) prompts.push_back({kit::Button::kRB, tag_mode_ ? "Soldier name" : "Clan tag", "F4"});
-    Prompts(d, st, st.P(120, 720 - 30 - 42), prompts, in);
-    // Enter here is the keyboard's after the merge with the controller (MergeInput), not the raw key: Steam's desktop
-    // layout gives a controller's A as Enter too, which saved an empty name instead of opening the keys. With the on
-    // screen keys open, Enter types the key under the cursor like A (Start saves).
-    const bool enter = in.accept && accept_from_key_;
-    if (in.accept || in.start || in.back || in.x || in.y)
-      REXLOG_INFO("BF launcher: name page {} from the {}{}",
-                  in.accept ? "A" : in.start ? "Start" : in.back ? "B" : in.x ? "X" : "Y",
-                  in.accept && accept_from_key_ ? "keyboard" : device_ == Device::kPad ? "controller" : "keyboard or mouse",
-                  name_keys_ ? " (keys open)" : "");
-    const ImVec2 a = st.P(120, 96), b = st.P(820, 640);
-    {
-      kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.5f);
-      kit::Paper(d, a, b, st.u, false);
-      const float x = a.x + st(40), w = st(620);
-      float y = a.y + st(32);
-      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
-                  name_setup_ ? "STEP 2 OF 8 \xC2\xB7 ACCOUNT" : "ACCOUNT", st(2));
-      y += st(24);
-      kit::Heading(d, st(52), ImVec2(x, y), kit::kInk, code_mode_ ? "USE A RECOVERY CODE" : "CHOOSE YOUR SOLDIER NAME", st(2), w);
-      y += st(64);
-      y += kit::Wrapped(d, f.ui, st(18), ImVec2(x, y), kit::kInkSoft,
-                        code_mode_ ? "The code you were given when you protected your name. Spaces and dashes do not "
-                                     "matter."
-                        : signed_in_once_ && !name_setup_
-                            ? "This is the name other players see on the scoreboard and in the server list, from your "
-                              "next start. If someone on a server already uses it, a number is added for that server."
-                            : "This is the name other players see on the scoreboard and in the server list. If someone "
-                              "on a server already uses it, a number is added for that server.",
-                        w) +
-           st(20);
-      NameFields(d, st, x, y, w);  // the clan tag and soldier name boxes, or the recovery code's (game_menu_clan.inc)
-      {
-        const std::string& error = !name_error_.empty() ? name_error_ : code_mode_ ? name_error_ : tag_refusal_;
-        d->AddText(f.typed, st(14), ImVec2(x, y), error.empty() ? kit::kInkFaint : kit::kRed,
-                   error.empty() ? NameFieldHint() : error.c_str());
-      }
-      y += st(30);
-      if (!code_mode_) {
-        d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(56)), kit::kPaperDim);
-        d->AddText(f.ui, st(20), ImVec2(x + st(14), y + st(5)), kit::kInk, RankLine().c_str());
-        d->AddText(f.typed, st(14), ImVec2(x + st(14), y + st(33)), kit::kInkFaint, "Your rank grows as you play.");
-        y += st(68);
-      }
-      AccountBox(d, st, ImVec2(x, y), w);
-    }
-    const std::vector<OnKey>& kOnKeys = OnKeys(false, !code_mode_);
-    int clicked = OnScreenKeys(d, st, st.P(846, 150), in, name_key_, name_keys_, name_caps_, false,
-                               "With a keyboard, just type. With a controller, move onto these keys with the D-pad or A.",
-                               !code_mode_);
-    StampCorner(d, st);
-    const bool pad_accept = in.accept && !enter;
-    if (name_keys_) {
-      if (in.x) NameDelete();
-      if (in.back) name_keys_ = false, in.back = false;
-    } else if (pad_accept || in.up || in.down || in.left || in.right) {
-      // A, or a direction (the D-pad or the stick), goes onto the keys (TekRantGaming, 9 Nov: the D-pad did nothing here).
-      name_keys_ = true;
-    }
-    if (clicked >= 0) {
-      const OnKey& key = kOnKeys[clicked];
-      REXLOG_INFO("BF launcher: on screen key {}", key.label);
-      if (key.kind == 0) {
-        NameType(key.ch);
-      } else if (key.kind == 1) {
-        NameDelete();
-      } else if (key.kind == 2) {
-        name_caps_ = !name_caps_;
-      } else if (key.kind == 4) {
-        NameTypeTm();
-      } else {
-        NameSave();
-        return;
-      }
-    }
-    if (!name_keys_ && in.y && !code_mode_) NameRandom();
-    if (!code_mode_ && (in.next_tab || ImGui::IsKeyPressed(ImGuiKey_F4, false))) TagSwitch(!tag_mode_);  // clan tag box
-    if ((!name_keys_ && in.x) || protect_key) {
-      if (code_mode_) {
-      } else if (NameProtected() && name_text_ == settings_.Get("player_name", "")) {
-        acct_show_code_ = !acct_show_code_;
-      } else {
-        ProtectName();
-      }
-    }
-    if (((!name_keys_ && in.prev_tab) || code_key) && !code_mode_ && !NameProtected() && AccountOnline()) BeginCodeMode(true);
-    if (in.back && code_mode_ && !name_keys_) {
-      BeginCodeMode(false);
-      return;
-    }
-    // Enter with no name yet (too short to save) opens the keys, as A does: Steam's Enter for a controller's A can come
-    // just before the A itself, which the merge then drops.
-    if (enter && !name_keys_ && name_text_.size() < 3) {
-      name_keys_ = true;
-    } else if (in.start || (enter && !name_keys_)) {
-      NameSave();
-      return;
-    }
-    if (in.back && !name_setup_ && !name_required_) page_ = name_from_;
-#if defined(BF_DEV_TOOLS)
-    // BF_DEV_NAME=<name> (tests): typed for the player 5 s after the page first shows, then saved.
-    static double dev_at = -1;
-    if (dev_at < 0) dev_at = ImGui::GetTime();
-    if (const char* v = std::getenv("BF_DEV_NAME"); v && *v && ImGui::GetTime() - dev_at > 5.0) {
-      dev_at = 1e30;
-      name_text_ = player_name::Clean(v);
-      if (const char* t = std::getenv("BF_DEV_TAG")) {  // BF_DEV_TAG=<tag>: the clan tag box too ("-": emptied)
-        tag_text_.clear();
-        for (const char* c = t; *c && *c != '-'; ++c) tag_text_ += *c;
-      }
-      NameSave();
-    }
-#endif
-  }
-
   // The rank: a first version from the player's own time in matches (Settings file, "match_seconds"), until a stats
   // service keeps the game's own score. The ranks of the US Marines the game's soldiers wear.
   static constexpr const char* kRanks[] = {
@@ -2144,7 +1954,7 @@
     switch (clicked) {
       case 0: return Play();
       case 1: return OpenBrowser();
-      case 2: return;  // Unlockables: nothing yet (TekRantGaming, 8 Nov)
+      case 2: page_ = Page::kUnlockables; return;
       case 3: page_ = Page::kSettings, from_home_ = true, tab_ = 0, row_ = 0, scroll_ = 0, sub_ = kSubNone; return;
       case 4: return UpdateNow();
       case 5: page_ = Page::kReport; return;
@@ -2355,6 +2165,7 @@
       for (const auto& sv : list_.servers())
         if (sv.gid == rows[size_t(clicked)].gid) {
           REXLOG_INFO("BF friends: joining {} on {}", rows[size_t(clicked)].name, sv.name);
+          ping_accepted_address_ = sv.address;  // to play with a friend: no far server question (FarServerWarned)
           Join(sv);
           return;
         }
@@ -2369,6 +2180,7 @@
   double sb_asked_at_ = -100;
   std::atomic<bool> sb_busy_{false};
   int sb_row_ = 0;  // the row cursor (the voice mute)
+  int sb_scroll_ = 0;  // the first row shown (a 32 or 64 player server has more rows than the page holds)
 
   void ScoreboardPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
     const ImVec2 sz = io.DisplaySize;
@@ -2382,7 +2194,7 @@
         std::string reply;
         const bool ok = RegistryRequest(req, reply);
         std::vector<LbRow> rows;
-        for (size_t at = ok ? reply.find("\"rows\"") : std::string::npos; at != std::string::npos && rows.size() < 64;) {
+        for (size_t at = ok ? reply.find("\"rows\"") : std::string::npos; at != std::string::npos && rows.size() < size_t(bf1943::kPlayerListLimit);) {
           const size_t a = reply.find('{', at), b = a == std::string::npos ? a : reply.find('}', a);
           if (a == std::string::npos || b == std::string::npos) break;
           const std::string obj = reply.substr(a, b - a + 1);
@@ -2424,9 +2236,33 @@
     sb_row_ = std::clamp(sb_row_, 0, std::max(0, n - 1));
     const float x0 = st.P(40, 0).x, x1 = st.P(1240, 0).x;
     float y = st.P(0, 176).y;
+    // The rows the page holds (10); more scroll (server sizes, docs/SERVER-SIZES.md): the cursor kept in view, the
+    // wheel over the list moves it.
+    const int shown = std::max(1, int((st.P(0, 640).y - y) / st(44)));
+    if (n && io.MouseWheel != 0 && ImGui::IsMouseHoveringRect(ImVec2(x0, y), ImVec2(x1, st.P(0, 640).y)))
+      sb_row_ = std::clamp(sb_row_ - int(io.MouseWheel * 3), 0, n - 1);
+    if (sb_row_ < sb_scroll_) sb_scroll_ = sb_row_;
+    if (sb_row_ >= sb_scroll_ + shown) sb_scroll_ = sb_row_ - shown + 1;
+    sb_scroll_ = std::clamp(sb_scroll_, 0, std::max(0, n - shown));
     int toggled = -1;
+    // The columns' words over the score and the ping; the ping furthest right (TekRantGaming, 20 Nov 2026), the score
+    // before it.
+    const bool show_ping = REXCVAR_GET(bf_scoreboard_ping);
+    const float score_right = show_ping ? x1 - st(24) - ping::CellWidth(st(20)) - st(40) : x1 - st(24);
+    if (n) {
+      const float pc = x1 - st(24) - ping::CellWidth(st(20)) * 0.5f;
+      if (show_ping)
+        kit::Spaced(d, f.typed, st(11), ImVec2(pc - kit::SpacedWidth(f.typed, st(11), "PING", st(2)) * 0.5f, st.P(0, 156).y),
+                    kit::kKhakiDim, "PING", st(2));
+      kit::Spaced(d, f.typed, st(11), ImVec2(score_right - kit::SpacedWidth(f.typed, st(11), "SCORE", st(2)), st.P(0, 156).y),
+                  kit::kKhakiDim, "SCORE", st(2));
+    }
     const double now = ImGui::GetTime();
-    for (int i = 0; i < n && y < st.P(0, 640).y; ++i) {
+    if (n > shown) {  // which rows these are, by the column words
+      const std::string range = fmt::format("{}-{} OF {}", sb_scroll_ + 1, std::min(n, sb_scroll_ + shown), n);
+      kit::Spaced(d, f.typed, st(11), ImVec2(x0 + st(24), st.P(0, 156).y), kit::kKhakiDim, range, st(2));
+    }
+    for (int i = sb_scroll_; i < n && i < sb_scroll_ + shown; ++i) {
       const LbRow& r = rows[size_t(i)];
       const bool me = !mine.empty() && r.name == mine;
       const bool sel = i == sb_row_;
@@ -2452,7 +2288,12 @@
         kit::Spaced(d, f.typed, st(12), ImVec2(nx, y + st(14)), kit::kStamp, "MUTED", st(2));
       }
       const std::string sc = std::to_string(r.score);
-      d->AddText(f.typed, st(16), ImVec2(x1 - st(24) - kit::TextWidth(f.typed, st(16), sc), y + st(10)), ink, sc.c_str());
+      d->AddText(f.typed, st(16), ImVec2(score_right - kit::TextWidth(f.typed, st(16), sc), y + st(10)), ink, sc.c_str());
+      // The player's ping (scoreboard_ping.h): bars and ms at the right edge; BOT for a bot; nothing when not known.
+      if (show_ping) {
+        const bool bot = world::IsBot(r.name);
+        ping::DrawCell(d, f.ui_bold, x1 - st(24), y + st(20), st(20), bot ? -1 : world::PingOf(r.name), bot, false, ink);
+      }
       y += st(44);
     }
     const bool can_mute = n && !(rows[size_t(sb_row_)].name == mine && !mine.empty());
@@ -2481,7 +2322,128 @@
   // Later that day: the match's name, whether the server browser shows it, and the router port as a box to tick
   // (UPnP) with the port typed when it is not ticked.
   static constexpr int kPmMap = 0, kPmName = 1, kPmNet = 2, kPmListed = 3, kPmUpnp = 4, kPmPort = 5, kPmHost = 6, kPmTick = 7,
-                       kPmPass = 8, kPmPassText = 9, kPmRows = 10;
+                       kPmPass = 8, kPmPassText = 9,
+                       // 14 Nov 2026, the match's world ("cloud coverage, rate, weather percentage, day/night
+                       // adjustment and time scale settings and sliders ... in the create match menu"): one row
+                       // that opens its own list in the rail (the rail has no room for six more rows).
+                       kPmWorld = 10, kPmDayNight = 11, kPmTime = 12, kPmDayLen = 13, kPmCloud = 14, kPmRate = 15,
+                       kPmWeather = 16, kPmFog = 17, kPmGroundFog = 18, kPmWind = 19, kPmCloudHeight = 20, kPmWorldBack = 21,
+                       // 18 Nov 2026, bots (bots.cpp; the user: "Let me play with them"): how many play.
+                       kPmBots = 22,
+                       // 19 Nov 2026 ("add match time and team ticket amount settings ... a map rotation selection as a
+                       // submenu in create match ... an option to select the game mode"; "an option for servers to
+                       // enable dynamic storm"): the game mode, the rotation's own list of rows (its switch, Rotate all
+                       // maps, a row a map), the tickets, the time limit, and the storm in the world's rows.
+                       kPmMode = 23, kPmRotation = 24, kPmTickets = 25, kPmTimeLimit = 26, kPmStorm = 27,
+                       kPmRotOn = 28, kPmRotAll = 29, kPmRotMap = 30 /* to 33, a map each */, kPmRotBack = 34,
+                       // 21 Nov 2026, the page of its own: Weather and time (the Weather tab's switch).
+                       kPmWeatherOn = 35,
+                       // D224 (20 Nov 2026): the storm's type, in the Weather tab's rows.
+                       kPmStormType = 36, kPmRows = 37;
+  // The game modes. Each map has one in the game's data (its level holds that mode's objects and no other's: Wake
+  // Island, Guadalcanal and Iwo Jima Conquest, Coral Sea Air Superiority), so the mode chooses the maps that play it.
+  static constexpr const char* kPmModeNames[] = {"CONQUEST", "AIR SUPERIORITY", "ALL MODES"};
+  static bool PmMapInMode(int mode, int map) { return mode == 2 || (mode == 0 ? map < 3 : map == 3); }
+  // The map's own (0: 130, Coral Sea 100) in its place among the counts (24 Nov 2026: first in the list, right from it
+  // went down to 25).
+  static constexpr int kPmTicketSteps[] = {25, 50, 75, 100, 0, 150, 200, 250, 300, 400, 500, 750, 1000};
+  static int PmTicketAt(int now) {  // the step at or under `now`, the map's own counted as 130
+    const auto count = [](int v) { return v == 0 ? 130 : v; };
+    int at = 0;
+    for (int k = 0; k < int(std::size(kPmTicketSteps)); ++k)
+      if (count(kPmTicketSteps[k]) <= count(now)) at = k;
+    return at;
+  }
+  static constexpr int kPmTimeSteps[] = {0, 5, 10, 15, 20, 25, 30, 40, 45, 60, 90, 120};
+  int pm_mode_ = 0;            // kPmModeNames
+  bool pm_rotation_ = false;   // the maps in turn (pm_rot_maps_) rather than the one map
+  int pm_rot_maps_ = 0xF;      // the rotation's maps, a bit each (kPmMapKeys' order)
+  int pm_tickets_ = 0;         // each team's tickets; 0: the map's own
+  int pm_time_limit_ = 0;      // minutes; 0: none, the round ends on tickets only
+  bool pm_storm_ = false;      // the dynamic storm
+  int pm_storm_type_ = 0;      // D224: kPmStormTypeNames
+  static constexpr const char* kPmStormTypeNames[] = {"STORM", "HURRICANE"};
+  bool pm_maps_view_ = false;  // the rail shows the rotation's rows
+  // The rail scrolls when its rows are more than it holds: the selection kept in view, the wheel over it.
+  float pm_scroll_ = 0;
+  bool pm_scroll_follow_ = true;
+  static int PmStep(const int* steps, int count, int now, int step) {
+    int at = 0;
+    for (int k = 0; k < count; ++k)
+      if (steps[k] <= now) at = k;
+    return steps[std::clamp(at + step, 0, count - 1)];
+  }
+  // The rotation's maps of the chosen mode, in turn.
+  std::vector<int> PmRotationMaps() const {
+    std::vector<int> out;
+    for (int m = 0; m < 4; ++m)
+      if (PmMapInMode(pm_mode_, m) && (pm_rot_maps_ >> m & 1)) out.push_back(m);
+    return out;
+  }
+  bool PmRotationOn() const { return pm_rotation_ && !PmRotationMaps().empty(); }
+  // The maps the match plays, in turn: the rotation's order (21 Nov 2026: the Levels list adds a map at its end, the
+  // Rotation column moves it up or down), the chosen mode's only; one map plays round after round.
+  std::vector<int> PmMatchMaps() const {
+    std::vector<int> maps;
+    for (int m : pm_order_)
+      if (m >= 0 && m < 4 && PmMapInMode(pm_mode_, m)) maps.push_back(m);
+    if (maps.empty()) maps = {PmMapOfMode(0, 1)};
+    return maps;
+  }
+  // The Custom Match page as its own page (TekRantGaming, 21 Nov 2026, his pick of runs/ui-designs/custom-match,
+  // Version G): the settings at the left under the Match tab (and the Weather tab, which exists only while Weather and
+  // time is on), the map's picture with the game mode and the Levels in the middle, the Rotation in its order with
+  // Host online and Host on LAN at the right, the chosen row's help along the foot.
+  std::vector<int> pm_order_ = {0};  // the rotation in the order it plays (kPmMapKeys' numbers)
+  bool pm_weather_on_ = false;       // Weather and time: the Weather tab's settings; off, the map's usual afternoon
+  int pm_tab_ = 0;                   // 0 Match, 1 Weather
+  int pm_col_ = 0;                   // the column the pad is in: 0 the settings, 1 the levels, 2 the rotation
+  int pm_lv_row_ = 0;                // the levels: -1 the game mode, 0 to 3 the maps
+  int pm_rot_row_ = 0;               // the rotation: its maps, then Host online and Host on LAN
+  bool pm_grab_ = false;             // the rotation's map under the cursor is carried: up and down move it
+  bool pm_dial_drag_ = false;        // the time of day's arc dragged with the mouse
+  bool PmInOrder(int m) const { return std::find(pm_order_.begin(), pm_order_.end(), m) != pm_order_.end(); }
+  // The rotation kept to the mode's maps, each once, never empty.
+  void PmFitOrder() {
+    std::vector<int> out;
+    for (int m : pm_order_)
+      if (m >= 0 && m < 4 && PmMapInMode(pm_mode_, m) && std::find(out.begin(), out.end(), m) == out.end()) out.push_back(m);
+    if (out.empty()) out.push_back(PmMapOfMode(0, 1));
+    pm_order_ = out;
+  }
+  // The world the match has with Weather and time off: today's starting values (the map's usual afternoon).
+  bool PmWorldDefault() const {
+    return !pm_dn_ && std::fabs(pm_time_ - 16.0f) < 0.01f && pm_cloud_ == 35 && pm_rate_ == 33 && pm_weather_ == 0 && pm_fog_ == 0 &&
+           pm_ground_fog_ == 0 && !pm_wind_manual_ && pm_cloud_height_ == 450 && !pm_storm_;  // the wind follows the weather
+  }
+  std::string PmHeadline() const {
+    const std::vector<int> maps = PmMatchMaps();
+    if (maps.size() == 1) return kPmMapNames[maps[0]];
+    return fmt::format("{} MAPS IN TURN", maps.size());
+  }
+  // The first map of the chosen mode at or after `from`, going `step` (1 or -1).
+  int PmMapOfMode(int from, int step) const {
+    for (int k = 0; k < 4; ++k) {
+      const int m = ((from + step * k) % 4 + 4) % 4;
+      if (PmMapInMode(pm_mode_, m)) return m;
+    }
+    return 0;
+  }
+  int pm_bots_ = 0;  // bots in the match, each on the smaller side, within the room the players leave (0: none)
+  bool pm_world_view_ = false;  // the rail shows the world's rows
+  bool pm_dn_ = false;          // day and night
+  float pm_time_ = 16.0f;       // the hour the match starts at
+  int pm_daylen_ = 0;
+  int pm_cloud_ = 35, pm_rate_ = 33, pm_weather_ = 0, pm_fog_ = 0, pm_ground_fog_ = 0, pm_wind_ = 30;  // per cent
+  int pm_cloud_height_ = 450;  // the cloud base over the sea, metres
+  // The wind follows the weather (19 Nov 2026, the user: "Weather percentage should also affect wind %, unless it's
+  // manually adjusted, so 100% weather should result in 100% wind") until the wind's own row is set apart from it;
+  // set back to the weather's value, it follows again.
+  bool pm_wind_manual_ = false;
+  void PmWeatherChanged() {
+    if (!pm_wind_manual_) pm_wind_ = pm_weather_;
+  }
+  void PmWindChanged() { pm_wind_manual_ = pm_wind_ != pm_weather_; }
   // A password for the match (13 Nov 2026): a switch under the name, and its field while it is on.
   bool pm_pass_on_ = false;
   std::string pm_pass_;
@@ -2497,7 +2459,8 @@
   // The row takes typing now: the name, or the port when it is the player's to choose.
   bool PmPortTyped() const { return pm_lan_ || !pm_upnp_; }
   bool PmTyping() const {
-    return !pm_hosting_ && (pm_edit_ >= 0 || pm_row_ == kPmName || pm_row_ == kPmPassText || (pm_row_ == kPmPort && PmPortTyped()));
+    return !pm_hosting_ && (pm_edit_ >= 0 || (pm_col_ == 0 && pm_tab_ == 0 &&
+                                              (pm_row_ == kPmName || pm_row_ == kPmPassText || (pm_row_ == kPmPort && !pm_upnp_))));
   }
   // The server name and the password from a controller (TekRantGaming, 16 Nov 2026: "when controller A is pressed on
   // server name bring up on screen keyboard to allow editing and same with password edit"): A on either row opens
@@ -2515,24 +2478,83 @@
                                 : (c >= '0' && c <= '9');
   }
   std::string PmPassShown(const std::string& pass) const { return pm_pass_shown_ ? pass : std::string(pass.size(), '*'); }
+  // The port too (24 Nov 2026: a controller could not change it at all), digits only (PmCharOk).
+  std::string& PmEditTarget(int row) { return row == kPmName ? pm_name_ : row == kPmPort ? pm_port_text_ : pm_pass_; }
+  static const char* PmEditWhat(int row) { return row == kPmName ? "server name" : row == kPmPort ? "port" : "password"; }
   void PmEditOpen(int row) {
-    pm_edit_ = row, pm_edit_key_ = 10;
-    pm_edit_text_ = row == kPmName ? pm_name_ : pm_pass_;
+    pm_edit_ = row, pm_edit_key_ = row == kPmPort ? 0 : 10;  // the port's keys start on the 1
+    pm_edit_text_ = PmEditTarget(row);
     pm_edit_caps_ = row == kPmName && pm_edit_text_.empty();
-    REXLOG_INFO("BF private match: the on screen keys open on the {}", row == kPmName ? "server name" : "password");
+    REXLOG_INFO("BF private match: the on screen keys open on the {}", PmEditWhat(row));
   }
   void PmEditClose(bool save) {
     if (pm_edit_ < 0) return;
     if (save) {
-      (pm_edit_ == kPmName ? pm_name_ : pm_pass_) = pm_edit_text_;
+      PmEditTarget(pm_edit_) = pm_edit_text_;
       SavePrivateMatchChoices();
     }
     REXLOG_INFO("BF private match: the on screen keys {} the {} ({} characters)", save ? "saved" : "cancelled",
-                pm_edit_ == kPmName ? "server name" : "password", (pm_edit_ == kPmName ? pm_name_ : pm_pass_).size());
+                PmEditWhat(pm_edit_), PmEditTarget(pm_edit_).size());
     pm_edit_ = -1;
   }
   int pm_row_ = 0, pm_map_ = 0;
   bool pm_upnp_ = true;
+  // The world's rows are sliders with a box for the exact value (the user, 16 Nov 2026: "day and weather controls in
+  // custom match menu to be sliders ... box values for being able to type in exact values"): the row dragged now, the
+  // row whose box is typed in and what was typed.
+  int pm_drag_ = -1, pm_slide_edit_ = -1;
+  std::string pm_slide_text_;
+  struct PmSlide {
+    float lo, hi, step;  // the slider's ends and its steps
+    float most;          // the most a typed value may be
+  };
+  static bool PmSlideRow(int row) { return row == kPmTime || row == kPmDayLen || (row >= kPmCloud && row <= kPmCloudHeight); }
+  static PmSlide PmSlideOf(int row) {
+    if (row == kPmTime) return {0.0f, 23.75f, 0.25f, 23.99f};
+    if (row == kPmDayLen) return {0.0f, 240.0f, 1.0f, 1440.0f};
+    if (row == kPmCloudHeight) return {100.0f, 1500.0f, 10.0f, 1500.0f};
+    return {0.0f, 100.0f, 1.0f, 100.0f};
+  }
+  float PmSlideGet(int row) const {
+    switch (row) {
+      case kPmTime: return pm_time_;
+      case kPmDayLen: return float(pm_daylen_);
+      case kPmCloud: return float(pm_cloud_);
+      case kPmRate: return float(pm_rate_);
+      case kPmWeather: return float(pm_weather_);
+      case kPmFog: return float(pm_fog_);
+      case kPmGroundFog: return float(pm_ground_fog_);
+      case kPmWind: return float(pm_wind_);
+      case kPmCloudHeight: return float(pm_cloud_height_);
+    }
+    return 0.0f;
+  }
+  // `exact`: a typed value (kept as typed, within the row's bounds); else the slider's, on its steps.
+  void PmSlideSet(int row, float v, bool exact) {
+    const PmSlide s = PmSlideOf(row);
+    if (!exact) v = s.lo + std::round((v - s.lo) / s.step) * s.step;
+    v = std::clamp(v, s.lo, exact ? s.most : s.hi);
+    const int n = int(std::lround(v));
+    switch (row) {
+      case kPmTime: pm_time_ = v; break;
+      case kPmDayLen: pm_daylen_ = n; break;
+      case kPmCloud: pm_cloud_ = n; break;
+      case kPmRate: pm_rate_ = n; break;
+      case kPmWeather: pm_weather_ = n, PmWeatherChanged(); break;
+      case kPmFog: pm_fog_ = n; break;
+      case kPmGroundFog: pm_ground_fog_ = n; break;
+      case kPmWind: pm_wind_ = n, PmWindChanged(); break;
+      case kPmCloudHeight: pm_cloud_height_ = n; break;
+    }
+  }
+  std::string PmSlideText(int row) const {
+    switch (row) {
+      case kPmTime: return fmt::format("{:02d}:{:02d}", int(pm_time_), int(std::lround(pm_time_ * 60.0f)) % 60);
+      case kPmDayLen: return pm_daylen_ == 0 ? std::string("STILL") : fmt::format("{} MIN", pm_daylen_);
+      case kPmCloudHeight: return fmt::format("{} M", pm_cloud_height_);
+    }
+    return fmt::format("{}%", int(PmSlideGet(row)));
+  }
   bool pm_hosting_ = false;  // our server runs for this game
   bool pm_joining_ = false;  // this game's join to it started
   double pm_started_at_ = 0, pm_read_at_ = -100, pm_copied_at_ = -100;
@@ -2550,10 +2572,48 @@
     pm_pass_on_ = settings_.Get("private_match_password_on", "0") == "1";
     pm_pass_ = settings_.Get("private_match_password", "");
     pm_tick_ = std::atoi(settings_.Get("private_match_tick", "60").c_str());
+    pm_bots_ = std::clamp(std::atoi(settings_.Get("private_match_bots", "0").c_str()), 0, 24);
+    pm_mode_ = std::clamp(std::atoi(settings_.Get("private_match_mode", "0").c_str()), 0, 2);
+    pm_rotation_ = settings_.Get("private_match_rotation", "0") == "1";
+    pm_rot_maps_ = std::clamp(std::atoi(settings_.Get("private_match_rotation_maps", "15").c_str()), 0, 15);
+    if (pm_map_ == 4) pm_map_ = 0, pm_rotation_ = true, pm_rot_maps_ = 0xF, pm_mode_ = 2;  // before 19 Nov: all four in turn
+    if (!PmMapInMode(pm_mode_, pm_map_)) pm_mode_ = pm_map_ == 3 ? 1 : 0;  // the map chosen keeps its mode
+    pm_tickets_ = std::clamp(std::atoi(settings_.Get("private_match_tickets", "0").c_str()), 0, 9999);
+    pm_time_limit_ = std::clamp(std::atoi(settings_.Get("private_match_time_limit", "0").c_str()), 0, 600);
+    pm_storm_ = settings_.Get("private_match_dynamic_storm", "0") == "1";
+    pm_storm_type_ = std::clamp(std::atoi(settings_.Get("private_match_storm_type", "0").c_str()), 0, 1);
+    pm_maps_view_ = false;
     if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 60;
     pm_edit_ = -1;  // the on screen keys never left open from an earlier visit
+    pm_dn_ = settings_.Get("private_match_day_night", "0") == "1";
+    pm_time_ = std::clamp(float(std::atof(settings_.Get("private_match_time", "16").c_str())), 0.0f, 23.5f);
+    pm_daylen_ = std::atoi(settings_.Get("private_match_day_minutes", "0").c_str());
+    pm_daylen_ = std::clamp(pm_daylen_, 0, 1440);  // any length (the slider, or typed)
+    pm_cloud_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_cover", "35").c_str()), 0, 100);
+    pm_rate_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_rate", "33").c_str()), 0, 100);
+    pm_weather_ = std::clamp(std::atoi(settings_.Get("private_match_weather", "0").c_str()), 0, 100);
+    pm_fog_ = std::clamp(std::atoi(settings_.Get("private_match_fog", "0").c_str()), 0, 100);
+    pm_ground_fog_ = std::clamp(std::atoi(settings_.Get("private_match_ground_fog", "0").c_str()), 0, 100);
+    pm_wind_ = std::clamp(std::atoi(settings_.Get("private_match_wind", "30").c_str()), 0, 100);
+    pm_wind_manual_ = settings_.Get("private_match_wind_manual", "0") == "1";
+    PmWeatherChanged();
+    pm_cloud_height_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_height", "450").c_str()), 100, 1500);
+    // The rotation's order (21 Nov 2026); before it, the map, or the rotation's maps in the game's order.
+    pm_order_.clear();
+    const std::string order = settings_.Get("private_match_rotation_order", "");
+    for (const char c : order)
+      if (c >= '0' && c <= '3') pm_order_.push_back(c - '0');
+    if (order.empty()) pm_order_ = PmRotationOn() ? PmRotationMaps() : std::vector<int>{std::clamp(pm_map_, 0, 3)};
+    PmFitOrder();
+    // Weather and time (21 Nov 2026): before it the world's settings always applied, so a player who had changed them
+    // finds it on.
+    const std::string custom = settings_.Get("private_match_weather_custom", "");
+    pm_weather_on_ = custom.empty() ? !PmWorldDefault() : custom == "1";
+    pm_pass_on_ = !pm_pass_.empty();  // the password is on while it has one (no switch since 21 Nov 2026)
+    pm_tab_ = 0, pm_col_ = 0, pm_lv_row_ = 0, pm_rot_row_ = 0, pm_grab_ = false, pm_dial_drag_ = false;
   }
   void SavePrivateMatchChoices() {
+    pm_pass_on_ = !pm_pass_.empty();
     settings_.values["private_match_map"] = std::to_string(pm_map_);
     settings_.values["private_match_upnp"] = pm_upnp_ ? "1" : "0";
     settings_.values["private_match_lan"] = pm_lan_ ? "1" : "0";
@@ -2561,18 +2621,57 @@
     settings_.values["private_match_name"] = pm_name_;
     settings_.values["private_match_port"] = pm_port_text_;
     settings_.values["private_match_tick"] = std::to_string(pm_tick_);
+    settings_.values["private_match_bots"] = std::to_string(pm_bots_);
+    settings_.values["private_match_mode"] = std::to_string(pm_mode_);
+    settings_.values["private_match_rotation"] = pm_rotation_ ? "1" : "0";
+    settings_.values["private_match_rotation_maps"] = std::to_string(pm_rot_maps_);
+    settings_.values["private_match_tickets"] = std::to_string(pm_tickets_);
+    settings_.values["private_match_time_limit"] = std::to_string(pm_time_limit_);
+    settings_.values["private_match_dynamic_storm"] = pm_storm_ ? "1" : "0";
+    settings_.values["private_match_storm_type"] = std::to_string(pm_storm_type_);
     settings_.values["private_match_password_on"] = pm_pass_on_ ? "1" : "0";
     settings_.values["private_match_password"] = pm_pass_;
+    settings_.values["private_match_day_night"] = pm_dn_ ? "1" : "0";
+    settings_.values["private_match_time"] = fmt::format("{:.2f}", pm_time_);
+    settings_.values["private_match_day_minutes"] = std::to_string(pm_daylen_);
+    settings_.values["private_match_cloud_cover"] = std::to_string(pm_cloud_);
+    settings_.values["private_match_cloud_rate"] = std::to_string(pm_rate_);
+    settings_.values["private_match_weather"] = std::to_string(pm_weather_);
+    settings_.values["private_match_fog"] = std::to_string(pm_fog_);
+    settings_.values["private_match_ground_fog"] = std::to_string(pm_ground_fog_);
+    settings_.values["private_match_wind"] = std::to_string(pm_wind_);
+    settings_.values["private_match_wind_manual"] = pm_wind_manual_ ? "1" : "0";
+    settings_.values["private_match_cloud_height"] = std::to_string(pm_cloud_height_);
+    std::string order;
+    for (int m : pm_order_) order += char('0' + m);
+    settings_.values["private_match_rotation_order"] = order;
+    settings_.values["private_match_weather_custom"] = pm_weather_on_ ? "1" : "0";
+    // The older rows' settings follow the order, for a build from before 21 Nov 2026.
+    if (!pm_order_.empty()) settings_.values["private_match_map"] = std::to_string(pm_order_.front());
+    settings_.values["private_match_rotation"] = pm_order_.size() > 1 ? "1" : "0";
+    int bits = 0;
+    for (int m : pm_order_) bits |= 1 << m;
+    settings_.values["private_match_rotation_maps"] = std::to_string(bits);
     settings_.Save();
   }
 
   void HostPrivateMatch() {
     bf1943::PrivateMatchOptions o;
-    if (pm_map_ < 4) o.maps = {kPmMapKeys[pm_map_]};
-    else o.maps = {"wake", "guadalcanal", "iwo", "coral"};
+    PmFitOrder();
+    for (int m : PmMatchMaps()) o.maps.push_back(kPmMapKeys[m]);
+    o.tickets = pm_tickets_, o.time_limit = pm_time_limit_, o.dynamic_storm = pm_weather_on_ && pm_storm_;
+    o.storm_type = pm_weather_on_ ? pm_storm_type_ : 0;
     o.upnp = pm_upnp_;
-    o.lan = pm_lan_;
-    if (pm_lan_) {
+    // The test launcher (tools	est_progression.py: the test_progression setting, its own backend on this PC's
+    // loopback) already answers sign-in, matchmaking and the server list on the ports a LAN match's own backend
+    // needs (TCP 18241 and 18246), and the game is signed in to it: a LAN match is hosted through that backend there,
+    // not through one of its own (16 Nov 2026: hosting from the test launcher was refused, "another program on this PC
+    // already uses TCP 18241").
+    const bool test_backend = settings_.Get("test_progression", "") == "1" &&
+                              rex::cvar::GetFlagByName("bf_backend_registry").rfind("127.0.0.1:", 0) == 0;
+    if (pm_lan_ && test_backend) REXLOG_INFO("BF private match: a LAN match under the test launcher: through its backend");
+    o.lan = pm_lan_ && !test_backend;
+    if (o.lan) {
       // The game signs in to the match's own backend, which it can only choose before it starts (once it runs it is
       // signed in to the main one).
       if (!pre_game_ && own_backend_ != "127.0.0.1") {
@@ -2589,12 +2688,20 @@
     const std::string me = settings_.Get("player_name", "");
     // Through our profanity filter (text_filter.h): a listed match's name is everybody's to read.
     o.name = text_filter::Censor(!pm_name_.empty() ? pm_name_ : me.empty() ? "Custom match" : me + "'s match");
-    if (pm_pass_on_ && pm_pass_.empty()) {
-      pm_error_ = "Type the match's password, or switch Password off.";
-      return;
-    }
-    o.password = pm_pass_on_ ? pm_pass_ : std::string();
+    pm_pass_on_ = !pm_pass_.empty();  // a password typed is on; empty, anybody joins
+    o.password = pm_pass_;
     o.tick = pm_tick_;
+    o.bots = pm_bots_;
+    // The match always has its clock's light and sky (16 Nov 2026: the switch "should just pause the time progression",
+    // not bring the game's own afternoon back): off, the time stands still at the time of day.
+    o.day_night = true, o.time = pm_time_, o.day_minutes = pm_dn_ ? pm_daylen_ : 0;
+    o.cloud_cover = pm_cloud_ / 100.0f, o.cloud_rate = pm_rate_ / 100.0f, o.weather = pm_weather_ / 100.0f;
+    o.fog = pm_fog_ / 100.0f, o.ground_fog = pm_ground_fog_ / 100.0f, o.wind = pm_wind_ / 100.0f;
+    o.cloud_height = float(pm_cloud_height_);
+    if (!pm_weather_on_) {  // Weather and time off: the map's usual afternoon (the page's starting values)
+      o.time = 16.0f, o.day_minutes = 0, o.cloud_cover = 0.35f, o.cloud_rate = 0.33f, o.weather = 0, o.fog = 0, o.ground_fog = 0;
+      o.wind = 0, o.cloud_height = 450.0f;  // the wind with the weather, as the page's starting values
+    }
     // The host's own game runs at the match's rate, set before its timers are made. Once a match was played at
     // another, this run cannot change: the server would start, and the host's join would have to start the game again,
     // which ends the server with it (the review of pull request 16). Said instead.
@@ -2623,7 +2730,9 @@
     }
     pm_hosting_ = true, pm_joining_ = false, pm_started_at_ = ImGui::GetTime(), pm_read_at_ = -100;
     pm_status_ = {};
-    REXLOG_INFO("BF private match: hosting ({})", kPmMapNames[pm_map_]);
+    REXLOG_INFO("BF private match: hosting ({}, {}; tickets {}, time limit {} min, dynamic storm {}, storm type {})",
+                PmHeadline(), kPmModeNames[pm_mode_], pm_tickets_ ? std::to_string(pm_tickets_) : std::string("the map's own"),
+                pm_time_limit_, pm_storm_ ? "on" : "off", kPmStormTypeNames[pm_storm_type_]);
   }
 
   void EndPrivateMatch() {
@@ -2666,7 +2775,7 @@
     const std::string me = settings_.Get("player_name", "");
     sv.name = me.empty() ? "Custom match" : me + "'s match";
     sv.address = pm_status_.address;
-    sv.map = pm_map_ < 4 ? kPmMapTitles[pm_map_] : "Wake Island";
+    sv.map = kPmMapTitles[PmMatchMaps().front()];
     sv.max_players = 24;
     // Its tick rate is the one it was started at. (Left unsaid, Join took it for a 30 Hz server and set this game to
     // 30 against a 60 Hz match: 13 Nov 2026, "I cannot walk at 60Hz anymore, and player partially falls through
@@ -2680,11 +2789,117 @@
     Join(sv);
   }
 
-  // Create Private Match as the main menu is drawn (13 Nov 2026: "look more like the main menu theming, with the
-  // options on the left side panel in the same font"): the menu's backdrop and chrome, the dark rail at the left with
-  // the rows in the game's own lettering (the chosen one on paper with the red tab and its glyph, its value typed at
-  // the right), and at the right the chosen map's picture over a paper band with the chosen row's help and the green
-  // button, where the main menu has its Quick Play card. Sizes are the Stage's (720 lines).
+  // ---- Custom Match, a page of its own (TekRantGaming's pick, 21 Nov 2026: runs/ui-designs/custom-match Version G,
+  // with the time of day's play button made a Time passes switch under it). Three columns on the menu's backdrop: the
+  // settings at the left (the Match tab, and the Weather tab while Weather and time is on), the chosen map's picture
+  // with the game mode and the Levels in the middle, the Rotation at the right in the order it plays with Host online
+  // and Host on LAN under it; the chosen row's help along the foot. View (Tab) goes from column to column, LB and RB
+  // (Q and E) from tab to tab, Start (P) hosts online. Sizes are the Stage's (720 lines).
+  static const char* PmTitle(int row) {
+    switch (row) {
+      case kPmName: return "SERVER NAME";
+      case kPmPassText: return "PASSWORD";
+      case kPmTickets: return "TICKETS";
+      case kPmTimeLimit: return "MATCH TIME";
+      case kPmBots: return "BOTS";
+      case kPmTick: return "TICK RATE";
+      case kPmListed: return "SHOW IN BROWSER";
+      case kPmUpnp: return "UPNP";
+      case kPmPort: return "PORT";
+      case kPmWeatherOn: return "WEATHER AND TIME";
+      case kPmTime: return "TIME OF DAY";
+      case kPmDayNight: return "TIME PASSES";
+      case kPmDayLen: return "A DAY LASTS";
+      case kPmCloud: return "CLOUD COVER";
+      case kPmRate: return "CLOUD CHANGE RATE";
+      case kPmCloudHeight: return "CLOUD HEIGHT";
+      case kPmWeather: return "WEATHER";
+      case kPmStorm: return "DYNAMIC STORM";
+      case kPmStormType: return "STORM TYPE";
+      case kPmWind: return "WIND";
+      case kPmFog: return "DISTANCE FOG";
+      case kPmGroundFog: return "GROUND FOG";
+    }
+    return "";
+  }
+  static const char* PmAbout(int row) {
+    switch (row) {
+      case kPmName:
+        return "The match's name in the server browser. Type it with the keyboard, or A for the on screen keys; left empty it is "
+               "your name's match. On a controller, right moves over to the Levels.";
+      case kPmPassText:
+        return "The password players type to join: up to 24 letters, digits or signs, no spaces. Empty, anybody who sees the "
+               "match can join; the browser shows a padlock by a match with one. Y (F2) shows it.";
+      case kPmTickets:
+        return "Each team's tickets at a round's start: a team loses one for each of its soldiers who dies, and more while the "
+               "other team holds most flags. A team with none left loses. The map's own is 130 (Coral Sea 100).";
+      case kPmTimeLimit:
+        return "How long a round lasts: when it is up, the team with fewer tickets loses. Every player sees the time left over the "
+               "ticket bars. Off, a round ends only when a team has no tickets left.";
+      case kPmBots:
+        return "Computer players who fill the match, half on each side: they take flags and fight like players and keep out of "
+               "everybody's stats. Early days: they fight on foot only, so Guadalcanal suits them best and they sit out "
+               "Coral Sea.";
+      case kPmTick:
+        return "How many times a second the match is simulated. 60 is the default; 30 is the original game's and asks less of your "
+               "PC and of every player's connection. A player's game takes the match's rate when it joins.";
+      case kPmListed:
+        return "Online matches. Yes: everybody sees your match on the server browser's Community tab and can join. No: only friends "
+               "you give the address to (Direct connect). A LAN match is always found by the PCs of your network.";
+      case kPmUpnp:
+        return "Online matches. On, your router is asked to open the match's port and the port is chosen for you. Off, you open the "
+               "port below on your router yourself.";
+      case kPmPort:
+        return "The UDP port players reach your match on, when UPnP is off or the match is a LAN one: 18300 unless you want another. "
+               "For an Online match, open it on your router for friends outside your home. Type it, or A for the on screen keys.";
+      case kPmWeatherOn:
+        return "Off: the map's usual afternoon, 16:00 and fair, and no Weather tab. On: a Weather tab appears beside Match with the "
+               "time of day, clouds, weather, wind and fog. F9 changes them while the match runs.";
+      case kPmTime:
+        return "The hour the match starts at: left and right move the sun, or the moon at night, a quarter hour; drag it with the "
+               "mouse, or type it (18:30).";
+      case kPmDayNight:
+        return "On, the match's clock runs: the sun goes over, then the moon, through dusk and night. Off, the time stands still at "
+               "the time of day above.";
+      case kPmDayLen:
+        return "How many minutes a whole day and night take in the match while the time passes. Left and right, or type up to 1440.";
+      case kPmCloud: return "How much of the sky the clouds take, for players who chose the volumetric sky.";
+      case kPmRate: return "How fast the clouds form and dissolve. Lower is calmer and closer to real weather.";
+      case kPmCloudHeight:
+        return "How high over the sea the clouds begin, for players who chose the volumetric sky. Low, the planes fly through them "
+               "and can hide in them.";
+      case kPmWeather:
+        return "From fair to a storm: more and denser cloud, a greyer sky and less sun; from about half, mist and far rain shafts; a "
+               "little higher, rain; from about two thirds, lightning in the clouds.";
+      case kPmStorm:
+        return "On, the weather builds from the Weather setting to a full storm over each round and eases again (over the match time, "
+               "else over half an hour). The wind goes with it unless set apart.";
+      case kPmStormType:
+        return "What the weather builds where it is strong: a thunderstorm (towering clouds, heavy rain and lightning over one "
+               "stretch of the map), or a hurricane (a calm eye, its wall and spiral rain bands). Both come in from the sea as the "
+               "weather rises and cover the map at 100%.";
+      case kPmWind: return "From calm to a gale: the stronger the wind, the further the rain leans. Follows the weather until set apart.";
+      case kPmFog: return "A haze that hides what is far: at 100% the sight is about a kilometre.";
+      case kPmGroundFog: return "A low layer of fog over the sea and the shore, in patches that drift.";
+    }
+    return "";
+  }
+  // The sun's height at the time of day, -1 (midnight) to 1 (noon).
+  float PmSunHeight() const { return std::sin(3.14159265f * (pm_time_ - 6.0f) / 12.0f); }
+  // The map's picture tinted for the time of day on the Weather tab (a hint, not the game's own light).
+  ImU32 PmSkyTint() const {
+    const float s = PmSunHeight();
+    auto mix = [](float a, float b, float k) { return int(a + (b - a) * std::clamp(k, 0.0f, 1.0f)); };
+    if (s >= 0.25f) return IM_COL32(255, 255, 255, 255);
+    if (s >= 0.0f) return IM_COL32(255, mix(200, 255, s / 0.25f), mix(150, 255, s / 0.25f), 255);
+    const float k = -s / 0.25f;
+    return IM_COL32(mix(255, 64, k), mix(200, 80, k), mix(150, 124, k), 255);
+  }
+  const char* PmDayPart() const {
+    const float s = PmSunHeight();
+    return s >= 0.25f ? "DAY" : s >= -0.05f ? (pm_time_ < 12 ? "DAWN" : "DUSK") : "NIGHT";
+  }
+
   void PrivateMatchPage(ImDrawList* d, ImGuiIO& io, Input in) {
     NotePage("private match");
     const Stage st = StageOf(io);
@@ -2694,37 +2909,59 @@
     const std::string status = OnlineStatus(online_ok);
     MenuChrome(d, io, st, status, online_ok);
     MenuFoot(d, st);
-    // ---- the rail and its heading
-    const ImVec2 ra = st.P(48, 93), rb = st.P(400, 620);
-    d->AddRectFilled(ra, rb, IM_COL32(13, 15, 11, 204));
-    d->AddRect(ra, rb, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
-    kit::Spaced(d, f.typed, st(8), ImVec2(ra.x + st(24), ra.y + st(18)), kit::kKhakiDim, "HOSTED ON THIS PC", st(2));
-    kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(ra.x + st(24), ra.y + st(32)), kit::kCream, "CUSTOM MATCH");
-    d->AddRectFilled(ImVec2(ra.x, ra.y + st(76)), ImVec2(rb.x, ra.y + st(77)), IM_COL32(241, 234, 211, 30));
-    const float rows_y = ra.y + st(77);
-    // ---- the picture card at the right: the chosen map from the air, the paper band under it
-    // (13 Nov 2026: down to the rail's foot, "getting a cleaner full view of the map"; it ended at 380.)
-    const ImVec2 ha = st.P(427, 93), hb = st.P(1232, 620);
-    const ImVec2 band(ha.x, hb.y - st(110));
-    d->PushClipRect(ha, hb, true);
-    MapPicture(d, st.u * 1.5f, ha, ImVec2(hb.x, band.y), pm_map_ < 4 ? kPmMapTitles[pm_map_] : "Wake Island");
-    d->PopClipRect();
-    {  // the chip
-      const std::string chip = pm_lan_ ? "YOUR OWN SERVER \xC2\xB7 ON YOUR NETWORK'S LAN TAB"
-                                       : "YOUR OWN SERVER \xC2\xB7 ON THE COMMUNITY TAB";
+    const ImVec2 la = st.P(48, 107), lb = st.P(475, 579);    // the settings
+    const ImVec2 pa = st.P(491, 107), pb = st.P(864, 320);   // the map's picture
+    const ImVec2 va = st.P(491, 331), vb = st.P(864, 579);   // the game mode and the levels
+    const ImVec2 ra = st.P(880, 107), rb = st.P(1232, 480);  // the rotation
+    const ImVec2 o0 = st.P(880, 491), o1 = st.P(1232, 535);  // Host online
+    const ImVec2 h0 = st.P(880, 541), h1 = st.P(1232, 579);  // Host on LAN
+    const ImVec2 ba = st.P(48, 589), bb = st.P(1232, 645);   // the chosen row's help
+    const ImU32 rail = IM_COL32(13, 15, 11, 214), edge = IM_COL32(241, 234, 211, 30), rule = IM_COL32(241, 234, 211, 18);
+    const ImU32 dim_ink = IM_COL32(120, 116, 100, 150);
+    if (!pm_weather_on_) pm_tab_ = 0;
+    PmFitOrder();
+    int n = int(pm_order_.size());
+    pm_rot_row_ = std::clamp(pm_rot_row_, 0, n + 1);
+    pm_lv_row_ = std::clamp(pm_lv_row_, -1, 3);
+    if (pm_rot_row_ >= n) pm_grab_ = false;
+    const bool editing = pm_edit_ >= 0;
+
+    // ---- the map's picture: the map under the cursor, else the rotation's first; on the Weather tab, tinted for the
+    // time of day
+    auto draw_picture = [&]() {
+      int pic = pm_order_.front();
+      if (pm_col_ == 1 && pm_lv_row_ >= 0) pic = pm_lv_row_;
+      if (pm_col_ == 2 && pm_rot_row_ < n) pic = pm_order_[size_t(pm_rot_row_)];
+      d->PushClipRect(pa, pb, true);
+      bool drawn = false;
+      if (pm_tab_ == 1)
+        drawn = kit::DrawImageFile(d, UserDir() / "cache" / "extracted" / "maps" / (std::string(kPmMapKeys[pic]) + ".png"), pa, pb,
+                                   false, false, 0, PmSkyTint());
+      if (!drawn) MapPicture(d, st.u * 1.5f, pa, pb, kPmMapTitles[pic]);
+      d->PopClipRect();
+      d->AddRect(pa, pb, edge, 0, 0, 1.0f);
+      const std::string chip = pm_tab_ == 1 ? fmt::format("{} \xC2\xB7 {} \xC2\xB7 {}", PmSlideText(kPmTime), PmDayPart(), kPmMapNames[pic])
+                                            : fmt::format("{} \xC2\xB7 {} \xC2\xB7 YOUR OWN SERVER", kPmMapNames[pic],
+                                                          pic == 3 ? "AIR SUPERIORITY" : "CONQUEST");
       const float cw = kit::SpacedWidth(f.ui_bold, st(9), chip, st(1));
-      const ImVec2 c0(ha.x + st(20), ha.y + st(20)), c1(c0.x + cw + st(22), c0.y + st(22));
+      const ImVec2 c0(pa.x + st(14), pa.y + st(14)), c1(c0.x + cw + st(22), c0.y + st(22));
       d->AddRectFilled(c0, c1, kit::kStrip);
       kit::Spaced(d, f.ui_bold, st(9), ImVec2(c0.x + st(11), c0.y + st(4)), kit::kStripText, chip, st(1));
-    }
-    kit::PaperArt(d, band, hb);
+    };
+    draw_picture();
+
+    // ---- while our server starts: its steps in the settings' place, the wait on paper over the levels
     if (pm_hosting_) {
-      PrivateMatchStarting(d, st, in, ImVec2(ra.x, rows_y), rb, band, hb);
+      d->AddRectFilled(la, lb, rail);
+      d->AddRect(la, lb, edge, 0, 0, 1.0f);
+      kit::Spaced(d, f.typed, st(8), ImVec2(la.x + st(18), la.y + st(14)), kit::kKhakiDim, "HOSTED ON THIS PC", st(2));
+      kit::GameText(d, kit::GameFont::kHeadline, st(24), ImVec2(la.x + st(18), la.y + st(28)), kit::kCream, "CUSTOM MATCH");
+      kit::PaperArt(d, va, vb);
+      PrivateMatchStarting(d, st, in, ImVec2(la.x, la.y + st(68)), lb, va, vb);
       return;
     }
-    // The prompts first: a click on one is that button's press for the rest of the frame.
-    const bool editing = pm_edit_ >= 0;
-    const bool text_row = pm_row_ == kPmName || pm_row_ == kPmPassText;
+
+    // ---- the prompts first: a click on one is that button's press for the rest of the frame
     std::vector<Cue> cues;
     if (editing) {
       cues = {{kit::Button::kA, "TYPE"}, {kit::Button::kX, "DELETE", "Backspace"}};
@@ -2732,36 +2969,91 @@
       cues.push_back({kit::Button::kStart, "DONE", "", true});
       cues.push_back({kit::Button::kB, "CANCEL"});
     } else {
-      // On the name and the password, A opens the on screen keys; the keyboard types straight into them (no Edit, as
-      // the soldier name's page).
-      if (!text_row) cues.push_back({kit::Button::kA, pm_row_ == kPmHost ? "HOST" : "CHANGE"});
-      else if (device_ != Device::kKeyboard) cues.push_back({kit::Button::kA, "EDIT"});
-      if (pm_row_ == kPmPassText) cues.push_back({kit::Button::kY, pm_pass_shown_ ? "HIDE" : "SHOW", "F2"});
-      cues.push_back({kit::Button::kB, "BACK"});
+      if (pm_col_ == 0) {
+        const bool text_row = pm_row_ == kPmName || pm_row_ == kPmPassText || pm_row_ == kPmPort;
+        // A slider's box is typed into, so a controller's A steps it as on the other rows (it opened a box only a
+        // keyboard could fill).
+        if (!text_row)
+          cues.push_back({kit::Button::kA, pm_tab_ == 1 && PmSlideRow(pm_row_) && device_ == Device::kKeyboard ? "TYPE IT" : "CHANGE"});
+        else if (device_ != Device::kKeyboard) cues.push_back({kit::Button::kA, "EDIT"});
+        if (pm_row_ == kPmPassText) cues.push_back({kit::Button::kY, pm_pass_shown_ ? "HIDE" : "SHOW", "F2"});
+        if (pm_weather_on_) cues.push_back({kit::Button::kLB, "MATCH / WEATHER"});
+      } else if (pm_col_ == 1) {
+        if (pm_lv_row_ >= 0 && PmMapInMode(pm_mode_, pm_lv_row_))
+          cues.push_back({kit::Button::kA, PmInOrder(pm_lv_row_) ? (n > 1 ? "TAKE OUT" : "THE ONLY MAP") : "ADD TO ROTATION"});
+        else if (pm_lv_row_ < 0) cues.push_back({kit::Button::kA, "CHANGE"});
+      } else if (pm_rot_row_ < n) {
+        cues.push_back({kit::Button::kA, pm_grab_ ? "PUT DOWN" : "MOVE"});
+        if (n > 1 && !pm_grab_) cues.push_back({kit::Button::kX, "TAKE OUT"});
+      } else {
+        cues.push_back({kit::Button::kA, pm_rot_row_ == n ? "HOST ONLINE" : "HOST ON LAN"});
+      }
+      cues.push_back({kit::Button::kBack, "COLUMNS"});
+      cues.push_back({kit::Button::kStart, "HOST ONLINE", "", true});
+      cues.push_back({kit::Button::kB, pm_grab_ ? "PUT DOWN" : pm_col_ != 0 ? "SETTINGS" : pm_tab_ == 1 ? "MATCH" : "BACK"});
     }
     Prompts(d, st, st.P(48, 662), cues, in, 15);
     // F2 (the keyboard's Y here: R types a letter) shows or hides the password.
-    if (ImGui::IsKeyPressed(ImGuiKey_F2, false) && (pm_row_ == kPmPassText || pm_edit_ == kPmPassText)) in.y = true;
-    // While the keys are open, the page's own rows take nothing: the keys get this frame's presses (ekeys, below).
-    Input ekeys;
+    if (ImGui::IsKeyPressed(ImGuiKey_F2, false) && ((pm_col_ == 0 && pm_row_ == kPmPassText) || pm_edit_ == kPmPassText)) in.y = true;
+    Input ekeys;  // while the keys are open, the page takes nothing: the keys get this frame's presses
     if (editing) ekeys = in, in = {};
-    if (!editing && in.y && pm_row_ == kPmPassText) pm_pass_shown_ = !pm_pass_shown_;
-    // The rows in the panel's order (13 Nov 2026, after the first look at it: the name first with its field under it,
-    // UPnP and the port as a smaller pair under Network type, and no UPnP at all for a LAN match).
-    std::vector<int> order = {kPmName, kPmPass};
-    if (pm_pass_on_) order.push_back(kPmPassText);
-    order.insert(order.end(), {kPmMap, kPmTick, kPmNet});
-    if (!pm_lan_) order.push_back(kPmListed);
-    if (!pm_lan_) order.push_back(kPmUpnp);
-    order.insert(order.end(), {kPmPort, kPmHost});
-    {
-      int at = 0;
-      for (int k = 0; k < int(order.size()); ++k)
-        if (order[size_t(k)] == pm_row_) at = k;
-      if (std::find(order.begin(), order.end(), pm_row_) == order.end()) pm_row_ = kPmNet, at = 3;  // UPnP went with LAN
-      const int n = int(order.size());
-      if (in.up) pm_row_ = order[size_t((at + n - 1) % n)];
-      if (in.down) pm_row_ = order[size_t((at + 1) % n)];
+    if (!editing && in.y && pm_col_ == 0 && pm_row_ == kPmPassText) pm_pass_shown_ = !pm_pass_shown_;
+
+    auto host = [&](bool lan) {
+      pm_lan_ = lan;
+      REXLOG_INFO("BF private match: Host {} pressed ({}, rotation {})", lan ? "on LAN" : "online", PmHeadline(), n);
+      HostPrivateMatch();
+    };
+    auto set_tab = [&](int t) {
+      pm_tab_ = t, pm_col_ = 0, pm_row_ = t ? kPmTime : kPmWeatherOn, pm_slide_edit_ = -1;
+      REXLOG_INFO("BF private match: the {} tab", t ? "Weather" : "Match");
+    };
+    if (!editing && pm_weather_on_ && (in.prev_tab || in.next_tab)) set_tab(1 - pm_tab_);
+    if (!editing && in.view) pm_col_ = (pm_col_ + 1) % 3, pm_grab_ = false, pm_slide_edit_ = -1;
+    if (!editing && in.start) {
+      host(false);
+      return;
+    }
+
+    // ---- the settings' rows of the tab shown
+    std::vector<int> order;
+    if (pm_tab_ == 0) {
+      order = {kPmName, kPmPassText, kPmTickets, kPmTimeLimit, kPmBots, kPmTick, kPmListed, kPmUpnp};
+      if (!pm_upnp_) order.push_back(kPmPort);
+      order.push_back(kPmWeatherOn);
+    } else {
+      order = {kPmTime, kPmDayNight, kPmDayLen, kPmCloud, kPmRate, kPmCloudHeight, kPmWeather, kPmStormType, kPmStorm, kPmWind, kPmFog, kPmGroundFog};
+    }
+    if (std::find(order.begin(), order.end(), pm_row_) == order.end()) pm_row_ = pm_tab_ == 0 && pm_row_ == kPmPort ? kPmUpnp : order.front();
+    const int at_row = int(std::find(order.begin(), order.end(), pm_row_) - order.begin());
+    if (pm_col_ == 0) {
+      const int m = int(order.size());
+      if (in.up) pm_row_ = order[size_t((at_row + m - 1) % m)], pm_slide_edit_ = -1;
+      if (in.down) pm_row_ = order[size_t((at_row + 1) % m)], pm_slide_edit_ = -1;
+    }
+    // Across the columns with left and right wherever they change nothing (TekRantGaming, 24 Nov 2026: "the custom
+    // match screen needs to work a little bit better with controller. Can you just make sure that the controller can
+    // navigate the page properly?"): the levels' and the rotation's rows, and the settings' rows that are typed into
+    // (name, password, port). Before, only View (Tab) went across. The cursor lands on the same map: a level row on its
+    // place in the rotation, a rotation row on its level.
+    auto go_col = [&](int c) {
+      if (c == pm_col_) return;
+      if (c == 1) {
+        if (pm_col_ == 2 && pm_rot_row_ < n) pm_lv_row_ = pm_order_[size_t(pm_rot_row_)];
+        pm_lv_row_ = std::max(pm_lv_row_, 0);
+      }
+      if (c == 2 && pm_col_ == 1 && pm_lv_row_ >= 0) {
+        const auto it = std::find(pm_order_.begin(), pm_order_.end(), pm_lv_row_);
+        pm_rot_row_ = it != pm_order_.end() ? int(it - pm_order_.begin()) : std::min(pm_rot_row_, n - 1);
+      }
+      pm_col_ = c, pm_grab_ = false, pm_slide_edit_ = -1;
+      REXLOG_INFO("BF private match: the pad in the {} column", c == 0 ? "settings" : c == 1 ? "levels" : "rotation");
+    };
+    if (!editing) {
+      const bool typed_row = pm_col_ == 0 && pm_tab_ == 0 && (pm_row_ == kPmName || pm_row_ == kPmPassText || pm_row_ == kPmPort);
+      if (typed_row && in.right) go_col(1), in.right = false;
+      else if (pm_col_ == 1 && pm_lv_row_ >= 0 && (in.left || in.right)) go_col(in.left ? 0 : 2), in.left = in.right = false;
+      else if (pm_col_ == 2 && !pm_grab_ && in.left) go_col(1), in.left = false;
     }
     if (PmTyping()) {  // the keyboard types straight into the row (as the browser's address)
       ImGuiContext& g = *ImGui::GetCurrentContext();
@@ -2778,208 +3070,658 @@
       }
       if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !text.empty()) text.pop_back();
       if (editing && typed) PmEditClose(true);
+      if (!editing && typed) SavePrivateMatchChoices();
       in.left = in.right = false;
     }
+    if (pm_slide_edit_ >= 0 && (pm_slide_edit_ != pm_row_ || pm_col_ != 0)) pm_slide_edit_ = -1;
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) pm_drag_ = -1, pm_dial_drag_ = false;
+    if (pm_tab_ == 1 && pm_col_ == 0 && PmSlideRow(pm_row_)) {
+      // A digit typed on a slider's row starts its box; Enter takes the value, Esc or B leaves it as it was.
+      ImGuiContext& g = *ImGui::GetCurrentContext();
+      g.PlatformImeData.WantTextInput = true;
+      g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
+      for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
+        const ImWchar c = io.InputQueueCharacters[i];
+        if (!((c >= '0' && c <= '9') || c == ':' || c == '.')) continue;
+        if (pm_slide_edit_ != pm_row_) pm_slide_edit_ = pm_row_, pm_slide_text_.clear();
+        if (pm_slide_text_.size() < 6) pm_slide_text_ += char(c);
+      }
+      if (pm_slide_edit_ == pm_row_) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+          if (pm_slide_text_.empty()) pm_slide_edit_ = -1;
+          else pm_slide_text_.pop_back();
+        }
+        if (in.accept) {
+          if (!pm_slide_text_.empty()) {
+            const size_t colon = pm_slide_text_.find(':');
+            float v = float(std::atof(pm_slide_text_.c_str()));
+            if (pm_row_ == kPmTime && colon != std::string::npos)
+              v = float(std::atoi(pm_slide_text_.c_str())) + float(std::atoi(pm_slide_text_.c_str() + colon + 1)) / 60.0f;
+            PmSlideSet(pm_row_, v, true);
+            SavePrivateMatchChoices();
+          }
+          pm_slide_edit_ = -1, in.accept = false;
+        }
+        if (in.back) pm_slide_edit_ = -1, in.back = false;
+        in.left = in.right = false;
+      }
+    }
     auto change = [&](int row, int step) {
-      if (row == kPmMap) pm_map_ = (pm_map_ + 5 + step) % 5;
+      if (row == kPmTickets)
+        pm_tickets_ = kPmTicketSteps[std::clamp(PmTicketAt(pm_tickets_) + step, 0, int(std::size(kPmTicketSteps)) - 1)];
+      if (row == kPmTimeLimit) pm_time_limit_ = PmStep(kPmTimeSteps, int(std::size(kPmTimeSteps)), pm_time_limit_, step);
+      if (row == kPmBots) pm_bots_ = std::clamp(pm_bots_ + step, 0, 24);
       if (row == kPmTick) {
         int at = 0;
         for (int k = 0; k < kPmTickCount; ++k)
           if (kPmTicks[k] == pm_tick_) at = k;
         pm_tick_ = kPmTicks[(at + kPmTickCount + step) % kPmTickCount];
       }
-      if (row == kPmNet) pm_lan_ = !pm_lan_;
-      if (row == kPmPass) pm_pass_on_ = !pm_pass_on_;
-      if (row == kPmListed && !pm_lan_) pm_listed_ = !pm_listed_;
-      if (row == kPmUpnp && !pm_lan_) pm_upnp_ = !pm_upnp_;
+      if (row == kPmListed) pm_listed_ = !pm_listed_;
+      if (row == kPmUpnp) pm_upnp_ = !pm_upnp_;
+      if (row == kPmWeatherOn) {
+        pm_weather_on_ = !pm_weather_on_;
+        REXLOG_INFO("BF private match: Weather and time {}", pm_weather_on_ ? "on: the Weather tab" : "off: the map's usual afternoon");
+      }
+      if (row == kPmStorm) pm_storm_ = !pm_storm_;
+      if (row == kPmStormType) pm_storm_type_ = (pm_storm_type_ + 2 + step) % 2;
+      if (row == kPmDayNight) {
+        pm_dn_ = !pm_dn_;
+        if (pm_dn_ && pm_daylen_ == 0) pm_daylen_ = 24;  // the time passes: a day of 24 minutes unless set
+      }
+      if (row == kPmTime) pm_time_ = std::fmod(std::round(pm_time_ * 4.0f) / 4.0f + 24.0f + 0.25f * step, 24.0f);
+      if (row == kPmDayLen && pm_dn_) pm_daylen_ = std::clamp(pm_daylen_ + 5 * step, 5, 240);
+      if (row == kPmCloud) pm_cloud_ = std::clamp(pm_cloud_ + 5 * step, 0, 100);
+      if (row == kPmRate) pm_rate_ = std::clamp(pm_rate_ <= 5 && step < 0 ? pm_rate_ - 1 : pm_rate_ < 5 ? pm_rate_ + 1 : pm_rate_ + 5 * step, 0, 100);
+      if (row == kPmWeather) pm_weather_ = std::clamp(pm_weather_ + 5 * step, 0, 100), PmWeatherChanged();
+      if (row == kPmFog) pm_fog_ = std::clamp(pm_fog_ + 5 * step, 0, 100);
+      if (row == kPmGroundFog) pm_ground_fog_ = std::clamp(pm_ground_fog_ + 5 * step, 0, 100);
+      if (row == kPmWind) pm_wind_ = std::clamp(pm_wind_ + 5 * step, 0, 100), PmWindChanged();
+      if (row == kPmCloudHeight) pm_cloud_height_ = std::clamp(pm_cloud_height_ + 50 * step, 100, 1500);
       SavePrivateMatchChoices();
     };
-    if (in.left && pm_row_ != kPmHost) change(pm_row_, -1);
-    if (in.right && pm_row_ != kPmHost) change(pm_row_, 1);
-    // ---- the rows, as the main menu's. By the row's own number (kPm...): its title, and its help in the band.
-    static constexpr const char* kTitles[] = {"MAP",  "SERVER NAME", "NETWORK TYPE",  "SHOW IN BROWSER",
-                                              "UPNP", "PORT",        "HOST THE MATCH", "TICK RATE",
-                                              "PASSWORD", "PASSWORD"};
-    int clicked = -1;
-    float y = rows_y;
+    if (pm_col_ == 0 && in.left) change(pm_row_, -1);
+    if (pm_col_ == 0 && in.right) change(pm_row_, 1);
+
+    // ---- the levels and the rotation from the pad
+    auto set_mode = [&](int mode) {
+      if (mode == pm_mode_) return;
+      pm_mode_ = mode;
+      PmFitOrder();
+      n = int(pm_order_.size());
+      REXLOG_INFO("BF private match: game mode {}; rotation {}", kPmModeNames[pm_mode_], PmHeadline());
+      SavePrivateMatchChoices();
+    };
+    auto toggle_level = [&](int m) {
+      if (!PmMapInMode(pm_mode_, m)) return;
+      const auto it = std::find(pm_order_.begin(), pm_order_.end(), m);
+      if (it != pm_order_.end()) {
+        if (n <= 1) return;  // the rotation keeps one map
+        pm_order_.erase(it);
+      } else {
+        pm_order_.push_back(m);
+      }
+      n = int(pm_order_.size());
+      REXLOG_INFO("BF private match: {} {} the rotation ({})", kPmMapTitles[m], PmInOrder(m) ? "added to" : "taken out of", PmHeadline());
+      SavePrivateMatchChoices();
+    };
+    auto move_in_order = [&](int step) {
+      const int to = pm_rot_row_ + step;
+      if (pm_rot_row_ >= n || to < 0 || to >= n) return;
+      std::swap(pm_order_[size_t(pm_rot_row_)], pm_order_[size_t(to)]);
+      pm_rot_row_ = to;
+      REXLOG_INFO("BF private match: {} moved to place {} of the rotation", kPmMapTitles[pm_order_[size_t(to)]], to + 1);
+      SavePrivateMatchChoices();
+    };
+    if (pm_col_ == 1) {
+      if (in.up) pm_lv_row_ = pm_lv_row_ <= -1 ? 3 : pm_lv_row_ - 1;
+      if (in.down) pm_lv_row_ = pm_lv_row_ >= 3 ? -1 : pm_lv_row_ + 1;
+      if (pm_lv_row_ < 0 && (in.left || in.right)) set_mode((pm_mode_ + (in.right ? 1 : 2)) % 3);
+      if (in.accept) {
+        if (pm_lv_row_ >= 0) toggle_level(pm_lv_row_);
+        else set_mode((pm_mode_ + 1) % 3);
+        in.accept = false;
+      }
+    } else if (pm_col_ == 2) {
+      if (pm_grab_) {
+        if (in.up) move_in_order(-1);
+        if (in.down) move_in_order(1);
+        if (in.accept || in.back) pm_grab_ = false, in.accept = in.back = false;
+      } else {
+        if (in.up) pm_rot_row_ = (pm_rot_row_ + n + 1) % (n + 2);
+        if (in.down) pm_rot_row_ = (pm_rot_row_ + 1) % (n + 2);
+        if (in.x && pm_rot_row_ < n && n > 1) {
+          toggle_level(pm_order_[size_t(pm_rot_row_)]);
+          pm_rot_row_ = std::min(pm_rot_row_, n - 1);
+        }
+        if (in.accept) {
+          in.accept = false;
+          if (pm_rot_row_ < n) pm_grab_ = true;
+          else {
+            host(pm_rot_row_ == n + 1);
+            return;
+          }
+        }
+      }
+    }
+
+    // ---- the settings column: its tabs, then its rows
+    d->AddRectFilled(la, lb, rail);
+    d->AddRect(la, lb, edge, 0, 0, 1.0f);
+    const float tab_h = st(47);
+    {
+      const float bump = st(43);
+      const float tw = (lb.x - la.x - bump * 2) * 0.5f;
+      d->AddRectFilled(ImVec2(la.x, la.y + tab_h - 1), ImVec2(lb.x, la.y + tab_h), edge);
+      if (pm_weather_on_) {
+        kit::Glyph(d, PromptStyle(), kit::Button::kLB, "Q", ImVec2(la.x + st(9), la.y + tab_h * 0.5f), st(17));
+        kit::Glyph(d, PromptStyle(), kit::Button::kRB, "E", ImVec2(lb.x - bump + st(9), la.y + tab_h * 0.5f), st(17));
+      }
+      for (int t = 0; t < (pm_weather_on_ ? 2 : 1); ++t) {
+        const ImVec2 t0(la.x + bump + tw * t, la.y), t1(t0.x + tw, la.y + tab_h);
+        const bool on = pm_tab_ == t;
+        const bool hover = ImGui::IsMouseHoveringRect(t0, t1);
+        if (on) {
+          kit::PaperArt(d, t0, t1);
+          d->AddRectFilled(ImVec2(t0.x, t1.y - st(4)), t1, kit::kStamp);
+        } else if (hover) {
+          d->AddRectFilled(t0, t1, IM_COL32(241, 234, 211, 14));
+        }
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2(t0.x + st(14), t0.y + st(20)), on ? kit::kInkSection : kit::kKhakiDim,
+                    t ? "02" : "01", st(1.5f));
+        kit::GameText(d, kit::GameFont::kHeadlineMedium, st(19), ImVec2(t0.x + st(36), t0.y + st(14)), on ? kit::kInk : kit::kCream,
+                      t ? "WEATHER" : "MATCH");
+        if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !editing && !on) set_tab(t);
+      }
+    }
+    int clicked = -1;  // a settings row clicked (its change)
+    const bool in_left = io.MousePos.x >= la.x && io.MousePos.x < lb.x && io.MousePos.y >= la.y + tab_h && io.MousePos.y < lb.y;
+    const std::string caret = std::fmod(ImGui::GetTime(), 1.0) < 0.5 ? "_" : " ";
+    const float right = lb.x - st(14);
+    auto draw_switch = [&](bool on, float mid, bool sel, float at_right) {  // an on/off switch, ON or OFF said beside it
+      const float sw = st(26), sh2 = st(13);
+      const ImVec2 s0(at_right - sw, mid - sh2 * 0.5f), s1(at_right, mid + sh2 * 0.5f);
+      d->AddRectFilled(s0, s1, on ? kit::kGreen : IM_COL32(120, 116, 100, 140), sh2 * 0.5f);
+      d->AddCircleFilled(ImVec2(on ? s1.x - sh2 * 0.5f : s0.x + sh2 * 0.5f, mid), sh2 * 0.5f - st(2), kit::kCream, 20);
+      const std::string said = on ? "ON" : "OFF";
+      const float tw = kit::SpacedWidth(f.typed, st(7.5f), said, st(1.5f));
+      kit::Spaced(d, f.typed, st(7.5f), ImVec2(s0.x - st(8) - tw, mid - st(5)), sel ? kit::kInkSection : kit::kKhakiDim, said, st(1.5f));
+      return s0.x - st(8) - tw;
+    };
+    auto value_box = [&](const std::string& v, float x1, float mid, bool sel, bool off, bool typing) {  // a value in its box
+      const float w = std::max(st(46), kit::SpacedWidth(f.typed, st(7.5f), v, st(1.5f)) + st(14));
+      const ImVec2 b0(x1 - w, mid - st(9)), b1(x1, mid + st(9));
+      d->AddRectFilled(b0, b1, typing ? IM_COL32(34, 36, 27, 30) : IM_COL32(0, 0, 0, sel ? 0 : 60));
+      d->AddRect(b0, b1, typing ? kit::kStamp : off ? IM_COL32(120, 116, 100, 90) : sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
+      const float vw = kit::SpacedWidth(f.typed, st(7.5f), v, st(1.5f));
+      kit::Spaced(d, f.typed, st(7.5f), ImVec2((b0.x + b1.x - vw) * 0.5f, mid - st(5)), off ? dim_ink : sel ? kit::kInk : kit::kKhaki, v, st(1.5f));
+      return b0.x;
+    };
+    auto unit_text = [&](const std::string& u, float x1, float mid, bool sel) {
+      const float uw = kit::SpacedWidth(f.typed, st(7), u, st(1.5f));
+      kit::Spaced(d, f.typed, st(7), ImVec2(x1 - uw, mid - st(4.5f)), sel ? kit::kInkSection : kit::kKhakiDim, u, st(1.5f));
+      return x1 - uw;
+    };
+    // A slider's track from x0 to x1 at `mid`: `share` of it filled; a click or a drag on it sets `row` (true while so).
+    auto track = [&](int row, float share, float x0, float x1, float mid, bool sel, bool off) {
+      d->AddRectFilled(ImVec2(x0, mid - st(1)), ImVec2(x1, mid + st(1)), sel ? IM_COL32(34, 36, 27, 70) : IM_COL32(241, 234, 211, 50));
+      const float knob = x0 + (x1 - x0) * std::clamp(share, 0.0f, 1.0f);
+      if (!off) d->AddRectFilled(ImVec2(x0, mid - st(1)), ImVec2(knob, mid + st(1)), sel ? kit::kStamp : kit::kKhakiDim);
+      d->AddRectFilled(ImVec2(knob - st(2.5f), mid - st(6)), ImVec2(knob + st(2.5f), mid + st(6)), off ? dim_ink : sel ? kit::kInk : kit::kKhaki);
+      const bool on_track = ImGui::IsMouseHoveringRect(ImVec2(x0 - st(6), mid - st(9)), ImVec2(x1 + st(6), mid + st(9)));
+      if (!editing && !off && on_track && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) pm_drag_ = row, pm_col_ = 0, pm_row_ = row;
+      return pm_drag_ == row && !off ? std::clamp((io.MousePos.x - x0) / (x1 - x0), 0.0f, 1.0f) : -1.0f;
+    };
+    float y = la.y + tab_h;
     int number = 0;
     const std::string me = settings_.Get("player_name", "");
-    for (const int i : order) {
-      // The smaller rows: the pair under Network type, and the password's under the name.
-      const bool sub = i == kPmUpnp || i == kPmPort || i == kPmPass || i == kPmPassText;
-      if (i == kPmHost) y += st(12);                  // a rule's worth of air before the action
-      const float h = i == kPmName ? st(74) : sub ? st(29) : st(41);
-      const float title_h = i == kPmName ? st(38) : h;
-      const ImVec2 r0(ra.x, y), r1(rb.x, y + h);
-      const bool hover = !editing && ImGui::IsMouseHoveringRect(r0, r1);
-      if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) pm_row_ = i;
-      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
-      const bool sel = i == pm_row_;
+    auto row_frame = [&](int i, float h) {  // the row's place, its selection, its number; true when selected
+      const ImVec2 r0(la.x, y), r1(lb.x, y + h);
+      const bool hover = !editing && in_left && ImGui::IsMouseHoveringRect(r0, r1);
+      if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) pm_row_ = i, pm_col_ = 0;
+      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && pm_drag_ < 0) clicked = i, pm_col_ = 0;
+      const bool sel = pm_row_ == i && pm_col_ == 0;
       if (sel) {
         kit::PaperArt(d, r0, r1);
-        d->AddRectFilled(r0, ImVec2(r0.x + st(5), r1.y), kit::kStamp);
+        d->AddRectFilled(r0, ImVec2(r0.x + st(4), r1.y), kit::kStamp);
+      } else if (pm_row_ == i) {
+        d->AddRectFilled(r0, r1, IM_COL32(241, 234, 211, 12));  // the column's place while another column is used
       }
-      // No rule between Network type and its pair, nor inside the pair: they read as one block.
-      const bool block = i == kPmNet || i == kPmUpnp || i == kPmName || (i == kPmPass && pm_pass_on_);
-      if (!block) d->AddRectFilled(ImVec2(r0.x, r1.y - 1), ImVec2(r1.x, r1.y), IM_COL32(241, 234, 211, 20));
-      const ImU32 dim = sel ? kit::kInkSection : kit::kKhakiDim;
-      if (!sub)
-        kit::Spaced(d, f.typed, st(8), ImVec2(r0.x + st(24), r0.y + title_h * 0.5f - st(5)), dim,
-                    fmt::format("{:02d}", ++number), st(1.5f));
-      if (sub) {
-        // A short tick joins the pair to Network type above it.
-        d->AddRectFilled(ImVec2(r0.x + st(58), r0.y - st(2)), ImVec2(r0.x + st(59), r0.y + h * 0.5f), IM_COL32(241, 234, 211, sel ? 0 : 60));
-        d->AddRectFilled(ImVec2(r0.x + st(58), r0.y + h * 0.5f - 1), ImVec2(r0.x + st(68), r0.y + h * 0.5f), IM_COL32(241, 234, 211, sel ? 0 : 60));
-        if (i != kPmPassText)
-          kit::Spaced(d, f.typed, st(8.5f), ImVec2(r0.x + st(76), r0.y + h * 0.5f - st(5.5f)), sel ? kit::kInk : kit::kKhaki,
-                      kTitles[i], st(2));
-      } else {
-        const float cap = st(19);
-        kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(r0.x + st(52), r0.y + (title_h - cap) * 0.5f),
-                      sel ? kit::kInk : kit::kKhaki, kTitles[i]);
+      d->AddRectFilled(ImVec2(r0.x, r1.y - 1), ImVec2(r1.x, r1.y), rule);
+      return sel;
+    };
+    auto number_title = [&](int i, float title_mid, bool sel, float cap) {
+      kit::Spaced(d, f.typed, st(7.5f), ImVec2(la.x + st(14), title_mid - st(4.5f)), sel ? kit::kInkSection : kit::kKhakiDim,
+                  fmt::format("{:02d}", ++number), st(1.5f));
+      kit::GameText(d, kit::GameFont::kHeadlineMedium, cap, ImVec2(la.x + st(38), title_mid - cap * 0.5f), sel ? kit::kInk : kit::kKhaki,
+                    PmTitle(i));
+    };
+    if (pm_tab_ == 0) {
+      for (const int i : order) {
+        const float h = i == kPmName || i == kPmPassText ? st(57) : i == kPmWeatherOn ? st(44) : i == kPmPort ? st(30) : st(37);
+        const bool sel = row_frame(i, h);
+        const float mid = y + (i == kPmName || i == kPmPassText ? st(15) : i == kPmWeatherOn ? st(16) : h * 0.5f);
+        if (i == kPmPort) {
+          kit::Spaced(d, f.typed, st(8), ImVec2(la.x + st(38), mid - st(5)), sel ? kit::kInk : kit::kKhaki, "PORT", st(2));
+          value_box(pm_port_text_ + (sel ? caret : ""), right, mid, sel, false, false);
+          y += h;
+          continue;
+        }
+        number_title(i, mid, sel, st(i == kPmWeatherOn ? 16 : 15));
+        if (i == kPmName || i == kPmPassText) {
+          // The text's field, the row's width under the title.
+          const ImVec2 f0(la.x + st(38), y + st(28)), f1(right, y + h - st(7));
+          d->AddRectFilled(f0, f1, sel ? IM_COL32(34, 36, 27, 22) : IM_COL32(0, 0, 0, 70));
+          d->AddRect(f0, f1, sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
+          std::string shown;
+          bool hint = false;
+          if (i == kPmName) {
+            hint = pm_name_.empty() && !sel;
+            shown = !pm_name_.empty() ? pm_name_ + (sel ? caret : "") : sel ? caret : me.empty() ? "Custom match" : me + "'s match";
+          } else {
+            hint = pm_pass_.empty() && !sel;
+            shown = hint ? std::string("None: anybody can join") : PmPassShown(pm_pass_) + (sel ? caret : "");
+          }
+          d->PushClipRect(f0, f1, true);
+          d->AddText(f.ui_bold, st(11), ImVec2(f0.x + st(8), f0.y + (f1.y - f0.y - st(11) * 1.45f) * 0.5f),
+                     hint ? IM_COL32(241, 234, 211, 110) : sel ? kit::kInk : kit::kKhaki, shown.c_str());
+          d->PopClipRect();
+        } else if (i == kPmTickets) {
+          const float u0 = unit_text(pm_tickets_ ? "A TEAM" : pm_mode_ == 2 ? "EACH MAP'S" : "MAP'S OWN", right, mid, sel);
+          const float b0 = value_box(pm_tickets_ ? std::to_string(pm_tickets_) : pm_mode_ == 1 ? "100" : pm_mode_ == 0 ? "130" : "OWN",
+                                     u0 - st(8), mid, sel, false, false);
+          const int at = PmTicketAt(pm_tickets_);
+          const float s = track(i, float(at) / float(std::size(kPmTicketSteps) - 1), b0 - st(118), b0 - st(12), mid, sel, false);
+          if (s >= 0) {
+            const int pick = kPmTicketSteps[int(std::lround(s * float(std::size(kPmTicketSteps) - 1)))];
+            if (pick != pm_tickets_) pm_tickets_ = pick, SavePrivateMatchChoices();
+          }
+        } else if (i == kPmTimeLimit) {
+          value_box(pm_time_limit_ ? fmt::format("{} MIN", pm_time_limit_) : std::string("OFF"), right, mid, sel, false, false);
+          if (!pm_time_limit_) unit_text("TICKETS ONLY", right - st(60), mid, sel);
+        } else if (i == kPmBots) {
+          const float u0 = unit_text(pm_bots_ ? fmt::format("{} A SIDE", (pm_bots_ + 1) / 2) : std::string("NONE"), right, mid, sel);
+          const float b0 = value_box(std::to_string(pm_bots_), u0 - st(8), mid, sel, false, false);
+          const float s = track(i, pm_bots_ / 24.0f, b0 - st(118), b0 - st(12), mid, sel, false);
+          if (s >= 0 && int(std::lround(s * 24)) != pm_bots_) pm_bots_ = int(std::lround(s * 24)), SavePrivateMatchChoices();
+        } else if (i == kPmTick) {
+          std::string v = std::to_string(pm_tick_) + (pm_tick_ == 60 ? " HZ \xC2\xB7 DEFAULT" : " HZ \xC2\xB7 ORIGINAL");
+          if (sel) v = "<  " + v + "  >";
+          const float vw = kit::SpacedWidth(f.typed, st(7.5f), v, st(1.5f));
+          kit::Spaced(d, f.typed, st(7.5f), ImVec2(right - vw, mid - st(5)), sel ? kit::kInk : kit::kKhaki, v, st(1.5f));
+        } else if (i == kPmListed) {
+          const float x = draw_switch(pm_listed_, mid, sel, right);
+          unit_text("ONLINE ONLY", x - st(12), mid, sel);
+        } else if (i == kPmUpnp) {
+          const float b0 = value_box(pm_upnp_ ? "PORT AUTO" : "PORT BELOW", right, mid, sel, true, false);
+          draw_switch(pm_upnp_, mid, sel, b0 - st(10));
+        } else if (i == kPmWeatherOn) {
+          kit::Spaced(d, f.typed, st(6.5f), ImVec2(la.x + st(38), mid + st(12)), sel ? kit::kInkSection : kit::kKhakiDim,
+                      pm_weather_on_ ? "THE WEATHER TAB IS OPEN" : "ON ADDS A WEATHER TAB", st(1.5f));
+          draw_switch(pm_weather_on_, y + h * 0.5f, sel, right);
+        }
+        y += h;
       }
-      const float right = r1.x - st(18), mid = r0.y + title_h * 0.5f;
-      auto value_text = [&](std::string value, bool arrows, bool off) {
-        if (arrows && sel && !off) value = "<  " + value + "  >";
-        const float vw = kit::SpacedWidth(f.typed, st(7.5f), value, st(1.5f));
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2(right - vw, mid - st(5)), off ? IM_COL32(120, 116, 100, 150) : dim, value, st(1.5f));
-      };
-      const std::string caret = std::fmod(ImGui::GetTime(), 1.0) < 0.5 ? "_" : " ";
-      auto draw_switch = [&](bool on) {  // an on/off switch at the row's right, ON or OFF said beside it
-        const float sw = st(26), sh2 = st(13);
-        const ImVec2 s0(right - sw, mid - sh2 * 0.5f), s1(right, mid + sh2 * 0.5f);
-        d->AddRectFilled(s0, s1, on ? kit::kGreen : IM_COL32(120, 116, 100, 140), sh2 * 0.5f);
-        d->AddCircleFilled(ImVec2(on ? s1.x - sh2 * 0.5f : s0.x + sh2 * 0.5f, mid), sh2 * 0.5f - st(2), kit::kCream, 20);
-        const std::string said = on ? "ON" : "OFF";
-        const float tw = kit::SpacedWidth(f.typed, st(7.5f), said, st(1.5f));
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2(s0.x - st(8) - tw, mid - st(5)), dim, said, st(1.5f));
-      };
-      if (i == kPmHost) {
-        if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(right - st(20), mid), st(20));
-      } else if (i == kPmName) {
-        // The name's field: a box the row's width, under the title.
-        const ImVec2 f0(r0.x + st(52), r0.y + st(40)), f1(r1.x - st(18), r1.y - st(9));
-        d->AddRectFilled(f0, f1, sel ? IM_COL32(34, 36, 27, 22) : IM_COL32(0, 0, 0, 70));
-        d->AddRect(f0, f1, sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
-        const bool empty = pm_name_.empty();
-        const std::string shown = !empty ? pm_name_ + (sel ? caret : "") : sel ? caret : me.empty() ? "Custom match" : me + "'s match";
-        d->PushClipRect(f0, f1, true);
-        d->AddText(f.ui_bold, st(11), ImVec2(f0.x + st(9), f0.y + (f1.y - f0.y - st(11) * 1.45f) * 0.5f),
-                   empty && !sel ? IM_COL32(241, 234, 211, 110) : sel ? kit::kInk : kit::kKhaki, shown.c_str());
-        d->PopClipRect();
-      } else if (i == kPmMap) {
-        value_text(kPmMapNames[pm_map_], true, false);
-      } else if (i == kPmTick) {
-        value_text(std::to_string(pm_tick_) + (pm_tick_ == 60 ? "Hz - Default" : pm_tick_ == 30 ? "Hz - Original" : "Hz - Experimental"),
-                   true, false);
-      } else if (i == kPmNet) {
-        value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
-      } else if (i == kPmListed) {
-        value_text(pm_lan_ ? "ON YOUR NETWORK" : pm_listed_ ? "YES" : "NO", true, pm_lan_);
-      } else if (i == kPmUpnp) {
-        draw_switch(pm_upnp_);  // on, the router is asked to open the port
-      } else if (i == kPmPass) {
-        draw_switch(pm_pass_on_);
-      } else if (i == kPmPassText) {
-        // The password's field, the row's width from the tick mark: stars, or as typed while Y (F2) shows it.
-        const ImVec2 f0(r0.x + st(76), r0.y + st(4)), f1(right, r1.y - st(4));
-        d->AddRectFilled(f0, f1, sel ? IM_COL32(34, 36, 27, 22) : IM_COL32(0, 0, 0, 70));
-        d->AddRect(f0, f1, sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
-        const std::string shown = pm_pass_.empty() && !sel ? std::string("Type a password") : PmPassShown(pm_pass_) + (sel ? caret : "");
-        d->PushClipRect(f0, f1, true);
-        d->AddText(f.ui_bold, st(10.5f), ImVec2(f0.x + st(8), f0.y + (f1.y - f0.y - st(10.5f) * 1.45f) * 0.5f),
-                   pm_pass_.empty() && !sel ? IM_COL32(241, 234, 211, 110) : sel ? kit::kInk : kit::kKhaki, shown.c_str());
-        d->PopClipRect();
-      } else if (i == kPmPort) {
-        // The port's field: typed when it is the player's to choose, greyed (Automatic) while the router is asked.
-        const bool off = !PmPortTyped();
-        const ImVec2 f0(right - st(70), r0.y + st(5)), f1(right, r1.y - st(5));
-        d->AddRect(f0, f1, off ? IM_COL32(120, 116, 100, 90) : sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
-        const std::string shown = off ? "AUTOMATIC" : pm_port_text_ + (sel ? caret : "");
-        const float vw = kit::SpacedWidth(f.typed, st(7.5f), shown, st(1.5f));
-        kit::Spaced(d, f.typed, st(7.5f), ImVec2((f0.x + f1.x - vw) * 0.5f, mid - st(5)),
-                    off ? IM_COL32(120, 116, 100, 150) : dim, shown, st(1.5f));
+    } else {
+      // The time of day: the sun's path over the horizon (golden by day, dotted under it by night), the sun riding it
+      // and the moon below it at night; the hour large at the top left with Time passes under it; A day lasts at the
+      // right. Three rows in one panel: Time of day, Time passes, A day lasts.
+      const ImVec2 p0(la.x + st(10), y + st(8)), p1(lb.x - st(10), y + st(8) + st(126));
+      const ImU32 panel = IM_COL32(27, 27, 24, 255);
+      const bool dial_sel = pm_col_ == 0 && (pm_row_ == kPmTime || pm_row_ == kPmDayNight || pm_row_ == kPmDayLen);
+      d->AddRectFilled(p0, p1, panel, st(9));
+      d->AddRect(p0, p1, dial_sel ? kit::kGreen : IM_COL32(255, 255, 255, 34), st(9), 0, dial_sel ? st(2) : 1.0f);
+      if (dial_sel) d->AddRectFilled(ImVec2(p0.x, p0.y + st(8)), ImVec2(p0.x + st(3.5f), p1.y - st(8)), kit::kStamp);
+      // the hour
+      const bool time_sel = pm_col_ == 0 && pm_row_ == kPmTime;
+      const ImVec2 t0(p0.x + st(14), p0.y + st(8));
+      const bool typing_time = pm_slide_edit_ == kPmTime;
+      const std::string hour = typing_time ? pm_slide_text_ + caret : PmSlideText(kPmTime);
+      d->AddText(f.ui_bold, st(30), t0, typing_time ? kit::kStamp : IM_COL32(244, 241, 230, 255), hour.c_str());
+      const float hour_w = kit::TextWidth(f.ui_bold, st(30), hour);
+      if (time_sel)
+        kit::Spaced(d, f.typed, st(6.5f), ImVec2(t0.x + hour_w + st(12), t0.y + st(16)), kit::kKhakiDim, "<  >  OR TYPE IT", st(1.5f));
+      // Time passes, under the hour
+      {
+        const bool sel = pm_col_ == 0 && pm_row_ == kPmDayNight;
+        const ImVec2 s0(t0.x - st(4), p0.y + st(46)), s1(t0.x + st(160), p0.y + st(64));
+        if (sel) d->AddRect(s0, s1, kit::kGreen, st(3), 0, st(1.5f));
+        const float sw = st(24), sh = st(12), mid = (s0.y + s1.y) * 0.5f;
+        const ImVec2 w0(t0.x, mid - sh * 0.5f), w1(t0.x + sw, mid + sh * 0.5f);
+        d->AddRectFilled(w0, w1, pm_dn_ ? kit::kGreen : IM_COL32(120, 116, 100, 140), sh * 0.5f);
+        d->AddCircleFilled(ImVec2(pm_dn_ ? w1.x - sh * 0.5f : w0.x + sh * 0.5f, mid), sh * 0.5f - st(2), kit::kCream, 20);
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2(w1.x + st(8), mid - st(5)), sel ? kit::kCream : kit::kKhaki,
+                    pm_dn_ ? "TIME PASSES" : "TIME PASSES \xC2\xB7 OFF", st(1.5f));
+        if (!editing && ImGui::IsMouseHoveringRect(s0, s1)) {
+          if (io.MouseDelta.x + io.MouseDelta.y != 0) pm_row_ = kPmDayNight, pm_col_ = 0;
+          if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = kPmDayNight, pm_col_ = 0;
+        }
       }
-      y += h;
-      // An experimental tick rate (every one above 30: TekRantGaming, 13 Nov 2026): the warning right under the
-      // row, in red.
-      if (i == kPmTick && pm_tick_ > 60) {  // 60 is the default now: only a rate above it warns
-        const std::string warning = "Physics, weapons, vehicles and timers may behave oddly or break, your PC and every "
-                                    "player's connection work harder, and players on older versions cannot join. Use "
-                                    "30 Hz for a normal match.";
-        const float wx = ra.x + st(52), wrap = rb.x - st(18) - wx, size = st(10);
-        const ImU32 red = IM_COL32(236, 92, 76, 255);  // a red that reads on the dark rail
-        const float wh = st(6) + st(14) + kit::WrappedHeight(f.ui, size, warning, wrap) + st(10);
-        d->AddRectFilled(ImVec2(ra.x, y), ImVec2(ra.x + st(5), y + wh), kit::kStamp);
-        kit::Spaced(d, f.ui_bold, st(9), ImVec2(wx, y + st(6)), red, fmt::format("WARNING: {} HZ IS EXPERIMENTAL", pm_tick_),
-                    st(1.5f));
-        kit::Wrapped(d, f.ui, size, ImVec2(wx, y + st(6) + st(14)), red, warning, wrap);
-        d->AddRectFilled(ImVec2(ra.x, y + wh - 1), ImVec2(rb.x, y + wh), IM_COL32(241, 234, 211, 20));
-        y += wh;
+      // A day lasts, at the right
+      {
+        const bool sel = pm_col_ == 0 && pm_row_ == kPmDayLen;
+        const std::string cap = "A DAY LASTS";
+        const float cw = kit::SpacedWidth(f.typed, st(6.5f), cap, st(1.5f));
+        kit::Spaced(d, f.typed, st(6.5f), ImVec2(p1.x - st(14) - cw, p0.y + st(12)), kit::kKhakiDim, cap, st(1.5f));
+        const bool typing = pm_slide_edit_ == kPmDayLen;
+        const std::string v = typing ? pm_slide_text_ + caret : pm_dn_ ? PmSlideText(kPmDayLen) : std::string("STILL");
+        const float vw = std::max(st(62), kit::SpacedWidth(f.typed, st(7.5f), v, st(1.5f)) + st(14));
+        const ImVec2 b0(p1.x - st(14) - vw, p0.y + st(24)), b1(p1.x - st(14), p0.y + st(42));
+        d->AddRect(b0, b1, typing ? kit::kStamp : sel ? kit::kGreen : IM_COL32(241, 234, 211, pm_dn_ ? 90 : 40), 0, 0, sel ? st(1.5f) : 1.0f);
+        const float tw = kit::SpacedWidth(f.typed, st(7.5f), v, st(1.5f));
+        kit::Spaced(d, f.typed, st(7.5f), ImVec2((b0.x + b1.x - tw) * 0.5f, b0.y + st(4)), pm_dn_ || typing ? kit::kKhaki : dim_ink, v, st(1.5f));
+        if (!editing && ImGui::IsMouseHoveringRect(ImVec2(b0.x, p0.y + st(8)), b1)) {
+          if (io.MouseDelta.x + io.MouseDelta.y != 0) pm_row_ = kPmDayLen, pm_col_ = 0;
+          if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && pm_dn_) pm_row_ = kPmDayLen, pm_col_ = 0, pm_slide_edit_ = kPmDayLen, pm_slide_text_.clear();
+        }
+      }
+      // the sun's path
+      {
+        const float x0 = p0.x + st(18), x1 = p1.x - st(18), hy = p0.y + st(94), amp = st(22);
+        auto at = [&](float t) { return ImVec2(x0 + (x1 - x0) * t / 24.0f, hy - amp * std::sin(3.14159265f * (t - 6.0f) / 12.0f)); };
+        d->AddLine(ImVec2(p0.x + st(10), hy), ImVec2(p1.x - st(10), hy), IM_COL32(255, 255, 255, 70), st(1));
+        for (int h = 0; h <= 24; h += 6) {
+          const float x = at(float(h)).x;
+          d->AddLine(ImVec2(x, hy - st(3)), ImVec2(x, hy + st(3)), IM_COL32(255, 255, 255, 90), st(1));
+          const std::string label = fmt::format("{:02d}", h);
+          const float lw = kit::TextWidth(f.typed, st(7), label);
+          d->AddText(f.typed, st(7), ImVec2(x - lw * 0.5f, p1.y - st(13)), IM_COL32(241, 234, 211, 90), label.c_str());
+        }
+        for (float t = 0; t <= 24.001f; t += 0.4f)  // the night: dots under the horizon
+          if (t < 6 || t > 18) d->AddCircleFilled(at(t), st(0.9f), IM_COL32(241, 234, 211, 120), 6);
+        d->PathClear();  // the day: the arc's glow, the arc, the light under it
+        for (float t = 6; t <= 18.001f; t += 0.2f) d->PathLineTo(at(t));
+        d->PathFillConvex(IM_COL32(227, 169, 79, 40));
+        for (float t = 6; t <= 18.001f; t += 0.2f) d->PathLineTo(at(t));
+        d->PathStroke(IM_COL32(227, 169, 79, 70), 0, st(4));
+        for (float t = 6; t <= 18.001f; t += 0.2f) d->PathLineTo(at(t));
+        d->PathStroke(IM_COL32(239, 184, 92, 255), 0, st(1.6f));
+        const ImVec2 c = at(pm_time_);
+        if (pm_time_ >= 6 && pm_time_ <= 18) {  // the sun
+          d->AddCircleFilled(c, st(13), IM_COL32(255, 212, 94, 40), 24);
+          d->AddCircleFilled(c, st(9.5f), IM_COL32(255, 212, 94, 70), 24);
+          for (int k = 0; k < 8; ++k) {
+            const float a = 3.14159265f * 0.25f * float(k);
+            d->AddLine(ImVec2(c.x + std::cos(a) * st(8.5f), c.y + std::sin(a) * st(8.5f)),
+                       ImVec2(c.x + std::cos(a) * st(12), c.y + std::sin(a) * st(12)), IM_COL32(255, 212, 94, 255), st(1.6f));
+          }
+          d->AddCircleFilled(c, st(6), IM_COL32(255, 212, 94, 255), 24);
+          d->AddCircle(c, st(6), IM_COL32(255, 243, 196, 255), 24, st(1));
+        } else {  // the moon: a crescent (its disc, then the panel's colour over most of it)
+          d->AddCircleFilled(c, st(11), IM_COL32(207, 216, 255, 34), 24);
+          d->AddCircleFilled(c, st(6.5f), IM_COL32(244, 244, 240, 255), 24);
+          d->AddCircleFilled(ImVec2(c.x + st(3.2f), c.y - st(2.4f)), st(5.6f), panel, 24);
+        }
+        // the mouse: a click or a drag over the path sets the time (a quarter hour's steps)
+        const ImVec2 a0(x0 - st(8), hy - amp - st(12)), a1(x1 + st(8), hy + amp + st(8));
+        if (!editing && ImGui::IsMouseHoveringRect(a0, a1)) {
+          if (io.MouseDelta.x + io.MouseDelta.y != 0 && !pm_dial_drag_) pm_row_ = kPmTime, pm_col_ = 0;
+          if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) pm_dial_drag_ = true, pm_row_ = kPmTime, pm_col_ = 0;
+        }
+        if (pm_dial_drag_) {
+          const float t = std::round(std::clamp((io.MousePos.x - x0) / (x1 - x0), 0.0f, 1.0f) * 96.0f) / 4.0f;
+          if (std::fabs(t - pm_time_) > 0.01f) pm_time_ = std::min(t, 23.75f), SavePrivateMatchChoices();
+        }
+        if (!editing && ImGui::IsMouseHoveringRect(p0, ImVec2(p1.x - st(90), p0.y + st(42))) && io.MouseDelta.x + io.MouseDelta.y != 0)
+          pm_row_ = kPmTime, pm_col_ = 0;
+      }
+      y = p1.y + st(8);
+      number = 1;
+      for (const int i : order) {
+        if (i == kPmTime || i == kPmDayNight || i == kPmDayLen) continue;
+        const float h = st(31);  // (nine rows under the dial since the storm's type, D224: 35 each ran past the column)
+        const bool sel = row_frame(i, h);
+        const float mid = y + h * 0.5f;
+        number_title(i, mid, sel, st(14));
+        if (i == kPmStorm) {
+          draw_switch(pm_storm_, mid, sel, right);
+        } else if (i == kPmStormType) {
+          std::string v = kPmStormTypeNames[pm_storm_type_];
+          if (sel) v = "<  " + v + "  >";
+          const float vw = kit::SpacedWidth(f.typed, st(7.5f), v, st(1.5f));
+          kit::Spaced(d, f.typed, st(7.5f), ImVec2(right - vw, mid - st(5)), sel ? kit::kInk : kit::kKhaki, v, st(1.5f));
+        } else {
+          const PmSlide s = PmSlideOf(i);
+          const bool typing = pm_slide_edit_ == i;
+          const float b0 = value_box(typing ? pm_slide_text_ + caret : PmSlideText(i), right, mid, sel, false, typing);
+          const float tx1 = b0 - st(12), tx0 = b0 - st(118);
+          if (i == kPmWind && !pm_wind_manual_) unit_text("FOLLOWS WEATHER", tx0 - st(10), mid, sel);
+          const float share = (PmSlideGet(i) - s.lo) / (s.hi - s.lo);
+          const float v = track(i, share, tx0, tx1, mid, sel, false);
+          if (v >= 0) {
+            const float before = PmSlideGet(i);
+            PmSlideSet(i, s.lo + (s.hi - s.lo) * v, false);
+            if (PmSlideGet(i) != before) SavePrivateMatchChoices();
+          }
+          if (!editing && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsMouseHoveringRect(ImVec2(b0, mid - st(9)), ImVec2(right, mid + st(9))))
+            pm_row_ = i, pm_col_ = 0, pm_slide_edit_ = i, pm_slide_text_.clear(), clicked = -2;
+        }
+        y += h;
       }
     }
-    // ---- the band: the chosen row's help, the green button
+
+    // ---- the middle: the game mode and the levels
+    d->AddRectFilled(va, vb, rail);
+    d->AddRect(va, vb, edge, 0, 0, 1.0f);
+    const bool in_mid = io.MousePos.x >= va.x && io.MousePos.x < vb.x && io.MousePos.y >= va.y && io.MousePos.y < vb.y;
     {
-      static constexpr const char* kAbout[] = {
-          "The map your match plays. All four in turn: the next map after each round, as on the Reborn servers.",
-          "The match's name in the server browser. Type it with the keyboard, or A for the on screen keys; left empty "
-          "it is your name's match.",
-          "Online: your match is on everybody's server browser, on the Community tab. LAN: for the PCs of your own "
-          "network, with no internet needed; your PC answers the sign-in and the match list itself, and the match is "
-          "on their browser's LAN tab (or they type your PC's network address in Direct connect).",
-          "Yes: everybody sees your match on the server browser's Community tab and can join. No: only friends you "
-          "give the address to (Direct connect). A LAN match is always found by the PCs of your network.",
-          "On, your router is asked to open the match's port (UPnP) and the port is chosen for you. Off, you open "
-          "the port below on your router yourself.",
-          "The UDP port players reach your match on, when UPnP is off or the match is a LAN one: 18300 unless "
-          "you want another. For an Online match, open it on your router for friends outside your home.",
-          "Your PC runs the match's server while you play, and you join it. Friends join with Direct connect in the "
-          "server browser: the pause copies the address for you. The match ends when you leave it.",
-          "How many times a second the match is simulated. 60 is the default; 30 is the original game's and asks "
-          "less of your PC and of every player's connection. A player's game takes the match's rate when it joins.",
-          "On, only players who type the match's password can join; the server browser shows a padlock by its name. "
-          "Off, anybody who sees the match can join.",
-          "The password players type to join: up to 24 letters, digits or signs, no spaces. Give it to your friends "
-          "yourself."};
-      kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, kTitles[pm_row_], st(2));
-      kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
-                    kPmMapNames[pm_map_]);
-      const ImVec2 q0(hb.x - st(20) - st(190), band.y + st(18)), q1(q0.x + st(190), q0.y + st(40));
-      const bool error = !pm_error_.empty();
-      kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error ? kit::kRed : kit::kInkFaint,
-                   error ? pm_error_ : std::string(kAbout[pm_row_]), q0.x - band.x - st(40));
-      if (GreenButton(d, st, q0, q1, kit::Button::kA, "HOST THE MATCH") && !editing) clicked = kPmHost;
+      const float sx0 = va.x + st(10), sx1 = vb.x - st(10), sy0 = va.y + st(9), sy1 = va.y + st(38);
+      const float sw = (sx1 - sx0) / 3.0f;
+      for (int k = 0; k < 3; ++k) {
+        const ImVec2 s0(sx0 + sw * k, sy0), s1(sx0 + sw * (k + 1), sy1);
+        const bool on = pm_mode_ == k;
+        if (on) {
+          d->AddRectFilled(s0, s1, kit::kGreen);
+          d->AddRectFilled(ImVec2(s0.x, s1.y - st(3)), s1, kit::kGreenShadow);
+        }
+        d->AddRect(s0, s1, IM_COL32(241, 234, 211, on ? 0 : 50), 0, 0, 1.0f);
+        const std::string name = kPmModeNames[k];
+        const float nw = kit::GameTextWidth(kit::GameFont::kText, st(10.5f), name, st(0.5f));
+        kit::GameText(d, kit::GameFont::kText, st(10.5f), ImVec2((s0.x + s1.x - nw) * 0.5f, s0.y + st(9)), on ? kit::kCream : kit::kKhaki, name,
+                      st(0.5f));
+        const bool hover = !editing && ImGui::IsMouseHoveringRect(s0, s1);
+        if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) pm_col_ = 1, pm_lv_row_ = -1;
+        if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) pm_col_ = 1, pm_lv_row_ = -1, set_mode(k);
+      }
+      if (pm_col_ == 1 && pm_lv_row_ < 0) d->AddRect(ImVec2(sx0 - st(3), sy0 - st(3)), ImVec2(sx1 + st(3), sy1 + st(3)), kit::kCream, 0, 0, st(1.5f));
     }
-    if (pm_edit_ >= 0) PrivateMatchKeys(d, st, ImVec2(ha.x, ha.y), ImVec2(hb.x, band.y), ekeys);
-    // A (not the keyboard's Enter) on the name or the password opens the on screen keys; a click there selects the
-    // row for typing, as before.
-    if (in.accept && !accept_from_key_ && (pm_row_ == kPmName || pm_row_ == kPmPassText)) {
+    for (int m = 0; m < 4; ++m) {
+      const float h = st(50);
+      const ImVec2 r0(va.x, va.y + st(47) + h * m), r1(vb.x, r0.y + h);
+      const bool hover = !editing && in_mid && ImGui::IsMouseHoveringRect(r0, r1);
+      if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) pm_col_ = 1, pm_lv_row_ = m;
+      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) pm_col_ = 1, pm_lv_row_ = m, toggle_level(m);
+      const bool sel = pm_col_ == 1 && pm_lv_row_ == m;
+      const bool fits = PmMapInMode(pm_mode_, m), in_rot = PmInOrder(m);
+      if (sel) {
+        kit::PaperArt(d, r0, r1);
+        d->AddRectFilled(r0, ImVec2(r0.x + st(4), r1.y), kit::kStamp);
+      }
+      d->AddRectFilled(ImVec2(r0.x, r0.y - 1), ImVec2(r1.x, r0.y), rule);
+      const ImVec2 t0(r0.x + st(12), r0.y + st(8)), t1(t0.x + st(68), r1.y - st(8));
+      MapPicture(d, st.u * 0.5f, t0, t1, kPmMapTitles[m]);
+      if (!fits) d->AddRectFilled(t0, t1, IM_COL32(13, 15, 11, 160));
+      const ImU32 ink = !fits ? dim_ink : sel ? kit::kInk : kit::kCream;
+      kit::GameText(d, kit::GameFont::kHeadlineMedium, st(16), ImVec2(t1.x + st(12), r0.y + st(10)), ink, kPmMapNames[m]);
+      kit::Spaced(d, f.typed, st(6.5f), ImVec2(t1.x + st(12), r0.y + st(33)), !fits ? dim_ink : sel ? kit::kInkSection : kit::kKhakiDim,
+                  m == 3 ? "AIR SUPERIORITY" : "CONQUEST", st(1.5f));
+      std::string end;
+      if (!fits) end = m == 3 ? "AIR SUP. ONLY" : "CONQUEST ONLY";
+      else if (in_rot) end = fmt::format("IN THE ROTATION \xC2\xB7 {}", int(std::find(pm_order_.begin(), pm_order_.end(), m) - pm_order_.begin()) + 1);
+      else if (sel) end = "ADD";
+      const float ew = kit::SpacedWidth(f.typed, st(7), end, st(1.5f));
+      const float mid = (r0.y + r1.y) * 0.5f;
+      kit::Spaced(d, f.typed, st(7), ImVec2(r1.x - st(14) - ew, mid - st(4.5f)), !fits ? dim_ink : sel ? kit::kInkSection : kit::kKhaki, end,
+                  st(1.5f));
+      if (sel && fits && !in_rot) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(r1.x - st(22) - ew - st(18), mid), st(16));
+    }
+
+    // ---- the right: the rotation in its order, Host online and Host on LAN
+    d->AddRectFilled(ra, rb, rail);
+    d->AddRect(ra, rb, edge, 0, 0, 1.0f);
+    kit::GameText(d, kit::GameFont::kHeadline, st(23), ImVec2(ra.x + st(16), ra.y + st(14)), kit::kCream, "ROTATION");
+    {
+      const std::string cap = "IN TURN, THEN AGAIN";
+      const float cw = kit::SpacedWidth(f.typed, st(7.5f), cap, st(2));
+      kit::Spaced(d, f.typed, st(7.5f), ImVec2(rb.x - st(16) - cw, ra.y + st(22)), kit::kKhakiDim, cap, st(2));
+    }
+    d->AddRectFilled(ImVec2(ra.x, ra.y + st(50)), ImVec2(rb.x, ra.y + st(51)), edge);
+    const bool in_right = io.MousePos.x >= ra.x && io.MousePos.x < rb.x && io.MousePos.y >= ra.y && io.MousePos.y < rb.y;
+    for (int k = 0; k < n; ++k) {
+      const int m = pm_order_[size_t(k)];
+      const float h = st(47);
+      const ImVec2 r0(ra.x, ra.y + st(51) + h * k), r1(rb.x, r0.y + h);
+      const bool sel = pm_col_ == 2 && pm_rot_row_ == k;
+      // the mouse: ▲ and ▼ on the chosen row move its map; elsewhere a click chooses the row
+      const ImVec2 up0(r1.x - st(52), r0.y + st(12)), up1(up0.x + st(18), r1.y - st(12));
+      const ImVec2 dn0(r1.x - st(30), r0.y + st(12)), dn1(dn0.x + st(18), r1.y - st(12));
+      const bool hover = !editing && in_right && ImGui::IsMouseHoveringRect(r0, r1);
+      if (hover && io.MouseDelta.x + io.MouseDelta.y != 0 && !pm_grab_) pm_col_ = 2, pm_rot_row_ = k;
+      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (sel && ImGui::IsMouseHoveringRect(up0, up1)) move_in_order(-1);
+        else if (sel && ImGui::IsMouseHoveringRect(dn0, dn1)) move_in_order(1);
+        else pm_col_ = 2, pm_rot_row_ = k;
+      }
+      if (sel) {
+        kit::PaperArt(d, r0, r1);
+        d->AddRectFilled(r0, ImVec2(r0.x + st(4), r1.y), kit::kStamp);
+        if (pm_grab_) d->AddRect(ImVec2(r0.x + 1, r0.y + 1), ImVec2(r1.x - 1, r1.y - 1), kit::kGreen, 0, 0, st(2));
+      }
+      d->AddRectFilled(ImVec2(r0.x, r1.y - 1), ImVec2(r1.x, r1.y), rule);
+      const ImVec2 t0(r0.x + st(14), r0.y + st(8)), t1(t0.x + st(62), r1.y - st(8));
+      MapPicture(d, st.u * 0.5f, t0, t1, kPmMapTitles[m]);
+      d->AddRectFilled(ImVec2(t0.x - st(5), t0.y - st(5)), ImVec2(t0.x + st(9), t0.y + st(9)), kit::kStamp);
+      const std::string num = std::to_string(k + 1);
+      d->AddText(f.ui_bold, st(10), ImVec2(t0.x - st(5) + (st(14) - kit::TextWidth(f.ui_bold, st(10), num)) * 0.5f, t0.y - st(5) + st(0.5f)),
+                 IM_COL32(255, 255, 255, 255), num.c_str());
+      kit::GameText(d, kit::GameFont::kHeadlineMedium, st(15), ImVec2(t1.x + st(12), r0.y + st(9)), sel ? kit::kInk : kit::kCream, kPmMapNames[m]);
+      kit::Spaced(d, f.typed, st(6.5f), ImVec2(t1.x + st(12), r0.y + st(30)), sel ? kit::kInkSection : kit::kKhakiDim,
+                  m == 3 ? "AIR SUPERIORITY" : "CONQUEST", st(1.5f));
+      if (sel) {  // ▲ ▼ for the mouse, and what A does
+        for (int a = 0; a < 2; ++a) {
+          const ImVec2 b0 = a ? dn0 : up0, b1 = a ? dn1 : up1;
+          const bool can = a ? k < n - 1 : k > 0;
+          const bool over = ImGui::IsMouseHoveringRect(b0, b1);
+          d->AddRect(b0, b1, IM_COL32(34, 36, 27, can ? (over ? 255 : 140) : 40), 0, 0, 1.0f);
+          const ImVec2 c((b0.x + b1.x) * 0.5f, (b0.y + b1.y) * 0.5f);
+          const float s = st(4);
+          if (a) d->AddTriangleFilled(ImVec2(c.x - s, c.y - s * 0.6f), ImVec2(c.x + s, c.y - s * 0.6f), ImVec2(c.x, c.y + s * 0.8f), IM_COL32(34, 36, 27, can ? 220 : 50));
+          else d->AddTriangleFilled(ImVec2(c.x - s, c.y + s * 0.6f), ImVec2(c.x + s, c.y + s * 0.6f), ImVec2(c.x, c.y - s * 0.8f), IM_COL32(34, 36, 27, can ? 220 : 50));
+        }
+        const std::string said = pm_grab_ ? "MOVING" : "";
+        if (!said.empty()) {
+          const float w = kit::SpacedWidth(f.typed, st(7), said, st(1.5f));
+          kit::Spaced(d, f.typed, st(7), ImVec2(up0.x - st(10) - w, (r0.y + r1.y) * 0.5f - st(4.5f)), kit::kGreen, said, st(1.5f));
+        }
+      }
+    }
+    kit::Wrapped(d, f.ui, st(10.5f), ImVec2(ra.x + st(16), rb.y - st(36)), kit::kKhakiDim,
+                 n == 1 ? "One map: it plays round after round. Add more from the Levels to play them in turn."
+                        : "The match plays these top to bottom, the next after each round, then again from the top.",
+                 rb.x - ra.x - st(32));
+    {  // Host online, Host on LAN
+      const bool sel_o = pm_col_ == 2 && pm_rot_row_ == n, sel_l = pm_col_ == 2 && pm_rot_row_ == n + 1;
+      if (GreenButton(d, st, o0, o1, kit::Button::kStart, "HOST ONLINE") && !editing) {
+        host(false);
+        return;
+      }
+      if (sel_o) d->AddRect(ImVec2(o0.x - st(3), o0.y - st(3)), ImVec2(o1.x + st(3), o1.y + st(6)), kit::kCream, 0, 0, st(1.5f));
+      const bool over = ImGui::IsMouseHoveringRect(h0, h1);
+      d->AddRectFilled(h0, h1, over ? IM_COL32(34, 36, 30, 240) : IM_COL32(20, 20, 18, 235));
+      d->AddRect(h0, h1, sel_l ? kit::kCream : IM_COL32(241, 234, 211, 40), 0, 0, sel_l ? st(1.5f) : 1.0f);
+      const std::string lan = "HOST ON LAN - NO INTERNET";  // (the game's lettering has no middle dot)
+      const float cap = st(13), lw = kit::GameTextWidth(kit::GameFont::kText, cap, lan, st(1));
+      kit::GameText(d, kit::GameFont::kText, cap, ImVec2((h0.x + h1.x - lw) * 0.5f, h0.y + (h1.y - h0.y - cap) * 0.5f), kit::kStripText, lan, st(1));
+      if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !editing) {
+        host(true);
+        return;
+      }
+    }
+
+    // ---- the help along the foot: the chosen row's, or the error of the last try to host
+    {
+      kit::PaperArt(d, ba, bb);
+      std::string title, text;
+      if (pm_col_ == 0) {
+        title = PmTitle(pm_row_), text = PmAbout(pm_row_);
+      } else if (pm_col_ == 1) {
+        if (pm_lv_row_ < 0) {
+          title = "GAME MODE";
+          text = "The kind of match. Each map has its own in the game: Conquest on Wake Island, Guadalcanal and Iwo Jima (take and hold the "
+                 "flags), Air Superiority on Coral Sea (fighters only). All modes: any of the four in one rotation.";
+        } else {
+          const int m = pm_lv_row_;
+          title = kPmMapNames[m];
+          text = !PmMapInMode(pm_mode_, m) ? fmt::format("{}'s level holds {} only: choose that game mode, or All modes, to play it.",
+                                                         kPmMapTitles[m], m == 3 ? "Air Superiority" : "Conquest")
+                 : PmInOrder(m) ? fmt::format("{} plays {} in the rotation. A takes it out (the rotation keeps one map at least).",
+                                              kPmMapTitles[m], int(std::find(pm_order_.begin(), pm_order_.end(), m) - pm_order_.begin()) + 1)
+                                : fmt::format("{}: {}. A puts it at the end of the rotation; the match plays its maps in turn, the next "
+                                              "one after each round.", kPmMapTitles[m], m == 3 ? "Air Superiority" : "Conquest");
+        }
+      } else if (pm_rot_row_ < n) {
+        title = kPmMapNames[pm_order_[size_t(pm_rot_row_)]];
+        text = pm_grab_ ? "Up and down move it in the order; A or B puts it down."
+                        : "A picks it up to move it in the order (or the arrows with the mouse); X (F) takes it out.";
+      } else if (pm_rot_row_ == n) {
+        title = "HOST ONLINE";
+        text = "Your PC runs the match's server while you play, and you join it. Friends join from the server browser, or with Direct "
+               "connect: the pause copies the address. The match ends when you leave it.";
+      } else {
+        title = "HOST ON LAN";
+        text = "For the PCs of your own network, with no internet needed: your PC answers the sign-in and the match list itself, and "
+               "the match is on their browser's LAN tab.";
+      }
+      kit::Spaced(d, f.typed, st(7.5f), ImVec2(ba.x + st(16), ba.y + st(9)), kit::kInkSection, "THE CHOSEN ROW", st(2));
+      kit::GameText(d, kit::GameFont::kHeadlineMedium, st(17), ImVec2(ba.x + st(16), ba.y + st(24)), kit::kInk, title);
+      const bool error = !pm_error_.empty();
+      const float tx = ba.x + st(250);
+      const float wrap = bb.x - tx - st(18);
+      const std::string shown = error ? pm_error_ : text;
+      const float th = kit::WrappedHeight(f.ui, st(12), shown, wrap);
+      kit::Wrapped(d, f.ui, st(12), ImVec2(tx, ba.y + std::max(st(6), (bb.y - ba.y - th) * 0.5f)), error ? kit::kRed : kit::kInkFaint, shown, wrap);
+    }
+
+    // ---- the on screen keys over the middle and the right while the name or the password is typed
+    if (pm_edit_ >= 0) PrivateMatchKeys(d, st, pa, ImVec2(rb.x, vb.y), ekeys);
+    // A (not the keyboard's Enter) on the name, the password or the port opens the on screen keys.
+    if (pm_col_ == 0 && pm_tab_ == 0 && in.accept && !accept_from_key_ &&
+        (pm_row_ == kPmName || pm_row_ == kPmPassText || (pm_row_ == kPmPort && !pm_upnp_))) {
       PmEditOpen(pm_row_);
       in.accept = false;
     }
-    if (in.accept) clicked = pm_row_;
-    if (clicked >= 0) {
-      pm_row_ = clicked;
-      if (clicked == kPmHost) HostPrivateMatch();
-      else change(clicked, 1);
+    // Enter on a slider's row opens its box for typing (left and right step it; a controller's A steps it too).
+    if (pm_col_ == 0 && in.accept && accept_from_key_ && pm_tab_ == 1 && PmSlideRow(pm_row_) && !(pm_row_ == kPmDayLen && !pm_dn_)) {
+      pm_slide_edit_ = pm_row_, pm_slide_text_.clear(), in.accept = false;
     }
-    if (in.back) BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
+    if (clicked >= 0 && clicked == pm_drag_) clicked = -1;  // the click that started a slider's drag
+    if (clicked >= 0 && (PmSlideRow(clicked) || clicked == kPmName || clicked == kPmPassText || clicked == kPmPort)) clicked = -1;
+    if (pm_col_ == 0 && in.accept && pm_row_ != kPmName && pm_row_ != kPmPassText && pm_row_ != kPmPort) clicked = pm_row_;
+    if (clicked >= 0 && !editing) {
+      pm_row_ = clicked, pm_col_ = 0;
+      change(clicked, 1);
+    }
+    if (in.back) {
+      if (pm_col_ != 0) go_col(0);   // the levels or the rotation: back to the settings (it used to leave the page)
+      else if (pm_tab_ == 1) set_tab(0);  // the Weather tab: back to Match
+      else BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
+    }
   }
 
   // The on screen keys over the map's picture (a..b) while the server name or the password is edited: its field with
   // the copy being typed (the password in stars unless shown), the keys under it. `k`: this frame's presses.
   void PrivateMatchKeys(ImDrawList* d, const Stage& st, ImVec2 a, ImVec2 b, const Input& k) {
     const kit::Fonts& f = kit::GetFonts();
-    const bool name = pm_edit_ == kPmName;
+    const bool name = pm_edit_ == kPmName, port = pm_edit_ == kPmPort;
     d->AddRectFilled(a, b, IM_COL32(13, 15, 11, 255));  // opaque: the picture's chip showed through the heading
     d->AddRect(a, b, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
     const float x = a.x + st(30), w = b.x - a.x - st(60);
     kit::GameText(d, kit::GameFont::kHeadlineMedium, st(19), ImVec2(x, a.y + st(18)), kit::kCream,
-                  name ? "SERVER NAME" : "PASSWORD");
+                  name ? "SERVER NAME" : port ? "PORT" : "PASSWORD");
     const ImVec2 n0(x, a.y + st(48)), n1(x + w, a.y + st(92));
     d->AddRectFilled(n0, n1, kit::kPaperLight);
     d->AddRect(n0, n1, kit::kGreen, 0, 0, st(3));
-    const std::string shown = name ? pm_edit_text_ : PmPassShown(pm_edit_text_);
+    const std::string shown = name || port ? pm_edit_text_ : PmPassShown(pm_edit_text_);
     const std::string count = std::to_string(pm_edit_text_.size()) + " / " + std::to_string(PmMost(pm_edit_));
     const float count_w = kit::TextWidth(f.typed, st(12), count);
     d->PushClipRect(n0, ImVec2(n1.x - count_w - st(24), n1.y), true);
@@ -2991,8 +3733,9 @@
     d->PopClipRect();
     d->AddText(f.typed, st(12), ImVec2(n1.x - st(12) - count_w, n0.y + st(15)), kit::kInkFaint, count.c_str());
     kit::Spaced(d, f.typed, st(8), ImVec2(x, n1.y + st(9)), kit::kKhakiDim,
-                name ? "UP TO 32 LETTERS, DIGITS, SPACES OR SIGNS. LEFT EMPTY, IT IS YOUR NAME'S MATCH."
-                     : pm_pass_shown_ ? "UP TO 24 LETTERS, DIGITS OR SIGNS, NO SPACES. Y HIDES IT."
+                name   ? "UP TO 32 LETTERS, DIGITS, SPACES OR SIGNS. LEFT EMPTY, IT IS YOUR NAME'S MATCH."
+                : port ? "1024 TO 65535, THE DIGITS ONLY. 18300 UNLESS YOU WANT ANOTHER."
+                : pm_pass_shown_ ? "UP TO 24 LETTERS, DIGITS OR SIGNS, NO SPACES. Y HIDES IT."
                                       : "UP TO 24 LETTERS, DIGITS OR SIGNS, NO SPACES. Y SHOWS IT.",
                 st(1.5f));
     // The keys, as the soldier name's: their width is ten keys (36 each, 4.5 apart).
@@ -3004,7 +3747,7 @@
     std::string& text = pm_edit_text_;
     if (clicked >= 0) {
       const OnKey& key = OnKeys(name)[size_t(clicked)];
-      if (key.kind != 0 || name) REXLOG_INFO("BF private match: on screen key {}", key.label);  // not the password's
+      if (key.kind != 0 || name || port) REXLOG_INFO("BF private match: on screen key {}", key.label);  // not the password's
       if (key.kind == 0) {
         char c = key.ch;
         if (std::isalpha(static_cast<unsigned char>(c)))
@@ -3072,7 +3815,7 @@
     kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection,
                 fmt::format("STARTING \xC2\xB7 {} S", int(t)), st(2));
     kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
-                  kPmMapNames[pm_map_]);
+                  PmHeadline());
     kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error.empty() ? kit::kInkFaint : kit::kRed,
                  error.empty() ? std::string("Your PC is starting the match's server. You join it as soon as it is up.") : error,
                  hb.x - band.x - st(40));
@@ -3250,7 +3993,7 @@
       joining_ = "The game's tutorial", joining_map_ = "Wake Island";
       joined_gid_.clear();
       comms::NoteJoined("");
-      SetJoinedServerNight(false);
+      world::NoteJoined("");
       failed_ = false, joined_from_start_ = true;
       page_ = Page::kJoining;
       StartGameFromLauncher();
@@ -3267,7 +4010,7 @@
     joining_map_ = "Wake Island";
     joined_gid_.clear();
     comms::NoteJoined("");  // no server: no voice or text chat in the tutorial
-    SetJoinedServerNight(false);  // nor a Night Ops server's night
+    world::NoteJoined("");
     failed_ = false;
     joined_from_start_ = false;
     page_ = Page::kJoining;
@@ -3610,6 +4353,55 @@
       OpenUrl(url);
     }
     if (in.back) page_ = Page::kHome;
+  }
+
+  // ---- Unlockables: what the player has unlocked, and whether it is worn (the user, 22 Nov 2026: "commit weapon skin
+  // as an unlock, and only shows if equipped from main menu's unlock screen"). One so far: the Electric weapon skin
+  // (fov.cpp: bf_skin_electric unlocked, bf_skin_equipped worn). Locked, it says how it is unlocked and cannot be
+  // equipped; unlocked, A equips it or takes it off, saved with the settings.
+  void UnlockablesPage(ImDrawList* d, ImGuiIO& io, Input in) {
+    NotePage("unlockables");
+    const Stage st = StageOf(io);
+    const kit::Fonts& f = kit::GetFonts();
+    MenuBackdrop(d, io.DisplaySize, st);
+    kit::Heading(d, st(44), st.P(40, 22), kit::kCream, "UNLOCKABLES", st(2));
+    const bool unlocked = Truthy(Cvar("bf_skin_electric"));
+    const bool equipped = unlocked && Cvar("bf_skin_equipped") == "electric";
+    const ImVec2 a = st.P(40, 96), b = st.P(1240, 268);
+    const bool hover = ImGui::IsMouseHoveringRect(a, b);
+    kit::Paper(d, a, b, st.u, false);
+    d->AddRect(ImVec2(a.x - st(3), a.y - st(3)), ImVec2(b.x + st(3), b.y + st(3)), unlocked ? kit::kGreenBright : kit::kKhakiDim, 0, 0,
+               st(4));
+    // Its swatch: the skin's own colours (dark metal, gold wood) and a stroke of its lightning.
+    const ImVec2 c0(a.x + st(18), a.y + st(18)), c1(c0.x + st(136), c0.y + st(136));
+    d->AddRectFilled(c0, c1, IM_COL32(22, 26, 36, 255));
+    d->AddRectFilled(ImVec2(c0.x, c0.y + st(92)), c1, IM_COL32(196, 150, 52, 255));
+    const ImVec2 bolt[] = {ImVec2(c0.x + st(84), c0.y + st(10)), ImVec2(c0.x + st(54), c0.y + st(52)), ImVec2(c0.x + st(76), c0.y + st(56)),
+                           ImVec2(c0.x + st(46), c0.y + st(104))};
+    d->AddPolyline(bolt, 4, unlocked ? IM_COL32(170, 214, 255, 255) : IM_COL32(110, 118, 132, 255), 0, st(4));
+    const float tx = c1.x + st(22);
+    kit::Spaced(d, f.typed, st(13), ImVec2(tx, a.y + st(22)), kit::kInkFaint, "WEAPON SKIN", st(2));
+    d->AddText(f.ui, st(34), ImVec2(tx, a.y + st(38)), kit::kInk, "Electric");
+    d->AddText(f.ui, st(17), ImVec2(tx, a.y + st(84)), IM_COL32(61, 59, 49, 255),
+               "For your Thompson and Type 100: dark metal, gold wood, and a storm of smoke and lightning round the gun.");
+    d->AddText(f.ui, st(15), ImVec2(tx, a.y + st(112)), IM_COL32(61, 59, 49, 255),
+               unlocked ? "Unlocked. Only your own game draws it: other players do not see it yet."
+                        : "Locked. To unlock it: play one full Night Ops match, from its start to its end.");
+    const char* state = equipped ? "EQUIPPED" : unlocked ? "NOT EQUIPPED" : "LOCKED";
+    const float sw = kit::SpacedWidth(f.stencil, st(26), state, st(2));
+    kit::Spaced(d, f.stencil, st(26), ImVec2(b.x - st(24) - sw, a.y + st(24)), equipped ? kit::kGreenDark : kit::kStamp, state, st(2));
+    std::vector<Cue> cues;
+    if (unlocked) cues.push_back({kit::Button::kA, equipped ? "TAKE OFF" : "EQUIP"});
+    cues.push_back({kit::Button::kB, "BACK"});
+    Prompts(d, st, st.P(40, 720 - 18 - 36), cues, in, 15);
+    if (kit::WatermarkOn()) kit::Stamp(d, st.P(1240 - 118, 18 + 30), st.u, -5, 0.8f);
+    if (unlocked && (in.accept || (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)))) {
+      const char* now = equipped ? "none" : "electric";
+      rex::cvar::SetFlagByName("bf_skin_equipped", now);
+      SetSetting("cvar.bf_skin_equipped", now);
+      REXLOG_INFO("BF weapon skins: the electric skin {}", equipped ? "taken off" : "equipped");
+    }
+    if (in.back) BackToMenu(kRowUnlockables, 3);
   }
 
   // ---- Report an issue: the form that files on GitHub is game_menu_report.inc (ReportPage).
@@ -4147,6 +4939,8 @@
   // server, any refusal of a join with a message. Over the page that asked to join, one OK.
   bool notice_popup_ = false;
   ServerNotice notice_shown_;
+  ServerNotice removed_notice_;   // moderation: the server's words when it took this player off it (comms kKicked)
+  bool removed_pending_ = false;  // shown once the menus are back after the match
   void ShowNotice(const ServerNotice& n, const std::string& asked) {
     notice_popup_ = true, notice_shown_ = n, popup_row_ = 0;
     if (notice_shown_.title.empty()) notice_shown_.title = n.kind == "full" ? "SERVER FULL" : "COULD NOT JOIN";
@@ -4157,9 +4951,12 @@
     const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
     d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 190));
-    // A refusal of this one join (a full server, one gone while its queue waited) or maintenance mode's (any other kind).
-    const bool full = notice_shown_.kind == "full" || notice_shown_.kind == "gone";
-    const std::string eyebrow = full ? "THE SERVER LIST \xC2\xB7 COULD NOT JOIN" : "THE SERVER LIST \xC2\xB7 SERVERS CLOSED";
+    // A refusal of this one join (a full server, one gone while its queue waited), moderation's (a ban or kick:
+    // "banned", docs/MODERATION.md) or maintenance mode's (any other kind).
+    const bool banned = notice_shown_.kind == "banned";
+    const bool full = notice_shown_.kind == "full" || notice_shown_.kind == "gone" || banned;
+    const std::string eyebrow = banned ? "MODERATION \xC2\xB7 COULD NOT JOIN"
+                                : full ? "THE SERVER LIST \xC2\xB7 COULD NOT JOIN" : "THE SERVER LIST \xC2\xB7 SERVERS CLOSED";
     const std::string foot = full ? "" : "New joins are closed for now. Players already in a match play on.";
     const float w = st(560);
     const float text_h = kit::WrappedHeight(f.ui, st(18), notice_shown_.text, w);

@@ -20,7 +20,17 @@ struct PrivateMatchOptions {
   bool listed = false;  // Online: shown in everybody's server browser (Community), not only joined by its address
   uint16_t port = 0;    // the UDP port players reach it on; 0: the first free one from 18300
   int tick = 0;         // its tick rate (30, 60, 75, 100); 0: this game's own
+  int bots = 0;         // bots in the match (bots.cpp, --bf_bots); 0: none
   std::string password;  // only players who know it are let in; empty: none
+  // The match's world (gm_host.cpp's bf_world_*; world_sync.cpp follows it).
+  bool day_night = false;
+  float time = 16.0f, day_minutes = 0.0f, cloud_cover = 0.35f, cloud_rate = 0.33f, weather = 0.0f, fog = 0.0f, ground_fog = 0.0f, wind = 0.3f;
+  float cloud_height = 450.0f;  // metres
+  bool dynamic_storm = false;  // the weather builds to a storm over each round and eases again
+  int storm_type = 0;          // D224: 0 a thunderstorm, 1 a hurricane
+  // The match's rules (match_rules.cpp): each team's tickets (0: the map's own) and a round's time limit in minutes
+  // (0: none; a round then ends only when a team has no tickets left).
+  int tickets = 0, time_limit = 0;
 };
 
 struct PrivateMatchStatus {

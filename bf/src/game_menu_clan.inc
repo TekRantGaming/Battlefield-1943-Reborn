@@ -14,6 +14,7 @@
   std::string tag_refusal_;    // the backend's words for a refused tag, kept for the page
   bool box_menu_ = false;      // a box's right click menu is open (BoxMenu), at box_menu_at_
   ImVec2 box_menu_at_;
+  bool box_menu_direct_ = false;  // that menu is Direct connect's address box's (game_menu_browser.inc DirectPanel)
 
   static bool TagChar(char c) { return static_cast<unsigned char>(c) < 128 && std::isalnum(static_cast<unsigned char>(c)); }
   void TagBegin() {
@@ -118,7 +119,7 @@
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) TagSwitch(&text == &tag_text_);
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
           TagSwitch(&text == &tag_text_);
-          box_menu_ = true, box_menu_at_ = ImGui::GetIO().MousePos;
+          box_menu_ = true, box_menu_at_ = ImGui::GetIO().MousePos, box_menu_direct_ = false;
           REXLOG_INFO("BF launcher: the name page's right click menu opened");
         }
       }
@@ -144,8 +145,8 @@
     box(nx, nw, name_text_, !tag_mode_, kNameMax);
     y += st(66);
   }
-  // The right click menu of a name page box (TekRantGaming, 16 Nov 2026: "a right click did not give a context menu"):
-  // PASTE and CLEAR for the box with the typing, at the mouse, over everything. A click anywhere closes it. True when
+  // The right click menu of a name page box (TekRantGaming, 16 Nov 2026: "a right click did not give a context menu"),
+  // and of Direct connect's address box (20 Nov 2026): PASTE and CLEAR for the box with the typing, at the mouse, over everything. A click anywhere closes it. True when
   // this frame's click was the menu's (an item, or closing it).
   bool BoxMenu(const Stage& st) {
     if (!box_menu_) return false;
@@ -165,8 +166,11 @@
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) hit = i;
     }
     fd->AddRect(p0, p1, kit::kInk, 0, 0, st(1.5f));
-    if (hit == 0) NamePaste(paste::Text(), "menu");
-    if (hit == 1) NameClear();
+    if (hit == 0) box_menu_direct_ ? DirectPaste(paste::Text(), "menu") : NamePaste(paste::Text(), "menu");
+    if (hit == 1) {
+      if (box_menu_direct_) direct_text_.clear(), direct_error_.clear();
+      else NameClear();
+    }
     const bool clicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right);
     if (clicked) box_menu_ = false;
     return clicked;

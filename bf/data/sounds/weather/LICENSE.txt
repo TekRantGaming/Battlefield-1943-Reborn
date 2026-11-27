@@ -1,0 +1,9 @@
+The weather's sounds (rain, wind, thunder and the lightning strikes), recorded and made by
+ThatZaliaSGuy for Battlefield 1943 Reborn.
+
+Released under Creative Commons Zero (CC0 1.0 Universal), https://creativecommons.org/publicdomain/zero/1.0/
+No rights reserved: free to copy, change and use for any purpose, commercial ones included,
+without asking and without credit.
+
+bf/src/weather_audio.cpp plays them: the rain and wind loops, the distant rumble under a storm,
+and a close, distant or cloud strike's thunder for each lightning flash by how far off it is.

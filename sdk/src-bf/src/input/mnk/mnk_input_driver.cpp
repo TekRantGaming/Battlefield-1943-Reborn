@@ -159,10 +159,12 @@ std::atomic<uint16_t> last_key_buttons{0};
 std::atomic<bool> last_key_axes{false};
 std::atomic<uint32_t> last_key_triggers{0};  // left trigger in the low byte, right in the next
 std::atomic<uint32_t> last_key_left_stick{0};  // x in the low 16 bits, y in the high 16 (signed)
+std::atomic<uint32_t> last_key_right_stick{0};  // the same, the keys' and the mouse's
 // Tests' keys (SetTestKey), held with or without the window's focus.
 std::mutex test_keys_mutex;
 bool test_keys[256] = {};
 int test_keys_held = 0;
+std::atomic<BindSource> bind_source{nullptr};
 
 }  // namespace
 
@@ -188,11 +190,16 @@ void SetTestKey(uint16_t virtual_key, bool down) {
   test_keys_held += down ? 1 : -1;
 }
 
+void SetBindSource(BindSource source) { bind_source.store(source, std::memory_order_relaxed); }
+
 uint8_t LastKeyTrigger(bool right) {
   return uint8_t(last_key_triggers.load(std::memory_order_relaxed) >> (right ? 8 : 0));
 }
 int16_t LastKeyLeftStick(bool y) {
   return int16_t(uint16_t(last_key_left_stick.load(std::memory_order_relaxed) >> (y ? 16 : 0)));
+}
+int16_t LastKeyRightStick(bool y) {
+  return int16_t(uint16_t(last_key_right_stick.load(std::memory_order_relaxed) >> (y ? 16 : 0)));
 }
 
 using rex::ui::VirtualKey;
@@ -267,6 +274,13 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
   return false;
 }
 
+// A bind's keys now: its setting's own, or the bind source's for it (SetBindSource).
+#define BIND_KEYS(name) BindKeys(#name, REXCVAR_GET(name))
+static std::string BindKeys(std::string_view name, const std::string& own) {
+  const BindSource source = bind_source.load(std::memory_order_relaxed);
+  return source ? source(name, own) : own;
+}
+
 void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
   // Disabled means no device at all, so it never occupies a guest user slot.
   if (!IsEnabled()) {
@@ -324,6 +338,7 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
     last_key_axes.store(false, std::memory_order_relaxed);
     last_key_triggers.store(0, std::memory_order_relaxed);
     last_key_left_stick.store(0, std::memory_order_relaxed);
+    last_key_right_stick.store(0, std::memory_order_relaxed);
     if (out_state) {
       std::memset(out_state, 0, sizeof(*out_state));
       out_state->packet_number = packet_number_;
@@ -339,60 +354,60 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   }
 
   uint16_t buttons = 0;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_a)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_a)))
     buttons |= X_INPUT_GAMEPAD_A;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_b)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_b)))
     buttons |= X_INPUT_GAMEPAD_B;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_x)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_x)))
     buttons |= X_INPUT_GAMEPAD_X;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_y)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_y)))
     buttons |= X_INPUT_GAMEPAD_Y;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_left_shoulder)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_left_shoulder)))
     buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_right_shoulder)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_right_shoulder)))
     buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_press)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_lstick_press)))
     buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_press)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_rstick_press)))
     buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_back)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_back)))
     buttons |= X_INPUT_GAMEPAD_BACK;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_start)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_start)))
     buttons |= X_INPUT_GAMEPAD_START;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_guide)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_guide)))
     buttons |= X_INPUT_GAMEPAD_GUIDE;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_up)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_dpad_up)))
     buttons |= X_INPUT_GAMEPAD_DPAD_UP;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_down)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_dpad_down)))
     buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_left)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_dpad_left)))
     buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_right)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_dpad_right)))
     buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
 
-  uint8_t lt = IsBindPressed(keys, REXCVAR_GET(keybind_left_trigger)) ? 0xFF : 0;
-  uint8_t rt = IsBindPressed(keys, REXCVAR_GET(keybind_right_trigger)) ? 0xFF : 0;
+  uint8_t lt = IsBindPressed(keys, BIND_KEYS(keybind_left_trigger)) ? 0xFF : 0;
+  uint8_t rt = IsBindPressed(keys, BIND_KEYS(keybind_right_trigger)) ? 0xFF : 0;
 
   int32_t lx = 0;
   int32_t ly = 0;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_left)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_lstick_left)))
     lx -= INT16_MAX;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_right)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_lstick_right)))
     lx += INT16_MAX;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_up)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_lstick_up)))
     ly += INT16_MAX;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_down)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_lstick_down)))
     ly -= INT16_MAX;
 
   int32_t rx = 0;
   int32_t ry = 0;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_left)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_rstick_left)))
     rx -= INT16_MAX;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_right)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_rstick_right)))
     rx += INT16_MAX;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_up)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_rstick_up)))
     ry += INT16_MAX;
-  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_down)))
+  if (IsBindPressed(keys, BIND_KEYS(keybind_rstick_down)))
     ry -= INT16_MAX;
   last_key_buttons.store(buttons, std::memory_order_relaxed);
   last_key_axes.store(lx || ly || rx || ry || lt || rt, std::memory_order_relaxed);
@@ -416,6 +431,9 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   auto clamp16 = [](int32_t v) -> int16_t {
     return static_cast<int16_t>(std::clamp(v, (int32_t)INT16_MIN, (int32_t)INT16_MAX));
   };
+
+  last_key_right_stick.store(uint32_t(uint16_t(clamp16(rx))) | uint32_t(uint16_t(clamp16(ry))) << 16,
+                             std::memory_order_relaxed);
 
   packet_number_++;
 

@@ -118,6 +118,24 @@ class Device {
   bool RemakeSwapChain();
   bool vsync_fallback_ = false;
   uint32_t rebuilds_ = 0;
+  // NXR_DEVICE_FAULT=1 (a diagnosis aid, D229): VK_EXT_device_fault on, and a lost device's fault report in the log.
+  bool fault_report_ = false, fault_reported_ = false;
+  void ReportFault();
+  void StartBindingReport();
+  void StartMarkers();
+
+ public:
+  // D229: NXR_RACE_CHECK=1: every Vulkan command DiligentCore records is checked: a thread other than the recorder's
+  // recording into the recorder's command buffer while the recorder has work in hand is a race, logged once per call
+  // stack (module and offset, for llvm-symbolizer). NXR_RACE_SELFTEST=1: one such race made on purpose at the start (its
+  // command not passed on), to show the check works.
+  void RaceSelfTest();
+  // D229: with NXR_DEVICE_FAULT=1, breadcrumbs (VK_AMD_buffer_marker): a pass's start (top of the pipe) and end (bottom)
+  // written by the GPU into memory read after a lost device, so the report names the passes the GPU was in. `slot`
+  // 0 to 63; `name` kept (a string literal).
+  void FaultMarker(Diligent::IDeviceContext* context, int slot, bool begin, const char* name);
+
+ private:
   // D159: a size the surface did not take (UpdateSize), not asked for again until the SDK's size changes.
   uint32_t refused_width_ = 0, refused_height_ = 0;
   int real_size_notes_ = 0;

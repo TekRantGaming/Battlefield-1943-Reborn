@@ -24,6 +24,8 @@
 #include <memory>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -57,6 +59,7 @@ REXCVAR_DECLARE(std::string, bf_online_host);
 namespace bf1943 {
 
 const char* BfVersion();  // pipeline_upload.cpp
+uint32_t OnlinePlayerId();  // live_layers.cpp
 
 // This game's version and platform, as the fields of a registry request.
 inline std::string ClientFields() {
@@ -66,6 +69,14 @@ inline std::string ClientFields() {
   const char* platform = "linux";
 #endif
   return std::string("\"version\": \"") + BfVersion() + "\", \"platform\": \"" + platform + "\", \"notice\": 1";
+}
+
+// A join's fields ("reserve", "queue"): those, and who asks. Others can share this address (a household, a LAN party),
+// so the backend checks bans as this player (server/plasma.py asker: believed only where this id signed in).
+inline std::string JoinFields() {
+  char id[9];
+  std::snprintf(id, sizeof(id), "%08X", OnlinePlayerId());
+  return std::string("\"id\": \"") + id + "\", " + ClientFields();
 }
 
 int TickRate();  // tick_rate.cpp: this game's simulation rate (bf_tick_rate: 30, or 60)
@@ -78,6 +89,10 @@ struct ServerInfo {
   // and never found, since v0.4.0's game plays the original everywhere and would be pulled about on it.
   bool retired_mode = false;
   int players = 0, max_players = 0;
+  // Its bots now (a backend and host from 21 Nov 2026; 0 from older ones): shown before the players, "(4) 0 / 24"
+  // (TekRantGaming). Not players: they leave a slot to a joining player (bots.cpp's backfill keeps two free and gives
+  // up one for each player who joins), so they never make a server full, and HAS PLAYERS means people.
+  int bots = 0;
   // Players waiting in its queue (0.4.7.4, server/plasma.py QUEUE); -1: a backend without the queue (a full server
   // there is refused, and the browser does not offer it).
   int queue = -1;
@@ -91,6 +106,7 @@ struct ServerInfo {
   bool promoted = false;
   bool Reborn() const { return official && !promoted; }
   bool night = false;  // a Night Ops server: its maps drawn at night (NativeXRenderer D162) while playing there
+  bool daybreak = false;  // a Daybreak server (26 Nov 2026): each round from sunrise, a storm building (gmhost.py)
   std::string region;  // where it is, a region code (regions.h); empty: not said (an older server)
   int tick_hz = 0;     // its tick rate; 0: not said
   // 0.4.1: a server is only listed, found and joined by a game simulating at its rate (a server that says none runs
@@ -398,7 +414,58 @@ class ServerList {
     const size_t at = reply.find("{\"gid\"");
     if (at == std::string::npos) return false;
     out = Parse(reply.substr(at, JsonEnd(reply, at) - at + 1));
-    return !out.gid.empty() && !out.retired_mode;
+    if (out.gid.empty() || out.retired_mode) return false;
+    // Its ping, as the list's (the far server warning, game_menu.cpp FarServerWarned, asks it of Direct connect too).
+    out.ping_ms = PingOne(out.address);
+    return true;
+  }
+
+  // One server's ping: two UDP pings to its host (one may be lost), the first answer within 1 s; -1 none.
+  static int PingOne(const std::string& a) {
+    const size_t colon = a.rfind(':');
+    if (colon == std::string::npos) return -1;
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(uint16_t(std::atoi(a.c_str() + colon + 1)));
+    if (inet_pton(AF_INET, a.substr(0, colon).c_str(), &to.sin_addr) != 1) return -1;
+    auto s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+#if defined(_WIN32)
+    if (s == INVALID_SOCKET) return -1;
+#else
+    if (s < 0) return -1;
+#endif
+    double sent[2] = {0, 0};
+    for (uint32_t i = 0; i < 2; ++i) {
+      char packet[16] = {'B', 'F', '4', '3', 'P', 'I', 'N', 'G'};
+      const uint32_t id[2] = {0xD1EC7u, i};
+      std::memcpy(packet + 8, id, 8);
+      sent[i] = Now();
+      sendto(s, packet, 16, 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
+    }
+    int best = -1;
+    const double until = Now() + 1.0;
+    while (Now() < until) {
+      fd_set read;
+      FD_ZERO(&read);
+      FD_SET(s, &read);
+      timeval wait{0, long(std::max(0.0, until - Now()) * 1e6)};
+      if (select(int(s) + 1, &read, nullptr, nullptr, &wait) <= 0) break;
+      char reply[64];
+      const int n = recvfrom(s, reply, sizeof(reply), 0, nullptr, nullptr);
+      if (n < 16 || std::memcmp(reply, "BF43PONG", 8) != 0) continue;
+      uint32_t id[2];
+      std::memcpy(id, reply + 8, 8);
+      if (id[0] != 0xD1EC7u || id[1] > 1) continue;
+      const int ms = int(std::lround((Now() - sent[id[1]]) * 1000.0));
+      best = ms;  // the first answer is enough
+      break;
+    }
+#if defined(_WIN32)
+    closesocket(s);
+#else
+    close(s);
+#endif
+    return best;
   }
 
   // The servers the backend at `host` lists (its registry on port 18250), for Direct connect to a server that runs
@@ -429,7 +496,7 @@ class ServerList {
   // kQueued (with `place`: the game waits in a full server's queue): `place` gets the place.
   enum class Reserved { kYes, kNo, kOutdated, kRefused, kQueued };
   static std::string ReserveRequest(const std::string& gid, bool queue) {
-    return "{\"op\": \"reserve\", \"gid\": \"" + gid + "\", " + (queue ? "\"queue\": 1, " : "") + ClientFields() + "}";
+    return "{\"op\": \"reserve\", \"gid\": \"" + gid + "\", " + (queue ? "\"queue\": 1, " : "") + JoinFields() + "}";
   }
   static QueuePlace ReadPlace(const std::string& reply, const std::string& gid) {
     QueuePlace p;
@@ -528,6 +595,7 @@ class ServerList {
     s.retired_mode = JsonField(obj, "mode") == "modern";
     s.players = std::atoi(JsonField(obj, "players").c_str());
     s.max_players = std::atoi(JsonField(obj, "max_players").c_str());
+    s.bots = std::max(0, std::atoi(JsonField(obj, "bots").c_str()));
     if (const std::string q = JsonField(obj, "queue"); !q.empty()) s.queue = std::atoi(q.c_str());
     s.description = JsonField(obj, "description");
     TakeDescriptionTags(s);
@@ -535,6 +603,7 @@ class ServerList {
     s.official = JsonField(obj, "official") == "true";
     s.promoted = s.official && JsonField(obj, "promoted") == "true";
     s.night = kNightOps && JsonField(obj, "night") == "true";  // night_ops.h: none without Night Ops
+    s.daybreak = kNightOps && !s.night && JsonField(obj, "daybreak") == "true";  // the same build switch
     s.region = JsonField(obj, "region");
     s.tick_hz = std::atoi(JsonField(obj, "tick").c_str());
     return s;
@@ -638,7 +707,7 @@ inline void QueueWatch::Run(std::shared_ptr<Shared> s) {
     }
     std::string reply;
     bool ok = RegistryRequest("{\"op\": \"queue\", \"gid\": \"" + place.gid + "\", \"token\": \"" + place.token + "\", " +
-                                  ClientFields() + "}",
+                                  JoinFields() + "}",
                               reply);
     std::string op = ok ? JsonField(reply, "op") : "";
     if (op == "queue_lost") {

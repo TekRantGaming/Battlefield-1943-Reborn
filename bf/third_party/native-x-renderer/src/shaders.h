@@ -46,6 +46,9 @@ class ShaderCache {
 
   // `scale`: the render scale the translated shaders revert (D37).
   bool Initialize(Diligent::IRenderDevice* device, const RenderScale& scale);
+  // D197: the shadow map's fetch constant whose compares get soft shadows (SpirvShaderTranslator::
+  // SetSoftShadowFetchConstant), before Initialize. UINT32_MAX: none.
+  void SetSoftShadowFetchConstant(uint32_t fetch_constant) { soft_shadow_fetch_constant_ = fetch_constant; }
 
   // The render thread's translator, for the default modifications (it translates nothing).
   rex::graphics::SpirvShaderTranslator& translator() { return *translator_; }
@@ -98,6 +101,7 @@ class ShaderCache {
   };
 
   void Worker();
+  uint32_t soft_shadow_fetch_constant_ = UINT32_MAX;
   void Translate(rex::graphics::SpirvShaderTranslator& translator, const Job& job);
   void MakeMotionShader(const Job& job);
 

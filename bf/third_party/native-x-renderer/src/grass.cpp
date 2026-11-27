@@ -946,6 +946,30 @@ bool GrassProbeResult(uint32_t* id, float* ground) {
 }
 
 namespace {
+// D205: the ground under the camera, for the turned shadows' pivot. Asked through the same probe whenever it is free
+// (the developer tour's asks come first), with numbers from 2^23 up (a float holds them exactly; the tour's are small).
+constexpr uint32_t kCameraProbeBase = 0x800000;
+struct CameraGround {
+  float x = 0, z = 0, ground = 0;  // where it was last answered for, and the height
+  bool valid = false;
+  uint32_t next = 0;
+} g_camera_ground;
+}  // namespace
+
+bool GrassCameraGround(float x, float z, float* ground) {
+  std::lock_guard lock(g_probe.mutex);
+  if (!g_probe.asked) {
+    g_probe.x = x, g_probe.z = z, g_probe.id = kCameraProbeBase + (g_camera_ground.next++ & 0x3FFFFF);
+    g_probe.asked = true;
+  }
+  // An answer for a place within 40 m (a plane flies that in a few frames; the probe answers within a few).
+  const CameraGround& c = g_camera_ground;
+  if (!c.valid || std::hypot(c.x - x, c.z - z) > 40.0f) return false;
+  *ground = c.ground;
+  return true;
+}
+
+namespace {
 // D151: the level's grass map as the game gave it (GrassMap), taken by the next frame's placement.
 struct GrassMapData {
   std::mutex mutex;
@@ -1210,8 +1234,10 @@ bool Grass::Initialize(IRenderDevice* device) {
 }
 
 Grass::Pass* Grass::DrawPass(TEXTURE_FORMAT color, TEXTURE_FORMAT depth, uint8_t depth_func, bool depth_clip,
-                             bool depth_write) {
-  auto key = std::make_tuple(int(color), int(depth), int(depth_func), int(depth_clip) | (depth_write ? 2 : 0));
+                             bool depth_write, uint32_t samples) {
+  // samples: the targets' (host MSAA, targets.h: the tufts are drawn into the view's multisampled twins).
+  auto key = std::make_tuple(int(color), int(depth), int(depth_func),
+                             int(depth_clip) | (depth_write ? 2 : 0) | int(samples) << 8);
   auto it = draw_passes_.find(key);
   if (it != draw_passes_.end()) return it->second.srb ? &it->second : nullptr;
   Pass& pass = draw_passes_[key];
@@ -1221,6 +1247,7 @@ Grass::Pass* Grass::DrawPass(TEXTURE_FORMAT color, TEXTURE_FORMAT depth, uint8_t
   info.GraphicsPipeline.NumRenderTargets = 1;
   info.GraphicsPipeline.RTVFormats[0] = color;
   info.GraphicsPipeline.DSVFormat = depth;
+  info.GraphicsPipeline.SmplDesc.Count = Uint8(std::max(samples, 1u));
   info.GraphicsPipeline.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
   info.GraphicsPipeline.RasterizerDesc.CullMode = CULL_MODE_NONE;
   info.GraphicsPipeline.RasterizerDesc.ScissorEnable = True;
@@ -1472,8 +1499,10 @@ bool Grass::Apply(IDeviceContext* context, const TerrainFrame& t, ITexture* colo
   }
   const bool use_map = REXCVAR_GET(native_grass_map) && map_state_ != 0;
   // Clipped to each partition's depth range (the game's own draws clamp; the grass is drawn once per partition).
-  Pass* draw = DrawPass(color_rtv->GetDesc().Format, depth_dsv->GetDesc().Format, t.depth_func, true, true);
-  Pass* draw_fading = DrawPass(color_rtv->GetDesc().Format, depth_dsv->GetDesc().Format, t.depth_func, true, false);
+  const uint32_t target_samples = color_rtv->GetTexture()->GetDesc().SampleCount;
+  Pass* draw = DrawPass(color_rtv->GetDesc().Format, depth_dsv->GetDesc().Format, t.depth_func, true, true, target_samples);
+  Pass* draw_fading =
+      DrawPass(color_rtv->GetDesc().Format, depth_dsv->GetDesc().Format, t.depth_func, true, false, target_samples);
   if (!draw || !draw_fading) return refuse("no draw pipeline");
 
   // The camera: the point the world-view-projection maps to clip x = y = w = 0 (solved with Cramer's rule on the
@@ -1664,7 +1693,14 @@ bool Grass::Apply(IDeviceContext* context, const TerrainFrame& t, ITexture* colo
       float ground;
       std::memcpy(&ground, &v[1], 4);
       std::lock_guard lock(g_probe.mutex);
-      if (v[0] == g_probe.id) g_probe.asked = false, g_probe.answered = true, g_probe.ground = ground;
+      if (v[0] == g_probe.id && v[0] >= kCameraProbeBase) {  // D205: the camera's ground
+        g_probe.asked = false;
+        if (std::isfinite(ground) && ground > -1000.0f && ground < 5000.0f)
+          g_camera_ground.x = g_probe.x, g_camera_ground.z = g_probe.z, g_camera_ground.ground = ground,
+          g_camera_ground.valid = true;
+      } else if (v[0] == g_probe.id) {
+        g_probe.asked = false, g_probe.answered = true, g_probe.ground = ground;
+      }
       probe_copied_ = false;
     }
   }

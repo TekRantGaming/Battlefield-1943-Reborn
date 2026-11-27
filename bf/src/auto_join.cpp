@@ -29,6 +29,7 @@
 #include <rex/hook.h>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/ui/keybinds.h>
+#include <native_x_renderer/native_x_renderer.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
@@ -38,6 +39,7 @@
 #include "voice_mute.h"
 #include "comms.h"
 #include "flash_spawn.h"
+#include "free_cam.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -63,7 +65,16 @@ void LookPad(uint8_t* gamepad, bool seated);                     // look.cpp
 bool LocalOnFoot();                                              // look.cpp: the vehicle seeker
 bool LocalSeated(const uint8_t* base);                           // look.cpp: in a vehicle, any seat
 void HudGlyphsTick(bool seated);                                 // hud_glyphs.cpp: the prompts drawn again on a change
+void SharpTextTick();                                            // sharp_text.cpp: Enhancements > HUD scale
+void SquadColorsTick(uint8_t* base);                             // squad_colors.cpp: the squad's icons in green
 void NoteLevelChange();                                          // modern_mode.cpp: scan the new level's values
+void WeatherRoundOver();     // weather_audio.cpp: between two rounds the weather is silent, and a new round's
+void WeatherLevelLoading();  // world is taken at once (D221)
+void WeatherLevelIn();
+void SkinMatchRoundOver();   // fov.cpp: the electric skin's unlock, one full Night Ops match
+void SkinMatchNewLevel();
+void SpawnMouseRoundOver();  // flash_mouse.cpp: the end of round scoreboard is not the deploy screen
+void SeatZoomPad(uint8_t left_trigger);  // fov.cpp: a gun seat's zoom
 #if defined(BF_DEV_TOOLS)
 extern std::atomic<float> g_dev_camera[3];                       // look.cpp: the local camera's position
 extern std::atomic<float> g_dev_view_pos[3];                     // dev_matscan.cpp: the rendered camera's
@@ -78,6 +89,7 @@ bool SpawnMouseActive();
 bool SpawnMouseCommand(const char* name, const char* args);    // flash_mouse.cpp: true, not to be passed on
 bool GameMenuEnabled();
 void GameMenuPad(uint16_t buttons, int16_t lx, int16_t ly);
+void GameMenuPadRaw(const uint8_t* gamepad);  // game_menu.cpp: the controller's whole state, for the controller page
 void ShowGameMenu();
 void ShowPauseMenu();
 void PressBf(const std::vector<uint16_t>& presses);
@@ -85,6 +97,7 @@ bool GameMenuPassing();
 void NoteMatchDevice(bool keyboard);  // game_menu.cpp: the device used in the match, for the HUD's prompts
 void NoteGameMenuSignal();  // game_menu.cpp: BF's own menu screen is up
 void ShowLostNotice();
+extern std::atomic<bool> g_smg_tune_hold;  // fov.cpp: the pause menu's sight sliders are open
 bool LauncherLetsGameSignIn();  // game_menu.cpp: BF signs in behind the launcher
 
 namespace {
@@ -428,6 +441,9 @@ void GameCommand(const std::string& name, const std::string& args) {
 // switch the flags were right and the names the old ones (run v41team2; tb_move4's shot 36). When the player's team
 // changes, the array is reversed, and the end of round screen's two (factionSIDsWIN, factionSIDsLOSE) with it.
 bool InMatch();
+#if defined(BF_DEV_TOOLS)
+void BenchFreeCam(PPCContext& ctx, uint8_t* base, bool hidden);  // bench_freecam.cpp
+#endif
 void TeamNamesTick() {
   if (!InMatch()) return;
   const int team = comms::Team();
@@ -796,6 +812,14 @@ REX_HOOK_RAW(sub_8243BB70) {
     if (name == "presenceConnected") bf1943::g.seen_presence = true;
     if (name == "queryBegin") bf1943::g.seen_query = true;
     if (name == "onStartLoading") bf1943::g.seen_loading = true;
+    // Between two rounds (weather_audio.cpp): the round's end (the game's WinningTeamIsSet, the end of round screen's
+    // winner) and, in a match, the next level's load (playerRoleReady, as on a join's load: runs endnames10, sb_round3,
+    // m0472b, the last a change of map with no round's end).
+    if (bf1943::g.stage == bf1943::Stage::kInGame && bf1943::g.seen_ready) {
+      if (name == "WinningTeamIsSet") bf1943::WeatherRoundOver(), bf1943::SkinMatchRoundOver(), bf1943::SpawnMouseRoundOver();
+      if (name == "playerRoleReady" && std::chrono::steady_clock::now() - bf1943::g.ready_at > std::chrono::seconds(10))
+        bf1943::WeatherLevelLoading(), bf1943::SkinMatchNewLevel();
+    }
     if (name == "gameIsReady" && bf1943::g.seen_loading) {
       const auto now = std::chrono::steady_clock::now();
       bf1943::g_names_team = 0;  // the level's HUD made its team names again (TeamNamesTick)
@@ -814,6 +838,7 @@ REX_HOOK_RAW(sub_8243BB70) {
         bf1943::g.spawning = false;
         bf1943::g.entered = false;
         bf1943::NoteLevelChange();
+        bf1943::WeatherLevelIn();
         REXLOG_INFO("BF menu driver: the server changed the level");
       }
     }
@@ -1314,6 +1339,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     }
     bf1943::GameMenuPad(uint16_t(buttons & ~rex::input::mnk::LastKeyButtons()), key_axes ? 0 : int16_t(p[8] << 8 | p[9]),
                         key_axes ? 0 : int16_t(p[10] << 8 | p[11]));
+    bf1943::GameMenuPadRaw(p + 4);
     // Start in a match: our pause opens (game_menu.cpp, PausePage), in place of the game's, which never opens (the
     // Start is taken from the game's pad). The keyboard's Esc too (game_menu.cpp sees it while our menu is closed).
     const bool esc = bf1943::TakeEscapePress();
@@ -1396,11 +1422,16 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     }
   }
   if (hidden) std::memset(p + 4, 0, 12);
+  // The pause menu's SMG sight sliders (fov.cpp): the aim held while they are open, so the gun stays at the eye.
+  if (hidden && bf1943::g_smg_tune_hold.load(std::memory_order_relaxed)) p[6] = 255;
   static const bool input_off = [] {
     const char* v = std::getenv("BF_AB_OFF");
     return v && std::string(v).find("input") != std::string::npos;
   }();
   const bool seated = bf1943::LocalSeated(base);
+  native_x_renderer::NightVehicleSeated(seated);  // D178: a vehicle's lamps are on while someone is in it
+  native_x_renderer::SetEyeOnFoot(!seated && bf1943::LocalOnFoot());  // D193: the storm shakes the view only on foot
+  native_x_renderer::SetEyeInWorld(seated || bf1943::LocalOnFoot());  // the sea splashes only on a living player's view
   bf1943::comms::NoteInWorld(seated || bf1943::LocalOnFoot());  // voice goes out only from the world
   bf1943::comms::ReadTeam(base, bf1943::LevelLoaded());  // team and squad chat (comms.cpp), the deploy screen too
   bf1943::CapturePointsTick(base, bf1943::LevelLoaded());  // the flags' letters and the pause menu's map
@@ -1413,7 +1444,12 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   if (!input_off)  // Settings > Controls
     bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, seated);
   bf1943::HudGlyphsTick(seated);  // hud_glyphs.cpp: the keyboard prompts follow the seat's keys
+  bf1943::SharpTextTick();        // sharp_text.cpp: the HUD's sharper copies drawn or not
+  bf1943::SquadColorsTick(base);  // squad_colors.cpp: the squad's icons a brighter green
   if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4, seated);
+  if (seated && !menu && !bf1943::g_walking) bf1943::SeatZoomPad(p[6]);  // fov.cpp: a gun seat's zoom (the left trigger)
+  // The admin's free camera (free_cam.cpp, F9): while it flies it takes the pad and the game gets an empty one.
+  bf1943::freecam::Pad(ctx, base, p + 4, !hidden);
   // Capture native navigation before the mouse helper adds any kit/button pulses.
   const auto nav_axis = [&](int at) { return std::abs(int(int16_t(p[at] << 8 | p[at + 1]))) > 4915; };
   const bool spawn_navigation = (uint16_t(p[4] << 8 | p[5]) & 0xB01F) != 0 ||
@@ -1434,6 +1470,42 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   p[4] = uint8_t(buttons >> 8);
   p[5] = uint8_t(buttons);
 #if defined(BF_DEV_TOOLS)
+  // BF_LOOK_UP_TEST=<seconds>: from that many seconds after joining, the right stick held up for two seconds (the
+  // camera looks up: the sky without terrain in view).
+  {
+    static const double look_after = [] {
+      const char* v = std::getenv("BF_LOOK_UP_TEST");
+      return v && *v ? std::atof(v) : -1.0;
+    }();
+    static std::chrono::steady_clock::time_point look_joined{};
+    if (look_after >= 0 && bf1943::InMatch()) {
+      if (!look_joined.time_since_epoch().count()) look_joined = std::chrono::steady_clock::now();
+      const double since = std::chrono::duration<double>(std::chrono::steady_clock::now() - look_joined).count();
+      if (since > look_after && since < look_after + 2.0) p[14] = 0x7F, p[15] = 0xFF;
+    }
+  }
+#if defined(BF_DEV_TOOLS)
+  // Benchmarks (tools/bench). BF_BENCH_TURN=<seconds>[,<strength>]: from that many seconds after joining, the right
+  // stick held to the right (default half way): the soldier turns on the spot at a steady rate, so a benchmark sweeps
+  // the whole view around the spawn point the same way every run.
+  {
+    static const std::pair<double, double> turn = [] {
+      const char* v = std::getenv("BF_BENCH_TURN");
+      double at = -1, strength = 0.5;
+      if (v && *v) std::sscanf(v, "%lf,%lf", &at, &strength);
+      return std::make_pair(at, std::clamp(strength, -1.0, 1.0));
+    }();
+    static std::chrono::steady_clock::time_point turn_joined{};
+    if (turn.first >= 0 && bf1943::InMatch() && !menu && !hidden) {
+      if (!turn_joined.time_since_epoch().count()) turn_joined = std::chrono::steady_clock::now();
+      if (std::chrono::duration<double>(std::chrono::steady_clock::now() - turn_joined).count() > turn.first) {
+        const int16_t x = int16_t(turn.second * 32767);
+        p[12] = uint8_t(uint16_t(x) >> 8), p[13] = uint8_t(x);
+      }
+    }
+  }
+  bf1943::BenchFreeCam(ctx, base, menu || hidden);  // BF_BENCH_FREECAM (bench_freecam.cpp)
+#endif
   // BF_WALK_TEST=<seconds>: in a match, the left stick full right from that many seconds after joining (frame rate
   // tests: how the soldier moves at different rates).
   static const double walk_after = [] {
@@ -1449,6 +1521,46 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
         logged = true;
         REXLOG_INFO("BF walk test: left stick right (pad connected {}, walking {}, menu {})", connected,
                     bool(bf1943::g_walking), menu);
+      }
+      // How the soldier moves while it walks (14 Nov 2026, 60 Hz servers "desyncing, rubber banding"): the camera's
+      // position every pad read; each 5 s, the path's length, the speed, and the steps against the direction of travel
+      // (a pull back by the server) with the largest.
+      {
+        static float last[3] = {}, from[3] = {};
+        static bool have = false;
+        static double path = 0, worst_back = 0, worst_jump = 0;
+        static int backs = 0, reads = 0;
+        static std::chrono::steady_clock::time_point window{};
+        const auto t = std::chrono::steady_clock::now();
+        const float v[3] = {bf1943::g_dev_view_pos[0].load(), bf1943::g_dev_view_pos[1].load(),
+                            bf1943::g_dev_view_pos[2].load()};
+        if (!have) {
+          have = true, window = t;
+          std::memcpy(last, v, sizeof(v)), std::memcpy(from, v, sizeof(v));
+        } else if (v[0] != last[0] || v[2] != last[2]) {
+          const double dx = v[0] - last[0], dz = v[2] - last[2];
+          const double step = std::sqrt(dx * dx + dz * dz);
+          // The direction of travel: from the window's start to the last position.
+          const double tx = last[0] - from[0], tz = last[2] - from[2];
+          const double tl = std::sqrt(tx * tx + tz * tz);
+          if (tl > 0.5) {
+            const double along = (dx * tx + dz * tz) / tl;
+            if (along < -0.02) ++backs, worst_back = std::max(worst_back, -along);
+          }
+          worst_jump = std::max(worst_jump, step);
+          path += step, ++reads;
+          std::memcpy(last, v, sizeof(v));
+        }
+        const double seconds = std::chrono::duration<double>(t - window).count();
+        if (seconds >= 5.0) {
+          const double fx = last[0] - from[0], fz = last[2] - from[2];
+          REXLOG_INFO("BF walk test: {:.1f} s: path {:.2f} m, {:.2f} m from the start ({:.2f} m/s), {} moves, {} steps back "
+                      "(largest {:.2f} m), largest step {:.2f} m",
+                      seconds, path, std::sqrt(fx * fx + fz * fz), std::sqrt(fx * fx + fz * fz) / seconds, reads, backs,
+                      worst_back, worst_jump);
+          window = t, path = worst_back = worst_jump = 0, backs = reads = 0;
+          std::memcpy(from, last, sizeof(last));
+        }
       }
       // BF_WALK_STICK: lx (default, strafe right: the open deck at the USMC carrier spawn), lxl (strafe left),
       // ly (forward), lyb (back), rx (turn right), ry (look up).
@@ -1713,7 +1825,12 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
           }
           const double tx = double(target[0]) - pos[0], tz = double(target[2]) - pos[2];
           static SClock::time_point logged_at{};
-          if (now - logged_at > std::chrono::seconds(2)) {
+          // BF_SEEK_LOG=<s>: the place logged that often (2 s without it).
+          static const double log_every = [] {
+            const char* v = std::getenv("BF_SEEK_LOG");
+            return v && *v ? std::max(0.05, std::atof(v)) : 2.0;
+          }();
+          if (now - logged_at > std::chrono::duration<double>(log_every)) {
             logged_at = now;
             REXLOG_INFO("BF seek: at {:.1f} {:.1f} {:.1f}, {:.1f} m from {:.1f} {:.1f}", pos[0], pos[1], pos[2], target_dist,
                         target[0], target[2]);
@@ -1836,7 +1953,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
         }
         held |= w == "a" ? 0x1000 : w == "b" ? 0x2000 : w == "x" ? 0x4000 : w == "y" ? 0x8000 : w == "lb" ? 0x0100
                 : w == "rb" ? 0x0200 : w == "up" ? 0x0001 : w == "down" ? 0x0002 : w == "left" ? 0x0004
-                : w == "right" ? 0x0008 : 0;
+                : w == "right" ? 0x0008 : w == "ls" ? 0x0040 : w == "rs" ? 0x0080 : w == "back" ? 0x0020 : 0;
         if (w == "lt") p[6] = 0xFF;
         if (w == "rt") p[7] = 0xFF;
       }
@@ -1844,6 +1961,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
       const uint16_t b = uint16_t(p[4] << 8 | p[5]) | held;
       p[4] = uint8_t(b >> 8), p[5] = uint8_t(b);
       ++packet;
+      if (seated) bf1943::SeatZoomPad(p[6]);  // (a test's left trigger too: put in after the read above)
     }
   }
   if (!match_script.empty() && bf1943::InMatch() && !menu && !bf1943::g_walking) {

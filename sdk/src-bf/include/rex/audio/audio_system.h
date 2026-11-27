@@ -28,6 +28,12 @@ class ByteStream;
 
 namespace rex::audio {
 
+// A game's check, run before each render callback while audio_render_wait_ms > 0: true when the game's own mixer has
+// its next packet ready for the guest's XAudio. While it says no, the callback waits for it, up to audio_render_wait_ms
+// (the output queue holds several frames, so a short wait is not heard; rendering at once would give a silent frame).
+using RenderReadyCheck = bool (*)();
+void SetRenderReadyCheck(RenderReadyCheck check);
+
 constexpr memory::fourcc_t kAudioSaveSignature = memory::make_fourcc("XAUD");
 
 class AudioDriver;
@@ -61,6 +67,7 @@ class AudioSystem : public system::IAudioSystem {
   virtual void Initialize();
 
   void WorkerThreadMain();
+  void WaitForGameMixer();
 
   virtual X_STATUS CreateDriver(size_t index, rex::thread::Semaphore* semaphore,
                                 AudioDriver** out_driver) = 0;
@@ -94,6 +101,7 @@ class AudioSystem : public system::IAudioSystem {
   rex::thread::WaitHandle* wait_handles_[kMaximumClientCount + 1];
 
   bool paused_ = false;
+  bool wait_armed_ = true;  // WaitForGameMixer: worker thread only
   rex::thread::Fence pause_fence_;
   std::unique_ptr<rex::thread::Event> resume_event_;
 };

@@ -155,8 +155,16 @@ loc_8275B724:
 // guest 0x1 (the null page guard gave zeros) and then wrote there ("Unhandled guest access violation: write of guest
 // 0x00000001", frames sub_821DBC68, sub_821E08D0, sub_823F0F30, sub_82410950, ... in the server's tick). What left the
 // table that way is not known. A bucket pointer in the guest's first 64 KB (never a heap address) is a table with
-// nothing to clear: sub_821DBC68 returns at once, and sub_821E08D0 empties it (no buckets, nothing to free) before
-// its own code runs. Logged, the first 10 times.
+// nothing to clear: sub_821DBC68 returns at once, and sub_821E08D0 leaves the table alone. Logged, the first 10 times.
+//
+// Until 0.4.8 sub_821E08D0's guard emptied such a table (+36 and +40 set to 0) and let the game's clear run. That clear
+// also frees the table's own buffer at +8 when +16 minus +8 is more than 1, and every table it caught had been freed
+// already: the caller (sub_823F0F30) then freed the table itself a second time (the small heap guard's line follows),
+// or the memory belonged to another object by then (a count of C2C80000, the float -100.0). All Maps 3 at 14:38 UTC on
+// 18 Nov 2026 and All Maps 1 at 00:20 UTC on 20 Nov (0.4.7.4) crashed that way: +8 held 00000400 and 00800000, the
+// big heap's free (sub_82624D90, sub_82624850, sub_826230C8) wrote 4 bytes below it, guest 3FC and 7FFFFC. So a bad
+// table is now passed over whole: none of the clear runs, nothing is freed, and nothing is written into memory that
+// may be another object's.
 namespace {
 std::atomic<uint32_t> g_bad_tables{0};
 bool BadBuckets(uint32_t buckets, uint32_t count) { return count != 0 && buckets < 0x10000; }
@@ -164,7 +172,7 @@ void NoteBadTable(const char* where, uint32_t table, uint32_t buckets, uint32_t 
   const uint32_t n = ++g_bad_tables;
   if (n <= 10)
     REXLOG_WARN("BF game fix: a hash table with its bucket pointer at {:08X} and {} buckets in {} (table {:08X}): "
-                "treated as empty instead of a crash (time {})",
+                "its clear passed over instead of a crash (time {})",
                 buckets, count, where, table, n);
 }
 }  // namespace
@@ -185,8 +193,7 @@ REX_HOOK_RAW(sub_821E08D0) {
     const uint32_t buckets = REX_LOAD_U32(table + 36), count = REX_LOAD_U32(table + 40);
     if (BadBuckets(buckets, count)) {
       NoteBadTable("sub_821E08D0", table, buckets, count);
-      REX_STORE_U32(table + 36, 0);
-      REX_STORE_U32(table + 40, 0);
+      return;  // the table is gone: none of the clear runs (see above)
     }
   }
   __imp__sub_821E08D0(ctx, base);
@@ -744,9 +751,25 @@ void RunGameFixTest(PPCContext& ctx, uint8_t* base) {
   ctx.r1.u64 = area - 0x100;
   const uint32_t bad_before = g_bad_tables.load();
   sub_821E08D0(ctx, base);
-  REXLOG_INFO("BF game fix test: a hash table with its bucket pointer at 1 cleared without a fault ({} caught; now "
-              "bucket pointer {:08X}, {} buckets)",
+  REXLOG_INFO("BF game fix test: a hash table with its bucket pointer at 1 cleared without a fault ({} caught; left "
+              "as it was: bucket pointer {:08X}, {} buckets)",
               g_bad_tables.load() - bad_before, REX_LOAD_U32(table + 36), REX_LOAD_U32(table + 40));
+  std::memcpy(&ctx, &saved, sizeof(ctx));
+  // The table of the 18 and 20 Nov crashes: bucket pointer 0, a count of C2C80000 (the float -100.0 of the object now
+  // in that memory) and a buffer from 00000400 to 00000800, which the clear frees. Without the guard the big heap's
+  // free writes guest 0x3FC.
+  for (uint32_t a = area; a < area + 0x200; a += 4) REX_STORE_U32(a, 0);
+  REX_STORE_U32(table + 8, 0x400);
+  REX_STORE_U32(table + 16, 0x800);
+  REX_STORE_U32(table + 40, 0xC2C80000);
+  REX_STORE_U32(table + 44, 0x5EED5EED);  // the clear sets +44 to 0: it stays if the clear did not run
+  ctx.r3.u64 = table;
+  ctx.r1.u64 = area - 0x100;
+  const uint32_t gone_before = g_bad_tables.load();
+  sub_821E08D0(ctx, base);
+  REXLOG_INFO("BF game fix test: a hash table that is gone (count C2C80000, a buffer at 00000400) passed over without "
+              "a fault ({} caught; +44 {:08X}, untouched)",
+              g_bad_tables.load() - gone_before, REX_LOAD_U32(table + 44));
   std::memcpy(&ctx, &saved, sizeof(ctx));
   // 16 Nov 2026: a live object whose table has no bucket array (the All Maps 1 crash), and a scene node whose entry
   // array is 0 (the All Maps 3 crash). Without the guards: a read of guest 0x10000 and a write of guest 0x18.
@@ -885,3 +908,24 @@ void RunGameFixTest(PPCContext& ctx, uint8_t* base) {
 #endif
 
 }  // namespace bf1943
+
+#if defined(BF_DEV_TOOLS)
+// Server sizes study (docs/SERVER-SIZES.md, 20 Nov 2026): a client joining a 63 player match died on a network object
+// id its ghost table did not hold (sub_8275D230: an id read with the bit count at +576, looked up in the table at
+// +460 by sub_8275D0D8, the entry's +8 read from 0). A failed lookup logs the id, the bit count and the table's words.
+REX_EXTERN(__imp__sub_8275D230);
+REX_HOOK_RAW(sub_8275D230) {
+  const uint32_t self = ctx.r3.u32;
+  __imp__sub_8275D230(ctx, base);
+  static std::atomic<int> told{0};
+  if (ctx.r3.u32 == 0 && told.load() < 20) {
+    ++told;
+    auto word = [&](uint32_t a) {
+      return uint32_t(base[a]) << 24 | uint32_t(base[a + 1]) << 16 | uint32_t(base[a + 2]) << 8 | base[a + 3];
+    };
+    REXLOG_WARN("BF ghosts: an object id not in the table (object {:08X}, id bits {}, table words {:08X} {:08X} {:08X} "
+                "{:08X} {:08X})", self, word(self + 576), word(self + 460), word(self + 464), word(self + 468),
+                word(self + 472), word(self + 476));
+  }
+}
+#endif

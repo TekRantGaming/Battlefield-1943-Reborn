@@ -175,6 +175,11 @@ void SpirvShaderTranslator::StartTranslation() {
   // TODO(Triang3l): Logger.
   builder_ = std::make_unique<SpirvBuilder>(features_.spirv_version, (kSpirvMagicToolId << 16) | 1,
                                             nullptr);
+  soft_shadow_register_ = UINT32_MAX;
+  soft_shadow_tap_mask_ = 0;
+  soft_shadow_sampler_index_ = SIZE_MAX;
+  soft_shadow_image_index_ = SIZE_MAX;
+  var_main_soft_shadow_coordinates_ = spv::NoResult;
 
   builder_->addCapability(IsSpirvTessEvalShader() ? spv::CapabilityTessellation
                                                   : spv::CapabilityShader);
@@ -309,6 +314,7 @@ void SpirvShaderTranslator::StartTranslation() {
       {"edram_rt_keep_mask", offsetof(SystemConstants, edram_rt_keep_mask), type_uint4_array_2},
       {"edram_rt_clamp", offsetof(SystemConstants, edram_rt_clamp), type_float4_array_4},
       {"edram_blend_constant", offsetof(SystemConstants, edram_blend_constant), type_float4_},
+      {"soft_shadow", offsetof(SystemConstants, soft_shadow), type_float4_array_4},
   };
   id_vector_temp_.clear();
   id_vector_temp_.reserve(rex::countof(system_constants));
@@ -508,6 +514,11 @@ void SpirvShaderTranslator::StartTranslation() {
     var_main_tfetch_gradients_v_ =
         builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_float3_,
                                  "xe_var_tfetch_gradients_v", const_float3_0_);
+    if (soft_shadow_fetch_constant_ != UINT32_MAX && is_pixel_shader()) {
+      var_main_soft_shadow_coordinates_ =
+          builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_float3_,
+                                   "xe_var_soft_shadow_coordinates", const_float3_0_);
+    }
     if (register_count()) {
       spv::Id type_register_array =
           builder_->makeArrayType(type_float4_, builder_->makeUintConstant(register_count()), 1);

@@ -31,10 +31,11 @@ if (Test-Path $out) { throw "release folder exists: $out" }
 # skips a bf-files.txt of another version. 0.1.x shipped 0.1.33 inside 0.1.33-preview.
 $built = (Select-String -Path (Join-Path $build "CMakeCache.txt") -Pattern '^BF_VERSION:STRING=(.*)$').Matches.Groups[1].Value
 if ($built -ne $Version) { throw "the build is version '$built', not ${Version}: build it with that version first (cmake -DBF_VERSION=$Version)" }
-# Night Ops (bf/src/night_ops.h) is not in releases until TekRantGaming says it is ready (12 Nov 2026): only a test
-# build (a version with -test) may have it.
+# Night Ops (bf/src/night_ops.h): in releases since 0.4.8 (TekRantGaming, 27 Nov 2026), so every build for players must
+# have it, or a Night Ops or Daybreak server's maps are drawn by day in that player's game (until then only a test
+# build, a version with -test, could have it).
 $nightOps = (Select-String -Path (Join-Path $build "CMakeCache.txt") -Pattern '^BF_NIGHT_OPS:BOOL=(ON|TRUE|1)$' -Quiet)
-if ($nightOps -and $Version -notmatch '-test') { throw "the build has Night Ops (BF_NIGHT_OPS ON): not for a release; build it with -DBF_NIGHT_OPS=OFF" }
+if (-not $nightOps) { throw "the build has no Night Ops (BF_NIGHT_OPS OFF): players' games would draw Night Ops and Daybreak servers by day; build it with -DBF_NIGHT_OPS=ON" }
 # The picture in picture sniper scope (bf/src/scope_pip.h): taken out of 0.4.1 at TekRantGaming's word (13 Nov 2026);
 # only a test build may have it.
 $scopePip = (Select-String -Path (Join-Path $build "CMakeCache.txt") -Pattern '^BF_SCOPE_PIP:BOOL=(ON|TRUE|1)$' -Quiet)
@@ -111,12 +112,44 @@ function New-Bin([string]$dest, [switch]$Shaders, [switch]$Flat) {
     foreach ($f in $binFiles) { Copy-Item (Join-Path $build $f) $bin }
     foreach ($f in $crtFiles) { Copy-Item (Join-Path $crtDir.FullName $f) $bin }
     Copy-Item (Join-Path $build "fonts") (Join-Path $bin "fonts") -Recurse  # our menus' font (Oswald, OFL)
+    # The shared bot data (bf\data\bots, filled by server\botdata.py install at each release): the official servers'
+    # merged learning, that every server's and every offline match's bots start from (bf\src\bots.cpp SharedPick).
+    # Both packages. No players in it: counts per 2 m cell of each map.
+    $botData = Join-Path $build "data\bots"
+    if (Test-Path (Join-Path $botData "version.txt")) {
+        $to = Join-Path $bin "data\bots"
+        New-Item -ItemType Directory -Force $to | Out-Null
+        Get-ChildItem $botData -File | Where-Object { $_.Extension -in ".txt", ".grid", ".json", ".sig" } |
+            Copy-Item -Destination $to
+    } else {
+        Write-Warning "no shared bot data in the build ($botData): the package carries none (server\botdata.py install)"
+    }
     # Our shader list (data\shaders: where each shader is in the player's game files, and the pipelines' render
     # state; no shader code), read at the first start (bf\src\shader_prep.cpp). Missing from every package up to
     # 0.1.5, so players' first sessions built all pipelines during play. Not for a server (it draws nothing).
     if ($Shaders) {
         # The launcher's button glyphs (Kenney's CC0 Input Prompts, glyphs\LICENSE.txt): the player's only.
         Copy-Item (Join-Path $build "glyphs") (Join-Path $bin "glyphs") -Recurse
+        # The weather's sounds (bf\src\weather_audio.cpp: rain, wind, thunder; the project's own recordings, 17 Nov
+        # 2026): the player's only. A build without them plays no weather sounds.
+        $weather = Join-Path $build "data\sounds\weather"
+        if (Test-Path $weather) {
+            $to = Join-Path $bin "data\sounds\weather"
+            New-Item -ItemType Directory -Force $to | Out-Null
+            Get-ChildItem $weather -File -Filter *.mp3 | ForEach-Object { Copy-Item $_.FullName $to }
+        } else {
+            Write-Warning "no weather sounds in the build ($weather): the package has none"
+        }
+        # The storms' radar patterns (bf\src\storm_patterns.cpp, D228: baked from public domain NWS radar by
+        # tools\storm_bake.py): the player's only. Without them the hurricane keeps its own shape.
+        $storms = Join-Path $build "data\weather\storms"
+        if (Test-Path $storms) {
+            $to = Join-Path $bin "data\weather\storms"
+            New-Item -ItemType Directory -Force $to | Out-Null
+            Get-ChildItem $storms -File -Filter *.bin | ForEach-Object { Copy-Item $_.FullName $to }
+        } else {
+            Write-Warning "no storm patterns in the build ($storms): the package has none"
+        }
         # The news window's YouTube player (bf\src\news_video.cpp, docs\NEWS.md): Microsoft's WebView2 loader, signed by
         # Microsoft (no submission of ours needed). The player's only.
         Copy-Item (Join-Path $root "bf\third_party\webview2\x64\WebView2Loader.dll") $bin
@@ -172,6 +205,9 @@ Settings: our menu (Settings). Crash and hang reports go to user\crashes. Licenc
 If Windows says "rexruntime.dll is either not designed to run on Windows or it contains an error" (Bad Image,
 0xc0e90002), Windows 11's Smart App Control has not cleared this build's files yet. It is not a broken download.
 "@
+# RecompLauncher's file (the repository's recomplauncher.json) beside bf1943.exe: how the launcher installs, sets up and
+# starts the game. The player's download only, never a server package.
+Copy-Item (Join-Path $root "recomplauncher.json") $c
 
 # ---- the server downloads (SERVERS-PLAN.md section 7): the community package for everyone (its servers only in the
 # Community list; the main backend is the official one, $OnlineHost), and with -Official the private one for TekRantGaming
@@ -184,8 +220,8 @@ function New-ServerPackage([string]$sname, [bool]$official) {
     Copy-Licences $s
     $sv = Join-Path $s "server"
     New-Item -ItemType Directory -Force (Join-Path $sv "manager_ui") | Out-Null
-    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\ed25519.py"), (Join-Path $root "server\stats.py"), (Join-Path $root "server\player_stats.py"), (Join-Path $root "server\text_filter.py"), (Join-Path $root "server\gmhost.py"), (Join-Path $root "server\manager.py") $sv
-    Copy-Item (Join-Path $root "server\manager_ui\index.html") (Join-Path $sv "manager_ui")
+    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\ed25519.py"), (Join-Path $root "server\stats.py"), (Join-Path $root "server\player_stats.py"), (Join-Path $root "server\text_filter.py"), (Join-Path $root "server\gmhost.py"), (Join-Path $root "server\manager.py"), (Join-Path $root "server\bans.py"), (Join-Path $root "server\dashboard.py"), (Join-Path $root "server\botdata.py") $sv
+    Copy-Item (Join-Path $root "server\manager_ui\index.html"), (Join-Path $root "server\manager_ui\dash.js"), (Join-Path $root "server\manager_ui\public.html") (Join-Path $sv "manager_ui")
     Copy-Item (Join-Path $root "tools\server_package\open_firewall.ps1") $s
     # The package's own Python (tools\server_package\make_python_runtime.py): a host installs nothing. python.org's
     # files, signed by the Python Software Foundation; their licence goes with the others.

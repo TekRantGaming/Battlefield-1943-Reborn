@@ -1,0 +1,67 @@
+name: "Server or connection"
+description: "Joining fails, lag, rubber banding, disconnects, or a server problem."
+title: "[Server or connection] "
+labels: ["server", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The quickest way is the game's own **Report an issue** page on the main menu: it fills
+        this form in with your system details and the end of your log, private details removed.
+  - type: textarea
+    id: what
+    attributes:
+      label: "What happened"
+      description: "Which server, what happened (could not join, lag, kicked), and when."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Steps to reproduce"
+      description: "What you did, step by step, so we can do the same."
+      placeholder: "1. Join a server on Wake Island, 2. Take a plane, 3. ..."
+    validations:
+      required: false
+  - type: input
+    id: expected
+    attributes:
+      label: "What I expected"
+      description: "What should have happened."
+    validations:
+      required: false
+  - type: input
+    id: actual
+    attributes:
+      label: "What happened instead"
+      description: "If it is not already said above."
+    validations:
+      required: false
+  - type: input
+    id: often
+    attributes:
+      label: "How often"
+      description: "Every time, Often, Sometimes or Once."
+    validations:
+      required: false
+  - type: textarea
+    id: system
+    attributes:
+      label: "System"
+      description: "Game version, Windows or Linux, CPU, GPU and driver, display and graphics settings, the last server and map. The game fills this in."
+    validations:
+      required: false
+  - type: textarea
+    id: log
+    attributes:
+      label: "Crash report and log"
+      description: "The game fills this in, or copies it for you to paste. Your log is bf1943.log in the game's user folder; crash reports are in the crashes folder beside it."
+    validations:
+      required: false
+  - type: input
+    id: contact
+    attributes:
+      label: "Contact"
+      description: "A Discord name if you want a reply there. Optional."
+    validations:
+      required: false

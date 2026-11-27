@@ -21,6 +21,13 @@ licence text in the place given here.
 | [GHMetalRecomp](https://github.com/ElGuslml/GHMetalRecomp), Gustavo Garcia: the NativeXRenderer profile that Battlefield's (`bf/src/native_x_renderer_bf1943.cpp`) started from | | MIT | `bf/licences/GHMetalRecomp.txt` |
 | [King Kong Recompiled](https://github.com/TekRantGaming/king-kong-recompiled), TekRantGaming and contributors: the choice of the dedicated graphics card on PCs that have two, ported as it is | `bf/src/gpu_choice.h`, `bf/src/gpu_preference.cpp`, `bf/tests/gpu_choice_tests.cpp` | MIT | `bf/third_party/native-x-renderer/thirdparty/king-kong-recompiled/LICENSE` |
 
+The weather's sounds in `bf/data/sounds/weather` are this project's own, released under CC0 (no rights reserved):
+see `bf/data/sounds/weather/LICENSE.txt`.
+
+The storm pattern in `bf/data/weather/storms` is baked from Hurricane Michael's radar (10 Oct 2018): the US National
+Weather Service's NEXRAD composite reflectivity as archived by the Iowa Environmental Mesonet (Iowa State University).
+NWS data is a work of the US government and in the public domain: see `bf/data/weather/storms/README.md`.
+
 The SDK's prebuilt test tools (GNU binutils for PowerPC and Cygwin, GPL) are left out of `sdk/src-bf/tools`: only the
 SDK's own tests use them (`REXGLUE_BUILD_TESTS`), and this project builds without them. They are in the
 [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) repository.

@@ -1,0 +1,130 @@
+From b886ab57a64697e59fcb17eec3b7ec38815c68e3 Mon Sep 17 00:00:00 2001
+From: "Claude (for TekRantGaming)" <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 13:49:28 +0000
+Subject: [PATCH] Vulkan: a combined image sampler whose view has no sampler
+ gets a fallback one, never VK_NULL_HANDLE
+
+The spec forbids a null sampler there (13.2.4), and NVIDIA's driver read through it and crashed (the electric
+weapon skin, 26 Nov 2026). The device makes one linear, clamped sampler on first use and the descriptor takes it;
+the first 16 such writes are logged as warnings, so the pass can be given a sampler of its own.
+---
+ .../include/RenderDeviceVkImpl.hpp            |  9 ++++++++
+ .../src/RenderDeviceVkImpl.cpp                | 23 +++++++++++++++++++
+ .../src/ShaderResourceCacheVk.cpp             | 16 ++++++++++---
+ 3 files changed, 45 insertions(+), 3 deletions(-)
+
+diff --git a/Graphics/GraphicsEngineVulkan/include/RenderDeviceVkImpl.hpp b/Graphics/GraphicsEngineVulkan/include/RenderDeviceVkImpl.hpp
+index 7d5d10a..81f0667 100644
+--- a/Graphics/GraphicsEngineVulkan/include/RenderDeviceVkImpl.hpp
++++ b/Graphics/GraphicsEngineVulkan/include/RenderDeviceVkImpl.hpp
+@@ -30,6 +30,7 @@
+ /// \file
+ /// Declaration of Diligent::RenderDeviceVkImpl class
+ #include <memory>
++#include <mutex>
+ #include <unordered_map>
+ #include <vector>
+ 
+@@ -264,6 +265,11 @@ public:
+     const VulkanUtilities::PhysicalDevice& GetPhysicalDevice() const { return *m_PhysicalDevice; }
+     const VulkanUtilities::LogicalDevice&  GetLogicalDevice() const { return *m_LogicalDevice; }
+ 
++    // NativeXRenderer: a combined image sampler written with a view that has no sampler (and no immutable sampler in
++    // its layout) gets this one (linear, clamped to the edge) instead of VK_NULL_HANDLE, which the Vulkan spec forbids
++    // and NVIDIA's driver crashes on. Made on first use.
++    VkSampler GetFallbackSampler();
++
+     FramebufferCache* GetFramebufferCache() { return m_FramebufferCache.get(); }
+     RenderPassCache*  GetImplicitRenderPassCache() { return m_ImplicitRenderPassCache.get(); }
+ 
+@@ -327,6 +333,9 @@ private:
+     std::unique_ptr<VulkanUtilities::PhysicalDevice> m_PhysicalDevice;
+     std::shared_ptr<VulkanUtilities::LogicalDevice>  m_LogicalDevice;
+ 
++    std::mutex                      m_FallbackSamplerMtx;
++    VulkanUtilities::SamplerWrapper m_FallbackSampler;
++
+     std::unique_ptr<FramebufferCache> m_FramebufferCache;
+     std::unique_ptr<RenderPassCache>  m_ImplicitRenderPassCache;
+ 
+diff --git a/Graphics/GraphicsEngineVulkan/src/RenderDeviceVkImpl.cpp b/Graphics/GraphicsEngineVulkan/src/RenderDeviceVkImpl.cpp
+index 90d9875..9262182 100644
+--- a/Graphics/GraphicsEngineVulkan/src/RenderDeviceVkImpl.cpp
++++ b/Graphics/GraphicsEngineVulkan/src/RenderDeviceVkImpl.cpp
+@@ -222,6 +222,9 @@ RenderDeviceVkImpl::~RenderDeviceVkImpl()
+     // Wait for the GPU to complete all its operations
+     IdleGPU();
+ 
++    // NativeXRenderer: no descriptor can use the fallback sampler now (the GPU is idle).
++    m_FallbackSampler.Release();
++
+     ReleaseStaleResources(true);
+ 
+     DEV_CHECK_ERR(m_DescriptorSetAllocator.GetAllocatedDescriptorSetCounter() == 0, "All allocated descriptor sets must have been released now.");
+@@ -442,6 +445,26 @@ Uint64 RenderDeviceVkImpl::ExecuteCommandBuffer(SoftwareQueueIndex CommandQueueI
+ }
+ 
+ 
++VkSampler RenderDeviceVkImpl::GetFallbackSampler()
++{
++    std::lock_guard<std::mutex> Lock{m_FallbackSamplerMtx};
++    if (m_FallbackSampler == VK_NULL_HANDLE)
++    {
++        VkSamplerCreateInfo SamplerCI{};
++        SamplerCI.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
++        SamplerCI.magFilter    = VK_FILTER_LINEAR;
++        SamplerCI.minFilter    = VK_FILTER_LINEAR;
++        SamplerCI.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
++        SamplerCI.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++        SamplerCI.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++        SamplerCI.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++        SamplerCI.maxLod       = VK_LOD_CLAMP_NONE;
++        SamplerCI.borderColor  = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
++        m_FallbackSampler      = m_LogicalDevice->CreateSampler(SamplerCI, "NativeXRenderer fallback sampler");
++    }
++    return m_FallbackSampler;
++}
++
+ void RenderDeviceVkImpl::IdleGPU()
+ {
+     IdleAllCommandQueues(true);
+diff --git a/Graphics/GraphicsEngineVulkan/src/ShaderResourceCacheVk.cpp b/Graphics/GraphicsEngineVulkan/src/ShaderResourceCacheVk.cpp
+index 3eb59f6..e7e26df 100644
+--- a/Graphics/GraphicsEngineVulkan/src/ShaderResourceCacheVk.cpp
++++ b/Graphics/GraphicsEngineVulkan/src/ShaderResourceCacheVk.cpp
+@@ -29,6 +29,8 @@
+ 
+ #include "ShaderResourceCacheVk.hpp"
+ 
++#include <atomic>
++
+ #include "DeviceContextVkImpl.hpp"
+ #include "BufferViewVkImpl.hpp"
+ #include "TextureViewVkImpl.hpp"
+@@ -850,12 +852,20 @@ VkDescriptorImageInfo ShaderResourceCacheVk::Resource::GetImageDescriptorWriteIn
+             // object (13.2.4)
+             DescrImgInfo.sampler = pSamplerVk->GetVkSampler();
+         }
+-#ifdef DILIGENT_DEVELOPMENT
+         else
+         {
+-            LOG_ERROR_MESSAGE("No sampler is assigned to texture view '", pTexViewVk->GetDesc().Name, "'");
++            // NativeXRenderer: never VK_NULL_HANDLE here (13.2.4 above; NVIDIA's driver read through it and crashed,
++            // the electric weapon skin, 26 Nov 2026). The device's fallback sampler instead, and a warning for the
++            // first few views that need it, so the pass can be given a sampler of its own.
++            DescrImgInfo.sampler = pTexViewVk->GetDevice()->GetFallbackSampler();
++            static std::atomic<int> Warned{0};
++            if (Warned.fetch_add(1) < 16)
++            {
++                const char* Name = pTexViewVk->GetDesc().Name;
++                LOG_WARNING_MESSAGE("No sampler is assigned to texture view '", (Name != nullptr ? Name : "(unnamed)"),
++                                    "' of a combined image sampler: the fallback sampler is used");
++            }
+         }
+-#endif
+     }
+     DescrImgInfo.imageView = pTexViewVk->GetVulkanImageView();
+ 
+-- 
+2.55.0.windows.5
+

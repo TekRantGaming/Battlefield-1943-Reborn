@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace bf1943 {
 enum class SeatKind {
@@ -28,6 +29,10 @@ struct SeatInfo {
   uint32_t bound = 0;         // bit c: the seat binds analog concept c
   bool throttle = false;      // concept 0 bound
   bool fire = false;          // concept 7 bound
+  // The vehicle's names from its data (native_input.cpp VehicleNames: "Sherman", "Medium_Tank"), and whether it is a
+  // boat (its names say so); empty and false on foot or when they could not be read.
+  std::string vehicle_name, vehicle_type;
+  bool boat = false;
   SeatKind kind = SeatKind::kNone;
 };
 

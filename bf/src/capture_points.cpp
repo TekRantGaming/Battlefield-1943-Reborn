@@ -493,6 +493,9 @@ int DrawFlagLetters(std::vector<uint8_t>& rgba, uint32_t width, uint32_t height,
 
 }  // namespace bf1943
 
+namespace bf1943 {
+void SquadColorsWorldMarker(uint8_t* base, uint32_t item);  // squad_colors.cpp
+}
 REX_EXTERN(__imp__sub_826A4E48);
 REX_HOOK_RAW(sub_826A4E48) {
   const uint32_t lr = uint32_t(ctx.lr), out = ctx.r6.u32, r31 = ctx.r31.u32, r28 = ctx.r28.u32;
@@ -504,6 +507,7 @@ REX_HOOK_RAW(sub_826A4E48) {
 #if defined(BF_DEV_TOOLS)
   if (bf1943::DevLog()) bf1943::DevNote(base, lr, icon, out, r31, r28, r25, r24, r7, ctx.r3.u32 != 0);
 #endif
+  if (lr == bf1943::kWorldCaller) bf1943::SquadColorsWorldMarker(base, r31);  // a squad mate's, on every frame
   if (ctx.r3.u32 != 0 && (lr == bf1943::kRowCaller || lr == bf1943::kWorldCaller || lr == bf1943::kMinimapCaller)) {
     bf1943::Letter(base, lr, icon, r7, out, r31, r28);
     if (lr == bf1943::kMinimapCaller) bf1943::NoteMapIcon(base, out, r28);

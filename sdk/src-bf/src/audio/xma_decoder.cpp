@@ -21,12 +21,19 @@
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/xthread.h>
+#include <rex/thread.h>
+
+#include <algorithm>
+#include <string>
 
 extern "C" {
 #include "libavutil/log.h"
 }  // extern "C"
 
 REXCVAR_DEFINE_BOOL(ffmpeg_verbose, false, "Audio", "Verbose FFmpeg output (debug and above)");
+REXCVAR_DEFINE_INT32(audio_xma_kick_threads, 4, "Audio",
+                     "Threads that decode deferred XMA kicks in parallel (BeginDeferredXmaKicks, besides the caller); "
+                     "0 = kicks always decode inline on the kicking thread");
 
 // As with normal Microsoft, there are like twelve different ways to access
 // the audio APIs. Early games use XMA*() methods almost exclusively to touch
@@ -53,6 +60,20 @@ REXCVAR_DEFINE_BOOL(ffmpeg_verbose, false, "Audio", "Verbose FFmpeg output (debu
 // using the XMA* functions.
 
 namespace rex::audio {
+
+namespace {
+XmaDecoder* g_decoder = nullptr;  // for BeginDeferredXmaKicks / EndDeferredXmaKicks
+// This thread's deferred kicks (between BeginDeferredKicks and EndDeferredKicks): the contexts to decode at End.
+thread_local bool t_defer_kicks = false;
+thread_local std::vector<uint32_t> t_kicked;
+}  // namespace
+
+void BeginDeferredXmaKicks() {
+  if (g_decoder) g_decoder->BeginDeferredKicks();
+}
+void EndDeferredXmaKicks() {
+  if (g_decoder) g_decoder->EndDeferredKicks();
+}
 
 XmaDecoder::XmaDecoder(runtime::FunctionDispatcher* function_dispatcher)
     : memory_(function_dispatcher->memory()), function_dispatcher_(function_dispatcher) {}
@@ -134,6 +155,8 @@ X_STATUS XmaDecoder::Setup(system::KernelState* kernel_state) {
 
   worker_thread_->Create();
 
+  g_decoder = this;
+
   return X_STATUS_SUCCESS;
 }
 
@@ -165,6 +188,14 @@ void XmaDecoder::WorkerThreadMain() {
 }
 
 void XmaDecoder::Shutdown() {
+  if (g_decoder == this) g_decoder = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(kick_mutex_);
+    kick_stop_ = true;
+  }
+  kick_cv_.notify_all();
+  for (auto& thread : kick_threads_) thread.join();
+  kick_threads_.clear();
   if (!worker_thread_) {
     return;
   }
@@ -293,6 +324,19 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
         context.Enable();
       }
     }
+    if (t_defer_kicks) {
+      // Deferred (BeginDeferredKicks): decoded at EndDeferredKicks, with the thread's other kicks, in parallel. The
+      // worker sweep is not woken: the guest may disable and refill the context before End, and would then wait for
+      // a decode already running.
+      for (int i = 0; kicked_value && i < 32; ++i, kicked_value >>= 1) {
+        if (kicked_value & 1) {
+          const uint32_t context_id = base_context_id + i;
+          if (std::find(t_kicked.begin(), t_kicked.end(), context_id) == t_kicked.end())
+            t_kicked.push_back(context_id);
+        }
+      }
+      return;
+    }
     // Decode inline. waiting on the worker sweep stalls the realtime
     // audio thread 50-100ms during kick bursts.
     for (int i = 0; kicked_value && i < 32; ++i, kicked_value >>= 1) {
@@ -352,6 +396,73 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
 #pragma warning(suppress : 4065)
     }
   }
+}
+
+void XmaDecoder::BeginDeferredKicks() {
+  if (REXCVAR_GET(audio_xma_kick_threads) <= 0) return;
+  t_defer_kicks = true;
+}
+
+void XmaDecoder::EndDeferredKicks() {
+  if (!t_defer_kicks) return;
+  t_defer_kicks = false;
+  if (t_kicked.empty()) return;
+  auto batch = std::make_shared<KickBatch>();
+  batch->ids.swap(t_kicked);
+  if (batch->ids.size() == 1) {
+    DecodeKicked(batch->ids[0]);
+    return;
+  }
+  std::lock_guard<std::mutex> one_at_a_time(kick_end_mutex_);
+  {
+    std::lock_guard<std::mutex> lock(kick_mutex_);
+    if (kick_threads_.empty() && !kick_stop_) {
+      const int count = std::min(16, static_cast<int>(REXCVAR_GET(audio_xma_kick_threads)));
+      for (int i = 0; i < count; ++i) kick_threads_.emplace_back([this, i] { KickThreadMain(i); });
+    }
+    kick_batch_ = batch;
+    kick_generation_++;
+  }
+  kick_cv_.notify_all();
+  RunKickBatch(*batch);  // the caller decodes too
+  std::unique_lock<std::mutex> lock(kick_mutex_);
+  kick_done_cv_.wait(lock, [&] { return batch->done.load() == batch->ids.size(); });
+}
+
+void XmaDecoder::KickThreadMain(int index) {
+  rex::thread::set_current_thread_name("XMA Kick " + std::to_string(index));
+  uint64_t seen = 0;
+  std::unique_lock<std::mutex> lock(kick_mutex_);
+  while (true) {
+    kick_cv_.wait(lock, [&] { return kick_stop_ || kick_generation_ != seen; });
+    if (kick_stop_) return;
+    seen = kick_generation_;
+    std::shared_ptr<KickBatch> batch = kick_batch_;
+    lock.unlock();
+    RunKickBatch(*batch);
+    lock.lock();
+  }
+}
+
+void XmaDecoder::RunKickBatch(KickBatch& batch) {
+  const uint32_t count = static_cast<uint32_t>(batch.ids.size());
+  for (uint32_t i; (i = batch.next.fetch_add(1)) < count;) {
+    DecodeKicked(batch.ids[i]);
+    if (batch.done.fetch_add(1) + 1 == count) {
+      std::lock_guard<std::mutex> lock(kick_mutex_);  // the caller checks done under this lock
+      kick_done_cv_.notify_all();
+    }
+  }
+}
+
+// What an inline kick does, then waiting for any pass still running on the context (the worker sweep may have taken
+// it first; Work returns at once when the context is no longer enabled).
+void XmaDecoder::DecodeKicked(uint32_t context_id) {
+  XmaContext& context = contexts_[context_id];
+  if (context.Work()) {
+    context.SignalWorkDone();
+  }
+  context.Block(false);
 }
 
 void XmaDecoder::Pause() {

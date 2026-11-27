@@ -32,11 +32,16 @@
 #include <rex/logging.h>
 
 #include "comms.h"
+#include "launcher_kit.h"
+#include "scoreboard_ping.h"
+#include "world_sync.h"
 
 REXCVAR_DECLARE(bool, server);
 REXCVAR_DEFINE_BOOL(bf_scoreboard_mute, true, "BF1943/Voice",
                     "The game's scoreboards show each player's voice (a speaker, struck through once muted), and their Y "
                     "mutes or unmutes the player picked");
+REXCVAR_DEFINE_BOOL(bf_scoreboard_ping, true, "BF1943/Voice",
+                    "The game's scoreboards and the pause's Scoreboard show each player's ping (bars and ms; BOT for a bot)");
 
 namespace bf1943 {
 bool InMatch();  // auto_join.cpp
@@ -85,7 +90,43 @@ struct Pending {
 thread_local Pending g_pending;
 
 std::mutex g_mutex;
-std::vector<GameRun> g_runs;  // the last quarter second's runs that could be a heading or a row
+std::vector<GameRun> g_runs;  // the last moments' runs that could be a heading or a row (EndGameText)
+// How long a run is kept, and how many at most. Two full tables of a 32 player server are about 36 runs a frame; at 80
+// frames a second the old quarter second and 600 runs ran full, the newest runs (the next frame's headings among
+// them) were dropped, and the speakers and pings went off for a frame about every quarter second (run sb169a,
+// 24 Nov 2026). Only the latest frame is drawn (DrawOverGame), so a tenth of a second is plenty, and when full the
+// oldest go.
+constexpr double kRunsKept = 0.1;
+constexpr size_t kRunsMost = 4000;
+
+// The ping column's room (TekRantGaming, 20 Nov 2026: "push the ping information to the furthest right of the
+// scoreboard"). The game's tables have no space right of their Scr. column, so while the ping column shows, the game's
+// own Kls. and Scr. columns (headings and numbers) are drawn kShift stage units further left and each row's dot
+// leaders end before the kills (kCut): the ping cell then takes the Scr. column's old place at the right edge. Done
+// glyph by glyph as the game draws (LayoutGlyph, the game's thread) from the tables the overlay found in the frames
+// just before (DrawOverGame publishes them, clip space).
+constexpr float kShift = 65.0f;        // stage units the Kls. and Scr. columns move left
+constexpr float kColumnsFrom = 240.0f;  // a run starting this far right of the name heading is Kls. or Scr. (to kColumnsTo)
+constexpr float kColumnsTo = 410.0f;  // the other table's # column starts at about 421
+constexpr float kCut = 236.0f;          // a row's dot leaders end here (the kills, moved, start after it)
+constexpr float kPingRight = 396.0f;    // the ping cell's right edge (the Scr. numbers' old right edge)
+struct LayoutTable {
+  float name_x = 0, name_y = 0;  // the name heading's pen, clip space
+  float ux = 0, uy = 0;          // a stage unit in clip space (uy negative: down)
+  float bottom = 0;              // stage units below the name heading that its rows reach
+};
+std::mutex g_layout_mutex;
+std::vector<LayoutTable> g_layout;
+double g_layout_at = -100;
+// The run being drawn (the game's thread): its matrix, the tables, and what is done to it.
+struct LayoutRun {
+  bool active = false, first = true, dotted = false;
+  int mode = 0;  // 1 moved left (Kls., Scr.), 2 a row's name with its dot leaders cut
+  float m[16] = {};
+  float cut_x = 0, ux = 1;
+  std::vector<LayoutTable> tables;
+};
+thread_local LayoutRun g_lrun;
 
 // The rewritten prompt (RewriteGameText), put back after its draw.
 struct Rewrite {
@@ -142,7 +183,22 @@ Voice VoiceOf(const std::string& name) {
 
 void NoteGameText(const uint8_t* base, uint32_t renderer, uint32_t lines) {
   g_pending.active = false;
-  if (REXCVAR_GET(server) || !REXCVAR_GET(bf_scoreboard_mute) || !Plausible(renderer) || !Plausible(lines)) return;
+  g_lrun.active = false;
+  if (!REXCVAR_GET(server) && REXCVAR_GET(bf_scoreboard_ping) && Plausible(renderer) && Plausible(lines)) {
+    std::lock_guard lock(g_layout_mutex);
+    if (!g_layout.empty() && Seconds() - g_layout_at < 0.25) {
+      g_lrun.active = true, g_lrun.first = true, g_lrun.mode = 0;
+      g_lrun.tables = g_layout;
+      for (int i = 0; i < 16; ++i) g_lrun.m[i] = LoadF(base, renderer + 128 + 4 * i);
+    }
+  }
+  if (g_lrun.active) {
+    std::string t;
+    g_lrun.dotted = RunText(base, lines, t, 64) && t.find(" . .") != std::string::npos;
+  }
+  if (REXCVAR_GET(server) || !(REXCVAR_GET(bf_scoreboard_mute) || REXCVAR_GET(bf_scoreboard_ping)) || !Plausible(renderer) ||
+      !Plausible(lines))
+    return;
   std::string text;
   if (!RunText(base, lines, text, 64)) return;
   // Only what can be a heading or a row: a "V", a name heading, or a name with its dot leaders.
@@ -162,15 +218,46 @@ void NoteGameGlyph(int32_t pen_x, int32_t pen_y) {
   g_pending.run.ux = m[0], g_pending.run.uy = m[5];
 }
 
+bool LayoutGlyph(uint8_t* base, uint32_t pen_at, int32_t pen_y) {
+  if (!g_lrun.active) return true;
+  const float* m = g_lrun.m;
+  const int32_t px = int32_t(Load32(base, pen_at));
+  const float cx = float(px) * m[0] + float(pen_y) * m[4] + m[12];
+  if (g_lrun.first) {
+    g_lrun.first = false;
+    const float cy = float(px) * m[1] + float(pen_y) * m[5] + m[13];
+    for (const LayoutTable& t : g_lrun.tables) {
+      if (t.ux == 0 || t.uy == 0 || m[0] == 0) continue;
+      const float rx = (cx - t.name_x) / t.ux, ry = (cy - t.name_y) / t.uy;
+      if (ry < -6 || ry > t.bottom) continue;
+      if (!g_lrun.dotted && rx > kColumnsFrom && rx < kColumnsTo) {
+        // Kls. or Scr. (a heading or a number): the run's pen moved left; its later glyphs follow from it.
+        Store32(base, pen_at, uint32_t(px + int32_t(std::lround(-kShift * t.ux / m[0]))));
+        g_lrun.mode = 1;
+        return true;
+      }
+      if (g_lrun.dotted && std::fabs(rx) < 4) {
+        g_lrun.mode = 2, g_lrun.cut_x = t.name_x + kCut * t.ux, g_lrun.ux = t.ux;
+        break;
+      }
+    }
+  }
+  // A row's dot leaders past the cut: not drawn.
+  if (g_lrun.mode == 2 && (cx - g_lrun.cut_x) * g_lrun.ux > 0) return false;
+  return true;
+}
+
 void EndGameText() {
+  g_lrun.active = false;
   if (!g_pending.active) return;
   g_pending.active = false;
   if (!g_pending.pen || !std::isfinite(g_pending.run.x) || !std::isfinite(g_pending.run.y)) return;
   g_pending.run.at = Seconds();
   std::lock_guard lock(g_mutex);
-  const double old = g_pending.run.at - 0.25;
+  const double old = g_pending.run.at - kRunsKept;
   g_runs.erase(std::remove_if(g_runs.begin(), g_runs.end(), [old](const GameRun& r) { return r.at < old; }), g_runs.end());
-  if (g_runs.size() < 600) g_runs.push_back(g_pending.run);
+  if (g_runs.size() >= kRunsMost) g_runs.erase(g_runs.begin(), g_runs.begin() + kRunsMost / 2);
+  g_runs.push_back(g_pending.run);
 }
 
 bool RewriteGameText(uint8_t* base, uint32_t head) {
@@ -205,7 +292,8 @@ void RestoreGameText(uint8_t* base) {
 }
 
 void DrawOverGame(ImGuiIO& io) {
-  if (!REXCVAR_GET(bf_scoreboard_mute) || !InMatch()) return;
+  const bool show_mute = REXCVAR_GET(bf_scoreboard_mute), show_ping = REXCVAR_GET(bf_scoreboard_ping);
+  if (!(show_mute || show_ping) || !InMatch()) return;
   // Only the game's latest frame of the scoreboard: the runs drawn around its last "V" heading, and only while the
   // game is still drawing it (its last heading no older than about one and a half of its frames). With a fixed 0.12 s
   // the speakers stayed a few frames over the match after the scoreboard closed (Ally run lnx1, shot 58).
@@ -233,12 +321,21 @@ void DrawOverGame(ImGuiIO& io) {
     else REXLOG_INFO("BF scoreboard: speakers hidden, {:.0f} ms after the game's last scoreboard frame", std::min(age, 9.999) * 1000);
   }
   if (!live || runs.empty()) return;
-  const ImVec2 size = io.DisplaySize;
-  auto screen = [&](float cx, float cy) { return ImVec2((cx + 1.0f) * 0.5f * size.x, (1.0f - cy) * 0.5f * size.y); };
+  // The game's clip space is its 1280 x 720 canvas, which the renderer keeps at 16:9 in the middle of a screen of
+  // another shape (an ultrawide, 16:10; with or without Fill screen): the speakers and the ping column go in that box,
+  // as flash_mouse.cpp maps the pointer. Against the whole width they slid left of the table on 21:9 and 32:9 (the
+  // user, 22 Nov 2026: "the new VoIP and Ping icons on scoreboard aren't staying in their 16:9 bound").
+  const float fit = std::min(io.DisplaySize.x / 1280.0f, io.DisplaySize.y / 720.0f);
+  const ImVec2 size(1280.0f * fit, 720.0f * fit);
+  const ImVec2 origin((io.DisplaySize.x - size.x) * 0.5f, (io.DisplaySize.y - size.y) * 0.5f);
+  auto screen = [&](float cx, float cy) {
+    return ImVec2(origin.x + (cx + 1.0f) * 0.5f * size.x, origin.y + (1.0f - cy) * 0.5f * size.y);
+  };
   // The tables: a "V" heading with a name heading on its line, to its right.
   struct Table {
     ImVec2 v, name;  // the headings' pens on the screen
     float unit;      // a stage unit in screen pixels (down)
+    LayoutTable clip;  // the name heading in clip space (LayoutGlyph)
   };
   std::vector<Table> tables;
   for (const GameRun& v : runs) {
@@ -252,7 +349,9 @@ void DrawOverGame(ImGuiIO& io) {
       if (std::fabs(gp.y - vp.y) < 4 * unit && gp.x > vp.x && gp.x - vp.x < 140 * unit) {
         bool dup = false;
         for (const Table& t : tables) dup = dup || (std::fabs(t.v.x - vp.x) < unit && std::fabs(t.v.y - vp.y) < unit);
-        if (!dup) tables.push_back({vp, gp, unit});
+        LayoutTable lt;
+        lt.name_x = g.x, lt.name_y = g.y, lt.ux = v.ux, lt.uy = v.uy;
+        if (!dup) tables.push_back({vp, gp, unit, lt});
       }
     }
   }
@@ -280,6 +379,43 @@ void DrawOverGame(ImGuiIO& io) {
       if (!dup) rows.push_back({name, p, t});
     }
   }
+  // The ping column (scoreboard_ping.h): a cell in each row on the name's dot leaders, right before the kills (the
+  // name heading's pen to the kills' last digit is about 335 stage units, run probe1's screenshots; the longest name
+  // with its clan tag, about 20 letters, ends near 185), and "Ping" over it on the headings' line.
+  if (show_ping) {
+    const kit::Fonts& f = kit::GetFonts();
+    std::vector<LayoutTable> layout;
+    for (size_t ti = 0; ti < tables.size(); ++ti) {
+      const Table& t = tables[ti];
+      const float u = t.unit, h = 17.0f * u, right = t.name.x + kPingRight * u;
+      bool any = false;
+      float bottom = 0;
+      for (const Row& row : rows) {
+        if (row.table != ti) continue;
+        bottom = std::max(bottom, (row.pen.y - t.name.y) / u + 22.0f);
+        const bool bot = world::IsBot(row.name);
+        const int ms = bot ? -1 : world::PingOf(row.name);
+        any = ping::DrawCell(d, f.ui_bold, right, row.pen.y + 10.0f * u, h, ms, bot, true, 0) > 0 || any;
+      }
+      if (!any) continue;  // nobody's ping known here (an older server): the game's columns as they are, no heading
+      LayoutTable lt = t.clip;
+      lt.bottom = bottom;
+      layout.push_back(lt);
+      const char* word = "Ping";
+      const float cap = 11.0f * u, cx = right - ping::CellWidth(h) * 0.5f;
+      const ImU32 ink = IM_COL32(30, 28, 22, 255);
+      if (kit::GameFontReady(kit::GameFont::kListHeader)) {
+        const float w = kit::GameTextWidth(kit::GameFont::kListHeader, cap, word);
+        kit::GameText(d, kit::GameFont::kListHeader, cap, ImVec2(cx - w * 0.5f, t.name.y + 2.0f * u), ink, word);
+      } else {
+        const ImVec2 w = f.ui->CalcTextSizeA(16.0f * u, 1e9f, 0, word);
+        d->AddText(f.ui, 16.0f * u, ImVec2(cx - w.x * 0.5f, t.name.y + 1.0f * u), ink, word);
+      }
+    }
+    std::lock_guard lock(g_layout_mutex);
+    g_layout = std::move(layout), g_layout_at = Seconds();
+  }
+  if (!show_mute) return;
   for (const Row& row : rows) {
     const Table& t = tables[row.table];
     const float u = t.unit;

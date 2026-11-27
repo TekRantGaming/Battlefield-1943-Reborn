@@ -14,6 +14,7 @@
 // left or right of the listener's camera.
 
 #include "comms.h"
+#include "audio_devices.h"
 #include "text_filter.h"
 
 #if defined(_WIN32)
@@ -81,7 +82,8 @@ const Clock::time_point kStart = Clock::now();
 
 constexpr char kMagic[8] = {'B', 'F', '4', '3', 'C', 'O', 'M', 'M'};
 enum : uint8_t { kHello = 1, kWelcome, kState, kChatRelay, kChat, kRoster, kVoice, kVoiceRelay, kBye, kRefused,
-                 kBroadcast };  // kBroadcast (11, v0.4.0): the host's message to every player on the server
+                 kBroadcast,  // kBroadcast (11, v0.4.0): the host's message to every player on the server
+                 kKicked };   // kKicked (12, v0.4.8): this player taken off the server (moderation), with its title and words
 constexpr uint8_t kProtocol = 1;
 constexpr int kRate = 16000, kFrame = 320;  // 20 ms
 constexpr uint8_t kCodecAdpcm = 1;
@@ -284,6 +286,12 @@ struct BroadcastNow {
   double at = -1000, seconds = 10;
 } g_broadcast;
 std::atomic<int> g_chime{0};  // a broadcast arrived: the mix plays its two notes (counted up, the mixer takes it)
+// The server took this player off it (kKicked): its words for the menu's pop-up (TakeRemoved), once.
+struct Removed {
+  std::string title, message;
+  bool pending = false;
+  double at = -1000;
+} g_removed;
 std::once_flag g_started;
 
 double NowS() { return std::chrono::duration<double>(Clock::now() - kStart).count(); }
@@ -720,6 +728,19 @@ class Engine {
                       kind == 1 ? "game update" : kind == 2 ? "restart" : kind == 3 ? "maintenance" : "message", shown);
           break;
         }
+        case kKicked: {
+          // Moderation (server/gmhost.py GameHost.remove): sent three times; the menu leaves the match and shows the
+          // words (game_menu.cpp). The host drops the link a few seconds later in any case.
+          const std::string title = r.text8(), message = r.text8();
+          if (!r.ok || title.empty()) break;
+          {
+            std::lock_guard lock(g_mutex);
+            if (now - g_removed.at < 30) break;
+            g_removed = {title, message, true, now};
+          }
+          REXLOG_INFO("BF comms: removed from the server: {}: {}", title, message);
+          break;
+        }
         case kVoiceRelay: {
           const uint16_t from = r.u16(), seq = r.u16();
           const float x = r.f32(), y = r.f32(), z = r.f32();
@@ -829,9 +850,9 @@ class Engine {
 #endif
     sdl_audio_ = true, real_mic_ = real_mic;  // the microphone opens when first wanted (OpenMic)
     if (real_out) {
-      playback_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &out, nullptr, nullptr);
-      if (playback_) SDL_ResumeAudioStreamDevice(playback_);
-      else REXLOG_WARN("BF comms: voices cannot play ({})", SDL_GetError());
+      // On the device Settings > Audio's Chat output names, kept there (audio_devices.h).
+      playback_ = audio_devices::OpenStream(audio_devices::Role::kChatOut, out, nullptr, nullptr, "the voice chat's voices");
+      if (!playback_) REXLOG_WARN("BF comms: voices cannot play ({})", SDL_GetError());
     }
     REXLOG_INFO("BF comms: voice on (playback {})", playback_ ? "open" : "none");
   }
@@ -841,9 +862,8 @@ class Engine {
   void OpenMic(bool wanted, double now) {
     if (capture_ || !sdl_audio_ || !real_mic_ || !wanted || now < mic_retry_at_) return;
     const SDL_AudioSpec in{SDL_AUDIO_S16, 1, kRate};
-    capture_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &in, nullptr, nullptr);
+    capture_ = audio_devices::OpenStream(audio_devices::Role::kChatIn, in, nullptr, nullptr, "the voice chat's microphone");
     if (capture_) {
-      SDL_ResumeAudioStreamDevice(capture_);
       REXLOG_INFO("BF comms: microphone open");
     } else {
       REXLOG_WARN("BF comms: no microphone ({}); trying again in 10 s", SDL_GetError());
@@ -854,8 +874,8 @@ class Engine {
     if (!audio_up_) return;
     audio_up_ = false;
     sdl_audio_ = false, mic_retry_at_ = 0;
-    if (capture_) SDL_DestroyAudioStream(capture_), capture_ = nullptr;
-    if (playback_) SDL_DestroyAudioStream(playback_), playback_ = nullptr;
+    if (capture_) audio_devices::CloseStream(capture_), capture_ = nullptr;
+    if (playback_) audio_devices::CloseStream(playback_), playback_ = nullptr;
     captured_.clear();
 #if defined(BF_DEV_TOOLS)
     delete dev_out_, dev_out_ = nullptr;
@@ -1153,6 +1173,14 @@ bool CurrentBroadcast(std::string* text, int* kind, double* age, double* seconds
 std::vector<std::string> Speaking() {
   std::lock_guard lock(g_mutex);
   return g_speaking;
+}
+bool TakeRemoved(std::string* title, std::string* message) {
+  std::lock_guard lock(g_mutex);
+  if (!g_removed.pending) return false;
+  g_removed.pending = false;
+  if (title) *title = g_removed.title;
+  if (message) *message = g_removed.message;
+  return true;
 }
 void SetUserDir(const std::filesystem::path& user_dir) {
   std::lock_guard lock(g_mute_mutex);

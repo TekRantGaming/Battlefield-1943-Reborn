@@ -30,7 +30,7 @@ INNOCENT = ("scunthorpe", "shiitake", "shitake", "snigger", "niggard", "therapis
 
 # ---- clan tags (text_filter.h kTagMin, kTagMax, detail::kTag...)
 TAG_MIN, TAG_MAX = 2, 4
-TAG_RESERVED_ANYWHERE = ("dev", "adm")
+TAG_RESERVED_ANYWHERE = ("dev", "adm", "bot")  # bot: the bots' own tag (bots.cpp "[BOT]"), 20 Nov 2026
 TAG_RESERVED_WHOLE = ("dv", "dvs", "dvz", "mod", "mods", "modz", "staf", "stff", "ea", "dice")
 TAG_ANYWHERE = ("nig", "nog", "ngr", "niga", "fag", "fgt", "kkk", "cunt",
                 "fuck", "fuk", "fck", "shit", "jizz", "nazi", "heil", "porn",
@@ -48,7 +48,7 @@ TAG_DIGITS_ANYWHERE = ("1488",)
 TAG_PROBLEM_TEXT = {
     'length': "A clan tag needs 2 to 4 letters or numbers, or leave it blank.",
     'chars': "A clan tag needs 2 to 4 letters or numbers, or leave it blank.",
-    'reserved': "That tag is kept for the game's developers. Choose another one.",
+    'reserved': "That tag is kept for the game's developers and bots. Choose another one.",
     'profanity': "That clan tag is not allowed. Choose another one.",
     'with_name': "That clan tag and your name together are not allowed.",
 }

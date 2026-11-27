@@ -17,9 +17,11 @@
 
 #include <atomic>
 #include <bit>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <algorithm>
@@ -30,6 +32,8 @@
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/xmemory.h>
 
 #include "seat_info.h"
 
@@ -42,10 +46,11 @@ REXCVAR_DEFINE_BOOL(bf_debug_native_input, false, "BF1943/Controls",
 namespace bf1943 {
 // plane_mouse.cpp: the mouse's stick for concepts 6 (a plane's roll, a gun's turn) and 5 (pitch), as the game has them
 // without its own invert; axes bit 0 for 6, bit 1 for 5.
-bool PlaneMouseConcepts(float& roll6, float& pitch5, unsigned& axes);
+bool PlaneMouseConcepts(float& roll6, float& pitch5, float& yaw4, unsigned& axes, bool& plane);
 // vehicle_mouse.cpp: the axes the seat's gun has (the same bits), 0 in a seat without one.
 unsigned VehicleMouseAxes();
 double TickSeconds();  // tick_rate.cpp
+bool FlightMouseInverted();  // plane_mouse.cpp: Invert flight (the mouse's up and down in planes)
 }  // namespace bf1943
 
 REXCVAR_DECLARE(double, bf_mouse_vehicle_sensitivity);  // look.cpp
@@ -210,6 +215,71 @@ void LogState(const uint8_t* base, uint32_t state, const char* note) {
 }
 }  // namespace
 
+// Guest memory that is there to read (as team_balance.cpp).
+static bool ProbeReadable(uint32_t address, uint32_t size) {
+  if (address < 0x00100000u || address >= 0xFFF00000u || address + size < address) return false;
+  auto* state = rex::system::kernel_state();
+  rex::memory::Memory* memory = state ? state->memory() : nullptr;
+  if (!memory) return false;
+  for (uint32_t page = address & ~0xFFFu; page < address + size;) {
+    rex::memory::BaseHeap* heap = memory->LookupHeap(page);
+    rex::memory::HeapAllocationInfo info{};
+    if (!heap || !heap->QueryRegionInfo(page, &info)) return false;
+    if (!(info.state & rex::memory::kMemoryAllocationCommit) || !(info.protect & rex::memory::kMemoryProtectRead))
+      return false;
+    const uint32_t next = info.base_address + info.region_size;
+    if (next <= page) return false;
+    page = next;
+  }
+  return true;
+}
+static std::string ProbeString(const uint8_t* base, uint32_t a) {
+  if (!ProbeReadable(a, 48)) return {};
+  std::string s;
+  for (uint32_t i = 0; i < 48; ++i) {
+    const char ch = char(base[a + i]);
+    if (!ch) return s.size() >= 2 ? s : std::string();
+    if (ch < 32 || ch > 126) return {};
+    s += ch;
+  }
+  return {};
+}
+// The vehicle's own names (run kb_probe_g2, 18 Nov 2026: a Sherman's data object at vehicle+0x14 has its name at +0xC,
+// "Sherman", and its kind at +0x80, "Medium_Tank"), and whether that is a boat (as server_stats.cpp VehicleKey).
+static void VehicleNames(const uint8_t* base, bf1943::SeatInfo& s) {
+  if (!ProbeReadable(s.vehicle, 0x18)) return;
+  const uint32_t data = Load32(base, s.vehicle + 0x14);
+  if (!ProbeReadable(data, 0x84)) return;
+  s.vehicle_name = ProbeString(base, Load32(base, data + 0xC));
+  s.vehicle_type = ProbeString(base, Load32(base, data + 0x80));
+  std::string t;
+  for (char c : s.vehicle_name + "|" + s.vehicle_type) t += char(std::tolower(static_cast<unsigned char>(c)));
+  for (const char* k : {"boat", "lcvp", "landing", "higgins", "daihatsu", "ship"})
+    if (t.find(k) != std::string::npos) s.boat = true;
+}
+
+#if defined(BF_DEV_TOOLS)
+// BF_DEV_SEAT_PROBE=1 (tests): at each seat change, the vehicle's and the controllable's class and the names found in
+// them (a C string at a word of the object, or at a word of an object it points to), to tell the vehicle kinds apart.
+static void ProbeObject(const uint8_t* base, const char* what, uint32_t obj) {
+  if (!ProbeReadable(obj, 0x600)) return;
+  std::string text;
+  int found = 0;
+  for (uint32_t off = 0; off < 0x600 && found < 60; off += 4) {
+    const uint32_t w = Load32(base, obj + off);
+    if (std::string s = ProbeString(base, w); !s.empty()) {
+      text += fmt::format(" +{:X}='{}'", off, s), ++found;
+      continue;
+    }
+    if (!ProbeReadable(w, 0x100) || off >= 0x400) continue;
+    for (uint32_t off2 = 0; off2 < 0x100 && found < 60; off2 += 4)
+      if (std::string s = ProbeString(base, Load32(base, w + off2)); !s.empty())
+        text += fmt::format(" +{:X}>+{:X}='{}'", off, off2, s), ++found;
+  }
+  REXLOG_INFO("BF seat probe: {} {:08X} class {:08X}:{}", what, obj, Load32(base, obj), text.empty() ? " no names" : text);
+}
+#endif
+
 // The mapper, sub_822BDB90(mapper, state): the pad to concepts (docs/input-concepts.md).
 REX_EXTERN(__imp__sub_822BDB90);
 REX_HOOK_RAW(sub_822BDB90) {
@@ -244,16 +314,33 @@ REX_HOOK_RAW(sub_822BDB90) {
              : s.scheme == 2 || s.throttle   ? bf1943::SeatKind::kDriver
                                              : bf1943::SeatKind::kGunner;
     std::lock_guard lock(g_info_mutex);
+    if (s.vehicle && s.vehicle == g_info.vehicle) {
+      s.vehicle_name = g_info.vehicle_name, s.vehicle_type = g_info.vehicle_type, s.boat = g_info.boat;
+    } else if (s.vehicle) {
+      VehicleNames(base, s);
+    }
     const bool changed = s.controllable != g_info.controllable || s.vehicle != g_info.vehicle ||
                          s.seat != g_info.seat || s.scheme != g_info.scheme || s.cls != g_info.cls;
     s.key = g_info.key + (changed || !g_info.key ? 1 : 0);
     if (s.key != g_info.key || s.bound != g_info.bound) {
-      REXLOG_INFO("BF seat: #{} {}: scheme {}, class {:08X}, controllable {:08X}, vehicle {:08X}, seat {}, binds "
-                  "analog concepts {:02X} (throttle {}, fire {}), input type {}, flip y {}",
-                  s.key, bf1943::SeatKindName(s.kind), s.scheme, s.cls, s.controllable, s.vehicle, s.seat, s.bound,
-                  s.throttle ? "yes" : "no", s.fire ? "yes" : "no", input_type, flip_y);
+      REXLOG_INFO("BF seat: #{} {}: scheme {}, class {:08X}, controllable {:08X}, vehicle {:08X} ({}, {}{}), seat {}, "
+                  "binds analog concepts {:02X} (throttle {}, fire {}), input type {}, flip y {}",
+                  s.key, bf1943::SeatKindName(s.kind), s.scheme, s.cls, s.controllable, s.vehicle,
+                  s.vehicle_name.empty() ? "-" : s.vehicle_name, s.vehicle_type.empty() ? "-" : s.vehicle_type,
+                  s.boat ? ", a boat" : "", s.seat, s.bound, s.throttle ? "yes" : "no", s.fire ? "yes" : "no",
+                  input_type, flip_y);
       g_logged_mapping = 0;
     }
+#if defined(BF_DEV_TOOLS)
+    static const bool probe = [] {
+      const char* v = std::getenv("BF_DEV_SEAT_PROBE");
+      return v && *v == '1';
+    }();
+    if (probe && s.key != g_info.key && s.vehicle) {
+      ProbeObject(base, "vehicle", s.vehicle);
+      ProbeObject(base, "controllable", s.controllable);
+    }
+#endif
     g_info = s;
     g_info_at = std::chrono::steady_clock::now();
   }
@@ -265,12 +352,19 @@ REX_HOOK_RAW(sub_822BDB90) {
     // mouse writes is inverted here first, so it arrives as written, and the mouse has its own invert settings.
     const float flip = (flip_y & 0xFF) ? -1.0f : 1.0f;
     auto clamp1 = [](float v) { return std::isfinite(v) ? std::fmax(-1.0f, std::fmin(1.0f, v)) : 0.0f; };
-    // The mouse's stick (plane_mouse.cpp): a plane's roll and pitch, or a gun's turn and pitch.
-    float roll6 = 0, pitch5 = 0;
+    // The mouse's stick (plane_mouse.cpp): a plane's roll, pitch and yaw (what its axes are set to fly), or a gun's
+    // turn and pitch. In a plane the stronger of it and what the game mapped is kept (18 Nov 2026: the keys or a
+    // controller fly the axes the mouse does not, and an axis both fly is the stronger's).
+    float roll6 = 0, pitch5 = 0, yaw4 = 0;
     unsigned stick_axes = 0;
-    if (bf1943::PlaneMouseConcepts(roll6, pitch5, stick_axes)) {
-      if (stick_axes & 1) StoreF(base, state + 8 + 4 * 6, clamp1(roll6));
-      if (stick_axes & 2) StoreF(base, state + 8 + 4 * 5, clamp1(pitch5) * flip);
+    bool stick_plane = false;
+    if (bf1943::PlaneMouseConcepts(roll6, pitch5, yaw4, stick_axes, stick_plane)) {
+      auto put = [&](int c, float v) {
+        if (!stick_plane || std::fabs(v) > std::fabs(LoadF(base, state + 8 + 4 * c))) StoreF(base, state + 8 + 4 * c, v);
+      };
+      if (stick_axes & 1) put(6, clamp1(roll6));
+      if (stick_axes & 2) put(5, clamp1(pitch5) * flip);
+      if (stick_axes & 4) put(4, clamp1(yaw4));
       note = " (mouse stick written)";
     }
     // A seat's own look (no plane, no gun's part, no free look: a seat whose view the game turns): the mouse's rate
@@ -284,7 +378,12 @@ REX_HOOK_RAW(sub_822BDB90) {
         if (!(dt > 0.001f && dt < 0.5f)) dt = float(bf1943::TickSeconds());
         const double sens = REXCVAR_GET(bf_mouse_vehicle_sensitivity);
         const double scale = 1.35 * (std::isfinite(sens) ? std::clamp(sens, 0.05, 10.0) : 1.0);
-        const double iy = REXCVAR_GET(bf_mouse_invert_y_vehicle) ? -1.0 : 1.0;
+        // A plane's (plane mouse flying switched off): Invert flight, never Invert vehicle (TekRantGaming, 23 Nov
+        // 2026). Normal there pulls the nose up with the mouse back, as the plane mouse does.
+        bf1943::SeatInfo look_seat;
+        const bool air = bf1943::LocalSeat(look_seat) &&
+                         (look_seat.kind == bf1943::SeatKind::kPlane || look_seat.kind == bf1943::SeatKind::kBomber);
+        const double iy = (air ? bf1943::FlightMouseInverted() : REXCVAR_GET(bf_mouse_invert_y_vehicle)) ? -1.0 : 1.0;
         auto stronger = [&](int c, double v) {
           v = std::clamp(v, -1.0, 1.0);
           const float now = LoadF(base, state + 8 + 4 * c);

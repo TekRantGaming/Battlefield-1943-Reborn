@@ -151,8 +151,18 @@ bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss) {
 
 // D163: kept whether the renderer runs yet or not (the level is read on a worker).
 void NightLamps(const NightLamp* lamps, uint32_t count) { renderer::NightLamps(lamps, count); }
+void SetWorldState(const WorldState& state) { renderer::SetWorldState(state); }
+WorldState CurrentWorldState() { return renderer::CurrentWorldState(); }
+void SnapWorld(double seconds) { renderer::SnapWorld(seconds); }
 void NightModels(const NightModelLamps* models, uint32_t count) { renderer::NightModels(models, count); }
-void NightSky(const NightSkyStyle& style) { renderer::NightSky(style); }
+void NightRooms(const NightRoom* rooms, uint32_t count) { renderer::NightRooms(rooms, count); }
+void NightVehicleSeated(bool seated) { renderer::NightVehicleSeated(seated); }
+void SetMapArea(float x, float z, float reach) { renderer::SetMapArea(x, z, reach); }
+void SetStormPattern(const StormPattern& pattern) { renderer::SetStormPattern(pattern); }  // D228
+void SetPlayerGroups(const float* xz, uint32_t count) { renderer::SetPlayerGroups(xz, count); }
+void SetFogMovers(const FogMover* movers, uint32_t count) { renderer::SetFogMovers(movers, count); }  // D231
+void FogBlast(const float position[3], float radius, float strength) { renderer::FogBlast(position, radius, strength); }
+void FogShot(const float from[3], const float to[3], float strength) { renderer::FogShot(from, to, strength); }
 
 void SetGameAspectBox(bool on) {
   if (g_renderer) renderer::SetGameAspectBox(on);
@@ -209,6 +219,54 @@ bool ScopeView(float right[3], float up[3], float back[3], float& tan_half_v_own
   return true;
 }
 
+namespace {
+struct ListenerNote {
+  float eye[3] = {}, right[3] = {}, forward[3] = {};
+  std::chrono::steady_clock::time_point at{};
+  bool known = false;
+};
+std::mutex g_listener_mutex;
+ListenerNote g_listener_note;
+}  // namespace
+
+void NoteListenerView(const float eye[3], const float right[3], const float forward[3]) {
+  float r[3], f[3];
+  const float lr = std::sqrt(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+  const float lf = std::sqrt(forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]);
+  if (!(lr > 1e-6f) || !(lf > 1e-6f) || !std::isfinite(eye[0] + eye[1] + eye[2])) return;
+  for (int i = 0; i < 3; ++i) r[i] = right[i] / lr, f[i] = forward[i] / lf;
+  std::lock_guard lock(g_listener_mutex);
+  ListenerNote& n = g_listener_note;
+  for (int i = 0; i < 3; ++i) n.eye[i] = eye[i], n.right[i] = r[i], n.forward[i] = f[i];
+  n.at = std::chrono::steady_clock::now(), n.known = true;
+}
+
+bool ListenerView(float eye[3], float right[3], float forward[3], double* age) {
+  std::lock_guard lock(g_listener_mutex);
+  const ListenerNote& n = g_listener_note;
+  if (!n.known) return false;
+  for (int i = 0; i < 3; ++i) eye[i] = n.eye[i], right[i] = n.right[i], forward[i] = n.forward[i];
+  if (age) *age = std::chrono::duration<double>(std::chrono::steady_clock::now() - n.at).count();
+  return true;
+}
+
+namespace {
+std::atomic<int64_t> g_eye_covered_at{0};
+std::atomic<bool> g_eye_covered{false};
+}  // namespace
+void NoteEyeCovered(bool covered) {
+  g_eye_covered.store(covered, std::memory_order_relaxed);
+  g_eye_covered_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
+}
+bool EyeCovered(double* age) {
+  const int64_t at = g_eye_covered_at.load(std::memory_order_relaxed);
+  if (age)
+    *age = at ? std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch() -
+                                              std::chrono::steady_clock::duration(at)).count()
+              : 1e9;
+  return at && g_eye_covered.load(std::memory_order_relaxed);
+}
+
 std::atomic<int64_t> g_game_menu_at{0};
 void NoteGameMenu() {
   g_game_menu_at.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
@@ -247,6 +305,20 @@ void EndViewGeometry() {
 }
 
 void RecordAttachedCameraMove(const float* position, const float* move, const float* placed);  // draw.cpp
+void RecordAdsBlend(float blend);  // dof.cpp
+void SetAdsBlend(float blend) { RecordAdsBlend(blend); }
+namespace {
+std::atomic<int64_t> g_object_blur_paused_until{0};  // steady clock ticks
+}  // namespace
+void SetObjectMotionBlurPaused() {
+  g_object_blur_paused_until.store(
+      (std::chrono::steady_clock::now() + std::chrono::milliseconds(250)).time_since_epoch().count(),
+      std::memory_order_relaxed);
+}
+bool ObjectMotionBlurPaused() {
+  return g_object_blur_paused_until.load(std::memory_order_relaxed) >=
+         std::chrono::steady_clock::now().time_since_epoch().count();
+}
 void RecordHideCrosshair();  // draw.cpp
 void HideCrosshair() { RecordHideCrosshair(); }
 void RecordWeaponLayerMove(const float* move, float fov_degrees);  // draw.cpp

@@ -46,6 +46,7 @@
 #include "TextureView.h"
 
 #include "camera_vote.h"
+#include "colour_check.h"
 #include "gtao.h"
 #include "scale.h"
 
@@ -165,6 +166,7 @@ class Ssgi {
   static constexpr float kPrefilterRadiusInNearPlanes = 6.0f;
 
  private:
+  ColourCheck check_;  // BF_AO_DISCARD_CHECK (tests)
   struct Pass {
     Diligent::RefCntAutoPtr<Diligent::IPipelineState> pso;
     Diligent::RefCntAutoPtr<Diligent::IShaderResourceBinding> srb;
