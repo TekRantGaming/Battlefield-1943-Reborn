@@ -540,7 +540,10 @@ def new_server(name, port):
             # The server's world (gmhost.py's World; 14 Nov 2026): its clock and weather, per cent where it says, and
             # the player IDs who may change them in game.
             'day_night': False, 'time': 16.0, 'day_minutes': 0, 'cloud_cover': 35, 'cloud_rate': 33, 'weather': 0,
-            'fog': 0, 'ground_fog': 0, 'wind': 30, 'cloud_height': 450, 'admins': ''}
+            'fog': 0, 'ground_fog': 0, 'wind': 30, 'cloud_height': 450, 'admins': '',
+            # The Weather switch (D254; the user, 28 Nov 2026): the weather system and volumetric clouds in players'
+            # games only when it is on (Night Ops and Daybreak always have it); off, the game's own sky, graded for the hour.
+            'weather_system': False}
 
 
 def clean_text(value, limit):
@@ -639,6 +642,11 @@ def clean_config(raw):
                 entry[key] = max(0, min(top, int(s.get(key, entry[key]))))
         with contextlib.suppress(TypeError, ValueError):
             entry['cloud_height'] = max(100, min(1500, int(s.get('cloud_height', entry['cloud_height']))))
+        # D254: a server saved before the switch keeps its rain and fog when it had any.
+        if 'weather_system' in s:
+            entry['weather_system'] = s.get('weather_system') is True
+        else:
+            entry['weather_system'] = any(entry[k] > 0 for k in ('weather', 'fog', 'ground_fog'))
         entry['admins'] = ','.join(a for a in (''.join(c for c in part if c in '0123456789abcdefABCDEF').upper()[:8]
                                                for part in str(s.get('admins') or '').replace(';', ',').replace(' ', ',').split(','))
                                    if a)[:400]
@@ -1266,6 +1274,8 @@ class Manager:
                  '--cloud-height', str(s['cloud_height'])]
         if s['day_night']:
             host.append('--day-night')
+        if s.get('weather_system'):  # D254
+            host.append('--weather-system')
         if s['admins']:
             host += ['--admins', s['admins']]
         if self.flags['official']:

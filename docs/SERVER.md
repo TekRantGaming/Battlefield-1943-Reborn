@@ -44,6 +44,10 @@ that `manager.py code` (Linux: `bf1943-server code`) prints on the server.
 Each server keeps its own clock and weather, and every player on it sees the same. In a server's settings:
 
 - **Day and night**: the light, the shadows and the sky follow the server's clock. Off, it is the game's own afternoon.
+- **Weather** (D254): the weather system and volumetric clouds, with the rain, fog and storms below. Off (a new
+  server's default), players see the game's own sky, by day and at night (graded for the hour), and the world has no
+  rain or fog. Night Ops and Daybreak always have it. A server saved before this switch has it on if its weather or
+  fog was set over 0.
 - **Time of day at the start**, and **A day lasts** (minutes for a whole day and night; 0 keeps the time still).
 - **Cloud cover**, **Cloud change rate** (how fast clouds form and dissolve) and **Weather** (0 fair to 100 a storm:
   more and denser cloud; from about half, mist and far rain shafts; a little higher, rain; from about two thirds,

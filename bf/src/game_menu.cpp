@@ -1112,7 +1112,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }
     NotePresence();  // Discord Rich Presence, the menu open or not
     NoteRebornAchievements();  // Reborn's own achievements, once a joined match's level has the soldier
-    TickEventLook();  // an event server's look, when its host says it is one and its listing did not (in a match)
+    TickServerLook();  // the joined match's look, as its host says (D254), or an event's that its listing did not say
     // Every frame, the menu open or not (Yes closes the pause: the check never ran, run v41team1).
     if (team_suicide_at_ > 0 && MenuTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
       team_suicide_at_ = -1;
@@ -2859,11 +2859,21 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // look settings off; a Night Ops server turns them on (none is one in a build without Night Ops, night_ops.h), and
     // since 26 Nov 2026 a Daybreak server too (its sunrise, lamps, lens flare, rain and wet hands are the same look). A
     // match a player's game hosts (Custom Match, LAN) has them on: its host's world (time, weather) decides what shows.
+    // D254 (the user, 28 Nov 2026: "if Weather is off, then the default game sky should be used for day and night
+    // (graded for proper night-time). Weather system and volumetric clouds only used if Weather is enabled"): the match
+    // this game hosts is decided here (its Weather and time switch, or an event); any other once its host says
+    // (TickServerLook: the world answer's flags 32 and 64), and until then, and with a host from before, as above.
     const bool player_match = sv.player_hosted || pm_hosting_ || !own_backend_.empty();
-    look_join_at_ = world::Now();  // TickEventLook: answers from this server's host only
-    ApplyServerLook(player_match || sv.night || sv.daybreak, player_match ? "a Custom Match or LAN"
-                                                             : sv.night  ? "a Night Ops"
-                                                             : sv.daybreak ? "a Daybreak" : "a regular");
+    look_join_at_ = world::Now();  // TickServerLook: answers from this server's host only
+    if (pm_hosting_) {
+      const bool weather = PmWeatherTab() || pm_event_ != 0;
+      ApplyLook(true, weather, weather ? "this PC's Custom Match or LAN, Weather on"
+                                       : "this PC's Custom Match or LAN, Weather off");
+    } else {
+      ApplyServerLook(player_match || sv.night || sv.daybreak, player_match ? "a Custom Match or LAN"
+                                                               : sv.night  ? "a Night Ops"
+                                                               : sv.daybreak ? "a Daybreak" : "a regular");
+    }
     joined_from_start_ = MenuDriverStage() < 2;  // its joining page shows the game's start first
     tutorial_ = false;
     NotePlayedLevel(sv.map.empty() ? "Wake Island" : sv.map);
@@ -3269,12 +3279,28 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // An event server (Night Ops, Daybreak) also says so in its world answer (world_sync.cpp: flags 4 and 16, 26 Nov
   // 2026). A listing that did not (a backend whose plasma.py does not pass "daybreak" on yet, or Direct connect to a
   // server it never listed) left the look off at the join: turned on here once this server's host has answered.
+  // D254 (28 Nov 2026): a host that says whether its weather system is on (flag 64) decides the look for as long as
+  // the match is joined: on, all of it (as an event's); off, the game's own sky, graded for the hour when the match has
+  // day and night (Day and night, Lamp glow and Lens flare follow its switch; Volumetric clouds, Rain on the lens and
+  // Wet weapon and hands stay off). An admin's change of day and night follows within a world answer.
   bool look_on_ = false;
+  bool look_day_night_ = false, look_weather_ = false;  // as last applied (ApplyLook)
   double look_join_at_ = -1;  // world::Now() at the join; -1: none to watch
-  void TickEventLook() {
-    if (!kNightOps || look_on_ || look_join_at_ < 0 || !InMatch()) return;
+  void TickServerLook() {
+    if (look_join_at_ < 0) return;
     const world::Status s = world::Current();
-    if (!s.answered || !s.night_ops || s.answered_at <= look_join_at_) return;
+    if (!s.answered || s.answered_at <= look_join_at_) return;
+    if (s.weather_told) {
+      const bool weather = s.weather_system, day_night = weather || s.now.day_night;
+      if (weather != look_weather_ || day_night != look_day_night_)
+        ApplyLook(day_night, weather, weather     ? "Weather on (as its host says)"
+                                      : day_night ? "Weather off, day and night on (as its host says)"
+                                                  : "Weather off, day and night off (as its host says)");
+      return;
+    }
+    // A host from before D254: an event server (Night Ops, Daybreak) also says so in its world answer (flags 4 and
+    // 16, 26 Nov 2026). A listing that did not left the look off at the join: turned on once the host has answered.
+    if (!kNightOps || look_on_ || !InMatch() || !s.night_ops) return;
     look_join_at_ = -1;
     ApplyServerLook(true, s.daybreak ? "a Daybreak (as its host says)" : "a Night Ops (as its host says)");
   }
@@ -3689,8 +3715,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // night, the Volumetric clouds sky, Rain on the lens, Wet weapon and hands, Lamp glow and Lens flare. None is in
   // Settings; each join sets them (saved, so the menus keep the last match's), and each applies at once. Lightning
   // and Storm shake are the player's own (Graphics > Weather). Night Ops' hour and storm are the server's (gmhost.py).
-  void ApplyServerLook(bool on, const char* what) {
-    look_on_ = on;
+  void ApplyServerLook(bool on, const char* what) { ApplyLook(on, on, what); }
+  // D254: `day_night` for Day and night, Lamp glow and Lens flare; `weather` for Volumetric clouds, Rain on the lens
+  // and Wet weapon and hands (the weather system). Day and night off with the weather on is not a look: it is on then.
+  void ApplyLook(bool day_night, bool weather, const char* what) {
+    day_night = day_night || weather;
+    look_on_ = day_night;
+    look_day_night_ = day_night, look_weather_ = weather;
 #if defined(BF_DEV_TOOLS)
     // BF_DEV_KEEP_LOOK=1 (tests): the look settings stay as the command line and the profile gave them, so an A/B run
     // can turn one off (--native_x_renderer_sky=false was set back on by the hosted match's join, 24 Nov 2026).
@@ -3699,14 +3730,15 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       return;
     }
 #endif
-    const bool night = on;
     static constexpr const char* kNightOpsCvars[] = {
         "native_x_renderer_day_night", "native_x_renderer_sky",        "native_x_renderer_rain_lens",
         "native_x_renderer_wetness",   "native_x_renderer_lamp_bloom", "native_x_renderer_lens_flare"};
-    const std::string value = night ? "true" : "false";
     int changed = 0;
     for (const char* name : kNightOpsCvars) {
       if (!rex::cvar::GetFlagInfo(name)) continue;
+      const std::string_view n(name);
+      const bool night = n.ends_with("_sky") || n.ends_with("_rain_lens") || n.ends_with("_wetness") ? weather : day_night;
+      const std::string value = night ? "true" : "false";
       if (Truthy(rex::cvar::GetFlagByName(name)) != night) ++changed;
       gfx_pending_.erase(name);  // not left waiting for Graphics' Apply
       settings_.values[std::string("cvar.") + name] = value;
@@ -3715,8 +3747,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     settings_.Save();
     std::string now;
     for (const char* name : kNightOpsCvars) now += fmt::format(" {}={}", name + 18, rex::cvar::GetFlagByName(name));
-    REXLOG_INFO("BF night ops: {} server: the server's look settings {} ({} changed):{}", what, on ? "on" : "off",
-                changed, now);
+    REXLOG_INFO("BF night ops: {} server: the server's look settings {} ({} changed):{}", what,
+                weather ? "on" : day_night ? "on but the weather system's (the game's own sky)" : "off", changed, now);
   }
 
   // The Upscaler row's choices: Off and TAA always, the others only where this GPU runs them (the renderer's answer,

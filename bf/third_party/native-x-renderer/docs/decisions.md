@@ -7641,3 +7641,27 @@ one place each: the shore mirrored as a picture, not SSR's streaks), on the carr
 shallows (the game's water kept at the waterline), at dusk and at night (the mirror as dark as the world). Not tested:
 the other maps, a plane in flight, storms, MSAA. Not found: the beach's white wash (the user's reference shot: a foam
 band over the water), which is missing with any reflection setting; looked into next.
+
+## D254 — Weather off: the game's own sky for day and night; the weather system only when a match turns it on (2026-11-28, Claude for Battlefield 1943 Reborn)
+
+The user, 28 Nov 2026: "for custom match and servers; if Weather is off, then the default game sky should be used for
+day and night (graded for proper night-time). Weather system and volumetric clouds only used if Weather is enabled in
+custom match/server settings." Asked what Weather off means on a server (which had a day and night switch and a weather
+strength, but no Weather switch): "A new Weather switch".
+
+- **What is Weather.** A Custom Match: its Weather and time switch (the Weather tab), or an event (Night Ops,
+  Daybreak). A server: the new Weather switch in the server manager (`weather_system`, gmhost.py `--weather-system`),
+  or an event. Off on a new server. A server saved before the switch gets it on when its weather, fog or ground fog
+  was over 0, so a server set up with rain keeps it.
+- **What the host says.** The world answer's flags byte gains 64 (this host says whether the weather system is on)
+  and 32 (it is), from gm_host.cpp (`bf_world_weather_system`) and gmhost.py alike. With Weather off the host's world
+  has no rain, fog, ground fog or dynamic storm, also after an admin's change in game.
+- **The look.** A joined match whose host says so decides the server's look (game_menu.cpp `TickServerLook`) for as
+  long as it is joined. Weather on: all six look settings on, as an event's look. Weather off: Volumetric clouds, Rain on
+  the lens and Wet weapon and hands off; Day and night, Lamp glow and Lens flare follow the match's day and night
+  switch. With the renderer's sky off and day and night on, the game's painted sky is tinted by the hour
+  (`light.game_sky`, D182), the night's grading. Weather off and day and night off is the released game's look, as
+  regular servers had. The match this PC hosts is decided at the join; any other on its host's first answer after it.
+  A host from before this (no flag 64) keeps the old rule: a player hosted match on, an event on, other servers off.
+- **Not changed:** the Custom Match's Weather tab still has the time of day, so a Custom Match with Weather off plays at
+  the map's afternoon (16:00), with the game's own sky; night with Weather off is only on a server.

@@ -2683,6 +2683,7 @@
     o.tickets = pm_tickets_, o.time_limit = pm_time_limit_, o.dynamic_storm = PmWeatherTab() && pm_storm_;
     o.storm_type = PmWeatherTab() ? pm_storm_type_ : 0;
     o.size = pm_size_, o.event = pm_event_;
+    o.weather_system = PmWeatherTab() || pm_event_ != 0;  // D254: Weather and time on, or Night Ops or Daybreak
     o.upnp = pm_upnp_;
     // The test launcher (tools	est_progression.py: the test_progression setting, its own backend on this PC's
     // loopback) already answers sign-in, matchmaking and the server list on the ports a LAN match's own backend

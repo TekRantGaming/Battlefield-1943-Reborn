@@ -331,6 +331,7 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
            {"--bf_world_cloud_height", number(o.cloud_height)},
            {"--bf_world_dynamic_storm", o.dynamic_storm ? "true" : "false"},
            {"--bf_world_storm_type", std::to_string(std::clamp(o.storm_type, 0, 1))},  // D224
+           {"--bf_world_weather_system", o.weather_system ? "true" : "false"},        // D254
            // As the server manager's: 0 automatic (the map's own scaled to the size), -1 the map's own (match_rules.cpp).
            {"--bf_match_tickets", o.tickets > 0 ? std::to_string(std::min(o.tickets, 9999)) : o.tickets < 0 ? "-1" : "0"},
            {"--bf_match_time_limit", std::to_string(std::clamp(o.time_limit, 0, 600))},
