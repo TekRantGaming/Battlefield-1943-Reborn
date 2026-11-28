@@ -8,6 +8,9 @@
 
 #include <imgui.h>
 
+#include <fstream>
+#include <vector>
+
 #include <rex/app/app.h>
 #include <rex/cli.h>
 
@@ -23,6 +26,91 @@ double SecondsSince(std::chrono::steady_clock::time_point t) {
   if (t == std::chrono::steady_clock::time_point{}) return -1.0;
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
 }
+
+#if !defined(BF_DEV_TOOLS)
+#if defined(__linux__)
+// Copies what an earlier start kept in usr/bin/user into RecompLauncher's data folder, once. Each item goes to
+// <name>.copying and is renamed into place only when it copied; the marker, written last, says it's done. A start
+// whose copy fails takes back what it put in place and plays from the old folder (false), so nothing the player
+// changes then is shadowed by an older copy; one that's killed leaves no marker either. Either way the next start
+// removes the .copying leftovers and tries again. Until the marker is there, the old bf1943-settings.txt replaces one
+// in the data folder; every other item already there is never overwritten. The cache is left out (it's rebuilt), and
+// the originals stay where they are.
+bool CopyOldUserDir(const std::filesystem::path& from, const std::filesystem::path& to) {
+  namespace fs = std::filesystem;
+  const fs::path marker = to / ".copied-from-program-folder";
+  std::error_code ec;
+  if (fs::exists(marker, ec) || !fs::is_directory(from, ec)) return true;
+  fs::create_directories(to, ec);
+  std::vector<fs::path> leftovers;
+  for (const auto& e : fs::directory_iterator(to, ec))
+    if (e.path().extension() == ".copying") leftovers.push_back(e.path());
+  for (const auto& p : leftovers) {
+    std::error_code r;
+    fs::remove_all(p, r);
+    if (r) REXLOG_WARN("BF setup: {} (an interrupted copy's) not removed: {}", p.string(), r.message());
+  }
+  bool ok = true;
+  std::vector<fs::path> placed;
+  std::error_code it;
+  for (const auto& e : fs::directory_iterator(from, it)) {
+    const fs::path name = e.path().filename();
+    // The settings file is the one item that replaces what's there: the player's old settings win over one written
+    // into the data folder before this copy finished (by the launcher, for one).
+    const bool settings = name == "bf1943-settings.txt" && fs::is_regular_file(e.path(), ec);
+    const bool there = fs::exists(to / name, ec);
+    if (name == "cache" || (there && !settings)) continue;
+    const fs::path part = to / (name.string() + ".copying");
+    std::error_code c;
+    fs::copy(e.path(), part, fs::copy_options::recursive, c);
+    if (!c) fs::rename(part, to / name, c);  // over an older settings file in one step
+    if (c) {
+      REXLOG_WARN("BF setup: {} not copied to {}: {}", e.path().string(), to.string(), c.message());
+      fs::remove_all(part, ec);
+      ok = false;
+    } else if (!there) {
+      placed.push_back(to / name);
+    }
+  }
+  if (it) {
+    REXLOG_WARN("BF setup: {} not read: {}", from.string(), it.message());
+    ok = false;
+  }
+  if (ok) {
+    std::ofstream out(marker);
+    out << from.string() << "\n";
+    out.close();
+    ok = !out.fail();
+    if (!ok) fs::remove(marker, ec);
+  }
+  if (ok) {
+    REXLOG_INFO("BF setup: the player's folder {} copied to RecompLauncher's {}", from.string(), to.string());
+  } else {
+    for (const auto& p : placed) fs::remove_all(p, ec);  // this start's own copies, not the originals
+    REXLOG_WARN("BF setup: {} not all copied to {}; playing from it this time, the next start tries again",
+                from.string(), to.string());
+  }
+  return ok;
+}
+#endif
+
+// The player's folder: "user" beside the exe, or on Linux RecompLauncher's data folder when it starts the game
+// (RECOMPLAUNCHER_DATA, <install>/recompdata). The launcher runs the unpacked AppImage, so beside the exe is
+// <install>/usr/bin, and the launcher's backups, cloud saves and Uninstall only look after the paths its manifest
+// names; the data folder is one of them. The first start there copies what an earlier one kept in usr/bin/user, and
+// until that copy is done the game plays from usr/bin/user.
+std::filesystem::path PlayerUserDir() {
+  const std::filesystem::path beside = bf1943::PlayerRoot() / "user";
+#if defined(__linux__)
+  if (const char* data = std::getenv("RECOMPLAUNCHER_DATA"); data && *data) {
+    const std::filesystem::path dir = data;
+    if (!CopyOldUserDir(beside, dir)) return beside;
+    return dir;
+  }
+#endif
+  return beside;
+}
+#endif
 
 }  // namespace
 
@@ -63,9 +151,10 @@ rex::Result<void> Bf1943App::OnConfigure(rex::SettingsRegistry& settings) {
   SetSdk(settings, "ui.title", "Battlefield 1943 Reborn");  // the game's name, not the SDK's "bf1943"
 #if !defined(BF_DEV_TOOLS)
   // The player's data beside the exe in "user" (cache and log there too): the player's download starts bf1943.exe
-  // with no options (TekRantGaming, 7 Nov 2026). The server package passes its own.
+  // with no options (TekRantGaming, 7 Nov 2026). The server package passes its own. Under RecompLauncher on Linux:
+  // its data folder (PlayerUserDir).
   if (!server) {
-    const std::filesystem::path user = bf1943::PlayerRoot() / "user";
+    const std::filesystem::path user = PlayerUserDir();
     std::error_code ec;
     std::filesystem::create_directories(user, ec);
     SetSdk(settings, "app.user_root", user.string());
