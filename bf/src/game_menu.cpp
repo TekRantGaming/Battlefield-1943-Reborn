@@ -4993,12 +4993,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // \"Original\" for off, and \"Enhanced\" for on"): two choices; a setting saved as SSR shows as Enhanced.
     {
       SettingRow reflections = Choice("Lighting", "Reflections",
-                          "How the sea reflects. Enhanced: what is around it from what is on the screen, the shore, "
-                          "ships and the sky as it is now, day or night. Original: the game's own water with the sky "
-                          "of the hour. Needs the volumetric sky. Applies at once.",
-                          // 0.4.8.4: Enhanced is SSR (1) again; planar (2, saved by 0.4.8.3) is drawn as SSR too
-                          // (renderer.cpp: planar's black textures in 0.4.8.3).
-                          "native_x_renderer_reflection_mode", {{"Original", "0"}, {"Enhanced", "1"}});
+                          "How the sea reflects. Enhanced: the world drawn a second time as a mirror in the water shows "
+                          "it, the shore, ships and the sky as they are now, day or night, also what is off the screen, "
+                          "with ripples. Original: the game's own water with the sky of the hour. Needs the volumetric "
+                          "sky. Applies at once.",
+                          "native_x_renderer_reflection_mode", {{"Original", "0"}, {"Enhanced", "2"}});
       const std::string saved = Cvar("native_x_renderer_reflection_mode");
       const int mode = saved.empty() || saved == "-1" ? (Truthy(Cvar("native_x_renderer_reflections")) ? 2 : 0)
                                                       : std::atoi(saved.c_str());
