@@ -33,6 +33,9 @@ struct PrivateMatchOptions {
   float cloud_height = 450.0f;  // metres
   bool dynamic_storm = false;  // the weather builds to a storm over each round and eases again
   int storm_type = 0;          // D224: 0 a thunderstorm, 1 a hurricane
+  // The weather system (D254; the user, 28 Nov 2026): on, the renderer's sky, volumetric clouds, rain and storm in
+  // every player's game; off, the game's own sky, graded for the hour. Weather and time's switch, or an event's.
+  bool weather_system = false;
   // The match's rules (match_rules.cpp): each team's tickets (0: automatic, the map's own scaled to the size as on our
   // servers; -1: the map's own; else the count) and a round's time limit in minutes (0: none; a round then ends only
   // when a team has no tickets left).

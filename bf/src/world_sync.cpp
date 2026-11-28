@@ -346,6 +346,8 @@ void Run() {
       s.admin = (buf[9] & 2) != 0;
       s.night_ops = (buf[9] & 4) != 0, s.held = (buf[9] & 8) != 0;  // 24 Nov 2026
       s.daybreak = s.night_ops && (buf[9] & 16) != 0;                // 26 Nov 2026: the event is Daybreak
+      s.weather_told = (buf[9] & 64) != 0;                           // D254: the weather system's switch
+      s.weather_system = s.weather_told ? (buf[9] & 32) != 0 : true;
       s.now.hour = GetF32(buf + 10), s.now.day_minutes = GetF32(buf + 14), s.now.cloud_cover = GetF32(buf + 18);
       s.now.cloud_rate = GetF32(buf + 22), s.now.weather = GetF32(buf + 26);
       s.now.fog = GetF32(buf + 30), s.now.ground_fog = GetF32(buf + 34), s.now.wind = GetF32(buf + 38);

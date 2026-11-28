@@ -36,6 +36,12 @@ Since upstream's 20 Nov change (de289206, "the server decides its look"), most o
 sets it (ApplyServerLook). On a regular server it is off, as in the released game; on a Night Ops server it is on; in
 a Custom Match or on LAN it is on, and the host's world decides what shows.
 
+Since D254 (28 Nov 2026) a host says whether its match's Weather is on (the world answer's flags 32 and 64), and that
+decides: Weather on, the whole look; Weather off, the game's own sky (Volumetric clouds, Rain on the lens and Wet weapon
+and hands off), with Day and night, Lamp glow and Lens flare following the match's day and night switch, so the
+painted sky is graded for the hour. A Custom Match's Weather is its Weather and time switch; a server's, the server
+manager's Weather switch; an event always has it. A host from before keeps the rule above.
+
 | Setting | Cvar | Who sets it | What it does |
 |---|---|---|---|
 | Day and night | `native_x_renderer_day_night` | the server | The time of day changes the game's own light, the sun's direction and the shadows. |
@@ -109,6 +115,7 @@ sets"). They left the graphics settings.
 | `bf_world_cloud_height` | 450 | The cloud base over the sea, metres (100 to 1500). |
 | `bf_world_dynamic_storm` | false | The storm builds and eases over each round. |
 | `bf_world_storm_type` | 0 | The storm's type: 0 a thunderstorm, 1 a hurricane (D224). |
+| `bf_world_weather_system` | false | Weather (D254): the weather system in players' games; off, the game's own sky, and no rain, fog or storm. An event always has it. |
 | `bf_world_admins` | "" | Player IDs (comma separated) allowed to change the world while it runs. |
 
 Developers: `native_x_renderer_world_own` (off) makes a game use its own `native_x_renderer_*` world settings even in a

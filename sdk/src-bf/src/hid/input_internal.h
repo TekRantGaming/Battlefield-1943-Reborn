@@ -71,6 +71,11 @@ struct Device {
  */
 void MergeInto(rex::hid::PadState& dst, const rex::hid::PadState& src);
 
+/** Battlefield 1943 Reborn patch: a test holds keyboard keys (bf::SetTestKey); they count without the focus. */
+bool TestKeysHeld();
+/** Battlefield 1943 Reborn patch: bf::LastKey* set to nothing (a read whose keyboard state is left out). */
+void ClearLastKeys();
+
 /**
  * Returns whether a state is at rest. A state is at rest when no button, trigger or stick passes
  * its threshold.

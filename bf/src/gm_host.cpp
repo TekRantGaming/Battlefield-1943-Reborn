@@ -92,6 +92,12 @@ REXCVAR_DEFINE_INT32(bf_world_storm_type, 0, "BF1943/World",
 REXCVAR_DEFINE_INT32(bf_world_event, 0, "BF1943/World",
                      "The match's event: 0 none (Classic), 1 Night Ops (18:30, a storm building with the tickets), 2 "
                      "Daybreak (06:10, the same build); its schedule then drives the clock, clouds, weather and fog");
+// D254 (the user, 28 Nov 2026: "if Weather is off, then the default game sky should be used for day and night (graded
+// for proper night-time). Weather system and volumetric clouds only used if Weather is enabled in custom match/server
+// settings"): told to every player's game in the world answer (flags 32 and 64); an event (Night Ops, Daybreak) has it.
+REXCVAR_DEFINE_BOOL(bf_world_weather_system, false, "BF1943/World",
+                    "The match's weather system: on, players' games draw the renderer's sky, volumetric clouds, rain and "
+                    "storm; off, the game's own sky, graded for the hour (Night Ops and Daybreak always have it)");
 REXCVAR_DEFINE_STRING(bf_world_admins, "", "BF1943/World",
                       "Player IDs (as the game's settings show them, separated by commas) whose games may change the "
                       "match's world while it runs");
@@ -690,15 +696,20 @@ class Host {
         EventClock();
         world.ramp_from = now;
         EventSet(0.0);
+      } else if (!REXCVAR_GET(bf_world_weather_system)) {
+        // D254: Weather off: players' games draw the game's own sky, and the world has no rain, fog or storm.
+        world.weather = world.fog = world.ground_fog = 0.0;
+        world.storm = false;
       }
       StormBegin();
       const bf1943::MatchClock clock = bf1943::CurrentMatchClock();
       Note(fmt::format("world: day and night {}, {:.1f} h, a day in {:.0f} min, clouds {:.0f}% at rate {:.0f}%, weather "
                        "{:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m, dynamic storm {}, "
-                       "storm type {}; tickets {}, time limit {}",
+                       "storm type {}, weather system {}; tickets {}, time limit {}",
                        world.day_night ? "on" : "off", world.hour, world.day_minutes, world.cover * 100, world.rate * 100,
                        world.weather * 100, world.fog * 100, world.ground_fog * 100, world.wind * 100,
                        world.cloud_height, world.storm ? "on" : "off", world.storm_type == 1 ? "hurricane" : "storm",
+                       world.event != 0 || REXCVAR_GET(bf_world_weather_system) ? "on" : "off",
                        clock.tickets > 0 ? std::to_string(clock.tickets) : std::string("the level's own"),
                        clock.time_limit > 0 ? fmt::format("{} min", clock.time_limit) : std::string("none")));
       if (world.event) Note(fmt::format("world: a {} match: its schedule drives the clock, clouds, weather and fog", EventName()));
@@ -862,6 +873,7 @@ class Host {
         world.ground_fog = std::clamp(ground_fog, 0.0, 1.0);
         world.wind = std::clamp(wind_set, 0.0, 1.0);
         world.cloud_height = cloud_height;
+        if (!REXCVAR_GET(bf_world_weather_system)) world.weather = world.fog = world.ground_fog = 0.0, storm = false;  // D254
         if (storm && !world.storm) StormBegin();
         world.storm = storm;
         world.storm_type = storm_type;
@@ -880,8 +892,11 @@ class Host {
     reply += char(1);
     // Flags 4, 8 and 16 (as gmhost.py sends them since 24 and 26 Nov 2026; a game from before reads only 1 and 2): an
     // event match (Night Ops or Daybreak), an admin's settings hold some of its build this round, the event is Daybreak.
+    // D254: 64, this host says whether the weather system is on; 32, it is (a game from before reads neither, and keeps
+    // its own rule for the look).
+    const bool weather_system = world.event != 0 || REXCVAR_GET(bf_world_weather_system);
     reply += char((world.day_night ? 1 : 0) | (admin ? 2 : 0) | (world.event ? 4 : 0) | (world.event && world.held ? 8 : 0) |
-                  (world.event == 2 ? 16 : 0));
+                  (world.event == 2 ? 16 : 0) | (weather_system ? 32 : 0) | 64);
     for (double v : {world.hour, world.day_minutes, world.cover, world.rate, world.weather, world.fog, world.ground_fog,
                      world.wind}) {
       const float f = float(v);

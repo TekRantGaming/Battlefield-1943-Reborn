@@ -422,9 +422,51 @@ static bool SeedVehiclePad(std::map<std::string, std::string>& values) {
   return true;
 }
 
+// Issue 90 (0.4.8 to 0.4.8.2, SDK v0.11): the infantry's keys read by name gave nothing (the settings bridge, fixed
+// in compat/cvar_bridge.cpp), so the first start seeded every vehicle set with no keys and saved them: in a vehicle
+// the keyboard did nothing. Once: a vehicle set whose saved keys are all empty (what that start wrote; no player
+// clears every key of a tab) is set back to its defaults and seeded again from the infantry's keys. A set with any key
+// of its own is left as the player has it.
+static bool RepairEmptyVehicleBinds(std::map<std::string, std::string>& values) {
+  if (values.count("vehicle_binds_repaired_v011")) return false;
+  values["vehicle_binds_repaired_v011"] = "1";
+  int sets = 0;
+  for (int set = kBindGround; set < kBindSetCount; ++set) {
+    int listed = 0;
+    bool all_empty = true;
+    for (std::string_view action : kVehicleActions) {
+      const auto it = values.find("cvar." + BindCvar(set, std::string(kPrefix) + std::string(action)));
+      if (it == values.end()) continue;
+      ++listed;
+      if (!it->second.empty()) all_empty = false;
+    }
+    if (listed < 10 || !all_empty) continue;
+    for (std::string_view action : kVehicleActions) {
+      const std::string name = BindCvar(set, std::string(kPrefix) + std::string(action));
+      values.erase("cvar." + name);
+      if (const auto* info = rex::cvar::GetFlagInfo(name)) rex::cvar::SetFlagByName(name, info->default_value);
+    }
+    ++sets;
+  }
+  if (sets) {
+    values.erase("vehicle_binds_seeded");  // seeded again below, from the infantry's keys as they are
+    REXLOG_INFO("BF bindings: {} vehicle key set(s) saved with no keys (issue 90) set back and seeded again", sets);
+  }
+  return true;
+}
+
 bool SeedVehicleBinds(std::map<std::string, std::string>& values) {
-  const bool pad = SeedVehiclePad(values);
+  const bool repaired = RepairEmptyVehicleBinds(values);
+  const bool pad = SeedVehiclePad(values) || repaired;
   if (values.count("vehicle_binds_seeded")) return pad;
+  // Never from keys that could not be read (issue 90): the sets keep their defaults, and the next start tries again.
+  bool any_keys = false;
+  for (std::string_view action : kVehicleActions)
+    any_keys = any_keys || !rex::cvar::GetFlagByName(std::string(kPrefix) + std::string(action)).empty();
+  if (!any_keys) {
+    REXLOG_WARN("BF bindings: the infantry's keys read as none: the vehicles' keys not seeded from them this start");
+    return pad;
+  }
   int copied = 0;
   for (std::string_view action : kVehicleActions) {
     const std::string infantry = std::string(kPrefix) + std::string(action);

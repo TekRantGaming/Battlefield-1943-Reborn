@@ -93,6 +93,7 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_tick_interpolation, false, "NativeXRendere
 
 namespace native_x_renderer {
 bool WeaponLayerMoveNow(double out[16]);  // (below, with RecordWeaponLayerMove)
+float AdsBlendNow();                      // dof.cpp: how far the zoom is in (0 to 1)
 void NoteFirstPersonWeaponDrawn();        // sky.cpp: the sea splashes only on a view that holds a weapon
 
 // A developer's: the next draws logged (renderer.cpp names the moment).
@@ -4778,7 +4779,18 @@ void DrawPath::ClassifyWeapon(const uint32_t* regs, uint32_t first, const uint64
   const bool nearest = z_min > 0.99f && z_max > 0.005f && z_max < 0.05f;
   const uint64_t frame = device_->frames_presented();
   const bool farther = !nearest && z_max < z_min && z_min < 0.05f && world_py_frame_ != frame;
-  if (!nearest && !farther) return;
+  // NXR_SKIN_AIM_LOG=1 (a diagnosis aid, 28 Nov 2026, the user: the weapon skin "disappearing when a player ADSs with
+  // iron sights"): while the skin is worn and the aim is in, each distinct depth range, projection and outcome once.
+  static const bool aim_log = std::getenv("NXR_SKIN_AIM_LOG") != nullptr;
+  const bool log_aim = aim_log && AdsBlendNow() > 0.5f;
+  auto say_aim = [&](const char* outcome, float py) {
+    static std::set<std::tuple<int, int, int, std::string>> said;
+    if (!log_aim || said.size() >= 120) return;
+    if (said.insert({int(z_min * 1000), int(z_max * 1000), int(py * 50), outcome}).second)
+      REXLOG_INFO("[native_x_renderer] skin aim: depth {:.4f} to {:.4f}, py {:.3f} (the world's {:.3f}): {}", z_min, z_max,
+                  py, world_py_, outcome);
+  };
+  if (!nearest && !farther) return say_aim("neither range", 0.0f);
   uint8_t numbers[256];
   uint32_t n = 0;
   for (uint32_t i = 0; i < 4; ++i) {
@@ -4788,22 +4800,28 @@ void DrawPath::ClassifyWeapon(const uint32_t* regs, uint32_t first, const uint64
       bits &= bits - 1;
     }
   }
-  if (n < 4) return;
+  if (n < 4) return say_aim(nearest ? "nearest, too few constants" : "farther, too few constants", 0.0f);
   std::array<uint8_t, 256 * 16> values;
   for (uint32_t k = 0; k < n; ++k) std::memcpy(values.data() + k * 16, &regs[first + (uint32_t(numbers[k]) << 2)], 16);
   uint32_t index = 0;
   bool transposed = false;
-  if (!CameraVote::FindMatrix(values.data(), numbers, n, index, transposed)) return;
+  if (!CameraVote::FindMatrix(values.data(), numbers, n, index, transposed))
+    return say_aim(nearest ? "nearest, no matrix" : "farther, no matrix", 0.0f);
   GtaoProjection p;
-  // (A field of view between 19 and 147 degrees: other matrices are found too, run chk3.)
-  if (!GtaoProjection::FromMatrix(CameraVote::MatrixAt(values.data(), index, transposed), p) || !(p.py > 0.3f && p.py < 6.0f)) {
-    return;
+  // (A field of view between 19 and 147 degrees: other matrices are found too, run chk3. The weapon's own range down to
+  // 6 degrees: aimed in, a rifle's view narrows to 10 to 12 (the M1 Garand, py 9 to 11.4, run aim_rifle), and its draws
+  // were no longer the weapon's: the user, 28 Nov 2026, "The Wetness shader on the weapons when it's raining should also
+  // still show when zooming or ADSing for all weapons too".)
+  const float most_py = nearest ? 20.0f : 6.0f;
+  if (!GtaoProjection::FromMatrix(CameraVote::MatrixAt(values.data(), index, transposed), p) || !(p.py > 0.3f && p.py < most_py)) {
+    return say_aim(nearest ? "nearest, no projection in range" : "farther, no projection in range", p.py);
   }
   if (farther) {
     world_py_ = p.py, world_py_frame_ = frame;
     return;
   }
   weapon_draw_ = world_py_ > 0.0f && std::abs(p.py - world_py_) > 0.02f * world_py_;
+  say_aim(weapon_draw_ ? "nearest: the weapon's" : "nearest: as the world's (not taken)", p.py);
   weapon_constants_ = n;
   if (weapon_draw_) weapon_px_ = std::abs(p.px), weapon_py_ = std::abs(p.py), NoteFirstPersonWeaponDrawn();
   static int said = 0;

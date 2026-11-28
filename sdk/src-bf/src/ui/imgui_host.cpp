@@ -469,6 +469,18 @@ void ImGuiHost::OnMouseButton(const InputEvent& e, bool is_down) {
     case MouseButton::kRight:
       button = 1;
       break;
+    // Battlefield 1943 Reborn patch (issue 91, 0.4.8.2): the middle and side buttons too, as v0.10 gave ImGui. Only
+    // the left and right reached it, so the game's Controls page could not bind MMB, MB4 or MB5, and a bind on them
+    // (push to talk, the chat keys) never fired.
+    case MouseButton::kMiddle:
+      button = 2;
+      break;
+    case MouseButton::kX1:
+      button = 3;
+      break;
+    case MouseButton::kX2:
+      button = 4;
+      break;
     default:
       break;
   }

@@ -540,7 +540,10 @@ def new_server(name, port):
             # The server's world (gmhost.py's World; 14 Nov 2026): its clock and weather, per cent where it says, and
             # the player IDs who may change them in game.
             'day_night': False, 'time': 16.0, 'day_minutes': 0, 'cloud_cover': 35, 'cloud_rate': 33, 'weather': 0,
-            'fog': 0, 'ground_fog': 0, 'wind': 30, 'cloud_height': 450, 'admins': ''}
+            'fog': 0, 'ground_fog': 0, 'wind': 30, 'cloud_height': 450, 'admins': '',
+            # The Weather switch (D254; the user, 28 Nov 2026): the weather system and volumetric clouds in players'
+            # games only when it is on (Night Ops and Daybreak always have it); off, the game's own sky, graded for the hour.
+            'weather_system': False}
 
 
 def clean_text(value, limit):
@@ -639,6 +642,11 @@ def clean_config(raw):
                 entry[key] = max(0, min(top, int(s.get(key, entry[key]))))
         with contextlib.suppress(TypeError, ValueError):
             entry['cloud_height'] = max(100, min(1500, int(s.get('cloud_height', entry['cloud_height']))))
+        # D254: a server saved before the switch keeps its rain and fog when it had any.
+        if 'weather_system' in s:
+            entry['weather_system'] = s.get('weather_system') is True
+        else:
+            entry['weather_system'] = any(entry[k] > 0 for k in ('weather', 'fog', 'ground_fog'))
         entry['admins'] = ','.join(a for a in (''.join(c for c in part if c in '0123456789abcdefABCDEF').upper()[:8]
                                                for part in str(s.get('admins') or '').replace(';', ',').replace(' ', ',').split(','))
                                    if a)[:400]
@@ -1266,6 +1274,8 @@ class Manager:
                  '--cloud-height', str(s['cloud_height'])]
         if s['day_night']:
             host.append('--day-night')
+        if s.get('weather_system'):  # D254
+            host.append('--weather-system')
         if s['admins']:
             host += ['--admins', s['admins']]
         if self.flags['official']:
@@ -2319,14 +2329,41 @@ def install_package(archive, target):
                     os.replace(destination, old)
                     os.replace(source, destination)
                 count += 1
+        remove_retired_files(target)
         return count
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def remove_update_leftovers():
+# Program files of older packages that the newer ones no longer have (hotfix 0.4.8.3): an update by an older manager puts
+# the new files over the old and leaves these, and the main backend's build check then hid the server (27 Nov 2026:
+# every community server updated from 0.4.8 to 0.4.8.2 kept SDK v0.10's runtime). gmhost.py's RETIRED_FILES leaves
+# the same ones out of the build digest.
+RETIRED_PROGRAM_FILES = ('bin/rexruntime.dll', 'bin/rexgpu-bfnative.dll', 'bin/librexruntime.so',
+                         'bin/librexgpu-bfnative.so', 'bin/amd_fidelityfx_vk.dll')
+
+
+def remove_retired_files(root):
+    """The retired program files in `root` removed, when its own program is SDK v0.11's (a rolled back older package
+    still needs them). Returns the paths removed."""
+    if not any(os.path.exists(os.path.join(root, 'bin', n)) for n in ('rexapprd.dll', 'rexapp.dll', 'librexapp.so')):
+        return []
+    gone = []
+    for rel in RETIRED_PROGRAM_FILES:
+        path = os.path.join(root, *rel.split('/'))
+        if os.path.isfile(path):
+            with contextlib.suppress(OSError):
+                os.remove(path)
+                gone.append(rel)
+    return gone
+
+
+def remove_update_leftovers(note=None):
     """The files an update moved aside because they were in use (Windows: the running Python's own), removed at a
-    later start, once nothing holds them."""
+    later start, once nothing holds them; and the retired program files an older manager's update left."""
+    gone = remove_retired_files(ROOT)
+    if gone and note:
+        note('removed program files of an older package: %s' % ', '.join(gone))
     folders = [os.path.join(ROOT, sub) for sub in ('bin', 'python', 'server')]
     names = [os.path.join(ROOT, name) for name in os.listdir(ROOT)] if os.path.isdir(ROOT) else []
     for folder in folders:
@@ -2970,7 +3007,7 @@ def run(args):
     write_atomic(STATE, json.dumps({'pid': os.getpid(), 'port': port, 'token': m.token}), mode=0o600)
     m.note('manager %s started: http://127.0.0.1:%d/ (data in %s)' % (m.version, port, DATA))
     m.clear_leftovers()
-    remove_update_leftovers()
+    remove_update_leftovers(m.note)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=m.watch, daemon=True).start()
     m.public_page()  # the public stats page, when it is on
