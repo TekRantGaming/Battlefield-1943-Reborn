@@ -7665,3 +7665,31 @@ strength, but no Weather switch): "A new Weather switch".
   A host from before this (no flag 64) keeps the old rule: a player hosted match on, an event on, other servers off.
 - **Not changed:** the Custom Match's Weather tab still has the time of day, so a Custom Match with Weather off plays at
   the map's afternoon (16:00), with the game's own sky; night with Weather off is only on a server.
+
+## D255 — The weapon while aiming: the Thompson's skin smoke beside its receiver; a rifle's narrow view still the weapon's (2026-11-28, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 28 Nov 2026: "the new skin is disappearing when a player ADSs with iron sights ... it should only keep
+the iron sight view clear with the rest of the animation showing around the weapon fine when ADS", checked "for both
+Type 100 and Thompson"; "The Wetness shader on the weapons when it's raining should also still show when zooming or
+ADSing for all weapons too" (the scoped rifle's optic fills the screen: left out); then, of the first attempt's shots:
+"The Type 100 was perfect. The Thompson just needed to show it's smoke on the side like the Type-100".
+
+**Found** (NXR_SKIN_AIM_LOG=1, a new diagnosis aid: while aiming, each distinct depth range, projection and outcome of
+ClassifyWeapon's draws, and twice a second what the skin's overlay goes by):
+- The skin's cloud: the overlay had the gun every frame, its barrel's line 0.31 to 1.03 m straight down the middle of the
+  view (run aim_smg). Seen end on, the Thompson's wide receiver at the eye hides every puff within a few centimetres of
+  the gun, the whole cloud; the Type 100's narrower one leaves wisps showing at its sides (aim_jp).
+- The wetness: the weapon's draws are told by their own projection in the nearest depth range (D217), which took
+  fields of view of 19 degrees or more only. Aimed in, the M1 Garand's view narrows to 10 to 12 degrees (py 9 to 11.4,
+  run aim_rifle): its draws were no longer the weapon's, and its wetness went. The SMGs' (py up to 4.5) stayed.
+
+**What:**
+- weapon_skin.cpp `Around`: while aiming (gun_up.w), the Thompson's storm only (mg.x 0) stands out to just past its
+  receiver's outline as seen, 8.5 cm a metre of its distance from the eye. The Type 100 as before.
+- weapon_skin.cpp `GunPoints`: only the muzzle need be in front of the eye (the back of the receiver may reach it).
+- draw.cpp `ClassifyWeapon`: the nearest range's projections down to 6 degrees (py under 20); the world's stay at 19.
+
+**Tested** (dev build, Wake Island by day in rain, Iron Sight on, the skin worn; runs aim_smg, aim_jp, aim_rifle): the
+Thompson aimed in with smoke both sides of its receiver and the sight picture clear; the Type 100 as before (the team
+changed by BF_MENU_STEPS' changeteam); the Garand's draws the weapon's all the way in (py up to 11.4, none out of range,
+its wet copy drawn with NXR_WET_TINT=99). The Garand's wetness was forced on for the check, not seen in real rain.

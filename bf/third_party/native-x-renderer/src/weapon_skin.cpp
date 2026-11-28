@@ -360,7 +360,20 @@ float GunReach(float part, float angle) {
   float tall = c > 0.0 ? shape.x : shape.y, wide = s > 0.0 ? shape.z : shape.w;
   return 1.0 / sqrt(c * c / (tall * tall) + s * s / (wide * wide));
 }
-vec3 Around(Gun g, vec3 cyl) { return g.mid + g.axis * cyl.x + (g.up * cos(cyl.y) + g.side * sin(cyl.y)) * cyl.z; }
+// While aiming (gun_up.w) the Thompson's storm stands a little off it. Seen down its sights the gun is end on, and the
+// Thompson's wide receiver at the eye hid the whole cloud, where the Type 100's narrower one leaves wisps showing at its
+// sides (the user, 28 Nov 2026: "the new skin is disappearing when a player ADSs with iron sights"; then, of runs aim_smg
+// and aim_jp: "The Type 100 was perfect. The Thompson just needed to show it's smoke on the side like the Type-100").
+// So the Thompson's (mg.x 0: its magazine under it) only, out to just past its receiver's outline as seen (8.5 cm a
+// metre of the distance from the eye); the Type 100 stays as it is.
+vec3 Around(Gun g, vec3 cyl) {
+  float r = cyl.z;
+  if (gun_up.w > 0.0 && mg.x < 0.5) {
+    float z = max((g.mid + g.axis * cyl.x).z, 0.06);
+    r = mix(r, max(r, 0.085 * z), gun_up.w);
+  }
+  return g.mid + g.axis * cyl.x + (g.up * cos(cyl.y) + g.side * sin(cyl.y)) * r;
+}
 // A plume's middle: along the axis, its angle round it (all go round together, each a little by itself), its distance.
 vec3 PlumeCyl(Gun g, float k, float t) {
   float h1 = h11(k * 3.7 + 1.0), h2 = h11(k * 9.1 + 2.0);
@@ -1216,7 +1229,12 @@ bool GunPoints(float out[20]) {
   place(gun.back, out), place(gun.muzzle, out + 4), place(gun.mag_top, out + 12), place(gun.mag_end, out + 16);
   out[3] = 1.0f;
   for (int c = 0; c < 3; ++c) out[8 + c] = f.col[1][c];  // the model's up
-  if (out[2] < 0.03f || out[6] < 0.03f) return false;    // (behind the eye: not a frame to go by)
+  // Only the muzzle must be in front of the eye. Aiming down the sights (the Iron Sight option most of all) brings the
+  // back of the receiver to the eye or behind it; turned down then, the overlay got no gun and every puff fell behind the
+  // eye: the whole storm went while aiming (the user, 28 Nov 2026: "the new skin is disappearing when a player ADSs
+  // with iron sights ... it should only keep the iron sight view clear with the rest of the animation showing around
+  // the weapon"; run skinaim_us2). The gun's line is the same with its back there.
+  if (out[6] < 0.03f) return false;  // (the muzzle behind the eye: not a frame to go by)
   return true;
 }
 }  // namespace
@@ -1695,8 +1713,19 @@ bool WeaponSkinBloom(IRenderDevice* device, IDeviceContext* context, const Weapo
     for (int i = 0; i < 4; ++i) k[56 + i] = k[36 + i];
     k[59] = bolts;
     for (int i = 36; i < 56; ++i) k[i] = 0.0f;
-    if (GunPoints(&k[36])) k[34] = -1.0f, k[35] = 1.0f;  // the stretch is the barrel's line itself, end to end
+    const bool points = GunPoints(&k[36]);
+    if (points) k[34] = -1.0f, k[35] = 1.0f;  // the stretch is the barrel's line itself, end to end
     k[47] = AimNow();
+    // NXR_SKIN_AIM_LOG=1 (a diagnosis aid, 28 Nov 2026): twice a second while aiming, what the overlay goes by.
+    if (static const bool aim_log = std::getenv("NXR_SKIN_AIM_LOG") != nullptr; aim_log && k[47] > 0.3f) {
+      static double said_at = -1.0;
+      if (now - said_at > 0.5) {
+        said_at = now;
+        REXLOG_INFO("[native_x_renderer] skin aim overlay: aim {:.2f}, fx {}, points {}, back {:.3f} {:.3f} {:.3f}, muzzle {:.3f} "
+                    "{:.3f} {:.3f}, px {:.3f} py {:.3f}",
+                    k[47], fx, points, k[36], k[37], k[38], k[40], k[41], k[42], in.px, in.py);
+      }
+    }
     void* data = nullptr;
     context->MapBuffer(b.constants, MAP_WRITE, MAP_FLAG_DISCARD, data);
     std::memcpy(data, k, sizeof(k));
