@@ -121,12 +121,48 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr uint32_t kCameraFovCaller = 0x82294CB0;  // sub_82294A58's call of setFovY
 constexpr uint32_t kSecondViewCaller = 0x822948E4;  // sub_82294818's call of sub_82623DB8 (at 0x822948E0)
 
+int64_t TicksNow() { return std::chrono::steady_clock::now().time_since_epoch().count(); }
+int64_t Ticks(int ms) { return std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(ms)).count(); }
+
+// Issue 79 (0.4.8: in planes, and in tanks and cars with their own slider, the view "suddenly changing, increasing and
+// going back to default"): the mapping's two inputs held steady. Whether the soldier sits in a vehicle (the pad hook's
+// look at the soldier entity) and whether the view is a first person one (the game's last answer, given up as unknown
+// after 250 ms without one: a hitch of a few frames) each switched the slider in use, or the cockpit's own view, the
+// moment they changed. Now a change counts once it has lasted 300 ms, and an unknown first person answer keeps the last
+// known one for up to 2 s. Getting in or out takes longer than that; a flicker no longer swings the view. (Not
+// reproduced here: runs veh1, plane1. The flicker's own log, below, still reports the raw inputs.)
+struct ViewInputs {
+  bool seated = false;
+  int first = -1;  // FirstPersonView's: 1 first person, 0 not, -1 unknown
+  bool operator==(const ViewInputs& o) const { return seated == o.seated && first == o.first; }
+};
+ViewInputs SteadyInputs() {
+  static std::mutex mutex;
+  static ViewInputs shown, pending;
+  static int64_t pending_at = 0, known_at = 0;
+  static int known_first = -1;
+  std::lock_guard lock(mutex);
+  const int64_t now = TicksNow();
+  ViewInputs raw{bf1943::LocalSeatedNow(), bf1943::FirstPersonView()};
+  if (raw.first >= 0) known_first = raw.first, known_at = now;
+  else if (known_first >= 0 && now - known_at < Ticks(2000)) raw.first = known_first;
+  if (raw == shown) {
+    pending = shown, pending_at = 0;
+  } else if (!(raw == pending) || !pending_at) {
+    pending = raw, pending_at = now;
+  } else if (now - pending_at >= Ticks(300)) {
+    shown = raw, pending_at = 0;
+  }
+  return shown;
+}
+
 // The slider that applies now: the vehicle's while the soldier sits in one with Custom FOV on (its first person one in
 // a first person view, when set), else the camera's.
 double Chosen() {
-  if (!bf1943::LocalSeatedNow() || !REXCVAR_GET(bf_weapon_fov_custom)) return REXCVAR_GET(bf_fov);
+  const ViewInputs in = SteadyInputs();
+  if (!in.seated || !REXCVAR_GET(bf_weapon_fov_custom)) return REXCVAR_GET(bf_fov);
   const double first = REXCVAR_GET(bf_fov_vehicle_fp);
-  return bf1943::FirstPersonView() == 1 && first > 0.0 ? first : REXCVAR_GET(bf_fov_vehicle);
+  return in.first == 1 && first > 0.0 ? first : REXCVAR_GET(bf_fov_vehicle);
 }
 
 // `weight`: how much of the mapping applies (1 all of it, 0 none: the value as the game has it); `chosen`: the
@@ -154,13 +190,12 @@ std::atomic<double> g_seat_factor{1.0};  // the world's view now over the game's
 std::atomic<int64_t> g_seat_factor_at{0};
 // 0: not such a view; 1: a gun seat in first person; 2: a plane's cockpit (its pilot, in first person).
 int GunSeatView(bf1943::SeatInfo& seat) {
-  if (!bf1943::LocalSeatedNow() || bf1943::FirstPersonView() != 1 || !bf1943::LocalSeat(seat)) return 0;
+  const ViewInputs in = SteadyInputs();  // (issue 79: held steady)
+  if (!in.seated || in.first != 1 || !bf1943::LocalSeat(seat)) return 0;
   if (seat.kind == bf1943::SeatKind::kGunner) return 1;
   if (seat.kind == bf1943::SeatKind::kPlane) return 2;
   return 0;
 }
-int64_t TicksNow() { return std::chrono::steady_clock::now().time_since_epoch().count(); }
-int64_t Ticks(int ms) { return std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(ms)).count(); }
 // The same mapping for a value in degrees (the first person weapon's own projection).
 double MappedDegrees(double degrees, double weight) { return Mapped(degrees * kPi / 180.0, weight) * 180.0 / kPi; }
 // How much of the mapping the first person weapon's projection takes: all of it unzoomed, none through a scope. A
