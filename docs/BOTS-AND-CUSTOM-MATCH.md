@@ -164,6 +164,9 @@ offline or LAN play and for real servers.
 - **Riding along:** a bot within 6 m of a vehicle of its own side that a human drives (a swimmer next to a passing
   boat too) takes the first free seat other than the driver's, through the server's own seating. Checked twice a
   second.
+- **Never with an enemy aboard** (28 Nov 2026): a bot gets into no vehicle, a tank, a plane or a boat to drive or a
+  vehicle to ride in, while any of its seats holds a player of the other side, gun seats and passengers included. A
+  bot on its way to a boat gives it up if an enemy gets in first.
 - **Getting off** (27 Nov 2026): a passenger gets off when the vehicle has come 25 m or more and stopped (stood 2
   seconds, or moved under 4 m in 10 seconds: a boat grinding in the surf), when the driver's seat has been empty a
   second, or when the vehicle has not moved for 20 seconds, whoever drives. A bot boat driver gets off on the beach

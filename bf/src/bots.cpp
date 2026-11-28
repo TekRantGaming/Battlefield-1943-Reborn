@@ -744,6 +744,21 @@ uint32_t SeatPlayer(const uint8_t* base, uint32_t vehicle, uint32_t seat) {
   const uint32_t entry = Load32(base, entries + 4 * seat);
   return Readable(entry, 288) ? Load32(base, entry + 284) : 0;
 }
+// Whether any seat of the vehicle holds a player of the other side (the user, 28 Nov 2026: "Bots should not be able to
+// jump into a vehicle that has any seat occupied by an enemy faction"). `side`: the bot's (player+48, 1 the US, 2 Japan).
+// Every entry of the seat list (+144 to +148), the gun seats and passengers' as well as the driver's.
+bool EnemyAboard(const uint8_t* base, uint32_t vehicle, uint32_t side) {
+  const uint32_t entries = Load32(base, vehicle + 144);
+  if (!Readable(entries, 4)) return false;
+  const uint32_t count = std::min<uint32_t>((Load32(base, vehicle + 148) - entries) / 4, 16);
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t p = SeatPlayer(base, vehicle, i);
+    if (!p || !Readable(p, 0x40)) continue;
+    const uint32_t t = Load32(base, p + 48);
+    if ((t == 1 || t == 2) && t != side) return true;
+  }
+  return false;
+}
 // A C string of the game's data, 40 characters at most. Readable takes 4 byte aligned addresses only (a name read a
 // character at a time stopped at its first: "L" for the LCVP, US Central 20 Nov), so the aligned span is checked once;
 // a string outside the heaps (the level's data) is checked as mapped.
@@ -5300,6 +5315,11 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
           if (v == bot.off_vehicle && now < bot.off_until) continue;  // just got out of it
           if (const float hp = VehicleHealth(base, v); hp >= 0.0f && hp < 0.4f) continue;  // burning, or nearly
           if (SeatPlayer(base, v, 0) || !Position(ctx, base, v, vp) || Dist2D(vp, me) > (plane ? 40.0f : 20.0f)) continue;
+          if (EnemyAboard(base, v, Load32(base, bot.player + 48))) {  // an enemy in a gun seat
+            if (REXCVAR_GET(bf_bots_log_detail))
+              REXLOG_INFO("BF bots: {} leaves the {} alone: an enemy is aboard", bot.name, VehicleName(base, v));
+            continue;
+          }
           bot.plane_flying = false, bot.plane_last_at = {};
           PPCContext call = ctx;
           call.r3.u64 = bot.player, call.r4.u64 = v, call.r5.u64 = 0;
@@ -5329,6 +5349,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
         if (const float hp = VehicleHealth(base, v); hp >= 0.0f && hp < 0.3f) continue;  // about to go up
         const uint32_t driver = SeatPlayer(base, v, 0);
         if (!driver || IsBot(driver) || !Readable(driver, 0x40) || Load32(base, driver + 48) != side) continue;
+        if (EnemyAboard(base, v, side)) continue;  // an enemy in another seat
         float at[3];
         if (!CachedPosition(ctx, base, v, at) || Dist2D(at, pos) > 6.0f || std::fabs(at[1] - pos[1]) > 4.0f) continue;
         // Every free seat in turn (the game refuses some: US Central 20 Nov, a landing craft's seats 3 to 5); none
@@ -5395,6 +5416,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
           if (d >= best) continue;
           const uint32_t driver = SeatPlayer(base, v, 0);
           if (driver && (!IsBot(driver) || !Readable(driver, 0x40) || Load32(base, driver + 48) != side)) continue;
+          if (EnemyAboard(base, v, side)) continue;  // an enemy in a gun seat or a passenger's
           const uint32_t n = SeatCount(ctx, base, v);
           uint32_t taken = 0;
           for (uint32_t i = 0; i < n; ++i) taken += SeatPlayer(base, v, i) ? 1 : 0;
@@ -5426,6 +5448,7 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
       keep = keep && CachedPosition(ctx, base, bot.boat, at);
       const uint32_t driver = keep ? SeatPlayer(base, bot.boat, 0) : 0;
       keep = keep && (!driver || IsBot(driver));
+      keep = keep && !EnemyAboard(base, bot.boat, Load32(base, bot.player + 48));  // an enemy got in on the way
       if (keep && Dist2D(at, pos) < 5.0f && std::fabs(at[1] - pos[1]) < 6.0f) {
         // Seats 0 to 2 only (the driver's and the two guns'): the server's seating sometimes takes a landing craft's
         // places 3 to 5 too, where the soldier keeps its own weapon and no button gets it out (run fx_boat5).
