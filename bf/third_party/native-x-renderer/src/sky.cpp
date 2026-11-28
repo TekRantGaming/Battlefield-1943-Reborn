@@ -3735,7 +3735,9 @@ bool Sky::Fog(IDeviceContext* context, const Inputs& in) {
     info.pPS = ps;
     info.PSODesc.ResourceLayout.DefaultVariableType = SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC;
     info.PSODesc.ResourceLayout.ImmutableSamplers = samplers;
-    info.PSODesc.ResourceLayout.NumImmutableSamplers = 16;
+    // (The list's own length: at 16 written out, D252's two planar samplers were left off, and patch 0012's fallback
+    // stood in for them; without it NVIDIA's driver reads a null sampler.)
+    info.PSODesc.ResourceLayout.NumImmutableSamplers = uint32_t(std::size(samplers));
     device_->CreateGraphicsPipelineState(info, &pso);
     if (pso) pso->CreateShaderResourceBinding(&srb, true);
   };

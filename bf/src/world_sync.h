@@ -45,6 +45,11 @@ struct Status {
   bool held = false;
   // 26 Nov 2026: the event is Daybreak (the answer's flag 16; night_ops is then set too: an event server).
   bool daybreak = false;
+  // D254 (28 Nov 2026): the host says whether the match's weather system is on (flag 64, `weather_told`), and it is
+  // (flag 32): on, the renderer's sky, volumetric clouds, rain and storm; off, the game's own sky, graded for the hour.
+  // An older host never says; the game then keeps its own rule.
+  bool weather_told = false;
+  bool weather_system = false;
   const char* EventName() const { return daybreak ? "Daybreak" : "Night Ops"; }
 };
 Status Current();

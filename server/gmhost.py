@@ -1092,6 +1092,7 @@ class World:
         self.fog = self.ground_fog = 0.0
         self.wind = 0.3
         self.cloud_height = 450.0
+        self.weather_system = False  # D254: configure() sets it
         self.seconds = self.evolve = 0.0
         self.at = time.monotonic()
         self.admins, self.key = set(), ''
@@ -1235,6 +1236,12 @@ class World:
         self.fog, self.ground_fog = clamp(args.fog, 0, 1), clamp(args.ground_fog, 0, 1)
         self.wind = clamp(args.wind, 0, 1)
         self.cloud_height = clamp(args.cloud_height, 100, 1500)
+        # D254 (the user, 28 Nov 2026): the weather system (the renderer's sky, volumetric clouds, rain and storm in
+        # every player's game) only when the server's Weather switch is on, or an event has it. Off, players' games
+        # draw the game's own sky, graded for the hour, and the world has no rain or fog.
+        self.weather_system = bool(getattr(args, 'weather_system', False)) or self.scheduled
+        if not self.weather_system:
+            self.weather = self.fog = self.ground_fog = 0.0
         self.round, self.progress, self.stage = None, 0.0, -1
         self.held = set()
         self.match_file, self.match_read = getattr(args, 'match_file', '') or '', 0.0
@@ -1248,9 +1255,10 @@ class World:
 
     def said(self):
         return ('day and night %s, %.1f h, a day in %.0f min, clouds %.0f%% at rate %.0f%%, weather %.0f%%, fog %.0f%%, '
-                'ground fog %.0f%%, wind %.0f%%, cloud height %.0f m') % (
+                'ground fog %.0f%%, wind %.0f%%, cloud height %.0f m, weather system %s') % (
             'on' if self.day_night else 'off', self.hour, self.day_minutes, self.cover * 100, self.rate * 100,
-            self.weather * 100, self.fog * 100, self.ground_fog * 100, self.wind * 100, self.cloud_height)
+            self.weather * 100, self.fog * 100, self.ground_fog * 100, self.wind * 100, self.cloud_height,
+            'on' if self.weather_system else 'off')
 
     def set_night_ops(self, progress):
         """An event's build (Night Ops or Daybreak) at a round's progress, on every setting an admin has not set this
@@ -1488,6 +1496,8 @@ class World:
                 self.day_minutes = max(0.0, min(1440.0, values[1]))
                 (self.cover, self.rate, self.weather, self.fog, self.ground_fog,
                  self.wind) = (max(0.0, min(1.0, v)) for v in values[2:8])
+                if not self.weather_system:  # D254: Weather off, no rain or fog
+                    self.weather = self.fog = self.ground_fog = 0.0
                 if len(data) >= at + 37:
                     height = struct.unpack_from('>f', data, at + 33)[0]
                     if math.isfinite(height):
@@ -1508,10 +1518,12 @@ class World:
             # Flags 4 and 8 (24 Nov 2026; a game from before reads only 1 and 2): an event server (Night Ops, and since
             # 26 Nov 2026 Daybreak too), and an admin's settings hold some of its build this round (the panel's "Back
             # to Night Ops"). Flag 16 (26 Nov 2026): the event is Daybreak (the panel's "Back to Daybreak"; a game from
-            # before says Night Ops).
+            # before says Night Ops). Flags 32 and 64 (D254, 28 Nov 2026; a game from before reads neither): 64, this
+            # host says whether the weather system is on; 32, it is.
             reply = b'BF43WRLR' + bytes([1, (1 if self.day_night else 0) | (2 if admin else 0) |
                                          (4 if self.scheduled else 0) | (8 if self.held else 0) |
-                                         (16 if self.daybreak else 0)]) + struct.pack(
+                                         (16 if self.daybreak else 0) |
+                                         (32 if self.weather_system else 0) | 64]) + struct.pack(
                 '>8f2d', self.hour, self.day_minutes, self.cover, self.rate, self.weather, self.fog, self.ground_fog,
                 self.wind, self.seconds, self.evolve) + struct.pack('>f', self.cloud_height)
             # Then as the game's own host sends them (gm_host.cpp, 19 Nov 2026; a game from before reads none): the
@@ -2388,6 +2400,11 @@ def main():
     # the storm building with the tickets (World.DAYBREAK_*). Listed for the browser's DAYBREAK chip; --night wins if both are given.
     ap.add_argument('--daybreak', action='store_true',
                     help='a Daybreak server: its world held at 06:10, the storm building with the tickets')
+    # The Weather switch (D254; the user, 28 Nov 2026): the weather system and volumetric clouds only when it is on (or
+    # on an event server); off, players' games draw the game's own sky for day and night, graded for the hour.
+    ap.add_argument('--weather-system', action='store_true',
+                    help="the weather system: players' games draw the renderer's sky, volumetric clouds, rain and storm "
+                         "(Night Ops and Daybreak always have it); without it, the game's own sky, graded for the hour")
     # Where the server is (TekRantGaming, 13 Nov 2026: the browser shows the region with its flag): one of the game's
     # region codes (bf/src/regions.h, the manager's drop down). And its tick rate, for the browser: the game's own
     # 30 Hz today.

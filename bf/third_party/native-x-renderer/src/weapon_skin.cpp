@@ -689,8 +689,11 @@ void main() {
     // (And fading out at the stretch's two ends.)
     float part = p.pa.x / g.half_len;
     float ends = smoothstep(bs[1].z - 0.02, bs[1].z + 0.10, part) * (1.0 - smoothstep(bs[1].w - 0.10, bs[1].w + 0.10, part));
-    // (And while aiming, none over the top of the gun, where the eye looks along its sights.)
-    float over_top = smoothstep(0.1, 0.65, cos(p.pa.y));
+    // (While aiming the cloud is as from the hip, unchanged and unmoved; the sight picture is kept clear in the pixel
+    // shader: the user, 28 Nov 2026, "Leave the animation as is from when at hip. When ADS, only the sights clear", the
+    // animation not changed or shifted. On the Type 100 (mg.x 1) the top of the gun along its sight line is kept clear
+    // as well: "For Type 100, just keep the top of the gun clear from the iron sight to the back of the receiver".)
+    float over_top = mg.x > 0.5 ? smoothstep(0.1, 0.65, cos(p.pa.y)) : 0.0;
     v_l = vec4(LightningAt(g, pos), mix(0.6, 1.0, smoothstep(-0.02, 0.03, pos.z - on_axis.z)) * ends * (1.0 - gun_up.w * over_top),
                p.ts.z * (1.0 + 0.3 * f), 0.0);
   } else {
@@ -755,7 +758,7 @@ void main() {
   // While aiming, nothing of the cloud or its sparks at the middle of the view: the sight picture.
   float sight = length((gl_FragCoord.xy / a.xy - 0.5) * vec2(a.x / a.y, 1.0));
   // (Only the sight picture itself: with a wider ring cleared, 0.09 to 0.20 of the view's height, nothing of the cloud
-  // was left to see on the gun while aiming. The top of the gun is kept clear along its whole length besides.)
+  // was left to see on the gun while aiming.)
   float clear = 1.0 - gun_up.w * (1.0 - smoothstep(0.035, 0.085, sight));
   if (clear <= 0.0) discard;
   if (v_m.w > 0.5) {
@@ -1216,7 +1219,12 @@ bool GunPoints(float out[20]) {
   place(gun.back, out), place(gun.muzzle, out + 4), place(gun.mag_top, out + 12), place(gun.mag_end, out + 16);
   out[3] = 1.0f;
   for (int c = 0; c < 3; ++c) out[8 + c] = f.col[1][c];  // the model's up
-  if (out[2] < 0.03f || out[6] < 0.03f) return false;    // (behind the eye: not a frame to go by)
+  // Only the muzzle must be in front of the eye. Aiming down the sights (the Iron Sight option most of all) brings the
+  // back of the receiver to the eye or behind it; turned down then, the overlay got no gun and every puff fell behind the
+  // eye: the whole storm went while aiming (the user, 28 Nov 2026: "the new skin is disappearing when a player ADSs
+  // with iron sights ... it should only keep the iron sight view clear with the rest of the animation showing around
+  // the weapon"; run skinaim_us2). The gun's line is the same with its back there.
+  if (out[6] < 0.03f) return false;  // (the muzzle behind the eye: not a frame to go by)
   return true;
 }
 }  // namespace
@@ -1695,8 +1703,19 @@ bool WeaponSkinBloom(IRenderDevice* device, IDeviceContext* context, const Weapo
     for (int i = 0; i < 4; ++i) k[56 + i] = k[36 + i];
     k[59] = bolts;
     for (int i = 36; i < 56; ++i) k[i] = 0.0f;
-    if (GunPoints(&k[36])) k[34] = -1.0f, k[35] = 1.0f;  // the stretch is the barrel's line itself, end to end
+    const bool points = GunPoints(&k[36]);
+    if (points) k[34] = -1.0f, k[35] = 1.0f;  // the stretch is the barrel's line itself, end to end
     k[47] = AimNow();
+    // NXR_SKIN_AIM_LOG=1 (a diagnosis aid, 28 Nov 2026): twice a second while aiming, what the overlay goes by.
+    if (static const bool aim_log = std::getenv("NXR_SKIN_AIM_LOG") != nullptr; aim_log && k[47] > 0.3f) {
+      static double said_at = -1.0;
+      if (now - said_at > 0.5) {
+        said_at = now;
+        REXLOG_INFO("[native_x_renderer] skin aim overlay: aim {:.2f}, fx {}, points {}, back {:.3f} {:.3f} {:.3f}, muzzle {:.3f} "
+                    "{:.3f} {:.3f}, px {:.3f} py {:.3f}",
+                    k[47], fx, points, k[36], k[37], k[38], k[40], k[41], k[42], in.px, in.py);
+      }
+    }
     void* data = nullptr;
     context->MapBuffer(b.constants, MAP_WRITE, MAP_FLAG_DISCARD, data);
     std::memcpy(data, k, sizeof(k));

@@ -160,8 +160,8 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_sea_sky, true, "NativeXRenderer",
                     "The sea reflects the hour's sky (the renderer's), not the game's day sky cube map, also without "
                     "native_x_renderer_reflections (D240)");
 REXCVAR_DEFINE_INT32(native_x_renderer_reflection_mode, -1, "NativeXRenderer",
-                     "The sea's reflection (D252): 0 off (the game's), 1 SSR, 2 planar (the world drawn again, mirrored "
-                     "in the water); -1 as native_x_renderer_reflections says (off or SSR)");
+                     "The sea's reflection (D252, D253): 0 Original (the game's), 1 or 2 Enhanced (the world drawn "
+                     "again, mirrored in the water); -1 as native_x_renderer_reflections says");
 REXCVAR_DEFINE_INT32(native_x_renderer_planar_every, 2, "NativeXRenderer",
                      "The planar reflection drawn every this many frames (1 to 4; the last one shown between; D252)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_planar_cull, true, "NativeXRenderer",
@@ -2068,9 +2068,11 @@ void ExecuteDraw(const Command& c) {
       SetCloudShadows(REXCVAR_GET(native_x_renderer_cloud_shadows));  // D214
       SetStormSway(REXCVAR_GET(native_x_renderer_storm_sway));
       // D252: Off / SSR / Planar (native_x_renderer_reflection_mode; -1, from before it, as the old switch says).
+      // D253: planar in place of SSR too (the user, 28 Nov 2026: "New planar reflections replace regular SSR as
+      // well"): any reflection setting on (1, saved before as SSR, or the old switch) is planar.
       const int32_t reflection_mode = REXCVAR_GET(native_x_renderer_reflection_mode) >= 0
-                                          ? REXCVAR_GET(native_x_renderer_reflection_mode)
-                                          : (REXCVAR_GET(native_x_renderer_reflections) ? 1 : 0);
+                                          ? (REXCVAR_GET(native_x_renderer_reflection_mode) >= 1 ? 2 : 0)
+                                          : (REXCVAR_GET(native_x_renderer_reflections) ? 2 : 0);
       SetSeaReflection(reflection_mode >= 1 && SkyOn());
       // (Drawn every native_x_renderer_planar_every frames: the draws kept only on those.)
       g_planar_mode = reflection_mode == 2 && SkyOn();

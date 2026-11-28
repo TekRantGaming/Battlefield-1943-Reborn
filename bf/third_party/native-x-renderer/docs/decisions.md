@@ -7641,3 +7641,60 @@ one place each: the shore mirrored as a picture, not SSR's streaks), on the carr
 shallows (the game's water kept at the waterline), at dusk and at night (the mirror as dark as the world). Not tested:
 the other maps, a plane in flight, storms, MSAA. Not found: the beach's white wash (the user's reference shot: a foam
 band over the water), which is missing with any reflection setting; looked into next.
+
+## D254 — Weather off: the game's own sky for day and night; the weather system only when a match turns it on (2026-11-28, Claude for Battlefield 1943 Reborn)
+
+The user, 28 Nov 2026: "for custom match and servers; if Weather is off, then the default game sky should be used for
+day and night (graded for proper night-time). Weather system and volumetric clouds only used if Weather is enabled in
+custom match/server settings." Asked what Weather off means on a server (which had a day and night switch and a weather
+strength, but no Weather switch): "A new Weather switch".
+
+- **What is Weather.** A Custom Match: its Weather and time switch (the Weather tab), or an event (Night Ops,
+  Daybreak). A server: the new Weather switch in the server manager (`weather_system`, gmhost.py `--weather-system`),
+  or an event. Off on a new server. A server saved before the switch gets it on when its weather, fog or ground fog
+  was over 0, so a server set up with rain keeps it.
+- **What the host says.** The world answer's flags byte gains 64 (this host says whether the weather system is on)
+  and 32 (it is), from gm_host.cpp (`bf_world_weather_system`) and gmhost.py alike. With Weather off the host's world
+  has no rain, fog, ground fog or dynamic storm, also after an admin's change in game.
+- **The look.** A joined match whose host says so decides the server's look (game_menu.cpp `TickServerLook`) for as
+  long as it is joined. Weather on: all six look settings on, as an event's look. Weather off: Volumetric clouds, Rain on
+  the lens and Wet weapon and hands off; Day and night, Lamp glow and Lens flare follow the match's day and night
+  switch. With the renderer's sky off and day and night on, the game's painted sky is tinted by the hour
+  (`light.game_sky`, D182), the night's grading. Weather off and day and night off is the released game's look, as
+  regular servers had. The match this PC hosts is decided at the join; any other on its host's first answer after it.
+  A host from before this (no flag 64) keeps the old rule: a player hosted match on, an event on, other servers off.
+- **Not changed:** the Custom Match's Weather tab still has the time of day, so a Custom Match with Weather off plays at
+  the map's afternoon (16:00), with the game's own sky; night with Weather off is only on a server.
+
+## D255 — The weapon while aiming: the skin's cloud as at the hip, only the sights clear; a rifle's narrow view still the weapon's (2026-11-28, Claude for Battlefield 1943 Reborn)
+
+**Why:** the user, 28 Nov 2026: "the new skin is disappearing when a player ADSs with iron sights ... it should only keep
+the iron sight view clear with the rest of the animation showing around the weapon fine when ADS", checked "for both
+Type 100 and Thompson"; "The Wetness shader on the weapons when it's raining should also still show when zooming or
+ADSing for all weapons too" (the scoped rifle's optic fills the screen: left out); then, of the first attempt's shots:
+"The Type 100 was perfect. The Thompson just needed to show it's smoke on the side like the Type-100".
+
+**Found** (NXR_SKIN_AIM_LOG=1, a new diagnosis aid: while aiming, each distinct depth range, projection and outcome of
+ClassifyWeapon's draws, and twice a second what the skin's overlay goes by):
+- The skin's cloud: the overlay had the gun every frame, its barrel's line 0.31 to 1.03 m straight down the middle of the
+  view (run aim_smg). Seen end on, the Thompson's wide receiver at the eye hides every puff within a few centimetres of
+  the gun, the whole cloud; the Type 100's narrower one leaves wisps showing at its sides (aim_jp).
+- The wetness: the weapon's draws are told by their own projection in the nearest depth range (D217), which took
+  fields of view of 19 degrees or more only. Aimed in, the M1 Garand's view narrows to 10 to 12 degrees (py 9 to 11.4,
+  run aim_rifle): its draws were no longer the weapon's, and its wetness went. The SMGs' (py up to 4.5) stayed.
+
+**What** (the skin's cloud took four tries with the user; what they settled on, 28 Nov 2026: "Leave the animation as
+is from when at hip. When ADS, only the sights clear (animation does not change or shift)", and "For Type 100, just
+keep the top of the gun clear from the iron sight to the back of the receiver"; then "Awesome, looks great now"):
+- weapon_skin.cpp: while aiming the cloud is the hip's, unmoved and hidden by the gun as at the hip. Cleared: the sight
+  picture (the middle of the view, as before) on both guns, and on the Type 100 the top of the gun along its sight line
+  (until now the top was cleared on both). Tried and dropped on the way: the storm stood off the gun while aiming, and
+  the gun and hands left not hiding it (both drew smoke round the sights, not round the gun).
+- weapon_skin.cpp `GunPoints`: only the muzzle need be in front of the eye (the back of the receiver may reach it).
+- draw.cpp `ClassifyWeapon`: the nearest range's projections down to 6 degrees (py under 20); the world's stay at 19.
+
+**Tested** (dev build, Wake Island by day in rain, Iron Sight on, the skin worn; runs aim_smg, aim_jp, aim_rifle): the
+Type 100 aimed in with its smoke at the receiver's sides and its top clear (the team changed by BF_MENU_STEPS'
+changeteam); the Thompson aimed in as at the hip, its cloud behind its receiver from that view; the Garand's draws the
+weapon's all the way in (py up to 11.4, none out of range, its wet copy drawn with NXR_WET_TINT=99). The Garand's
+wetness was forced on for the check, not seen in real rain.

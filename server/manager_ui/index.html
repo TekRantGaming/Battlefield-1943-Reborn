@@ -380,6 +380,7 @@ header { background: url(logo) right center / contain no-repeat, #111; }
   <p class="hint" id="e-event-note">An event sets the time, clouds, weather, fog and wind itself, every round. Admins can still change them with F9 for the rest of a round.</p>
   <label class="check"><input type="checkbox" id="e-balance"><span>Team balance<br><small>When one team has 2 or more players more for 20 seconds, a player who has died on it moves to the other team, with no points lost. A Change Team that would make the teams uneven is refused.</small></span></label>
   <label class="check"><input type="checkbox" id="e-daynight"><span>Day and night: the light, the shadows and the sky follow the server's clock<br><small>Admins can change all of these while the server runs, with F9 in the game.</small></span></label>
+  <label class="check"><input type="checkbox" id="e-weathersystem"><span>Weather: the weather system and volumetric clouds, with the rain, fog and storms set below<br><small>Off: players see the game's own sky, by day and at night, and no rain or fog. Night Ops and Daybreak always have it.</small></span></label>
   <div class="grid2">
     <label class="field"><span>Time of day at the start (0 to 24)</span><input type="number" id="e-time" min="0" max="23.75" step="0.25"></label>
     <label class="field"><span>A day lasts, minutes (0: time stands still)</span><input type="number" id="e-dayminutes" min="0" max="1440" step="1"></label>
@@ -738,7 +739,7 @@ function openEdit(n) {
     ...[[60, 'Recommended'], [30, 'Original'], [75, 'Experimental'], [100, 'Experimental']].map(([hz, word]) => h('option', { value: hz, text: hz + ' Hz - ' + word })));
   $('e-tick').value = String([30, 60, 75, 100].includes(sv.tick) ? sv.tick : 0);
   $('e-listed').checked = sv.listed; $('e-event').value = sv.night ? 'night' : sv.daybreak ? 'daybreak' : ''; $('e-autostart').checked = sv.autostart; $('e-balance').checked = sv.team_balance !== false;
-  $('e-daynight').checked = sv.day_night === true; $('e-time').value = sv.time ?? 16; $('e-dayminutes').value = sv.day_minutes ?? 0;
+  $('e-daynight').checked = sv.day_night === true; $('e-weathersystem').checked = sv.weather_system === true; $('e-time').value = sv.time ?? 16; $('e-dayminutes').value = sv.day_minutes ?? 0;
   $('e-cloud').value = sv.cloud_cover ?? 35; $('e-cloudrate').value = sv.cloud_rate ?? 33; $('e-weather').value = sv.weather ?? 0;
   $('e-fog').value = sv.fog ?? 0; $('e-groundfog').value = sv.ground_fog ?? 0; $('e-wind').value = sv.wind ?? 30;
   $('e-cloudheight').value = sv.cloud_height ?? 450;
@@ -811,7 +812,7 @@ async function saveEdit(restart) {
     night: $('e-event').value === 'night', daybreak: $('e-event').value === 'daybreak', port: port, max_players: Number($('e-max').value), bots: Number($('e-bots').value) || 0,
     tickets: ['auto', 'map'].includes($('e-tickets').value) ? $('e-tickets').value : Number($('e-tickets').value), autostart: $('e-autostart').checked,
     tick: Number($('e-tick').value) || 0,
-    day_night: $('e-daynight').checked, time: Number($('e-time').value) || 0, day_minutes: Number($('e-dayminutes').value) || 0,
+    day_night: $('e-daynight').checked, weather_system: $('e-weathersystem').checked, time: Number($('e-time').value) || 0, day_minutes: Number($('e-dayminutes').value) || 0,
     cloud_cover: Number($('e-cloud').value) || 0, cloud_rate: Number($('e-cloudrate').value) || 0, weather: Number($('e-weather').value) || 0,
     fog: Number($('e-fog').value) || 0, ground_fog: Number($('e-groundfog').value) || 0, wind: Number($('e-wind').value) || 0,
     cloud_height: Number($('e-cloudheight').value) || 450,

@@ -218,8 +218,11 @@ Result<rex::hid::PadState> InputSystem::State::ReadRawLocked(u32 user) {
     if (!state) {
       continue;
     }
-    if (key.source == keyboard_mouse_source && !IsActive()) {
+    // (Battlefield 1943 Reborn patch: not while a test holds keys, which count without the focus, as the pad's own
+    // read lets them; the tests' window stays in the background.)
+    if (key.source == keyboard_mouse_source && !IsActive() && !detail::TestKeysHeld()) {
       *state = rex::hid::PadState{};
+      detail::ClearLastKeys();  // (Battlefield 1943 Reborn patch: what the title is told the keys gave, none)
     }
     active.Observe(user, key, *state);
     if (!any) {
