@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.8.4 (28 November 2026): a hotfix
+
+Earlier versions update to it by themselves, and the servers only let the newest version in. Every update builds your
+shaders again from scratch at the first start.
+
+**Fixed**
+- **No more black textures all over the screen.** 0.4.8.3 moved everyone who had SSR reflections to the new planar
+  reflections, which drew black patches, worst on Daybreak. Reflections, Enhanced is the SSR reflection again, as in
+  0.4.8.2, and the planar reflections are off until they are fixed. Original stays as it was.
+
 ## 0.4.8.3 (28 November 2026): a hotfix
 
 Earlier versions update to it by themselves, and the servers only let the newest version in. Every update builds your

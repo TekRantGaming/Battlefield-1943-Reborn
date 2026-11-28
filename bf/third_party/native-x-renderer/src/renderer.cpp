@@ -160,8 +160,8 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_sea_sky, true, "NativeXRenderer",
                     "The sea reflects the hour's sky (the renderer's), not the game's day sky cube map, also without "
                     "native_x_renderer_reflections (D240)");
 REXCVAR_DEFINE_INT32(native_x_renderer_reflection_mode, -1, "NativeXRenderer",
-                     "The sea's reflection (D252, D253): 0 Original (the game's), 1 or 2 Enhanced (the world drawn "
-                     "again, mirrored in the water); -1 as native_x_renderer_reflections says");
+                     "The sea's reflection (D252, D253): 0 Original (the game's), 1 or 2 Enhanced (SSR; planar, the world "
+                     "drawn again mirrored, only with NXR_PLANAR_REFLECTION=1 since 0.4.8.4); -1 as native_x_renderer_reflections says");
 REXCVAR_DEFINE_INT32(native_x_renderer_planar_every, 2, "NativeXRenderer",
                      "The planar reflection drawn every this many frames (1 to 4; the last one shown between; D252)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_planar_cull, true, "NativeXRenderer",
@@ -2070,9 +2070,18 @@ void ExecuteDraw(const Command& c) {
       // D252: Off / SSR / Planar (native_x_renderer_reflection_mode; -1, from before it, as the old switch says).
       // D253: planar in place of SSR too (the user, 28 Nov 2026: "New planar reflections replace regular SSR as
       // well"): any reflection setting on (1, saved before as SSR, or the old switch) is planar.
-      const int32_t reflection_mode = REXCVAR_GET(native_x_renderer_reflection_mode) >= 0
-                                          ? (REXCVAR_GET(native_x_renderer_reflection_mode) >= 1 ? 2 : 0)
-                                          : (REXCVAR_GET(native_x_renderer_reflections) ? 2 : 0);
+      // 0.4.8.4 (TekRantGaming, 28 Nov 2026): with planar for every player who had SSR, 0.4.8.3 drew black textures all
+      // over the screen (Daybreak "unplayable", players everywhere; Reflections set to Original cured it in his game).
+      // Enhanced (any setting on) is SSR again, as every player had it in 0.4.8.2, and planar is drawn for no one until
+      // it is fixed: NXR_PLANAR_REFLECTION=1 (developers) still gives planar for Enhanced.
+      static const bool planar_allowed = [] {
+        const char* v = std::getenv("NXR_PLANAR_REFLECTION");
+        return v && *v == '1';
+      }();
+      const bool reflection_on = REXCVAR_GET(native_x_renderer_reflection_mode) >= 0
+                                     ? REXCVAR_GET(native_x_renderer_reflection_mode) >= 1
+                                     : REXCVAR_GET(native_x_renderer_reflections);
+      const int32_t reflection_mode = !reflection_on ? 0 : planar_allowed ? 2 : 1;
       SetSeaReflection(reflection_mode >= 1 && SkyOn());
       // (Drawn every native_x_renderer_planar_every frames: the draws kept only on those.)
       g_planar_mode = reflection_mode == 2 && SkyOn();
