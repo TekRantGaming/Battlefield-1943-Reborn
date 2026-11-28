@@ -360,20 +360,7 @@ float GunReach(float part, float angle) {
   float tall = c > 0.0 ? shape.x : shape.y, wide = s > 0.0 ? shape.z : shape.w;
   return 1.0 / sqrt(c * c / (tall * tall) + s * s / (wide * wide));
 }
-// While aiming (gun_up.w) the Thompson's storm stands a little off it. Seen down its sights the gun is end on, and the
-// Thompson's wide receiver at the eye hid the whole cloud, where the Type 100's narrower one leaves wisps showing at its
-// sides (the user, 28 Nov 2026: "the new skin is disappearing when a player ADSs with iron sights"; then, of runs aim_smg
-// and aim_jp: "The Type 100 was perfect. The Thompson just needed to show it's smoke on the side like the Type-100").
-// So the Thompson's (mg.x 0: its magazine under it) only, out to just past its receiver's outline as seen (8.5 cm a
-// metre of the distance from the eye); the Type 100 stays as it is.
-vec3 Around(Gun g, vec3 cyl) {
-  float r = cyl.z;
-  if (gun_up.w > 0.0 && mg.x < 0.5) {
-    float z = max((g.mid + g.axis * cyl.x).z, 0.06);
-    r = mix(r, max(r, 0.085 * z), gun_up.w);
-  }
-  return g.mid + g.axis * cyl.x + (g.up * cos(cyl.y) + g.side * sin(cyl.y)) * r;
-}
+vec3 Around(Gun g, vec3 cyl) { return g.mid + g.axis * cyl.x + (g.up * cos(cyl.y) + g.side * sin(cyl.y)) * cyl.z; }
 // A plume's middle: along the axis, its angle round it (all go round together, each a little by itself), its distance.
 vec3 PlumeCyl(Gun g, float k, float t) {
   float h1 = h11(k * 3.7 + 1.0), h2 = h11(k * 9.1 + 2.0);
@@ -702,8 +689,11 @@ void main() {
     // (And fading out at the stretch's two ends.)
     float part = p.pa.x / g.half_len;
     float ends = smoothstep(bs[1].z - 0.02, bs[1].z + 0.10, part) * (1.0 - smoothstep(bs[1].w - 0.10, bs[1].w + 0.10, part));
-    // (And while aiming, none over the top of the gun, where the eye looks along its sights.)
-    float over_top = smoothstep(0.1, 0.65, cos(p.pa.y));
+    // (While aiming the cloud is as from the hip, unchanged and unmoved; the sight picture is kept clear in the pixel
+    // shader: the user, 28 Nov 2026, "Leave the animation as is from when at hip. When ADS, only the sights clear", the
+    // animation not changed or shifted. On the Type 100 (mg.x 1) the top of the gun along its sight line is kept clear
+    // as well: "For Type 100, just keep the top of the gun clear from the iron sight to the back of the receiver".)
+    float over_top = mg.x > 0.5 ? smoothstep(0.1, 0.65, cos(p.pa.y)) : 0.0;
     v_l = vec4(LightningAt(g, pos), mix(0.6, 1.0, smoothstep(-0.02, 0.03, pos.z - on_axis.z)) * ends * (1.0 - gun_up.w * over_top),
                p.ts.z * (1.0 + 0.3 * f), 0.0);
   } else {
@@ -768,7 +758,7 @@ void main() {
   // While aiming, nothing of the cloud or its sparks at the middle of the view: the sight picture.
   float sight = length((gl_FragCoord.xy / a.xy - 0.5) * vec2(a.x / a.y, 1.0));
   // (Only the sight picture itself: with a wider ring cleared, 0.09 to 0.20 of the view's height, nothing of the cloud
-  // was left to see on the gun while aiming. The top of the gun is kept clear along its whole length besides.)
+  // was left to see on the gun while aiming.)
   float clear = 1.0 - gun_up.w * (1.0 - smoothstep(0.035, 0.085, sight));
   if (clear <= 0.0) discard;
   if (v_m.w > 0.5) {

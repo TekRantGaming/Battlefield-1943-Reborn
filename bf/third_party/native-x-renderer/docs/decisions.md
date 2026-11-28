@@ -7666,7 +7666,7 @@ strength, but no Weather switch): "A new Weather switch".
 - **Not changed:** the Custom Match's Weather tab still has the time of day, so a Custom Match with Weather off plays at
   the map's afternoon (16:00), with the game's own sky; night with Weather off is only on a server.
 
-## D255 — The weapon while aiming: the Thompson's skin smoke beside its receiver; a rifle's narrow view still the weapon's (2026-11-28, Claude for Battlefield 1943 Reborn)
+## D255 — The weapon while aiming: the skin's cloud as at the hip, only the sights clear; a rifle's narrow view still the weapon's (2026-11-28, Claude for Battlefield 1943 Reborn)
 
 **Why:** the user, 28 Nov 2026: "the new skin is disappearing when a player ADSs with iron sights ... it should only keep
 the iron sight view clear with the rest of the animation showing around the weapon fine when ADS", checked "for both
@@ -7683,13 +7683,18 @@ ClassifyWeapon's draws, and twice a second what the skin's overlay goes by):
   fields of view of 19 degrees or more only. Aimed in, the M1 Garand's view narrows to 10 to 12 degrees (py 9 to 11.4,
   run aim_rifle): its draws were no longer the weapon's, and its wetness went. The SMGs' (py up to 4.5) stayed.
 
-**What:**
-- weapon_skin.cpp `Around`: while aiming (gun_up.w), the Thompson's storm only (mg.x 0) stands out to just past its
-  receiver's outline as seen, 8.5 cm a metre of its distance from the eye. The Type 100 as before.
+**What** (the skin's cloud took four tries with the user; what they settled on, 28 Nov 2026: "Leave the animation as
+is from when at hip. When ADS, only the sights clear (animation does not change or shift)", and "For Type 100, just
+keep the top of the gun clear from the iron sight to the back of the receiver"; then "Awesome, looks great now"):
+- weapon_skin.cpp: while aiming the cloud is the hip's, unmoved and hidden by the gun as at the hip. Cleared: the sight
+  picture (the middle of the view, as before) on both guns, and on the Type 100 the top of the gun along its sight line
+  (until now the top was cleared on both). Tried and dropped on the way: the storm stood off the gun while aiming, and
+  the gun and hands left not hiding it (both drew smoke round the sights, not round the gun).
 - weapon_skin.cpp `GunPoints`: only the muzzle need be in front of the eye (the back of the receiver may reach it).
 - draw.cpp `ClassifyWeapon`: the nearest range's projections down to 6 degrees (py under 20); the world's stay at 19.
 
 **Tested** (dev build, Wake Island by day in rain, Iron Sight on, the skin worn; runs aim_smg, aim_jp, aim_rifle): the
-Thompson aimed in with smoke both sides of its receiver and the sight picture clear; the Type 100 as before (the team
-changed by BF_MENU_STEPS' changeteam); the Garand's draws the weapon's all the way in (py up to 11.4, none out of range,
-its wet copy drawn with NXR_WET_TINT=99). The Garand's wetness was forced on for the check, not seen in real rain.
+Type 100 aimed in with its smoke at the receiver's sides and its top clear (the team changed by BF_MENU_STEPS'
+changeteam); the Thompson aimed in as at the hip, its cloud behind its receiver from that view; the Garand's draws the
+weapon's all the way in (py up to 11.4, none out of range, its wet copy drawn with NXR_WET_TINT=99). The Garand's
+wetness was forced on for the check, not seen in real rain.
