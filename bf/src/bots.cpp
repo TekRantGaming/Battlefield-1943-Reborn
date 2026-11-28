@@ -333,6 +333,10 @@ struct Bot {
   float plane_speed = 0;
   bool plane_flying = false;
   int melee_tries = 0;              // knife attempts at this spot in a row
+  // Issue 82: whether land is near its boat (ShoreNear), looked at once a second while it would get off.
+  bool shore_near = true;
+  Clock::time_point shore_at{};
+  bool deck_waiting = false;  // waiting on its carrier's deck for a boat (logged once a wait)
   float check_pos[3] = {};
   Clock::time_point check_at{};
   float aim_error_yaw = 0, aim_error_pitch = 0;
@@ -1093,6 +1097,32 @@ float KnownWater(const std::string& map) {
   return -1e9f;
 }
 bool SwimCell(const NavCell& c) { return c.state == 3 || (c.state == 1 && c.y < nav.water - 0.9f); }
+// Issue 82: a "walk" at the water's surface (under 3 m over it) over a cell known as water is a soldier standing in a
+// boat (a landing craft's standing places leave the soldier in control), not ground: learned as ground, those cells
+// drew lines of "shore" out from both carriers (run bot86_3), and ShoreNear let the riders of a stuck boat off there.
+bool BoatRiderOverWater(uint8_t water_state, float y) {
+  return water_state == 3 && nav.water > -1e8f && y >= nav.water - 0.9f && y < nav.water + 3.0f;
+}
+// Whether a swimmer could walk out onto land within r metres of `at`: a walkable cell at most 2.5 m over the water (a
+// beach, a jetty's foot; not a carrier's deck, 14 m over it). Issue 82 (bots "hanging out in large groups in the water
+// on Wake Island"): bots got off boats stuck beside the carriers and swam 300 to 500 m to the island (run bot86_1: 18%
+// of their positions swimming, most of it from the carriers). A shore is many such cells: on Wake's shipped grid each
+// beach the boats landed on had 198 to 527 within 40 m, beside each carrier 49 to 65 (lines at 215 to 217 m: what
+// boats' riders walked on, learned as ground; run bot86_2). True while the water's height is not known (as before).
+bool ShoreNear(const float at[3], float r, int cells_needed = 120) {
+  if (nav.water < -1e8f) return true;
+  const int cx = CellOf(at[0]), cz = CellOf(at[2]), n = int(std::ceil(r / kCell));
+  int found = 0;
+  for (int dz = -n; dz <= n; ++dz)
+    for (int dx = -n; dx <= n; ++dx) {
+      if (dx * dx + dz * dz > n * n) continue;
+      const auto it = nav.cells.find(CellKey(cx + dx, cz + dz));
+      if (it != nav.cells.end() && it->second.state == 1 && it->second.y >= nav.water - 0.9f &&
+          it->second.y <= nav.water + 2.5f && ++found >= cells_needed)
+        return true;
+    }
+  return false;
+}
 // How much more a swum step costs than a walked one: swimming is slow, and a swimmer cannot shoot (TekRantGaming,
 // 26 Nov 2026: bots "try to swim over to the other side of the island instead of correctly traveling the island or
 // taking a boat"). At 3 the 160 m swim across Wake's lagoon beat its 612 m walk round; at 10 a swim wins only where the
@@ -1546,6 +1576,10 @@ void LearnWalk(const float a[3], const float b[3], float weight, std::deque<std:
     const int cx = CellOf(x), cz = CellOf(z);
     const uint64_t cell = CellKey(cx, cz);
     NavCell& c = nav.cells[cell];
+    if (BoatRiderOverWater(c.state, y)) {  // standing in a boat: nothing walked
+      px = cx, pz = cz;
+      continue;
+    }
     if (y < nav.water - 0.9f) {
       if (c.state != 3) c.y = nav.water - 0.2f, c.state = 3;
     } else if (c.state != 1) {
@@ -1897,6 +1931,7 @@ bool LoadGridFile(const std::filesystem::path& file, const char* what) {
     const uint64_t k = CellKey(x, z);
     NavCell& have = nav.cells[k];
     if (have.state == 0) have.y = c.y, have.state = c.state;  // what was walked (already in) stands over the scan's
+    else if (have.state == 1 && BoatRiderOverWater(c.state, have.y)) have.y = c.y, have.state = 3;  // (a boat's rider)
     nav.scanned.insert(k);
     have.open |= open;
     have.closed |= uint8_t(closed & ~have.open);
@@ -2980,16 +3015,37 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
     // Stuck before something low (the user, 19 Nov 2026: "They should now be able to melee breakable fences to get
     // through the obstacle"): blocked within 1.5 m at the waist (0.8 m) but clear over the head (2.4 m), as a fence,
     // a railing or a low wall is: the knife at it for 2 s (B, the knife's button on foot: the HUD's knife picture is
-    // button_b; digital concepts 13 and 16), twice at most in a row before going round as below. A fence the game lets
-    // break falls; a wall stays, and the next try goes round.
+    // button_b; digital concept 13, as a player's B sets it on foot: run bot86_2), twice at most in a row before going
+    // round as below. A fence the game lets break falls; a wall stays, and the next try goes round. Not within 6 m of a
+    // vehicle: B there gets in it.
+    // Issue 86 (bots "getting stuck on fences ... should break fences with melee"): until 28 Nov 2026 this never ran.
+    // Ray returns false when nothing is hit, so the clear ray over the head failed the test (run bot86_2: 96 stuck bots
+    // blocked at the waist and clear over the head, none knifed), and its press added concept 16, which no button sets.
     bool fence = false;
+    float f_low = -1.0f, f_high = -1.0f;  // (the detail log's: -1 not tried)
     if (stuck && bot.melee_tries < 2) {
       const float fx = -std::sin(bot.yaw), fz = std::cos(bot.yaw);
       const float low[3] = {pos[0], pos[1] + 0.8f, pos[2]}, low_to[3] = {pos[0] + fx * 1.5f, pos[1] + 0.8f, pos[2] + fz * 1.5f};
       const float high[3] = {pos[0], pos[1] + 2.4f, pos[2]}, high_to[3] = {pos[0] + fx * 1.5f, pos[1] + 2.4f, pos[2] + fz * 1.5f};
-      float f_low = 1.0f, f_high = 1.0f;
-      if (Ray(ctx, base, soldier, low, low_to, &f_low) && f_low < 0.99f && Ray(ctx, base, soldier, high, high_to, &f_high) &&
-          f_high > 0.99f) {
+      f_low = f_high = 1.0f;
+      const bool low_hit = Ray(ctx, base, soldier, low, low_to, &f_low) && f_low < 0.99f;
+      if (low_hit) Ray(ctx, base, soldier, high, high_to, &f_high);  // (nothing hit: false, the fraction left at 1)
+      bool vehicle_near = false;
+      if (low_hit && f_high > 0.99f) {
+        std::vector<uint32_t> vs;
+        {
+          std::lock_guard lock(g.mutex);
+          vs.assign(g.vehicles.begin(), g.vehicles.end());
+        }
+        for (uint32_t v : vs) {
+          float vp[3];
+          if (CachedPosition(ctx, base, v, vp) && Dist2D(pos, vp) < 6.0f && std::fabs(vp[1] - pos[1]) < 4.0f) {
+            vehicle_near = true;
+            break;
+          }
+        }
+      }
+      if (low_hit && f_high > 0.99f && !vehicle_near) {
         fence = true;
         ++bot.melee_tries;
         bot.melee_until = now + std::chrono::seconds(2);
@@ -2999,8 +3055,9 @@ void Think(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t soldier, const flo
     }
     if (!stuck) bot.melee_tries = 0;
     if (stuck && REXCVAR_GET(bf_bots_log_detail))
-      REXLOG_INFO("BF bots: {} is stuck at {:.1f} {:.1f} {:.1f}{}", bot.name, pos[0], pos[1], pos[2],
-                  fence ? ", something low ahead: the knife" : ", a side step");
+      REXLOG_INFO("BF bots: {} is stuck at {:.1f} {:.1f} {:.1f}{} (ahead at the waist {:.2f}, over the head {:.2f})",
+                  bot.name, pos[0], pos[1], pos[2], fence ? ", something low ahead: the knife" : ", a side step", f_low,
+                  f_high);
     if (stuck && !fence) {
       // Stuck on something the grid does not know (a vehicle, a soldier, a corner): a side step first, and every
       // second time in a row a jump with it (A, as the parachute's press: digital concepts 12 and 29), over a kerb,
@@ -3365,8 +3422,8 @@ void Drive(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t soldier, double 
     // bots_calib). Run bail3: A opened it (40 m/s down to 8.7); RB (concept 17, EIAToggleParachute in the input enum's
     // table at 0x82D3D530) did not.
     if (Clock::now() < bot.chute_press_until) base[cur + 126] |= 0x10, base[cur + 124] |= 0x20;
-    // The knife (B: digital concepts 13 and 16), pressed a quarter of each half second while at a fence.
-    if (std::chrono::steady_clock::now() < bot.melee_until && bot.tick % 30 < 8) base[cur + 126] |= 0x20, base[cur + 125] |= 0x01;
+    // The knife (B: digital concept 13), pressed a quarter of each half second while at a fence.
+    if (std::chrono::steady_clock::now() < bot.melee_until && bot.tick % 30 < 8) base[cur + 126] |= 0x20;
     StoreF(base, cur + 136, bot.yaw);
     StoreF(base, cur + 140, bot.pitch);
     Store32(base, cur + 152, ++bot.tick);
@@ -3482,21 +3539,26 @@ void Ride(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t vehicle, Clock::t
       const float diff = WrapAngle(want - heading);
       if (now < bot.reverse_until) {
         brake = 1.0f, steer = diff > 0 ? -1.0f : 1.0f;  // backing: the stern swings the other way
+        if (bot.reverses > 3 && bot.reverses % 2 == 0) steer = -steer;  // at sea, every other try the other way
       } else {
         steer = std::clamp(diff * 2.0f, -1.0f, 1.0f);
         throttle = std::fabs(diff) > 1.2f ? 0.4f : 1.0f;
       }
       const bool at_end = bot.boat_path.size() == 1 && Dist2D(at, bot.boat_path.front().data()) < 20.0f;
       if ((still > std::chrono::seconds(3) || bot.ride_slow) && now >= bot.reverse_until) {
-        if (Dist2D(at, goal) < 200.0f || at_end || bot.boat_path.size() == 1 && Dist2D(at, goal) < 260.0f)
+        // Issue 82: off only where land is near; stuck at sea (beside a carrier, against another boat), up to 12 tries
+        // at backing off (every other one the other way, longer from the fourth) before giving the boat up.
+        const bool shore = ShoreNear(at, 40.0f);
+        if (shore && (Dist2D(at, goal) < 200.0f || at_end || bot.boat_path.size() == 1 && Dist2D(at, goal) < 260.0f))
           why = "on the beach";
-        else if (bot.reverses < 3) {
+        else if (bot.reverses < (shore ? 3 : 12)) {
           ++bot.reverses;
-          bot.reverse_until = now + std::chrono::milliseconds(2500);
+          bot.reverse_until = now + std::chrono::milliseconds(bot.reverses > 3 ? 4000 : 2500);
           bot.ride_moved = now;
-          if (bot.boat_path.size() > 1) bot.boat_path.erase(bot.boat_path.begin());  // that point is blocked: the next
-          REXLOG_INFO("BF bots: {} backs {} off something ({:.0f} m from its flag)", bot.name,
-                      VehicleName(base, vehicle), Dist2D(at, goal));
+          // That point is blocked: the next (the first three tries; a boat stuck at sea keeps its way).
+          if (bot.reverses <= 3 && bot.boat_path.size() > 1) bot.boat_path.erase(bot.boat_path.begin());
+          REXLOG_INFO("BF bots: {} backs {} off something ({:.0f} m from its flag{}, try {})", bot.name,
+                      VehicleName(base, vehicle), Dist2D(at, goal), shore ? "" : ", at sea", bot.reverses);
         } else {
           why = "the boat is stuck";
           g.stranded[vehicle] = now + std::chrono::minutes(5);
@@ -3522,6 +3584,12 @@ void Ride(PPCContext& outer, uint8_t* base, Bot& bot, uint32_t vehicle, Clock::t
     why = "the vehicle stopped";
   else if (now - bot.ride_at > std::chrono::minutes(3) && still > std::chrono::seconds(5))
     why = "a long wait";
+  // Issue 82: a passenger of a boat a bot drives stays aboard at sea (the driver backs off what holds it, up to 12
+  // tries, ShoreNear above); off where land is near, or when its driver gets off.
+  if (why && seat != 0 && driver && IsBot(driver) && IsBoat(base, vehicle)) {
+    if (now >= bot.shore_at) bot.shore_at = now + std::chrono::seconds(1), bot.shore_near = ShoreNear(at, 40.0f);
+    if (!bot.shore_near) why = nullptr;
+  }
   if (why && now >= bot.next_press) {
     bot.press_until = now + std::chrono::milliseconds(250);
     bot.next_press = now + std::chrono::milliseconds(1500);  // still seated then: pressed again
@@ -3640,6 +3708,11 @@ void StandingRide(PPCContext& ctx, uint8_t* base, Bot& bot, uint32_t vehicle, ui
     why = "the vehicle stopped";
   else if (still > std::chrono::seconds(20) || (bot.ride_slow && now - bot.ride_at > std::chrono::seconds(20)))
     why = "the vehicle has not moved for 20 s";
+  // Issue 82: as a seated passenger (Ride): aboard at sea while a bot drives.
+  if (why && driver && IsBot(driver) && IsBoat(base, vehicle)) {
+    if (now >= bot.shore_at) bot.shore_at = now + std::chrono::seconds(1), bot.shore_near = ShoreNear(at, 40.0f);
+    if (!bot.shore_near) why = nullptr;
+  }
   if (why && now >= bot.next_press) {
     bot.press_until = now + std::chrono::milliseconds(250);
     bot.next_press = now + std::chrono::milliseconds(1500);  // still in its place then: pressed again
@@ -5287,7 +5360,18 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
     // off, has no way there yet, or 150 m of the straight line is sea) takes a boat within 60 m instead (one with no driver and
     // no human player within 6 m of it, to drive; or one a bot of its side drives, to ride), walks to it and gets in
     // (the driver's seat if free, else a passenger's; refused: the enter/exit button). 25 s to reach it.
-    if (!bot.boat && !bot.boated && now - bot.life_at < std::chrono::seconds(45) && now >= bot.boat_check &&
+    // Issue 82: on its carrier's deck (8 m or more over the water, no shore within 40 m), its flag 250 m off and 150 m
+    // of the way sea, a bot that has not boarded waits there for a boat for up to 90 s of its life, still looking for
+    // one, instead of walking off the deck and swimming 500 m to the island (run bot86_2: two that found their boats
+    // gone swam from the US carrier for over a minute each).
+    bool on_deck = false;
+    if (!bot.boat && !bot.boated && bot.goal >= 0 && !bot.enemy && nav.water > -1e8f && pos[1] > nav.water + 8.0f &&
+        now - bot.life_at < std::chrono::seconds(90) && Dist2D(pos, bot.goal_pos) > 250.0f &&
+        StraightWater(pos, bot.goal_pos) > 150.0f) {
+      if (now >= bot.shore_at) bot.shore_at = now + std::chrono::seconds(1), bot.shore_near = ShoreNear(pos, 40.0f);
+      on_deck = !bot.shore_near;
+    }
+    if (!bot.boat && !bot.boated && (now - bot.life_at < std::chrono::seconds(45) || on_deck) && now >= bot.boat_check &&
         bot.goal >= 0) {
       bot.boat_check = now + std::chrono::seconds(3);
       // Only for a long way (the beach's shallows count as water: a bot just landed 100 m from its flag took the
@@ -5391,6 +5475,18 @@ static void BotsTickImpl(PPCContext& ctx, uint8_t* base) {
         continue;
       }
     }
+    if (on_deck && !bot.boat) {  // (above) waiting on the deck for a boat
+      if (!bot.deck_waiting) {
+        bot.deck_waiting = true;
+        REXLOG_INFO("BF bots: {} waits on the deck for a boat ({:.0f} m to its flag, {:.0f} m of it sea)", bot.name,
+                    Dist2D(pos, bot.goal_pos), StraightWater(pos, bot.goal_pos));
+      }
+      bot.forward = bot.strafe = 0, bot.sprint = false, bot.fire = false, bot.ads = false;
+      CostTimer t(&cost.drive);
+      Drive(ctx, base, bot, soldier, dt);
+      continue;
+    }
+    bot.deck_waiting = false;
 #if defined(BF_DEV_TOOLS)
     // BF_BOT_WEAPONTEST=1 (tests): the first bot, on foot, stands and presses each weapon concept in turn (5 s apart, 8 s
     // after the match starts: Y, the pad's weapon swap (the user, 23 Nov 2026; concepts 9 AltFire and 19

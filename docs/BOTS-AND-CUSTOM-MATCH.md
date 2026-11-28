@@ -140,8 +140,14 @@ offline or LAN play and for real servers.
   looks at 4,000 cells, and Wake's walks round the lagoon need 14,000 to 31,000. The server log says "the ways to N
   flags worked out".
 - A bot that gets stuck closes that step for a while and plans round it. Stuck in front of something low (blocked at
-  the waist within 1.5 m, clear over the head), it knifes it for 2 seconds, twice at most, before going round: a fence
-  the game lets break falls. Not yet seen on a real fence in a test.
+  the waist within 1.5 m, clear over the head), it knifes it for 2 seconds (B, as a player's B on foot), twice at most,
+  before going round: a fence the game lets break falls. Not within 6 m of a vehicle, where B gets in it.
+  Until 28 Nov 2026 ([issue 86](https://github.com/TekRantGaming/Battlefield-1943-Reborn/issues/86)) this never ran:
+  the clear ray over the head failed the test, and the press added an input no button sets. In a 5 minute Wake match
+  with 23 bots it now knifes about 70 times, and about half of those bots are moving again 10 seconds later; a fence
+  seen falling to a bot's knife is still to be shown in a screenshot.
+- A soldier standing in a boat is not walking: its track over the water is not learned as ground. Such tracks drew
+  lines of "shore" out from both carriers, where bots then got off their boats.
 
 ### Squads
 
@@ -162,6 +168,14 @@ offline or LAN play and for real servers.
   seconds, or moved under 4 m in 10 seconds: a boat grinding in the surf), when the driver's seat has been empty a
   second, or when the vehicle has not moved for 20 seconds, whoever drives. A bot boat driver gets off on the beach
   the same way.
+- **Not at sea** (28 Nov 2026, [issue 82](https://github.com/TekRantGaming/Battlefield-1943-Reborn/issues/82)): the
+  passengers of a boat a bot drives stay aboard unless a shore is within 40 m (120 or more cells of ground at most
+  2.5 m over the water: Wake's beaches have 198 to 527, beside a carrier there are about 50), and a bot driver stuck at
+  sea backs off up to 12 times (every other time the other way) before giving the boat up. Before, the landing boats
+  that got stuck beside the Japanese carrier were left there within 30 seconds, and their crews swam 400 m to the
+  island: 18% of the bots' positions in a 5 minute Wake match were swimming.
+- **Waiting on the deck:** a bot on its carrier with no boat to take, whose flag is 250 m off and mostly over the sea,
+  waits on the deck for the next boat, up to 90 seconds into its life, instead of walking off the deck and swimming.
 - **A landing craft's places 3 to 5** keep the soldier as what its player controls (its own weapon in hand), and no
   button gets a soldier out of them. Bots now board boats only into seats 0 to 2 (the driver's and the two guns').
   A bot that is in such a place anyway is found by the boat's seats, stands still, and on the beach is moved by the
