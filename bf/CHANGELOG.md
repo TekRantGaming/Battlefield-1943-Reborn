@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.4.8.3 (28 November 2026): a hotfix
+
+Earlier versions update to it by themselves, and the servers only let the newest version in. Every update builds your
+shaders again from scratch at the first start.
+
+**Keyboard and mouse**
+- **The keyboard works in vehicles again.** Since 0.4.8.1 the vehicles' key sets could be saved empty, so the keys did
+  nothing in a vehicle. An empty set is filled once from your infantry keys; a set with any key of your own is left as
+  it is.
+- **The HUD shows keyboard prompts again,** not the controller's buttons.
+- **The middle mouse button and mouse buttons 4 and 5** can be bound again on the Controls page.
+- **A held key no longer turns a vehicle the wrong way** when the game window loses focus.
+
+**Bots**
+- **Bots knife through the fences** they get stuck on.
+- **Far fewer bots in the water on Wake Island:** a boat's crew stays aboard until a shore is near, and bots on a
+  carrier wait for the next boat instead of swimming.
+- **Bots no longer get into a vehicle with an enemy in any of its seats.**
+
+**Graphics**
+- **Reflections is now Original or Enhanced** (the planar reflection). If you had SSR, you now have Enhanced.
+- **The electric skin aimed in** looks as it does at the hip; only the sights are kept clear.
+- **Rifles stay wet in the rain** when you aim down the sights.
+- **The vehicle field of view no longer jumps** for a moment in planes and in vehicles with their own slider.
+
+**Custom Match**
+- **Weather and time decides the sky:** on, the weather system and volumetric clouds; off, the game's own sky, by day
+  and at night.
+
+**For server hosts**
+- **A Weather switch for each server** in the server manager: the weather system and volumetric clouds without
+  running Night Ops or Daybreak. It is off for a new server; a server that already had rain or fog set gets it on.
+  Night Ops and Daybreak always have it, and the official Classic servers stay as they are.
+- **An updated server stays listed:** updates leave no older program files behind, so the build check passes.
+
+**Linux**
+- **With RecompLauncher, your settings, saves, logs and crash reports survive updates:** they are kept in the
+  launcher's data folder, copied once from the old one. By Xarishark (pull request 88).
+
+**Thanks**
+- Thanks to ThatZaliaSGuy for this hotfix's keyboard, bots, graphics and weather work (pull request 98); to Xarishark for the
+  RecompLauncher data folder; and to everyone who tested and reported.
+
 ## 0.4.8.2 (27 November 2026): a hotfix
 
 Earlier versions update to it by themselves, and the servers only let the newest version in. Every update builds your
